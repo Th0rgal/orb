@@ -45,6 +45,7 @@ pub(crate) mod kimi_usage;
 pub mod library;
 pub mod mcp;
 pub mod metadata_llm;
+pub(crate) mod minimax_usage;
 pub mod mission_horizon;
 pub mod mission_payload;
 pub mod mission_runner;
