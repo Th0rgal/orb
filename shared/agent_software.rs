@@ -347,7 +347,9 @@ fn owner(path: &Path) -> String {
         .unwrap_or(path.into())
         .to_string_lossy()
         .to_string();
-    if resolved.contains("/Cellar/") || resolved.contains("/Caskroom/") {
+    if fleet_component(path).is_some() {
+        "Fleet installer"
+    } else if resolved.contains("/Cellar/") || resolved.contains("/Caskroom/") {
         "Homebrew"
     } else if resolved.contains("/agent-software/packages/") {
         "Orb"
@@ -364,8 +366,33 @@ fn owner(path: &Path) -> String {
     }
     .into()
 }
+/// Fleet launchers must resolve into the component's administrator-owned tree.
+fn fleet_component(path: &Path) -> Option<&'static str> {
+    let name = TOOLS
+        .iter()
+        .find(|t| path == Path::new("/usr/local/bin").join(t.2))?
+        .2;
+    let resolved = std::fs::canonicalize(path).ok()?;
+    resolved
+        .starts_with(Path::new("/opt/sandboxed-tools").join(name))
+        .then_some(name)
+}
 /// Infer the package from its manifest, not merely a bin directory name.
 fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf, Vec<String>)> {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = fleet_component(path) {
+        let expected = TOOLS.iter().find(|t| t.0 == component)?.2;
+        let helper = Path::new("/usr/local/sbin/orb-update-harness");
+        if name != expected || !helper.is_file() {
+            return None;
+        }
+        let mut args = vec![name.into(), target.into()];
+        if unsafe { libc::geteuid() } == 0 {
+            return Some((helper.into(), args));
+        }
+        args.splice(0..0, ["-n".into(), helper.to_string_lossy().into_owned()]);
+        return Some((PathBuf::from("/usr/bin/sudo"), args));
+    }
     if component == "claudecode" && owner(path) == "Claude installer" {
         return Some((path.to_path_buf(), vec!["install".into(), target.into()]));
     }
