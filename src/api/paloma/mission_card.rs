@@ -289,8 +289,10 @@ mod tests {
             desktop_sessions: vec![],
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::Task,
             goal_mode: false,
             goal_objective: None,
@@ -299,6 +301,8 @@ mod tests {
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         }
     }
 

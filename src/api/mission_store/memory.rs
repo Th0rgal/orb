@@ -1,9 +1,9 @@
 //! In-memory mission store (non-persistent).
 
 use super::{
-    now_string, BoardOutboxItem, BoardProject, BoardTask, BoardTaskStatus, Mission,
-    MissionExecutionState, MissionHistoryEntry, MissionRun, MissionStatus, MissionStatusCounts,
-    MissionStore, MissionToolExecution, MissionToolExecutionState, NewBoardTask, TaskAttempt,
+    now_string, BoardOutboxItem, BoardTask, BoardTaskStatus, Mission, MissionExecutionState,
+    MissionHistoryEntry, MissionRun, MissionStatus, MissionStatusCounts, MissionStore,
+    MissionToolExecution, MissionToolExecutionState, NewBoardTask, TaskAttempt,
 };
 use crate::api::control::{AgentTreeNode, DesktopSessionInfo};
 use async_trait::async_trait;
@@ -18,6 +18,9 @@ const METADATA_SOURCE_USER: &str = "user";
 #[derive(Clone)]
 pub struct InMemoryMissionStore {
     missions: Arc<RwLock<HashMap<Uuid, Mission>>>,
+    harness_sessions: Arc<RwLock<HashMap<Uuid, HashMap<String, String>>>>,
+    native_prompts: Arc<RwLock<HashMap<Uuid, std::collections::HashSet<String>>>>,
+    native_prompt_claims: Arc<RwLock<HashMap<Uuid, HashMap<String, super::NativePromptClaim>>>>,
     trees: Arc<RwLock<HashMap<Uuid, AgentTreeNode>>>,
     board_tasks: Arc<RwLock<HashMap<Uuid, BoardTask>>>,
     /// FLEET-001 scheduling: deferred goals held outside the Mission struct
@@ -25,24 +28,54 @@ pub struct InMemoryMissionStore {
     deferred_goals: Arc<RwLock<HashMap<Uuid, String>>>,
     runs: Arc<RwLock<HashMap<Uuid, MissionRun>>>,
     tool_executions: Arc<RwLock<HashMap<(Uuid, String), MissionToolExecution>>>,
-    board_projects: Arc<RwLock<HashMap<String, BoardProject>>>,
     task_attempts: Arc<RwLock<HashMap<(Uuid, u32), TaskAttempt>>>,
     board_outbox: Arc<RwLock<HashMap<String, BoardOutboxItem>>>,
+    /// Test-only: make `list_active_tool_executions` fail, to exercise the
+    /// callers that must not confuse a failed scan with "no tool row".
+    #[cfg(test)]
+    fail_tool_scans: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InMemoryMissionStore {
     pub fn new() -> Self {
         Self {
             missions: Arc::new(RwLock::new(HashMap::new())),
+            harness_sessions: Arc::new(RwLock::new(HashMap::new())),
+            native_prompts: Arc::new(RwLock::new(HashMap::new())),
+            native_prompt_claims: Arc::new(RwLock::new(HashMap::new())),
             trees: Arc::new(RwLock::new(HashMap::new())),
             board_tasks: Arc::new(RwLock::new(HashMap::new())),
             deferred_goals: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
             tool_executions: Arc::new(RwLock::new(HashMap::new())),
-            board_projects: Arc::new(RwLock::new(HashMap::new())),
             task_attempts: Arc::new(RwLock::new(HashMap::new())),
             board_outbox: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            fail_tool_scans: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Test-only: every subsequent `list_active_tool_executions` returns `Err`.
+    #[cfg(test)]
+    pub(crate) fn test_fail_tool_scans(&self) {
+        self.fail_tool_scans
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: backdate `updated_at` so `get_stale_active_missions` can
+    /// select a row without waiting real hours.
+    #[cfg(test)]
+    pub(crate) async fn test_set_updated_at(
+        &self,
+        id: Uuid,
+        updated_at: String,
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        mission.updated_at = updated_at;
+        Ok(())
     }
 }
 
@@ -72,12 +105,7 @@ impl MissionStore for InMemoryMissionStore {
             ..MissionStatusCounts::default()
         };
         for mission in missions.values() {
-            match mission.status {
-                MissionStatus::Active => counts.active += 1,
-                MissionStatus::Completed => counts.completed += 1,
-                MissionStatus::Failed => counts.failed += 1,
-                _ => {}
-            }
+            counts.record(mission.status);
         }
         Ok(counts)
     }
@@ -155,6 +183,17 @@ impl MissionStore for InMemoryMissionStore {
             .await
             .values()
             .find(|run| run.mission_id == mission_id && !run.execution_state.is_terminal())
+            .cloned())
+    }
+
+    async fn get_latest_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
+        Ok(self
+            .runs
+            .read()
+            .await
+            .values()
+            .filter(|run| run.mission_id == mission_id)
+            .max_by_key(|run| run.generation)
             .cloned())
     }
 
@@ -251,6 +290,13 @@ impl MissionStore for InMemoryMissionStore {
         &self,
         run_id: Uuid,
     ) -> Result<Vec<MissionToolExecution>, String> {
+        #[cfg(test)]
+        if self
+            .fail_tool_scans
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("database is locked".to_string());
+        }
         Ok(self
             .tool_executions
             .read()
@@ -267,7 +313,7 @@ impl MissionStore for InMemoryMissionStore {
             .collect())
     }
 
-    async fn create_mission_with_parent(
+    async fn create_mission_with_parent_and_placement(
         &self,
         title: Option<&str>,
         workspace_id: Option<Uuid>,
@@ -279,6 +325,8 @@ impl MissionStore for InMemoryMissionStore {
         config_profile: Option<&str>,
         parent_mission_id: Option<Uuid>,
         working_directory: Option<&str>,
+        requires_local_disk: bool,
+        assigned_id: Option<Uuid>,
     ) -> Result<Mission, String> {
         let now = now_string();
         let metadata_source = title.and_then(|value| {
@@ -291,7 +339,7 @@ impl MissionStore for InMemoryMissionStore {
         });
         let metadata_updated_at = metadata_source.as_ref().map(|_| now.clone());
         let mission = Mission {
-            id: Uuid::new_v4(),
+            id: assigned_id.unwrap_or_else(Uuid::new_v4),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
             short_description: None,
@@ -314,10 +362,12 @@ impl MissionStore for InMemoryMissionStore {
             paused_at: None,
             resumable: false,
             desktop_sessions: Vec::new(),
-            session_id: Some(Uuid::new_v4().to_string()),
+            session_id: (backend != Some("grok")).then(|| Uuid::new_v4().to_string()),
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id,
             working_directory: working_directory.map(|s| s.to_string()),
+            requires_local_disk,
             mission_mode: super::MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -329,12 +379,44 @@ impl MissionStore for InMemoryMissionStore {
                 ..Default::default()
             },
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
         self.missions
             .write()
             .await
             .insert(mission.id, mission.clone());
         Ok(mission)
+    }
+
+    async fn create_mission_with_parent(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        fast_mode: bool,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+    ) -> Result<Mission, String> {
+        self.create_mission_with_parent_and_placement(
+            title,
+            workspace_id,
+            agent,
+            model_override,
+            model_effort,
+            fast_mode,
+            backend,
+            config_profile,
+            parent_mission_id,
+            working_directory,
+            true,
+            None,
+        )
+        .await
     }
 
     async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
@@ -346,9 +428,48 @@ impl MissionStore for InMemoryMissionStore {
             .collect())
     }
 
+    async fn set_mission_requires_local_disk(
+        &self,
+        id: Uuid,
+        requires_local_disk: bool,
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        mission.requires_local_disk = requires_local_disk;
+        mission.updated_at = now_string();
+        Ok(())
+    }
+
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String> {
         self.update_mission_status_with_reason(id, status, None)
             .await
+    }
+
+    async fn restore_mission_status(
+        &self,
+        id: Uuid,
+        snapshot: &super::MissionStatusSnapshot,
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        if mission.status != MissionStatus::Active && mission.status != snapshot.status {
+            return Err("mission status changed during rejected activation".into());
+        }
+        snapshot.restore(mission);
+        Ok(())
+    }
+
+    async fn set_terminal_evidence(&self, id: Uuid, evidence: &str) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission not found: {id}"))?;
+        mission.terminal_evidence = Some(evidence.chars().take(2000).collect());
+        Ok(())
     }
 
     async fn update_mission_status_with_reason(
@@ -529,6 +650,16 @@ impl MissionStore for InMemoryMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
 
+        let selected_session = {
+            let mut sessions = self.harness_sessions.write().await;
+            super::select_harness_session(
+                mission,
+                backend,
+                session_id,
+                sessions.entry(id).or_default(),
+            )
+        };
+
         if let Some(backend) = backend {
             mission.backend = backend.to_string();
         }
@@ -547,10 +678,7 @@ impl MissionStore for InMemoryMissionStore {
         if let Some(config_profile) = config_profile {
             mission.config_profile = config_profile.map(ToString::to_string);
         }
-        mission.session_id = Some(session_id.to_string());
-        mission.resumable = false;
-        mission.interrupted_at = None;
-        mission.terminal_reason = None;
+        mission.session_id = selected_session;
         mission.updated_at = now_string();
 
         Ok(mission.clone())
@@ -612,6 +740,9 @@ impl MissionStore for InMemoryMissionStore {
         let mission = missions
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
+        if let Some(title) = patch.title {
+            mission.title = title;
+        }
         if let Some(project) = patch.project {
             mission.project.project = project;
         }
@@ -627,13 +758,18 @@ impl MissionStore for InMemoryMissionStore {
         if let Some(tags) = patch.tags {
             mission.project.tags = tags;
         }
+        if let Some(delta) = patch.tag_patch {
+            delta.apply(&mut mission.project.tags);
+        }
         if let Some(desired_state) = patch.desired_state {
             mission.project.desired_state = desired_state;
         }
         if let Some(next_check_at) = patch.next_check_at {
             mission.project.next_check_at = next_check_at;
         }
-        mission.updated_at = now_string();
+        if !patch.preserve_updated_at {
+            mission.updated_at = now_string();
+        }
         Ok(())
     }
 
@@ -650,14 +786,164 @@ impl MissionStore for InMemoryMissionStore {
         Ok(())
     }
 
-    async fn update_mission_session_id(&self, id: Uuid, session_id: &str) -> Result<(), String> {
+    async fn set_mission_origin(
+        &self,
+        id: Uuid,
+        origin: &str,
+        origin_session_id: Option<&str>,
+    ) -> Result<(), String> {
         let mut missions = self.missions.write().await;
         let mission = missions
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
-        mission.session_id = Some(session_id.to_string());
-        mission.updated_at = now_string();
+        mission.origin = Some(origin.to_string());
+        mission.origin_session_id = origin_session_id.map(ToString::to_string);
         Ok(())
+    }
+
+    async fn native_prompt_attempted(&self, id: Uuid, backend: &str) -> Result<bool, String> {
+        if !self.missions.read().await.contains_key(&id) {
+            return Err("mission not found".into());
+        }
+        Ok(self
+            .native_prompts
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|p| p.contains(backend)))
+    }
+
+    async fn claim_native_prompt(
+        &self,
+        id: Uuid,
+        backend: &str,
+        session_id: Option<&str>,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let missions = self.missions.write().await;
+        let mission = missions.get(&id).ok_or("mission not found")?;
+        if backend.is_empty() || mission.backend != backend {
+            return Ok(false);
+        }
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run || mission.session_id.as_deref() != session_id {
+            return Ok(false);
+        }
+        let mut prompts = self.native_prompts.write().await;
+        let mut claims = self.native_prompt_claims.write().await;
+        let mut next = prompts.clone();
+        let mut next_claims = claims.clone();
+        let attempted = next.entry(id).or_default();
+        if attempted.contains(backend) {
+            // A bound continuation may proceed, but cannot own rollback of old evidence.
+            return Ok(session_id.is_some());
+        }
+        attempted.insert(backend.to_string());
+        next_claims.entry(id).or_default().insert(
+            backend.to_string(),
+            super::NativePromptClaim {
+                claim_id,
+                run: run.cloned(),
+            },
+        );
+        *prompts = next;
+        *claims = next_claims;
+        Ok(true)
+    }
+
+    async fn release_native_prompt_no_launch(
+        &self,
+        id: Uuid,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let missions = self.missions.write().await;
+        let mission = missions.get(&id).ok_or("mission not found")?;
+        if backend.is_empty() || mission.backend != backend {
+            return Ok(false);
+        }
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run || mission.session_id.is_some() {
+            return Ok(false);
+        }
+        let mut prompts = self.native_prompts.write().await;
+        let mut claims = self.native_prompt_claims.write().await;
+        if claims.get(&id).and_then(|c| c.get(backend))
+            != Some(&super::NativePromptClaim {
+                claim_id,
+                run: run.cloned(),
+            })
+        {
+            return Ok(false);
+        }
+        let mut next = prompts.clone();
+        let mut next_claims = claims.clone();
+        if let Some(p) = next.get_mut(&id) {
+            p.remove(backend);
+            if p.is_empty() {
+                next.remove(&id);
+            }
+        }
+        if let Some(c) = next_claims.get_mut(&id) {
+            c.remove(backend);
+            if c.is_empty() {
+                next_claims.remove(&id);
+            }
+        }
+        *prompts = next;
+        *claims = next_claims;
+        Ok(true)
+    }
+
+    async fn update_mission_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+    ) -> Result<bool, String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+        if backend.is_empty() {
+            return Err("native session update requires harness provenance".into());
+        }
+        // Same lock order as begin_mission_run: mission before runs.
+        // Keep the run read guard through the identity write so acquisition of
+        // a newer generation cannot race this check.
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run {
+            return Ok(false);
+        }
+        self.harness_sessions
+            .write()
+            .await
+            .entry(id)
+            .or_default()
+            .insert(backend.to_string(), session_id.to_string());
+        if mission.backend == backend {
+            mission.session_id = Some(session_id.to_string());
+            mission.updated_at = now_string();
+        }
+        Ok(true)
     }
 
     async fn update_mission_tree(&self, id: Uuid, tree: &AgentTreeNode) -> Result<(), String> {
@@ -672,6 +958,7 @@ impl MissionStore for InMemoryMissionStore {
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String> {
         let removed = self.missions.write().await.remove(&id).is_some();
         self.trees.write().await.remove(&id);
+        self.harness_sessions.write().await.remove(&id);
         Ok(removed)
     }
 
@@ -781,7 +1068,13 @@ impl MissionStore for InMemoryMissionStore {
             .read()
             .await
             .values()
-            .filter(|m| m.status == MissionStatus::Pending && goals.contains_key(&m.id))
+            .filter(|m| {
+                crate::api::control::client_placement::scheduler_accepts(
+                    m.status == MissionStatus::Pending,
+                    goals.contains_key(&m.id),
+                    &m.project.tags,
+                )
+            })
             .cloned()
             .collect();
         missions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -834,6 +1127,15 @@ impl MissionStore for InMemoryMissionStore {
                         bt.token_budget = t.token_budget;
                         bt.cost_budget_cents = t.cost_budget_cents;
                         bt.depends_on = t.depends_on;
+                        bt.updated_at = now.clone();
+                    } else if bt.status == BoardTaskStatus::Running {
+                        // Mirror the sqlite store: a running task's prompt is
+                        // frozen but its outcome contract may still be
+                        // corrected (spec_warnings arrive after registration,
+                        // and the scheduler can spawn within one pass).
+                        bt.acceptance_criteria = t.acceptance_criteria;
+                        bt.verification_command = t.verification_command;
+                        bt.risk_class = t.risk_class;
                         bt.updated_at = now.clone();
                     }
                     out.push(bt.clone());
@@ -895,6 +1197,36 @@ impl MissionStore for InMemoryMissionStore {
         Ok(tasks)
     }
 
+    async fn list_board_tasks_for_project(&self, project: &str) -> Result<Vec<BoardTask>, String> {
+        // Same family semantics as the sqlite join: exact slug or a literal
+        // `slug-` prefix on the boss mission's project tag.
+        let family_prefix = format!("{project}-");
+        let bosses: std::collections::HashSet<Uuid> = {
+            let missions = self.missions.read().await;
+            missions
+                .values()
+                .filter(|mission| {
+                    mission.project.project.as_deref().is_some_and(|tag| {
+                        tag == project || tag.starts_with(family_prefix.as_str())
+                    })
+                })
+                .map(|mission| mission.id)
+                .collect()
+        };
+        let map = self.board_tasks.read().await;
+        let mut tasks: Vec<BoardTask> = map
+            .values()
+            .filter(|task| bosses.contains(&task.boss_mission_id))
+            .cloned()
+            .collect();
+        tasks.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.task_key.cmp(&b.task_key))
+        });
+        Ok(tasks)
+    }
+
     async fn list_active_board_missions(&self) -> Result<Vec<Uuid>, String> {
         let map = self.board_tasks.read().await;
         let mut ids: Vec<Uuid> = map
@@ -932,23 +1264,6 @@ impl MissionStore for InMemoryMissionStore {
         saved.updated_at = now_string();
         map.insert(task.id, saved);
         Ok(())
-    }
-
-    async fn upsert_board_project(
-        &self,
-        mut project: BoardProject,
-    ) -> Result<BoardProject, String> {
-        let mut projects = self.board_projects.write().await;
-        if let Some(existing) = projects.get(&project.slug) {
-            project.created_at = existing.created_at.clone();
-        }
-        project.updated_at = now_string();
-        projects.insert(project.slug.clone(), project.clone());
-        Ok(project)
-    }
-
-    async fn get_board_project(&self, slug: &str) -> Result<Option<BoardProject>, String> {
-        Ok(self.board_projects.read().await.get(slug).cloned())
     }
 
     async fn create_task_attempt(&self, attempt: TaskAttempt) -> Result<TaskAttempt, String> {
@@ -1233,7 +1548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_mission_run_settings_clears_terminal_reason() {
+    async fn update_mission_run_settings_preserves_stop_until_dispatch() {
         let store = InMemoryMissionStore::new();
         let mission = store
             .create_mission(Some("Initial"), None, None, None, None, None, None)
@@ -1263,10 +1578,10 @@ mod tests {
             .await
             .expect("update run settings");
 
-        assert_eq!(updated.terminal_reason, None);
+        assert_eq!(updated.terminal_reason.as_deref(), Some("rate_limited"));
         assert_eq!(updated.session_id.as_deref(), Some("new-session"));
-        assert!(!updated.resumable);
-        assert_eq!(updated.interrupted_at, None);
+        assert!(updated.resumable);
+        assert!(updated.interrupted_at.is_none());
     }
 
     #[tokio::test]

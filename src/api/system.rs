@@ -35,7 +35,7 @@ use crate::workspace::{Workspace, WorkspaceStatus, WorkspaceType};
 
 /// Git remote used for sandboxed.sh self-updates
 const SANDBOXED_REPO_REMOTE: &str = "https://github.com/Th0rgal/sandboxed.sh.git";
-const MIN_SUPPORTED_OPENCODE_VERSION: &str = "1.1.59";
+const MIN_SUPPORTED_OPENCODE_VERSION: &str = "1.18.0";
 
 /// Information about a system component.
 #[derive(Debug, Clone, Serialize)]
@@ -335,6 +335,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/components/:name/update", post(update_component))
         .route("/components/:name/uninstall", post(uninstall_component))
         .route("/deploy", post(deploy_sandboxed_sh))
+        .route("/reconcile", post(super::reconcile::reconcile_endpoint))
 }
 
 /// Get information about all system components.
@@ -1217,31 +1218,7 @@ mcp_servers:
     connect_timeout: 15
     tools:
       include:
-        - list_active_missions
-        - list_missions
-        - get_mission
-        - get_mission_digest
-        - get_mission_events
-        - get_mission_health
-        - get_mission_diagnostics
-        - get_compute_fleet
-        - start_mission
-        - send_message_to_mission
-        - ask_mission
-        - update_mission_settings
-        - resume_mission
-        - cancel_mission
-        - list_workspaces
-        - get_workspace
-        - create_workspace
-        - update_workspace
-        - delete_workspace
-        - list_workspace_templates
-        - get_workspace_template
-        - save_workspace_template
-        - delete_workspace_template
-        - rebuild_workspace_from_template
-        - workspace_bash
+{tools_include}
       prompts: false
       resources: false
 
@@ -1259,6 +1236,7 @@ display:
         jwt_secret = yaml_squote(jwt_secret),
         user_id = yaml_squote(user_id),
         default_workspace_id = yaml_squote(default_workspace_id),
+        tools_include = crate::hermes_tools::yaml_include_items("        "),
     )
 }
 
@@ -1560,6 +1538,28 @@ fn hermes_api_server_port(config: &crate::config::Config) -> u16 {
     } else {
         8642
     }
+}
+
+/// Internal callers proxy scheduler operations through the local Hermes API;
+/// the browser never receives this key.
+pub(crate) async fn hermes_api_server_key(
+    state: &crate::api::routes::AppState,
+) -> Result<String, String> {
+    let runtime_name = assistant_runtime_name(&state.config);
+    for path in hermes_env_paths(runtime_name) {
+        if let Ok(contents) = tokio::fs::read_to_string(path).await {
+            if let Some(key) =
+                parse_env_value(&contents, "API_SERVER_KEY").filter(|key| !key.trim().is_empty())
+            {
+                return Ok(key);
+            }
+        }
+    }
+    Err("Hermes API server key is not configured; enable Hermes remote access first".into())
+}
+
+pub(crate) fn hermes_api_server_url(config: &crate::config::Config) -> String {
+    format!("http://127.0.0.1:{}", hermes_api_server_port(config))
 }
 
 fn hermes_env_paths(runtime_name: &str) -> [String; 2] {
@@ -1907,131 +1907,6 @@ pub async fn hermes_remote_proxy(
     {
         Ok(upstream) => {
             let status = upstream.status();
-            let mut response_headers = upstream.headers().clone();
-            for hop in [
-                axum::http::header::CONTENT_LENGTH,
-                axum::http::header::CONNECTION,
-                axum::http::header::TRANSFER_ENCODING,
-            ] {
-                response_headers.remove(hop);
-            }
-            (
-                status,
-                response_headers,
-                axum::body::Body::from_stream(upstream.bytes_stream()),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Hermes API server unreachable: {e}"),
-        )
-            .into_response(),
-    }
-}
-
-pub const HERMES_CHAT_PROXY_PATH: &str = "/api/assistant/hermes";
-
-fn hermes_chat_proxy_status(status: StatusCode) -> StatusCode {
-    if status == StatusCode::UNAUTHORIZED {
-        StatusCode::BAD_GATEWAY
-    } else {
-        status
-    }
-}
-
-fn sanitize_hermes_chat_proxy_headers(headers: &mut axum::http::HeaderMap) {
-    for header in [
-        axum::http::header::HOST,
-        axum::http::header::CONTENT_LENGTH,
-        axum::http::header::CONNECTION,
-        axum::http::header::TRANSFER_ENCODING,
-        // Hermes applies browser-origin CSRF checks to mutating session
-        // routes. This is a trusted server-to-server hop protected by the
-        // dashboard JWT, so forwarding the browser origin makes valid writes
-        // look like cross-origin requests to the loopback-only upstream.
-        axum::http::header::ORIGIN,
-    ] {
-        headers.remove(header);
-    }
-}
-
-/// Dashboard-authenticated proxy for the Hermes session/chat API
-/// (`/api/assistant/hermes/*` → `http://127.0.0.1:<api-server-port>`).
-///
-/// Unlike `hermes_remote_proxy`, this route sits behind the dashboard JWT
-/// (protected_routes) and the browser never sees the Hermes `API_SERVER_KEY`:
-/// the key is read from the gateway env here and injected server-side. Only
-/// the session surface is exposed — no `/v1/*` model endpoints.
-pub async fn hermes_chat_proxy(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-    let suffix = path_and_query
-        .strip_prefix(HERMES_CHAT_PROXY_PATH)
-        .unwrap_or("");
-    let allowed = suffix == "/api/sessions"
-        || suffix.starts_with("/api/sessions?")
-        || suffix.starts_with("/api/sessions/");
-    if !allowed {
-        return (StatusCode::FORBIDDEN, "Path not allowed").into_response();
-    }
-
-    let runtime_name = assistant_runtime_name(&state.config);
-    let [env_path, _] = hermes_env_paths(runtime_name);
-    let key = tokio::fs::read_to_string(&env_path)
-        .await
-        .ok()
-        .and_then(|c| parse_env_value(&c, "API_SERVER_KEY").filter(|v| !v.trim().is_empty()));
-    let Some(key) = key else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Hermes API server key not provisioned",
-        )
-            .into_response();
-    };
-
-    let port = hermes_api_server_port(&state.config);
-    let target = format!("http://127.0.0.1:{port}{suffix}");
-
-    let method = req.method().clone();
-    let mut headers = req.headers().clone();
-    sanitize_hermes_chat_proxy_headers(&mut headers);
-    // Swap the dashboard JWT for the Hermes bearer.
-    match axum::http::HeaderValue::from_str(&format!("Bearer {key}")) {
-        Ok(value) => {
-            headers.insert(axum::http::header::AUTHORIZATION, value);
-        }
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Hermes key").into_response();
-        }
-    }
-
-    let body = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response(),
-    };
-
-    match state
-        .http_client
-        .request(method, &target)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(upstream) => {
-            // The dashboard JWT has already passed protected_routes. A 401
-            // here comes from Hermes rejecting the server-injected
-            // API_SERVER_KEY, not from the browser login.
-            let status = hermes_chat_proxy_status(upstream.status());
             let mut response_headers = upstream.headers().clone();
             for hop in [
                 axum::http::header::CONTENT_LENGTH,
@@ -3224,6 +3099,23 @@ fn stream_sandboxed_update(
             .output()
             .await;
 
+        // Wait for the listen port to actually be released before we proceed
+        // to the restart. Twice in prod an orphaned old process kept holding
+        // the port, so the restarted service died with EADDRINUSE while the
+        // orphan served stale code.
+        let listen_port = state.config.port;
+        yield sse("log", format!("Waiting for port {} to be released...", listen_port), Some(76));
+        for line in wait_for_port_release(
+            listen_port,
+            &mut RealPortProbe,
+            std::time::Duration::from_secs(PORT_RELEASE_GRACE_SECS),
+            std::time::Duration::from_secs(PORT_RELEASE_KILL_GRACE_SECS),
+        )
+        .await
+        {
+            yield sse("log", line, Some(76));
+        }
+
         const MAIN_CARGO_BIN: &str = "sandboxed-sh";
         let src = format!("{}/target/debug/{}", repo_path.display(), MAIN_CARGO_BIN);
 
@@ -3296,6 +3188,32 @@ fn stream_sandboxed_update(
                 yield sse("error", format!("Failed to install {}: {}", binary, error), None);
                 let _ = Command::new("systemctl").args(["start", &service_name]).output().await;
                 return;
+            }
+        }
+
+        // Recycle companion processes still executing the binary we just
+        // replaced. Replacing a file does not touch processes that already
+        // opened it: they keep running the old inode (`/proc/<pid>/exe` shows
+        // "(deleted)") and are NOT restarted by the service restart below,
+        // because Hermes agents own them, not this service.
+        //
+        // The failure that motivated this is silent and expensive: a stranded
+        // `assistant-mcp` kept answering on a half-broken connection, a
+        // controller's `get_compute_fleet` hung until its agent-side timeout
+        // (~600s of a bounded tick), and the controller concluded the MCP was
+        // unreachable — while the API itself was answering in 4ms. Deploy
+        // reported success throughout.
+        //
+        // Signalling is safe: each companion runs under a stdio watchdog that
+        // respawns it on next use, now against the new binary.
+        for (binary, _, destination) in &companion_plans {
+            let recycled = recycle_stale_companion_processes(binary, destination).await;
+            if recycled > 0 {
+                yield sse(
+                    "log",
+                    format!("Recycled {recycled} stale {binary} process(es) still on the replaced binary"),
+                    Some(78),
+                );
             }
         }
 
@@ -3376,12 +3294,17 @@ fn stream_sandboxed_update(
         // Small delay to ensure the SSE event is flushed before we restart
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Restart the service - this will terminate our process, so no code after this
-        // will execute. The client should poll /api/health to confirm the new version.
-        let _ = Command::new("systemctl")
-            .args(["start", &service_name])
-            .output()
-            .await;
+        // Use the SAME guarded restart as `/api/system/deploy` (stop → wait for
+        // the listen port to free → SIGTERM/SIGKILL any lingering holder →
+        // start), launched as a transient `systemd-run` unit so it survives the
+        // service stop. The previous bare `systemctl start` was a no-op on an
+        // already-running unit AND carried no orphan-safety: a stranded old
+        // process still holding the port made the fresh binary die with
+        // EADDRINUSE. This process is torn down when the service stops, so no
+        // code after this runs; the client polls /api/health to confirm.
+        if let Err(e) = spawn_guarded_restart(&service_name, state.config.port) {
+            yield sse("error", format!("Binaries installed but failed to schedule restart: {}. Run `systemctl restart {}` manually.", e, service_name), None);
+        }
     }
 }
 
@@ -3431,6 +3354,13 @@ fn evaluate_debounce(
         }
         _ => DebounceDecision::Allow,
     }
+}
+
+/// Seconds since the last `/api/system/deploy` marker was touched.
+/// Used by boot reconcile to treat a just-killed runner as a deploy
+/// interrupt rather than a user cancel.
+pub(crate) fn last_deploy_age_secs() -> Option<u64> {
+    deploy_marker_age_secs(&deploy_marker_path())
 }
 
 /// Read `mtime` of the deploy marker, return seconds since it was written.
@@ -3508,6 +3438,9 @@ enum DeployRefusal {
     SelfTarget,
     /// Last deploy was too recent (see [`DEPLOY_DEBOUNCE_SECS`]).
     Debounced { since_secs: u64 },
+    /// Live writers are mid-turn. Restarting SIGTERMs their Codex/Grok
+    /// bash and produces the pending-tool-not-replayed inspect loop.
+    WritersLive { count: usize },
 }
 
 impl DeployRefusal {
@@ -3516,6 +3449,7 @@ impl DeployRefusal {
             DeployRefusal::WrongService { .. } => StatusCode::CONFLICT,
             DeployRefusal::SelfTarget => StatusCode::CONFLICT,
             DeployRefusal::Debounced { .. } => StatusCode::TOO_MANY_REQUESTS,
+            DeployRefusal::WritersLive { .. } => StatusCode::CONFLICT,
         }
     }
 
@@ -3537,6 +3471,11 @@ impl DeployRefusal {
                  Pass force=true to override.",
                 since_secs, DEPLOY_DEBOUNCE_SECS
             ),
+            DeployRefusal::WritersLive { count } => format!(
+                "{count} mission(s) are currently running a harness turn. \
+                 Restarting now SIGTERMs in-flight Codex/Grok tools (pending-tool-not-replayed). \
+                 Wait for them to finish, or pass force=true if you accept killing those turns."
+            ),
         }
     }
 }
@@ -3549,6 +3488,7 @@ fn evaluate_deploy_request(
     calling_mission_on_this_service: bool,
     last_deploy_secs_ago: Option<u64>,
     force: bool,
+    live_writer_count: usize,
 ) -> Option<DeployRefusal> {
     if let (Some(actual), Some(expected)) = (actual_service, expected_service) {
         if actual != expected {
@@ -3560,6 +3500,11 @@ fn evaluate_deploy_request(
     }
     if !force && calling_mission_on_this_service {
         return Some(DeployRefusal::SelfTarget);
+    }
+    if !force && live_writer_count > 0 {
+        return Some(DeployRefusal::WritersLive {
+            count: live_writer_count,
+        });
     }
     match evaluate_debounce(last_deploy_secs_ago, DEPLOY_DEBOUNCE_SECS, force) {
         DebounceDecision::Allow => None,
@@ -3609,12 +3554,33 @@ pub async fn deploy_sandboxed_sh(
     let marker = deploy_marker_path();
     let last_age = deploy_marker_age_secs(&marker);
 
+    let live_writer_count = {
+        let store = state.control.get_mission_store().await;
+        let filter = crate::api::mission_store::MissionFilter {
+            attention_only: true,
+            ..Default::default()
+        };
+        match store.list_missions_filtered(&filter, 200, 0).await {
+            Ok(page) => page
+                .iter()
+                .filter(|mission| {
+                    crate::api::controller_honesty::is_live_writer_status(mission.status)
+                })
+                .count(),
+            Err(error) => {
+                tracing::warn!(%error, "deploy: could not list live writers; treating as zero");
+                0
+            }
+        }
+    };
+
     if let Some(refusal) = evaluate_deploy_request(
         Some(&actual_service),
         req.expected_service.as_deref(),
         calling_on_self,
         last_age,
         req.force,
+        live_writer_count,
     ) {
         return Err((refusal.http_status(), refusal.message()));
     }
@@ -3687,6 +3653,49 @@ enum DeployRollback {
     Missing,
     Backup,
     Symlink(std::path::PathBuf),
+}
+
+/// Signal companion processes still executing a binary that was just replaced.
+///
+/// Returns how many were signalled. A process that opened the old inode keeps
+/// running it after `install` overwrites the path — Linux reports this as
+/// `/proc/<pid>/exe` pointing at "<path> (deleted)". Those processes belong to
+/// Hermes agents rather than this service, so restarting the service does not
+/// touch them, and they linger with a broken view of the API they talk to.
+///
+/// Deliberately narrow: only processes whose resolved exe is the *deleted*
+/// version of this exact destination path are signalled. A companion already
+/// running the new binary, or an unrelated process of the same name installed
+/// elsewhere, is left alone.
+async fn recycle_stale_companion_processes(binary: &str, destination: &str) -> usize {
+    let Ok(output) = Command::new("pgrep").args(["-x", binary]).output().await else {
+        return 0;
+    };
+    let mut recycled = 0;
+    for pid in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+    {
+        let exe = match tokio::fs::read_link(format!("/proc/{pid}/exe")).await {
+            Ok(path) => path.to_string_lossy().to_string(),
+            // The process exited between pgrep and now, or we cannot inspect
+            // it. Either way it is not ours to signal.
+            Err(_) => continue,
+        };
+        if exe != format!("{destination} (deleted)") {
+            continue;
+        }
+        if Command::new("kill")
+            .arg(pid.to_string())
+            .output()
+            .await
+            .is_ok_and(|out| out.status.success())
+        {
+            recycled += 1;
+            tracing::info!(pid, binary, "deploy: recycled stale companion process");
+        }
+    }
+    recycled
 }
 
 async fn prepare_deploy_backup(destination: &str, backup: &str) -> Result<DeployRollback, String> {
@@ -4079,6 +4088,20 @@ fn stream_deploy(
             }
         }
 
+        // The MCP binaries we just replaced are still being executed by the
+        // Hermes agents that spawned them: those processes hold the old inode
+        // and are NOT recycled by this service's restart, because they are not
+        // in its cgroup. See `recycle_stale_companion_processes`.
+        for (binary, destination) in [
+            ("assistant-mcp", &install_dest_assistant_mcp),
+            ("orchestrator-mcp", &install_dest_mcp),
+        ] {
+            let recycled = recycle_stale_companion_processes(binary, destination).await;
+            if recycled > 0 {
+                yield sse("log", format!("Recycled {recycled} stale {binary} process(es) still running the replaced binary"), Some(86));
+            }
+        }
+
         yield sse("log", format!("Installing {} → {}", src_paloma.display(), install_dest_paloma), Some(87));
         let bkp_paloma = format!("{}.pre-deploy-{}", install_dest_paloma, sha);
         let rollback_paloma = match prepare_deploy_backup(&install_dest_paloma, &bkp_paloma).await {
@@ -4312,22 +4335,47 @@ fn stream_deploy(
             );
         }
 
-        // Schedule the restart in a fully detached process so this SSE
-        // response can flush its final event before systemd SIGTERMs us.
-        // `setsid` + `nohup` + `&` puts the restart in a new session that
-        // outlives the API process, so the queued `systemctl restart` runs
-        // even after our PID exits.
-        let restart_cmd = format!(
-            "sleep 2 && systemctl restart {} >/dev/null 2>&1",
-            service_name
+        // Schedule the restart so this SSE response can flush its final event
+        // before systemd SIGTERMs us.
+        //
+        // stop + port-wait + start instead of a bare `systemctl restart`: an
+        // orphaned old process still holding the listen port makes the fresh
+        // service die with EADDRINUSE while the orphan serves stale code
+        // (seen twice in prod). The script waits up to
+        // PORT_RELEASE_GRACE_SECS for the port to be released, then
+        // SIGTERM → SIGKILL escalates on any lingering holder before start.
+        //
+        // The script MUST run as a transient systemd unit via `systemd-run`,
+        // NOT as a `setsid`/`nohup` child of this handler. A detached child
+        // still lives inside THIS service's cgroup, so when the script runs
+        // `systemctl stop <svc>` systemd tears the whole cgroup down and kills
+        // the script itself BEFORE it reaches `systemctl start` — the PR #790
+        // regression that left prod stopped (0/SUCCESS) until a manual start.
+        // `systemd-run` launches the script under systemd (PID 1), a sibling
+        // cgroup, so the stop of <svc> does not touch it and it survives to
+        // issue the start. Where systemd is not PID 1 (Docker/dev) we fall
+        // back to a single detached `systemctl restart`, whose restart is
+        // owned atomically by whatever supervises the service.
+        let listen_port = state.config.port;
+        yield sse(
+            "log",
+            format!(
+                "Scheduling guarded restart: stop {}, wait up to {}s for port {} to be released (SIGTERM then SIGKILL any lingering holder), then start",
+                service_name, PORT_RELEASE_GRACE_SECS, listen_port
+            ),
+            Some(90),
         );
-        if let Err(e) = Command::new("setsid")
-            .args(["nohup", "bash", "-c", &restart_cmd])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        yield sse(
+            "log",
+            if systemd_run_available() {
+                "Launching guarded restart as a transient systemd-run unit (sibling cgroup, survives the service stop)".to_string()
+            } else {
+                "systemd-run unavailable (no systemd PID 1); falling back to a detached `systemctl restart`".to_string()
+            },
+            Some(91),
+        );
+        let spawn_result = spawn_guarded_restart(&service_name, listen_port);
+        if let Err(e) = spawn_result {
             yield sse(
                 "error",
                 format!("Binary installed but failed to schedule restart: {}. Run `systemctl restart {}` manually.", e, service_name),
@@ -5055,7 +5103,10 @@ fn is_env_name_char(ch: char) -> bool {
 fn hermes_uses_native_codex(model: Option<&str>, base_url: Option<&str>) -> bool {
     let model_is_codex = model.is_some_and(|m| {
         let value = m.to_ascii_lowercase();
-        value.contains("openai-codex") || value.contains("gpt-5.6") || value.contains("gpt-5.5")
+        value.contains("openai-codex")
+            || value.contains("gpt-6")
+            || value.contains("gpt-5.6")
+            || value.contains("gpt-5.5")
     });
     let base_url_is_codex = base_url.is_some_and(|url| {
         url.to_ascii_lowercase()
@@ -5365,52 +5416,321 @@ fn stream_claude_code_uninstall() -> impl Stream<Item = Result<Event, std::conve
     stream_package_uninstall("@anthropic-ai/claude-code", ".claude", "Claude Code")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        chatgpt_ui_driver_install_path, evaluate_debounce, evaluate_deploy_request,
-        expand_hermes_env_refs, extract_version_token, hermes_chat_proxy_status,
-        hermes_config_base_url, hermes_config_model_label, hermes_config_yaml, hermes_service_unit,
-        hermes_uses_native_codex, install_versioned_binary_as, is_safe_repo_path,
-        normalize_repo_path, prepare_deploy_backup, prune_deploy_backups, rollback_deployed_binary,
-        sandboxed_service_name_from_path, sanitize_hermes_chat_proxy_headers, select_repo_path,
-        systemd_service_component_from_states, upsert_hermes_mcp_command, ComponentStatus,
-        DebounceDecision, DeployRefusal, DeployRollback, DEPLOY_DEBOUNCE_SECS,
-        HERMES_SERVICE_DRAIN_DROP_IN,
+// ---------------------------------------------------------------------------
+// Deploy port-release guard
+//
+// Twice in prod a deploy restart raced an orphaned old API process that kept
+// LISTENing on the service port: the freshly started service died with
+// EADDRINUSE while the orphan kept serving stale code. The guard below waits
+// for the listen port to actually be released between `systemctl stop` and
+// `systemctl start`, and escalates SIGTERM → SIGKILL on whatever PID still
+// holds it after the grace period.
+// ---------------------------------------------------------------------------
+
+/// Grace period to wait for the port to be released after stopping the
+/// service, before escalating to signals.
+const PORT_RELEASE_GRACE_SECS: u64 = 20;
+/// How long to wait after SIGTERM before escalating to SIGKILL.
+const PORT_RELEASE_KILL_GRACE_SECS: u64 = 5;
+
+/// Injectable view of "is the port free / who holds it / signal it" so the
+/// wait-and-escalate decision logic is unit-testable without spawning real
+/// listeners in CI.
+pub(crate) trait PortProbe {
+    /// True when nothing is LISTENing on `port` (a fresh bind would succeed).
+    fn is_free(&mut self, port: u16) -> bool;
+    /// PID of the process currently LISTENing on `port`, if identifiable.
+    fn holder_pid(&mut self, port: u16) -> Option<u32>;
+    /// Send `sig` ("TERM" or "KILL") to `pid`. Best-effort.
+    fn signal(&mut self, pid: u32, sig: &str);
+    /// PID of the current process (never self-signal: if *we* still hold the
+    /// port, `systemctl start` is what replaces us).
+    fn self_pid(&self) -> u32;
+}
+
+/// Real probe: bind-test the port, identify the holder via
+/// `ss -tlnpH sport = :PORT`, signal via `kill(1)`.
+pub(crate) struct RealPortProbe;
+
+impl RealPortProbe {
+    fn ss_listen_line(port: u16) -> Option<String> {
+        let out = std::process::Command::new("ss")
+            .args(["-tlnpH", &format!("sport = :{port}")])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().find(|l| !l.trim().is_empty())?;
+        Some(line.to_string())
+    }
+}
+
+impl PortProbe for RealPortProbe {
+    fn is_free(&mut self, port: u16) -> bool {
+        // A successful wildcard bind is definitive: nothing holds the port.
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return true;
+        }
+        // Bind can fail for reasons other than a live LISTEN socket (e.g. a
+        // lingering TIME_WAIT from an accepted connection). Trust `ss`: free
+        // iff no LISTEN socket is reported. If `ss` is unavailable, trust the
+        // failed bind.
+        match std::process::Command::new("ss")
+            .args(["-tlnH", &format!("sport = :{port}")])
+            .output()
+        {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .all(|l| l.trim().is_empty()),
+            _ => false,
+        }
+    }
+
+    fn holder_pid(&mut self, port: u16) -> Option<u32> {
+        parse_ss_holder_pid(&Self::ss_listen_line(port)?)
+    }
+
+    fn signal(&mut self, pid: u32, sig: &str) {
+        let _ = std::process::Command::new("kill")
+            .args([&format!("-{sig}"), &pid.to_string()])
+            .output();
+    }
+
+    fn self_pid(&self) -> u32 {
+        std::process::id()
+    }
+}
+
+/// Extract `pid=N` from an `ss -tlnp` line like
+/// `LISTEN 0 1024 0.0.0.0:3000 0.0.0.0:* users:(("sandboxed-sh",pid=1234,fd=9))`.
+pub(crate) fn parse_ss_holder_pid(line: &str) -> Option<u32> {
+    let idx = line.find("pid=")?;
+    let rest = &line[idx + 4..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Wait for `port` to be released, escalating on the holder if the grace
+/// period expires. Returns human-readable log lines describing each step so
+/// callers can forward them into the deploy SSE stream.
+///
+/// Sequence: poll `is_free` once per second for `grace`; if still held,
+/// identify the holder and SIGTERM it (unless it is this very process); wait
+/// `kill_grace`; SIGKILL if still held; report the final state.
+pub(crate) async fn wait_for_port_release(
+    port: u16,
+    probe: &mut (dyn PortProbe + Send),
+    grace: std::time::Duration,
+    kill_grace: std::time::Duration,
+) -> Vec<String> {
+    let poll = std::time::Duration::from_secs(1);
+    let mut logs = Vec::new();
+
+    let polls = grace.as_secs().max(1);
+    for attempt in 0..=polls {
+        if probe.is_free(port) {
+            if attempt > 0 {
+                logs.push(format!("Port {port} released after {attempt}s"));
+            } else {
+                logs.push(format!("Port {port} is free"));
+            }
+            return logs;
+        }
+        if attempt < polls {
+            tokio::time::sleep(poll).await;
+        }
+    }
+
+    logs.push(format!(
+        "Port {port} still held after {}s grace period",
+        grace.as_secs()
+    ));
+
+    let Some(pid) = probe.holder_pid(port) else {
+        logs.push(format!(
+            "Could not identify the process holding port {port}; proceeding with restart anyway"
+        ));
+        return logs;
     };
 
-    #[test]
-    fn hermes_chat_proxy_removes_browser_origin_but_keeps_application_headers() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            axum::http::HeaderValue::from_static("http://localhost:3001"),
-        );
-        headers.insert(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        );
+    if pid == probe.self_pid() {
+        // We are the lingering holder (this handler runs inside the service
+        // being redeployed). systemd will terminate us on start; killing
+        // ourselves here would abort the deploy before the start is issued.
+        logs.push(format!(
+            "Port {port} is held by this process (pid {pid}); the service restart will replace it"
+        ));
+        return logs;
+    }
 
-        sanitize_hermes_chat_proxy_headers(&mut headers);
+    logs.push(format!(
+        "Port {port} held by orphaned pid {pid}; sending SIGTERM"
+    ));
+    probe.signal(pid, "TERM");
+    let kill_polls = kill_grace.as_secs().max(1);
+    for _ in 0..kill_polls {
+        tokio::time::sleep(poll).await;
+        if probe.is_free(port) {
+            logs.push(format!("Port {port} released after SIGTERM to pid {pid}"));
+            return logs;
+        }
+    }
 
-        assert!(!headers.contains_key(axum::http::header::ORIGIN));
+    logs.push(format!(
+        "Pid {pid} ignored SIGTERM for {}s; sending SIGKILL",
+        kill_grace.as_secs()
+    ));
+    probe.signal(pid, "KILL");
+    for _ in 0..kill_polls {
+        tokio::time::sleep(poll).await;
+        if probe.is_free(port) {
+            logs.push(format!("Port {port} released after SIGKILL to pid {pid}"));
+            return logs;
+        }
+    }
+
+    logs.push(format!(
+        "Port {port} STILL held after SIGKILL; restart may fail with EADDRINUSE"
+    ));
+    logs
+}
+
+/// Restart script used by the deploy endpoint. The handler process is itself
+/// part of the service being restarted, so the stop/wait/start sequence must
+/// run in a context that outlives this PID *and this cgroup* — see
+/// `redeploy_systemd_run_args` for why it is launched via `systemd-run` rather
+/// than as a detached child. Mirrors `wait_for_port_release`: stop, poll the
+/// port for up to `PORT_RELEASE_GRACE_SECS`, SIGTERM → (5s) → SIGKILL any
+/// Spawn the guarded restart so a freshly deployed binary never races an
+/// orphaned old process still holding the listen port (EADDRINUSE, seen twice
+/// in prod). Prefers a transient `systemd-run` unit — a sibling cgroup that
+/// survives the `systemctl stop` of the service — and falls back to a detached
+/// `setsid`/`nohup systemctl restart` where systemd is not PID 1 (Docker/dev),
+/// whose restart is owned atomically by whatever supervises the service.
+///
+/// Shared by every deploy entry point (`/api/system/deploy` and the one-click
+/// self-update) so both get the same stop → wait-for-port → SIGTERM/SIGKILL →
+/// start guarantee. Returns the spawn result; the detached child owns the
+/// restart, so success here means "scheduled", not "restarted".
+fn spawn_guarded_restart(service_name: &str, port: u16) -> std::io::Result<tokio::process::Child> {
+    if systemd_run_available() {
+        let unit = redeploy_unit_name(service_name);
+        let script = guarded_restart_script(service_name, port);
+        Command::new("systemd-run")
+            .args(redeploy_systemd_run_args(&unit, &script))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else {
+        let fallback = format!(
+            "sleep 2 && systemctl restart {} >/dev/null 2>&1",
+            service_name
+        );
+        Command::new("setsid")
+            .args(["nohup", "bash", "-c", &fallback])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    }
+}
+
+/// lingering holder, then start. Uses stop+start instead of `systemctl restart`
+/// so the wait can sit between the two halves.
+pub(crate) fn guarded_restart_script(service_name: &str, port: u16) -> String {
+    format!(
+        "sleep 2 && systemctl stop {svc} >/dev/null 2>&1; \
+         for i in $(seq 1 {grace}); do \
+           ss -tlnH 'sport = :{port}' 2>/dev/null | grep -q . || break; sleep 1; \
+         done; \
+         if ss -tlnH 'sport = :{port}' 2>/dev/null | grep -q .; then \
+           pid=$(ss -tlnpH 'sport = :{port}' 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | head -n1); \
+           if [ -n \"$pid\" ]; then \
+             kill -TERM \"$pid\" 2>/dev/null; sleep {kill_grace}; \
+             kill -0 \"$pid\" 2>/dev/null && kill -KILL \"$pid\" 2>/dev/null; sleep 1; \
+           fi; \
+         fi; \
+         systemctl start {svc} >/dev/null 2>&1",
+        svc = service_name,
+        port = port,
+        grace = PORT_RELEASE_GRACE_SECS,
+        kill_grace = PORT_RELEASE_KILL_GRACE_SECS,
+    )
+}
+
+/// True when the guarded restart can be launched as a transient systemd unit:
+/// systemd must be PID 1 (its runtime API dir exists) and the `systemd-run`
+/// binary must be present. On boxes where this is false (Docker without a
+/// systemd init, dev laptops) the deploy path falls back to a single detached
+/// `systemctl restart`.
+pub(crate) fn systemd_run_available() -> bool {
+    std::path::Path::new("/run/systemd/system").is_dir()
+        && ["/usr/bin/systemd-run", "/bin/systemd-run"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+}
+
+/// Transient unit name for a redeploy restart. Derived from the service name
+/// (with any `.service` suffix stripped) plus a millisecond timestamp so
+/// back-to-back deploys never collide on a still-lingering unit name.
+pub(crate) fn redeploy_unit_name(service_name: &str) -> String {
+    let base = service_name
+        .strip_suffix(".service")
+        .unwrap_or(service_name);
+    format!("{base}-redeploy-{}", chrono::Utc::now().timestamp_millis())
+}
+
+/// argv for launching the guarded restart script via `systemd-run`. Running
+/// under systemd (PID 1) puts the script in its OWN transient unit/cgroup — a
+/// sibling of the service being restarted — so `systemctl stop <svc>` inside
+/// the script does NOT kill the script along with the service's cgroup. That
+/// cgroup co-location is exactly what broke prod in PR #790 when the same
+/// script ran as a `setsid` child of the service. `--collect` garbage-collects
+/// the transient unit after it exits (including on failure); `Type=oneshot`
+/// matches the run-once stop/wait/start shape.
+pub(crate) fn redeploy_systemd_run_args(unit_name: &str, script: &str) -> Vec<String> {
+    vec![
+        format!("--unit={unit_name}"),
+        "--collect".to_string(),
+        "--property=Type=oneshot".to_string(),
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn stale_companion_matching_is_exact() {
+        // The "(deleted)" suffix is how Linux reports a replaced binary. Only
+        // that exact form, for that exact destination, may be signalled —
+        // matching loosely here would kill a healthy companion that is already
+        // running the new binary, or an unrelated same-named process.
+        let dest = "/usr/local/bin/assistant-mcp";
         assert_eq!(
-            headers.get(axum::http::header::CONTENT_TYPE),
-            Some(&axum::http::HeaderValue::from_static("application/json"))
+            format!("{dest} (deleted)"),
+            "/usr/local/bin/assistant-mcp (deleted)"
+        );
+        // A companion on the fresh binary reports the bare path and must not match.
+        assert_ne!(dest, format!("{dest} (deleted)"));
+        // A same-named binary installed elsewhere must not match either.
+        assert_ne!(
+            format!("/opt/other/assistant-mcp (deleted)"),
+            format!("{dest} (deleted)")
         );
     }
 
-    #[test]
-    fn hermes_upstream_auth_failure_is_not_reported_as_dashboard_auth_failure() {
-        assert_eq!(
-            hermes_chat_proxy_status(axum::http::StatusCode::UNAUTHORIZED),
-            axum::http::StatusCode::BAD_GATEWAY
-        );
-        assert_eq!(
-            hermes_chat_proxy_status(axum::http::StatusCode::FORBIDDEN),
-            axum::http::StatusCode::FORBIDDEN
-        );
-    }
+    use super::{
+        chatgpt_ui_driver_install_path, evaluate_debounce, evaluate_deploy_request,
+        expand_hermes_env_refs, extract_version_token, hermes_config_base_url,
+        hermes_config_model_label, hermes_config_yaml, hermes_service_unit,
+        hermes_uses_native_codex, install_versioned_binary_as, is_safe_repo_path,
+        normalize_repo_path, prepare_deploy_backup, prune_deploy_backups, rollback_deployed_binary,
+        sandboxed_service_name_from_path, select_repo_path, systemd_service_component_from_states,
+        upsert_hermes_mcp_command, ComponentStatus, DebounceDecision, DeployRefusal,
+        DeployRollback, DEPLOY_DEBOUNCE_SECS, HERMES_SERVICE_DRAIN_DROP_IN,
+    };
 
     #[test]
     fn generated_hermes_config_allows_long_ask_turns_and_workspace_management() {
@@ -5428,19 +5748,10 @@ mod tests {
 
         assert!(yaml.contains("    timeout: 600\n"));
         assert!(!yaml.contains("    timeout: 120\n"));
-        assert!(yaml.contains("        - ask_mission\n"));
-        for tool in [
-            "get_workspace",
-            "create_workspace",
-            "update_workspace",
-            "delete_workspace",
-            "list_workspace_templates",
-            "get_workspace_template",
-            "save_workspace_template",
-            "delete_workspace_template",
-            "rebuild_workspace_from_template",
-            "workspace_bash",
-        ] {
+        // The generated allowlist is the canonical one — every assistant-mcp
+        // tool, including the ones that had drifted out of it
+        // (get_chatgpt_ui_pool_status, acknowledge_mission, workspace jobs).
+        for tool in crate::hermes_tools::HERMES_ASSISTANT_TOOL_ALLOWLIST {
             assert!(
                 yaml.contains(&format!("        - {tool}\n")),
                 "generated Hermes config missing {tool}"
@@ -5748,7 +6059,7 @@ mod tests {
 
     #[test]
     fn deploy_refuses_self_target_by_default() {
-        let r = evaluate_deploy_request(None, None, true, None, false);
+        let r = evaluate_deploy_request(None, None, true, None, false, 0);
         assert_eq!(r, Some(DeployRefusal::SelfTarget));
     }
 
@@ -5757,7 +6068,10 @@ mod tests {
         // force=true bypasses self-protection (caller explicitly accepts
         // the in-flight turn dying). Still respects debounce unless the
         // debounce is also force-bypassed, which it is.
-        assert_eq!(evaluate_deploy_request(None, None, true, None, true), None);
+        assert_eq!(
+            evaluate_deploy_request(None, None, true, None, true, 0),
+            None
+        );
     }
 
     #[test]
@@ -5765,11 +6079,11 @@ mod tests {
         // calling_on_self=false → no self-target refusal, no debounce
         // hit, no refusal at all.
         assert_eq!(
-            evaluate_deploy_request(None, None, false, None, false),
+            evaluate_deploy_request(None, None, false, None, false, 0),
             None
         );
         assert_eq!(
-            evaluate_deploy_request(None, None, false, Some(10_000), false),
+            evaluate_deploy_request(None, None, false, Some(10_000), false, 0),
             None
         );
     }
@@ -5779,7 +6093,7 @@ mod tests {
         // calling_on_self=false, but a deploy fired 30s ago — debounce
         // should refuse even though the self check passed.
         assert_eq!(
-            evaluate_deploy_request(None, None, false, Some(30), false),
+            evaluate_deploy_request(None, None, false, Some(30), false, 0),
             Some(DeployRefusal::Debounced { since_secs: 30 })
         );
     }
@@ -5787,7 +6101,7 @@ mod tests {
     #[test]
     fn deploy_force_bypasses_both_self_and_debounce() {
         assert_eq!(
-            evaluate_deploy_request(None, None, true, Some(0), true),
+            evaluate_deploy_request(None, None, true, Some(0), true, 0),
             None
         );
     }
@@ -5798,8 +6112,20 @@ mod tests {
         // meaningful one (self-target) so the agent sees the actual reason
         // instead of being told "wait a bit and retry" only to discover
         // it'd kill itself.
-        let r = evaluate_deploy_request(None, None, true, Some(30), false);
+        let r = evaluate_deploy_request(None, None, true, Some(30), false, 0);
         assert_eq!(r, Some(DeployRefusal::SelfTarget));
+    }
+
+    #[test]
+    fn deploy_refuses_live_writers_unless_forced() {
+        assert_eq!(
+            evaluate_deploy_request(None, None, false, None, false, 3),
+            Some(DeployRefusal::WritersLive { count: 3 })
+        );
+        assert_eq!(
+            evaluate_deploy_request(None, None, false, None, true, 3),
+            None
+        );
     }
 
     #[test]
@@ -5810,6 +6136,7 @@ mod tests {
             false,
             None,
             false,
+            0,
         );
         assert_eq!(
             r,
@@ -5828,6 +6155,7 @@ mod tests {
             false,
             None,
             false,
+            0,
         );
         assert_eq!(r, None);
     }
@@ -5973,5 +6301,209 @@ mod tests {
         assert!(is_safe_repo_path(std::path::Path::new(
             crate::settings::DEFAULT_SANDBOXED_REPO_PATH
         )));
+    }
+
+    // ---- deploy port-release guard -------------------------------------
+
+    use super::{
+        guarded_restart_script, parse_ss_holder_pid, redeploy_systemd_run_args, redeploy_unit_name,
+        wait_for_port_release, PortProbe,
+    };
+
+    /// Scripted probe: `free_after` polls of "held" before the port frees,
+    /// optionally freeing only in response to a given signal.
+    struct FakeProbe {
+        polls: u32,
+        free_after_polls: Option<u32>,
+        holder: Option<u32>,
+        self_pid: u32,
+        frees_on_signal: Option<&'static str>,
+        signals: Vec<(u32, String)>,
+        freed_by_signal: bool,
+    }
+
+    impl FakeProbe {
+        fn held(holder: Option<u32>, frees_on_signal: Option<&'static str>) -> Self {
+            Self {
+                polls: 0,
+                free_after_polls: None,
+                holder,
+                self_pid: 999_999,
+                frees_on_signal,
+                signals: Vec::new(),
+                freed_by_signal: false,
+            }
+        }
+    }
+
+    impl PortProbe for FakeProbe {
+        fn is_free(&mut self, _port: u16) -> bool {
+            self.polls += 1;
+            if self.freed_by_signal {
+                return true;
+            }
+            match self.free_after_polls {
+                Some(n) => self.polls > n,
+                None => false,
+            }
+        }
+        fn holder_pid(&mut self, _port: u16) -> Option<u32> {
+            self.holder
+        }
+        fn signal(&mut self, pid: u32, sig: &str) {
+            self.signals.push((pid, sig.to_string()));
+            if Some(sig) == self.frees_on_signal {
+                self.freed_by_signal = true;
+            }
+        }
+        fn self_pid(&self) -> u32 {
+            self.self_pid
+        }
+    }
+
+    fn short() -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    #[tokio::test]
+    async fn port_free_immediately_needs_no_signals() {
+        let mut probe = FakeProbe::held(Some(42), None);
+        probe.free_after_polls = Some(0);
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert!(probe.signals.is_empty(), "must not signal when port frees");
+        assert!(logs.iter().any(|l| l.contains("free")), "{logs:?}");
+    }
+
+    #[tokio::test]
+    async fn holder_gets_sigterm_and_release_stops_escalation() {
+        let mut probe = FakeProbe::held(Some(4242), Some("TERM"));
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert_eq!(probe.signals, vec![(4242, "TERM".to_string())]);
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("SIGTERM") && l.contains("4242")),
+            "{logs:?}"
+        );
+        assert!(!logs.iter().any(|l| l.contains("SIGKILL")), "{logs:?}");
+    }
+
+    #[tokio::test]
+    async fn stubborn_holder_escalates_to_sigkill() {
+        let mut probe = FakeProbe::held(Some(4242), Some("KILL"));
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert_eq!(
+            probe.signals,
+            vec![(4242, "TERM".to_string()), (4242, "KILL".to_string())]
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("SIGKILL") && l.contains("4242")),
+            "{logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unkillable_holder_is_reported_not_looped() {
+        let mut probe = FakeProbe::held(Some(4242), None);
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert_eq!(probe.signals.len(), 2, "TERM then KILL, then give up");
+        assert!(logs.iter().any(|l| l.contains("STILL held")), "{logs:?}");
+    }
+
+    #[tokio::test]
+    async fn self_holding_process_is_never_signalled() {
+        // The deploy handler runs inside the service being restarted: if the
+        // lingering holder is our own PID, killing it would abort the deploy
+        // before `systemctl start` is issued.
+        let mut probe = FakeProbe::held(Some(999_999), None);
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert!(probe.signals.is_empty(), "must never self-signal");
+        assert!(
+            logs.iter().any(|l| l.contains("held by this process")),
+            "{logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unidentifiable_holder_proceeds_without_signals() {
+        let mut probe = FakeProbe::held(None, None);
+        let logs = wait_for_port_release(3000, &mut probe, short(), short()).await;
+        assert!(probe.signals.is_empty());
+        assert!(
+            logs.iter().any(|l| l.contains("Could not identify")),
+            "{logs:?}"
+        );
+    }
+
+    #[test]
+    fn ss_holder_pid_parses_users_clause() {
+        let line = r#"LISTEN 0 1024 0.0.0.0:3000 0.0.0.0:* users:(("sandboxed-sh",pid=1234,fd=9))"#;
+        assert_eq!(parse_ss_holder_pid(line), Some(1234));
+        assert_eq!(
+            parse_ss_holder_pid("LISTEN 0 1024 0.0.0.0:3000 0.0.0.0:*"),
+            None
+        );
+    }
+
+    #[test]
+    fn guarded_restart_uses_stop_wait_start_not_restart() {
+        let script = guarded_restart_script("sandboxed-sh-prod.service", 3100);
+        assert!(script.contains("systemctl stop sandboxed-sh-prod.service"));
+        assert!(script.contains("systemctl start sandboxed-sh-prod.service"));
+        assert!(
+            !script.contains("systemctl restart"),
+            "must stop, wait for the port, then start"
+        );
+        assert!(
+            script.contains(":3100"),
+            "port must come from config, not hardcoded 3000"
+        );
+        assert!(!script.contains(":3000"));
+        assert!(script.contains("kill -TERM"));
+        assert!(script.contains("kill -KILL"));
+    }
+
+    #[test]
+    fn redeploy_launches_via_systemd_run_not_bare_detached_shell() {
+        // The whole point of the PR #790 fix: the guarded restart must run as a
+        // transient systemd unit (PID 1 parent, sibling cgroup) so the script's
+        // own `systemctl stop <svc>` cannot tear it down before `start`.
+        let script = guarded_restart_script("sandboxed-sh-prod.service", 3100);
+        let args = redeploy_systemd_run_args("sandboxed-sh-prod-redeploy-123", &script);
+
+        // Transient unit is named and auto-collected after it exits.
+        assert!(args
+            .iter()
+            .any(|a| a == "--unit=sandboxed-sh-prod-redeploy-123"));
+        assert!(args.iter().any(|a| a == "--collect"));
+        assert!(args.iter().any(|a| a == "--property=Type=oneshot"));
+
+        // It runs the guarded stop/wait/start script through bash.
+        assert!(args.iter().any(|a| a == "/bin/bash"));
+        assert!(args.iter().any(|a| a == "-c"));
+        let body = args.last().expect("script is the final arg");
+        assert!(body.contains("systemctl stop sandboxed-sh-prod.service"));
+        assert!(body.contains("systemctl start sandboxed-sh-prod.service"));
+        // The port-wait / kill-escalation decision logic is preserved verbatim.
+        assert!(body.contains("kill -TERM"));
+        assert!(body.contains("kill -KILL"));
+        assert!(body.contains(":3100"));
+    }
+
+    #[test]
+    fn redeploy_unit_name_strips_service_suffix_and_is_unique() {
+        let a = redeploy_unit_name("sandboxed-sh-prod.service");
+        assert!(a.starts_with("sandboxed-sh-prod-redeploy-"));
+        // The `.service` suffix must not leak into the transient unit name.
+        assert!(!a.contains(".service"));
+
+        // A name without the suffix is handled too.
+        let b = redeploy_unit_name("sandboxed-sh-dev");
+        assert!(b.starts_with("sandboxed-sh-dev-redeploy-"));
+
+        // Back-to-back calls differ so a still-lingering unit never collides.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = redeploy_unit_name("sandboxed-sh-prod.service");
+        assert_ne!(a, c);
     }
 }

@@ -87,9 +87,20 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         pricing: pricing(15_000, 75_000, Some(18_750), Some(1_500)),
     },
     PricingEntry {
+        canonical: "claude-fable-5-1",
+        aliases: &["claude-fable-5-1", "claude-fable-5.1"],
+        pricing: pricing(10_000, 50_000, Some(12_500), Some(250)),
+    },
+    PricingEntry {
         canonical: "claude-fable-5",
         aliases: &["claude-fable-5"],
         pricing: pricing(10_000, 50_000, Some(12_500), Some(1_000)),
+    },
+    // Anthropic Opus 5.5 overview, verified 2026-09-23 ($/MTok: 4/20/5/0.20).
+    PricingEntry {
+        canonical: "claude-opus-5-5",
+        aliases: &["claude-opus-5-5", "claude-opus-5.5"],
+        pricing: pricing(4_000, 20_000, Some(5_000), Some(200)),
     },
     PricingEntry {
         canonical: "claude-opus-5",
@@ -160,6 +171,13 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         canonical: "gpt-5-mini",
         aliases: &["gpt-5-mini"],
         pricing: pricing(250, 2_000, None, Some(25)),
+    },
+    // GPT-6 Astra (Codex, ChatGPT catalog 2026-09-05). No public rate yet:
+    // carries the GPT-5.6 Sol rates until models.dev lists it.
+    PricingEntry {
+        canonical: "gpt-6-astra",
+        aliases: &["gpt-6-astra", "gpt-6"],
+        pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
     },
     PricingEntry {
         canonical: "gpt-5.6-sol",
@@ -262,6 +280,13 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         pricing: pricing(75, 300, None, None),
     },
     PricingEntry {
+        // grok-4.6 list price not yet published separately; mirrors grok-4.5
+        // ($2/$6 per Mtok, $0.5 cached) until xAI publishes it.
+        canonical: "grok-4.6",
+        aliases: &["grok-4.6", "grok-4.6-latest"],
+        pricing: pricing(2_000, 6_000, None, Some(500)),
+    },
+    PricingEntry {
         canonical: "grok-4.5",
         aliases: &["grok-4.5", "grok-4.5-latest", "grok-build-latest"],
         pricing: pricing(2_000, 6_000, None, Some(500)),
@@ -290,6 +315,17 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         canonical: "grok-3",
         aliases: &["grok-3"],
         pricing: pricing(1_250, 2_500, None, Some(200)),
+    },
+    PricingEntry {
+        // Pay-as-you-go list for glm-5.3 is not on
+        // https://docs.z.ai/guides/overview/pricing yet. Coding Plan
+        // treats it as the successor of glm-5.2/5.1 and auto-routes those
+        // IDs to glm-5.3, so keep the published 5.2 rates ($1.4/$4.4 per
+        // Mtok, $0.26 cached) until Z.AI posts a distinct 5.3 row.
+        // `glm-5.3[1m]` is the 1M-context Coding Plan alias.
+        canonical: "glm-5.3",
+        aliases: &["glm-5.3", "glm-5-3", "glm-5.3[1m]"],
+        pricing: pricing(1_400, 4_400, None, Some(260)),
     },
     PricingEntry {
         // glm-5.2 list price not yet published separately; mirrors glm-5.1
@@ -352,6 +388,38 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         canonical: "minimax-m3",
         aliases: &["minimax-m3"],
         pricing: pricing(600, 2_400, Some(375), Some(60)),
+    },
+    // Meta Muse (api.meta.ai). models.dev / OpenCode catalog, checked 2026-08-19.
+    // Contributor must sit above the family alias so "-contributor" does not
+    // inherit standard Spark rates via the `muse-spark` prefix.
+    //
+    // Spark 1.3 appeared on /models on 2026-09-03; models.dev had no rates for
+    // it yet, so it carries the 1.2 tiers (contributor = the data-sharing tier,
+    // ~12x cheaper). Re-check models.dev and correct if Meta priced it apart.
+    PricingEntry {
+        canonical: "muse-spark-1.3-contributor",
+        aliases: &["muse-spark-1.3-contributor"],
+        pricing: pricing(100, 200, None, Some(2)),
+    },
+    PricingEntry {
+        canonical: "muse-spark-1.3",
+        aliases: &["muse-spark-1.3"],
+        pricing: pricing(1_250, 4_250, None, Some(150)),
+    },
+    PricingEntry {
+        canonical: "muse-spark-1.2-contributor",
+        aliases: &["muse-spark-1.2-contributor"],
+        pricing: pricing(100, 200, None, Some(2)),
+    },
+    PricingEntry {
+        canonical: "muse-spark-1.2",
+        aliases: &["muse-spark-1.2"],
+        pricing: pricing(1_250, 4_250, None, Some(150)),
+    },
+    PricingEntry {
+        canonical: "muse-spark-1.1",
+        aliases: &["muse-spark-1.1"],
+        pricing: pricing(1_250, 4_250, None, Some(150)),
     },
     PricingEntry {
         canonical: "minimax-m2.7-highspeed",
@@ -562,6 +630,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opus_55_pricing_does_not_fall_back_to_opus_5() {
+        for id in [
+            "claude-opus-5-5",
+            "anthropic/claude-opus-5.5",
+            "claude-opus-5-5-20260922",
+        ] {
+            let p = pricing_for_model(id).unwrap();
+            assert_eq!(p.input_nano_per_token, 4000);
+            assert_eq!(p.output_nano_per_token, 20000);
+            assert_eq!(p.cache_create_nano_per_token, Some(5000));
+            assert_eq!(p.cache_read_nano_per_token, Some(200));
+        }
+        assert_eq!(
+            pricing_for_model("claude-opus-5")
+                .unwrap()
+                .input_nano_per_token,
+            5000
+        );
+    }
+
+    #[test]
     fn test_normalize_model() {
         assert_eq!(
             normalize_model("claude-3-5-sonnet-20241022"),
@@ -572,6 +661,8 @@ mod tests {
             "claude-3-5-sonnet"
         );
         assert_eq!(normalize_model("claude-opus-4-7"), "claude-opus-4-7");
+        assert_eq!(normalize_model("claude-fable-5-1"), "claude-fable-5-1");
+        assert_eq!(normalize_model("claude-fable-5.1"), "claude-fable-5-1");
         assert_eq!(normalize_model("claude-5-opus"), "claude-opus-5");
         assert_eq!(
             normalize_model("claude-opus-4-5-20251101"),
@@ -588,6 +679,8 @@ mod tests {
         assert_eq!(normalize_model("gpt-4o-2024-08-06"), "gpt-4o");
         assert_eq!(normalize_model("gpt-5.3-codex"), "gpt-5.3");
         assert_eq!(normalize_model("openai/gpt-5.6"), "gpt-5.6-sol");
+        assert_eq!(normalize_model("openai/gpt-6-astra"), "gpt-6-astra");
+        assert_eq!(normalize_model("gpt-6"), "gpt-6-astra");
         assert_eq!(normalize_model("gpt-5.6-2026-07-09"), "gpt-5.6-sol");
         assert_eq!(normalize_model("openai/gpt-5.6-sol"), "gpt-5.6-sol");
         assert_eq!(normalize_model("openai/gpt-5.6-terra"), "gpt-5.6-terra");
@@ -603,11 +696,15 @@ mod tests {
         assert_eq!(normalize_model("gemini-3-pro-preview"), "gemini-3-pro");
         assert_eq!(normalize_model("grok-4-fast-reasoning"), "grok-4-fast");
         assert_eq!(normalize_model("xAI/Grok Inference"), "grok-4-fast");
+        assert_eq!(normalize_model("xai/grok-4.6"), "grok-4.6");
+        assert_eq!(normalize_model("xai/grok-4.6-latest"), "grok-4.6");
         assert_eq!(normalize_model("xai/grok-4.5"), "grok-4.5");
         assert_eq!(normalize_model("xai/grok-4.5-latest"), "grok-4.5");
         assert_eq!(normalize_model("xai/grok-build-latest"), "grok-4.5");
         assert_eq!(normalize_model("grok-build"), "grok-build");
         assert_eq!(normalize_model("zai/glm-5"), "glm-5");
+        assert_eq!(normalize_model("zai/glm-5.3"), "glm-5.3");
+        assert_eq!(normalize_model("zai/glm-5.3[1m]"), "glm-5.3");
         assert_eq!(normalize_model("zai/glm-5.2"), "glm-5.2");
         assert_eq!(normalize_model("zai/glm-5.1"), "glm-5.1");
         assert_eq!(normalize_model("zai/glm-5-turbo"), "glm-5-turbo");
@@ -618,6 +715,16 @@ mod tests {
             "minimax-m2.5-highspeed"
         );
         assert_eq!(normalize_model("minimax/MiniMax-M2.5"), "minimax-m2.5");
+        assert_eq!(normalize_model("meta/muse-spark-1.2"), "muse-spark-1.2");
+        assert_eq!(
+            normalize_model("muse/muse-spark-1.2-contributor"),
+            "muse-spark-1.2-contributor"
+        );
+        assert_eq!(normalize_model("muse-spark-1.1"), "muse-spark-1.1");
+        assert_eq!(
+            normalize_model("meta/muse-spark-1.3-contributor"),
+            "muse-spark-1.3-contributor"
+        );
     }
 
     #[test]
@@ -625,6 +732,7 @@ mod tests {
         assert!(pricing_for_model("claude-3-5-sonnet").is_some());
         assert!(pricing_for_model("claude-opus-4-7").is_some());
         assert!(pricing_for_model("claude-opus-5").is_some());
+        assert!(pricing_for_model("claude-fable-5-1").is_some());
         assert!(pricing_for_model("claude-opus-4-5").is_some());
         assert!(pricing_for_model("claude-sonnet-4-5").is_some());
         assert!(pricing_for_model("claude-haiku-4-5").is_some());
@@ -645,9 +753,13 @@ mod tests {
         assert!(pricing_for_model("gemini-3-flash-preview").is_some());
         assert!(pricing_for_model("grok-4-fast").is_some());
         assert!(pricing_for_model("xAI/Grok Inference").is_some());
+        assert!(pricing_for_model("xai/grok-4.6").is_some());
+        assert!(pricing_for_model("xai/grok-4.6-latest").is_some());
         assert!(pricing_for_model("xai/grok-4.5").is_some());
         assert!(pricing_for_model("grok-build").is_some());
         assert!(pricing_for_model("glm-5").is_some());
+        assert!(pricing_for_model("zai/glm-5.3").is_some());
+        assert!(pricing_for_model("zai/glm-5.3[1m]").is_some());
         assert!(pricing_for_model("zai/glm-5.2").is_some());
         assert!(pricing_for_model("glm-5.1").is_some());
         assert!(pricing_for_model("zai/glm-5-turbo").is_some());
@@ -656,6 +768,13 @@ mod tests {
         assert!(pricing_for_model("minimax/MiniMax-M3").is_some());
         assert!(pricing_for_model("minimax/MiniMax-M2.5-highspeed").is_some());
         assert!(pricing_for_model("minimax/MiniMax-M2.5").is_some());
+        let spark = pricing_for_model("meta/muse-spark-1.2").expect("spark 1.2");
+        assert_eq!(spark.input_nano_per_token, 1_250);
+        assert_eq!(spark.output_nano_per_token, 4_250);
+        let contributor =
+            pricing_for_model("muse-spark-1.2-contributor").expect("spark 1.2 contributor");
+        assert_eq!(contributor.input_nano_per_token, 100);
+        assert_eq!(contributor.output_nano_per_token, 200);
     }
 
     #[test]
@@ -679,9 +798,12 @@ mod tests {
         assert_eq!(grok_45.output_nano_per_token, 6_000);
         assert_eq!(grok_45.cache_read_nano_per_token, Some(500));
 
-        let glm = pricing_for_model("zai/glm-5.1").expect("glm-5.1 pricing");
+        let glm = pricing_for_model("zai/glm-5.3").expect("glm-5.3 pricing");
         assert_eq!(glm.input_nano_per_token, 1_400);
         assert_eq!(glm.output_nano_per_token, 4_400);
+        assert_eq!(glm.cache_read_nano_per_token, Some(260));
+        let glm_1m = pricing_for_model("zai/glm-5.3[1m]").expect("glm-5.3[1m] pricing");
+        assert_eq!(glm_1m.input_nano_per_token, glm.input_nano_per_token);
 
         let minimax = pricing_for_model("minimax/MiniMax-M3").expect("minimax pricing");
         assert_eq!(minimax.input_nano_per_token, 600);

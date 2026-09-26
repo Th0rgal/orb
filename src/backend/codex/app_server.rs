@@ -14,8 +14,10 @@
 //!   `"thread/goal/set requires experimentalApi capability"`.
 //! - After `thread/goal/set`, codex auto-starts a turn — clients only need to
 //!   send `turn/start` for non-goal sessions or follow-up user input.
-//! - Goal terminal status arrives as `thread/goal/updated` with
-//!   `goal.status ∈ {"complete", "budgetLimited"}`. The model's
+//! - Codex 0.153.0 emits `thread/goal/updated {threadId, turnId, goal}`.
+//!   Statuses are active, paused, blocked, usageLimited, budgetLimited, complete.
+//!   Only complete means the objective is achieved; the other inactive states
+//!   park resumable work after the associated turn and tools drain. The model's
 //!   `update_goal` tool call also surfaces as a normal `item/started` +
 //!   `item/completed`, but the notification is the canonical signal.
 //!
@@ -113,7 +115,7 @@ pub struct InitializeResult {
 
 /// Subset of `thread/start` params we use. Codex 0.128.0 has many more
 /// (experimental-gated) fields; add them as we adopt them.
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -146,16 +148,42 @@ pub struct ThreadStartParams {
 
 #[derive(Debug, Deserialize)]
 pub struct ThreadStartResult {
+    #[serde(default)]
+    pub model: Option<String>,
     pub thread: ThreadHandle,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ThreadHandle {
     pub id: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub status: Option<Value>,
+    #[serde(default)]
+    pub turns: Vec<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadGoal {
+    pub thread_id: String,
+    pub objective: String,
+    pub status: String,
+    pub token_budget: Option<i64>,
+    pub tokens_used: i64,
+    pub time_used_seconds: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ThreadGoalGetResponse {
+    pub goal: Option<ThreadGoal>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TurnStartParams {
+    #[serde(rename = "collaborationMode", skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode: Option<Value>,
     #[serde(rename = "threadId")]
     pub thread_id: String,
     pub input: Vec<UserInputItem>,
@@ -172,6 +200,8 @@ pub struct GoalSetParams {
     #[serde(rename = "threadId")]
     pub thread_id: String,
     pub objective: String,
+    /// Explicitly re-arm stopped goals, including blocked goals.
+    pub status: &'static str,
     /// Optional token budget — `null` clears, omitted leaves unchanged.
     #[serde(rename = "tokenBudget", skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
@@ -219,6 +249,7 @@ pub struct RpcError {
 
 /// A live connection to a `codex app-server` process.
 pub struct AppServerSession {
+    closed: tokio_util::sync::CancellationToken,
     next_id: Arc<Mutex<i64>>,
     pending: PendingMap,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -328,6 +359,8 @@ impl AppServerSession {
         // Reader loop: pulls newline-delimited JSON, dispatches responses to
         // pending oneshots and notifications/server-requests onto the inbound
         // channel.
+        let closed = tokio_util::sync::CancellationToken::new();
+        let reader_closed = closed.clone();
         let pending_for_task = Arc::clone(&pending);
         let reader_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
@@ -413,6 +446,7 @@ impl AppServerSession {
                     warn!("codex app-server: unrecognized message shape — {}", trimmed);
                 }
             }
+            reader_closed.cancel();
             debug!("codex app-server: reader loop exited (EOF)");
             // Drain any still-pending request senders so callers stuck in
             // `rx.await` get a clear error instead of hanging until the
@@ -435,6 +469,7 @@ impl AppServerSession {
         let _ = config;
 
         Ok(Self {
+            closed,
             next_id: Arc::new(Mutex::new(1)),
             pending,
             stdin: Arc::new(Mutex::new(Some(stdin))),
@@ -442,6 +477,10 @@ impl AppServerSession {
             child: Arc::new(Mutex::new(Some(child))),
             reader_task: Mutex::new(Some(reader_task)),
         })
+    }
+
+    pub async fn closed(&self) {
+        self.closed.cancelled().await;
     }
 
     /// Take the inbound message stream. Each session yields it exactly once.
@@ -638,6 +677,50 @@ impl AppServerSession {
         .await
     }
 
+    /// Apply the selected mission settings to the existing native history.
+    /// `config.model_reasoning_effort` is accepted by 0.144 and 0.153;
+    /// `reasoningEffort` is not a thread/resume protocol field.
+    pub async fn thread_resume_configured(
+        &self,
+        thread_id: &str,
+        overrides: &ThreadStartParams,
+    ) -> Result<ThreadStartResult> {
+        let mut params = serde_json::to_value(overrides)?;
+        let object = params.as_object_mut().expect("thread params are an object");
+        object.remove("ephemeral");
+        object.remove("reasoningEffort");
+        object.insert("threadId".into(), json!(thread_id));
+        // Explicit null clears a previously selected fast tier.
+        object.insert("serviceTier".into(), json!(overrides.service_tier));
+        if let Some(effort) = &overrides.reasoning_effort {
+            object.insert("config".into(), json!({"model_reasoning_effort": effort}));
+        }
+        self.request("thread/resume", params).await
+    }
+
+    pub async fn goal_get(&self, thread_id: &str) -> Result<ThreadGoalGetResponse> {
+        self.request("thread/goal/get", json!({"threadId": thread_id}))
+            .await
+    }
+
+    /// Omitting objective and tokenBudget preserves the existing goal counters.
+    pub async fn goal_status(&self, thread_id: &str, status: &str) -> Result<Value> {
+        self.request(
+            "thread/goal/set",
+            json!({"threadId": thread_id, "status": status}),
+        )
+        .await
+    }
+
+    pub async fn turn_steer(&self, thread_id: &str, turn_id: &str, text: &str) -> Result<Value> {
+        self.request(
+            "turn/steer",
+            json!({"threadId": thread_id, "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": text}]}),
+        )
+        .await
+    }
+
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<Value> {
         // We don't strongly type the response — the caller cares about
         // notifications, not the immediate `{turn: ...}` echo.
@@ -668,6 +751,7 @@ impl AppServerSession {
 
     /// Hard-stop: kill the child process and drop the reader task.
     pub async fn shutdown(&self) {
+        self.closed.cancel();
         if let Some(mut child) = self.child.lock().await.take() {
             if let Err(e) = child.kill().await {
                 debug!("codex app-server kill: {}", e);
@@ -696,6 +780,7 @@ mod tests {
     #[test]
     fn turn_start_params_serialize_threadid_camelcase() {
         let p = TurnStartParams {
+            collaboration_mode: None,
             thread_id: "abc".to_string(),
             input: vec![UserInputItem::Text {
                 text: "hi".to_string(),
@@ -726,6 +811,7 @@ mod tests {
         let p = GoalSetParams {
             thread_id: "abc".to_string(),
             objective: "do the thing".to_string(),
+            status: "active",
             token_budget: None,
         };
         let s = serde_json::to_string(&p).unwrap();

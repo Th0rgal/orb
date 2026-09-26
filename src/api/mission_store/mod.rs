@@ -7,7 +7,8 @@
 
 mod file;
 mod memory;
-mod sqlite;
+pub(crate) mod sqlite;
+pub mod transfer;
 
 pub use file::FileMissionStore;
 pub use memory::InMemoryMissionStore;
@@ -41,6 +42,99 @@ pub struct MissionScheduling {
     /// mission with reason `deadline_exceeded` once this passes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+}
+
+/// Tag written on an attempt that a later start on the same item replaced.
+/// Default listings hide these without requiring a separate acknowledge.
+pub const SUPERSEDED_TAG: &str = "superseded";
+
+/// Which missions a listing wants. One value, one predicate — so the SQL
+/// pushdown and the in-memory scan can never disagree about what a filter
+/// means.
+///
+/// `project` stays an exact match: widening it would silently change every
+/// existing caller's results. Cross-phase queries ask for `project_prefix`
+/// instead, which matches a project family (`verity` covers `verity-core`,
+/// `verity-phase1d`, …) while a project is being migrated onto the
+/// `project` + `track` convention.
+///
+/// `attention_only` is the default MCP/API horizon: hide `acknowledged`,
+/// `completed`, and absorbed/replaced attempts. Supervision and reconcile
+/// keep the empty filter (this flag off) so they still see the full fleet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissionFilter {
+    pub status: Option<String>,
+    pub project: Option<String>,
+    /// Family match: `project == X` OR `project` starts with `X-`.
+    pub project_prefix: Option<String>,
+    pub track: Option<String>,
+    pub tag: Option<String>,
+    /// The conversation a mission was launched from (Hermes session id).
+    pub origin_session_id: Option<String>,
+    /// When true, keep only live / waiting / blocked / unabsorbed-failed
+    /// attempts. Default listings set this; internal scanners do not.
+    pub attention_only: bool,
+}
+
+/// Live / waiting / blocked, plus unabsorbed `failed` / `interrupted`.
+/// Acknowledged, completed, and absorbed/replaced attempts drop out.
+pub fn default_attention_keeps(mission: &Mission) -> bool {
+    if mission.project.tags.iter().any(|tag| tag == SUPERSEDED_TAG) {
+        return false;
+    }
+    !matches!(
+        mission.status,
+        crate::api::control::events::MissionStatus::Acknowledged
+            | crate::api::control::events::MissionStatus::Completed
+    )
+}
+
+impl MissionFilter {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// True when `project` belongs to the `family` family: the family itself,
+    /// or a `family-<suffix>` member. Deliberately hyphen-anchored so `verity`
+    /// never swallows `verityx`.
+    fn in_family(project: &str, family: &str) -> bool {
+        project == family
+            || (project.len() > family.len()
+                && project.starts_with(family)
+                && project.as_bytes()[family.len()] == b'-')
+    }
+
+    pub fn matches(&self, mission: &Mission) -> bool {
+        if self.attention_only && !default_attention_keeps(mission) {
+            return false;
+        }
+        self.status
+            .as_deref()
+            .is_none_or(|s| mission.status.to_string() == s)
+            && self
+                .project
+                .as_deref()
+                .is_none_or(|p| mission.project.project.as_deref() == Some(p))
+            && self.project_prefix.as_deref().is_none_or(|family| {
+                mission
+                    .project
+                    .project
+                    .as_deref()
+                    .is_some_and(|p| Self::in_family(p, family))
+            })
+            && self
+                .track
+                .as_deref()
+                .is_none_or(|t| mission.project.track.as_deref() == Some(t))
+            && self
+                .tag
+                .as_deref()
+                .is_none_or(|t| mission.project.tags.iter().any(|x| x == t))
+            && self
+                .origin_session_id
+                .as_deref()
+                .is_none_or(|s| mission.origin_session_id.as_deref() == Some(s))
+    }
 }
 
 /// Project tagging metadata for a mission. Flattened into `Mission` so the
@@ -91,16 +185,106 @@ impl MissionProject {
     }
 }
 
+/// Atomic tag delta. Admission owns only the PR capability tags; unrelated
+/// internal tags must survive a stale identity snapshot and its rollback.
+#[derive(Debug, Clone, Default)]
+pub struct MissionTagPatch {
+    pub remove: Vec<String>,
+    pub add: Vec<String>,
+}
+impl MissionTagPatch {
+    pub fn between(before: &[String], after: &[String]) -> Self {
+        Self {
+            remove: before
+                .iter()
+                .filter(|tag| !after.contains(tag))
+                .cloned()
+                .collect(),
+            add: after
+                .iter()
+                .filter(|tag| !before.contains(tag))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub fn capabilities(tags: &[String]) -> Self {
+        Self {
+            remove: vec!["pr-writer".into(), "pr-readonly".into()],
+            add: tags
+                .iter()
+                .filter(|tag| matches!(tag.as_str(), "pr-writer" | "pr-readonly"))
+                .cloned()
+                .collect(),
+        }
+    }
+    pub fn apply(&self, tags: &mut Vec<String>) {
+        tags.retain(|tag| !self.remove.contains(tag));
+        for tag in &self.add {
+            if !tags.contains(tag) {
+                tags.push(tag.clone());
+            }
+        }
+    }
+}
+
+/// Status and the metadata changed by activation. Restoration must be one
+/// store mutation, never another transition that synthesizes new timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionStatusSnapshot {
+    pub status: MissionStatus,
+    pub interrupted_at: Option<String>,
+    pub paused_at: Option<String>,
+    pub resumable: bool,
+    pub terminal_reason: Option<String>,
+    pub terminal_evidence: Option<String>,
+    pub first_viewed_at: Option<String>,
+    pub awaiting_kind: Option<AwaitingKind>,
+    pub last_status_change_at: Option<String>,
+}
+impl MissionStatusSnapshot {
+    pub fn capture(mission: &Mission) -> Self {
+        Self {
+            status: mission.status,
+            interrupted_at: mission.interrupted_at.clone(),
+            paused_at: mission.paused_at.clone(),
+            resumable: mission.resumable,
+            terminal_reason: mission.terminal_reason.clone(),
+            terminal_evidence: mission.terminal_evidence.clone(),
+            first_viewed_at: mission.first_viewed_at.clone(),
+            awaiting_kind: mission.awaiting_kind,
+            last_status_change_at: mission.activity.last_status_change_at.clone(),
+        }
+    }
+    pub fn restore(&self, mission: &mut Mission) {
+        mission.status = self.status;
+        mission.interrupted_at = self.interrupted_at.clone();
+        mission.paused_at = self.paused_at.clone();
+        mission.resumable = self.resumable;
+        mission.terminal_reason = self.terminal_reason.clone();
+        mission.terminal_evidence = self.terminal_evidence.clone();
+        mission.first_viewed_at = self.first_viewed_at.clone();
+        mission.awaiting_kind = self.awaiting_kind;
+        mission.activity.last_status_change_at = self.last_status_change_at.clone();
+    }
+}
+
 /// Tri-state patch for project metadata: each field is `None` to leave
 /// unchanged, `Some(None)` to clear, `Some(Some(v))` to set. `tags` is
 /// `Some(vec)` to replace the whole list.
 #[derive(Debug, Clone, Default)]
 pub struct MissionProjectPatch {
+    /// Compensation is not new activity. Keep the current timestamp rather
+    /// than restoring a stale snapshot or hiding startup recovery candidates.
+    pub preserve_updated_at: bool,
+    /// Updated atomically with assignment fields during dispatch admission.
+    pub title: Option<Option<String>>,
     pub project: Option<Option<String>>,
     pub track: Option<Option<String>>,
     pub intent: Option<Option<String>>,
     pub github_pr: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
+    pub tag_patch: Option<MissionTagPatch>,
     pub desired_state: Option<Option<String>>,
     pub next_check_at: Option<Option<String>>,
 }
@@ -108,11 +292,13 @@ pub struct MissionProjectPatch {
 impl MissionProjectPatch {
     /// True when the patch would change nothing.
     pub fn is_empty(&self) -> bool {
-        self.project.is_none()
+        self.title.is_none()
+            && self.project.is_none()
             && self.track.is_none()
             && self.intent.is_none()
             && self.github_pr.is_none()
             && self.tags.is_none()
+            && self.tag_patch.is_none()
             && self.desired_state.is_none()
             && self.next_check_at.is_none()
     }
@@ -138,6 +324,20 @@ pub struct MissionActivity {
     /// consumer derive staleness with a single field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<String>,
+    /// Seconds since `last_activity_at`, computed at read time. Consumers
+    /// (LLM orchestrators especially) should never have to subtract two
+    /// RFC3339 timestamps to decide whether a worker looks alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_seconds: Option<u64>,
+    /// Human rendering of `idle_seconds` (e.g. "16h", "2h30m", "45s").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_for: Option<String>,
+    /// Server-computed staleness verdict for non-terminal missions
+    /// (`working`, `quiet`, `stalled`, `parked`, `stalled_parked`, `queued`,
+    /// `stuck_queued`, `waiting_background`, `stalled_background`, `paused`).
+    /// Absent for terminal missions. See `mission_health_verdict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_verdict: Option<String>,
 }
 
 /// Durable execution truth for one mission runner generation. Mission status
@@ -353,12 +553,25 @@ pub struct Mission {
     /// Why the mission terminated (for failed/completed missions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
+    /// What the guard that terminated the mission OBSERVED — the repeated
+    /// substring, the missing selector, the measured timeout. The guard
+    /// contract (2026-08-06): a terminal_reason without evidence is how a
+    /// downstream agent ends up inventing a cause ("transport bug",
+    /// "GitHub is disabled") instead of reporting a fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<String>,
     /// Parent mission ID (for orchestrated worker missions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_mission_id: Option<Uuid>,
     /// Working directory override (for git worktrees etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Whether this mission's placement consumes host-local disk.  This is
+    /// server-owned placement authority, deliberately persisted with the
+    /// mission rather than inferred from mutable project metadata or a lease
+    /// ledger.  Missing legacy records are conservatively local.
+    #[serde(default = "default_requires_local_disk")]
+    pub requires_local_disk: bool,
     /// Mission operating mode (task or assistant)
     #[serde(default)]
     pub mission_mode: MissionMode,
@@ -396,6 +609,15 @@ pub struct Mission {
     /// decision or just an acknowledgement. `None` for every other status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_kind: Option<AwaitingKind>,
+    /// Which system created this mission (e.g. "hermes" for the assistant
+    /// MCP). `None` for missions created directly from the dashboard/API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// External conversation that spawned this mission — the Hermes session id
+    /// when `origin == "hermes"`. Lets clients group missions as workers under
+    /// their owning session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<String>,
 }
 
 /// Aggregate mission counts by status.
@@ -405,6 +627,39 @@ pub struct MissionStatusCounts {
     pub active: usize,
     pub completed: usize,
     pub failed: usize,
+    /// Agent-declared done waiting for operator ack. Counted as success for
+    /// `success_rate` and, when `since` is set, folded into `completed_tasks`
+    /// so the 24h panel is not an all-time `completed`-only dump.
+    #[serde(default)]
+    pub acknowledged: usize,
+}
+
+impl MissionStatusCounts {
+    pub fn record(&mut self, status: crate::api::control::events::MissionStatus) {
+        self.add(status, 1);
+    }
+
+    pub fn add(&mut self, status: crate::api::control::events::MissionStatus, n: usize) {
+        use crate::api::control::events::MissionStatus;
+        self.total += n;
+        match status {
+            MissionStatus::Active => self.active += n,
+            MissionStatus::Completed => self.completed += n,
+            MissionStatus::Acknowledged => self.acknowledged += n,
+            MissionStatus::Failed | MissionStatus::NotFeasible => self.failed += n,
+            _ => {}
+        }
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        let ok = self.completed + self.acknowledged;
+        let finished = ok + self.failed;
+        if finished == 0 {
+            1.0
+        } else {
+            ok as f64 / finished as f64
+        }
+    }
 }
 
 fn default_backend() -> String {
@@ -413,6 +668,10 @@ fn default_backend() -> String {
 
 fn default_workspace_id() -> Uuid {
     crate::workspace::DEFAULT_WORKSPACE_ID
+}
+
+fn default_requires_local_disk() -> bool {
+    true
 }
 
 impl Mission {
@@ -494,6 +753,14 @@ pub struct MissionSummary {
     pub status: String,
     pub workspace_name: Option<String>,
     pub awaiting_kind: Option<String>,
+    /// Qualified operator page — computed at read time from kind/origin/grace.
+    pub needs_operator: bool,
+    /// Clock + origin for recomputing `needs_operator` once live WaitingUser
+    /// is known. Not on the wire.
+    #[serde(skip)]
+    pub origin_session_id: Option<String>,
+    #[serde(skip)]
+    pub updated_at: String,
 }
 
 /// Persisted summary for one tool call across all of its stored events.
@@ -625,6 +892,10 @@ pub struct TelegramTriggerConfig {
 pub enum StopPolicy {
     /// Never auto-disable this automation.
     Never,
+    /// Auto-disable once the host mission leaves the live set (ack / complete
+    /// / fail / interrupt / not_feasible / paused). Native goal-loops use this
+    /// so a finished writer cannot keep a spinner on Overview.
+    WhenMissionTerminal,
     /// Auto-disable after N consecutive failures.
     WhenFailingConsecutively {
         /// Number of consecutive failures before stopping (default: 2)
@@ -1490,24 +1761,6 @@ impl BoardTaskRole {
     }
 }
 
-/// Canonical project record. Repository markdown remains the source of human
-/// intent; only its path and immutable revision are stored here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoardProject {
-    pub slug: String,
-    pub repository: String,
-    pub workspace_id: Uuid,
-    pub specification_path: String,
-    pub specification_revision: String,
-    pub compute_policy: String,
-    #[serde(default)]
-    pub budget_policy: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_controller_lease: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 /// Immutable history for one task execution attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAttempt {
@@ -1760,11 +2013,122 @@ pub trait MissionStore: Send + Sync {
     /// List missions, ordered by updated_at descending.
     async fn list_missions(&self, limit: usize, offset: usize) -> Result<Vec<Mission>, String>;
 
+    /// Filtered listing, newest first. `offset` counts MATCHES, not raw rows.
+    ///
+    /// The default implementation pages `list_missions` and applies
+    /// [`MissionFilter::matches`], so it is bounded by `MAX_FILTER_SCAN` and
+    /// can miss matches that live deeper than that in a large fleet. Stores
+    /// that can push the predicate down (sqlite) override this and are exact.
+    async fn list_missions_filtered(
+        &self,
+        filter: &MissionFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Mission>, String> {
+        const PAGE: usize = 200;
+        const MAX_FILTER_SCAN: usize = 5_000;
+        if filter.is_empty() {
+            return self.list_missions(limit, offset).await;
+        }
+        let want = offset.saturating_add(limit);
+        let mut matched: Vec<Mission> = Vec::new();
+        let mut scan_offset = 0usize;
+        let mut scanned = 0usize;
+        loop {
+            let page = self.list_missions(PAGE, scan_offset).await?;
+            let page_len = page.len();
+            for mission in page {
+                if filter.matches(&mission) {
+                    matched.push(mission);
+                    if matched.len() >= want {
+                        break;
+                    }
+                }
+            }
+            scanned += page_len;
+            if matched.len() >= want || page_len < PAGE || scanned >= MAX_FILTER_SCAN {
+                if scanned >= MAX_FILTER_SCAN && matched.len() < want {
+                    tracing::warn!(
+                        "list_missions_filtered scan hit cap ({}); results may be incomplete",
+                        MAX_FILTER_SCAN
+                    );
+                }
+                break;
+            }
+            scan_offset += PAGE;
+        }
+        Ok(matched.into_iter().skip(offset).take(limit).collect())
+    }
+
     /// Count missions by status without applying list pagination.
     async fn count_missions_by_status(&self) -> Result<MissionStatusCounts, String>;
 
+    /// Counts restricted to rows whose `updated_at` is `>= since` (RFC3339).
+    /// Default scans `list_missions`; sqlite overrides with a SQL filter.
+    async fn count_missions_updated_since(
+        &self,
+        since: &str,
+    ) -> Result<MissionStatusCounts, String> {
+        let snapshot = self.list_missions(usize::MAX, 0).await?;
+        let mut counts = MissionStatusCounts::default();
+        for mission in snapshot {
+            if mission.updated_at.as_str() >= since {
+                counts.record(mission.status);
+            }
+        }
+        Ok(counts)
+    }
+
+    async fn machine_transfers(&self, _id: Uuid) -> Result<Vec<transfer::Transfer>, String> {
+        Ok(vec![])
+    }
+    async fn save_machine_transfer(
+        &self,
+        _action: transfer::Transfer,
+        _expected: Option<u64>,
+    ) -> Result<transfer::Transfer, String> {
+        Err("Machine transfer requires the updated SQLite store".into())
+    }
+
     /// Get a single mission by ID.
     async fn get_mission(&self, id: Uuid) -> Result<Option<Mission>, String>;
+
+    /// Missions whose canonical id starts with `prefix`, newest first.
+    ///
+    /// Dashboards, logs and humans all refer to a mission by its first 8
+    /// characters, so tooling has to accept that form. Resolution is
+    /// deliberately a lookup rather than a parse: only the store knows whether
+    /// a prefix is unambiguous. The default implementation pages
+    /// `list_missions`; sqlite overrides it with an indexed prefix scan.
+    ///
+    /// Reads the store ONCE, unpaged, on purpose. Two independent hazards make
+    /// paging wrong here, and both end the same way — the caller cancels or
+    /// messages the wrong mission:
+    ///
+    /// - a scan ceiling could report a single visible candidate as unambiguous
+    ///   while a second match sat beyond the horizon;
+    /// - `list_missions` orders by `updated_at`, so a mission touched between
+    ///   two pages can move into an already-consumed page and be skipped
+    ///   entirely, again leaving a false "unique".
+    ///
+    /// A single call is as atomic as the backing store's own listing (the
+    /// file and memory stores materialize under one read lock), which is
+    /// exactly the snapshot this needs. An incomplete list is a nuisance; an
+    /// incomplete uniqueness proof is a correctness bug. sqlite overrides this
+    /// with an indexed range read, which is atomic for the same reason.
+    async fn find_missions_by_id_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<Mission>, String> {
+        let prefix = prefix.to_ascii_lowercase();
+        let snapshot = self.list_missions(usize::MAX, 0).await?;
+        Ok(snapshot
+            .into_iter()
+            .filter(|mission| mission.id.to_string().starts_with(&prefix))
+            .take(limit)
+            .collect())
+    }
 
     /// Acquire the sole non-terminal execution lease for a mission. Every
     /// successful acquisition increments the mission generation.
@@ -1781,6 +2145,12 @@ pub trait MissionStore: Send + Sync {
     async fn get_active_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
         let _ = mission_id;
         Ok(None)
+    }
+
+    /// Most recent durable generation, including a settled run. Read-only
+    /// reporting must retain identity after the active lease has been released.
+    async fn get_latest_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
+        self.get_active_mission_run(mission_id).await
     }
 
     async fn list_active_mission_runs(&self) -> Result<Vec<MissionRun>, String> {
@@ -1848,6 +2218,13 @@ pub trait MissionStore: Send + Sync {
         }))
     }
 
+    async fn sync_local_origin(
+        &self,
+        _snapshot: crate::local_origin::Snapshot,
+    ) -> Result<(), String> {
+        Err("Local offline imports are not supported by this store".into())
+    }
+
     /// Create a new mission.
     async fn create_mission(
         &self,
@@ -1889,8 +2266,69 @@ pub trait MissionStore: Send + Sync {
         working_directory: Option<&str>,
     ) -> Result<Mission, String>;
 
+    /// Create a mission while atomically recording the server-decided
+    /// placement authority. Persistent stores must override this together
+    /// with their row insert; the compatibility implementation is only for
+    /// stores which cannot provide a transaction.
+    async fn create_mission_with_parent_and_placement(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        fast_mode: bool,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+        requires_local_disk: bool,
+        assigned_id: Option<Uuid>,
+    ) -> Result<Mission, String> {
+        let _ = assigned_id;
+        let mut mission = self
+            .create_mission_with_parent(
+                title,
+                workspace_id,
+                agent,
+                model_override,
+                model_effort,
+                fast_mode,
+                backend,
+                config_profile,
+                parent_mission_id,
+                working_directory,
+            )
+            .await?;
+        self.set_mission_requires_local_disk(mission.id, requires_local_disk)
+            .await?;
+        mission.requires_local_disk = requires_local_disk;
+        Ok(mission)
+    }
+
     /// Update mission status.
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String>;
+
+    /// Restore a rejected activation without discarding its prior diagnostics.
+    async fn restore_mission_status(
+        &self,
+        id: Uuid,
+        snapshot: &MissionStatusSnapshot,
+    ) -> Result<(), String> {
+        let _ = (id, snapshot);
+        Err("mission store does not support atomic status restoration".into())
+    }
+
+    /// Persist server-decided placement authority.  Project metadata is
+    /// intentionally excluded: it is editable by users and cannot decide
+    /// whether a mission consumes local disk after restart.
+    async fn set_mission_requires_local_disk(
+        &self,
+        _id: Uuid,
+        _requires_local_disk: bool,
+    ) -> Result<(), String> {
+        Err("mission store does not support persisted placement authority".to_string())
+    }
 
     /// Persist FLEET-001 scheduling metadata (priority, not_before, deadline)
     /// for a mission. Default is a no-op so non-persistent stores can ignore it;
@@ -1910,6 +2348,14 @@ pub trait MissionStore: Send + Sync {
         status: MissionStatus,
         terminal_reason: Option<&str>,
     ) -> Result<(), String>;
+
+    /// Attach what the terminating guard observed. Additive and best-effort:
+    /// stores that predate the column simply keep None, and a failure to
+    /// record evidence must never turn into a failure to terminate.
+    async fn set_terminal_evidence(&self, id: Uuid, evidence: &str) -> Result<(), String> {
+        let _ = (id, evidence);
+        Ok(())
+    }
 
     /// Update mission conversation history.
     async fn update_mission_history(
@@ -1992,6 +2438,19 @@ pub trait MissionStore: Send + Sync {
         Ok(std::collections::HashMap::new())
     }
 
+    /// Record which system created a mission (`origin`, e.g. "hermes") and,
+    /// when known, the external session that spawned it. Written once right
+    /// after creation. Default no-op for stores that do not persist it.
+    async fn set_mission_origin(
+        &self,
+        id: Uuid,
+        origin: &str,
+        origin_session_id: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (id, origin, origin_session_id);
+        Ok(())
+    }
+
     /// Set (or clear) the `awaiting_kind` classification for a mission. Only
     /// meaningful while the mission is in `AwaitingUser`. Default no-op for
     /// stores that do not persist it.
@@ -2004,8 +2463,47 @@ pub trait MissionStore: Send + Sync {
         Ok(())
     }
 
-    /// Update mission session ID (for backends that generate their own IDs).
-    async fn update_mission_session_id(&self, id: Uuid, session_id: &str) -> Result<(), String>;
+    /// Update native identity only for the latest acquired execution generation.
+    /// Returns false without mutation for stale or unattributed updates. None
+    /// is accepted only before any execution run exists (bootstrap/import).
+    async fn update_mission_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: Option<&SessionUpdateRun>,
+    ) -> Result<bool, String>;
+
+    /// Durable native-attempt intent (session creation or prompt). Never a native ID
+    /// or proof that a user prompt actually executed.
+    async fn native_prompt_attempted(&self, _id: Uuid, _backend: &str) -> Result<bool, String> {
+        Err("native prompt provenance is unavailable".into())
+    }
+
+    /// Atomically fence the generation and record intent before launching/sending.
+    /// A second unbound attempt is forbidden even within the same generation.
+    async fn claim_native_prompt(
+        &self,
+        _id: Uuid,
+        _backend: &str,
+        _session_id: Option<&str>,
+        _run: Option<&SessionUpdateRun>,
+        _claim_id: Uuid,
+    ) -> Result<bool, String> {
+        Err("native prompt provenance is unavailable".into())
+    }
+
+    /// Release only this new, unbound claim after definitive proof no process
+    /// accepted the prompt. Never call after a child has been returned.
+    async fn release_native_prompt_no_launch(
+        &self,
+        _id: Uuid,
+        _backend: &str,
+        _run: Option<&SessionUpdateRun>,
+        _claim_id: Uuid,
+    ) -> Result<bool, String> {
+        Err("native prompt rollback is unavailable".into())
+    }
 
     /// Update cached goal-mode metadata for missions started with `/goal`.
     async fn update_mission_goal(
@@ -2133,6 +2631,16 @@ pub trait MissionStore: Send + Sync {
         key_files: &[String],
         success: bool,
     ) -> Result<(), String>;
+
+    /// The text of the mission's most recent assistant message (its final
+    /// output/result), or None when there is none. Used to include the actual
+    /// work product — not just status metadata — in the terminal mission-status
+    /// webhook, so a mission-backed delegation returns a real result to the
+    /// delegating agent. Default None; overridden by the SQLite store.
+    async fn latest_assistant_text(&self, mission_id: Uuid) -> Result<Option<String>, String> {
+        let _ = mission_id;
+        Ok(None)
+    }
 
     // === Event logging methods (default no-op for backward compatibility) ===
 
@@ -3389,6 +3897,15 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
+    /// Every board task whose boss mission belongs to this project family
+    /// (exact slug or `slug-*` prefix, matching `project_prefix` filter
+    /// semantics). Resolved through the missions join at read time — no
+    /// denormalized slug column to go stale when a family is retagged.
+    async fn list_board_tasks_for_project(&self, project: &str) -> Result<Vec<BoardTask>, String> {
+        let _ = project;
+        Ok(vec![])
+    }
+
     /// Boss mission ids that have at least one non-terminal task. Drives the
     /// scheduler's per-tick scan.
     async fn list_active_board_missions(&self) -> Result<Vec<Uuid>, String> {
@@ -3413,16 +3930,6 @@ pub trait MissionStore: Send + Sync {
     async fn save_board_task(&self, task: &BoardTask) -> Result<(), String> {
         let _ = task;
         Err("Task board not supported by this mission store".to_string())
-    }
-
-    async fn upsert_board_project(&self, project: BoardProject) -> Result<BoardProject, String> {
-        let _ = project;
-        Err("Project ledger not supported by this mission store".to_string())
-    }
-
-    async fn get_board_project(&self, slug: &str) -> Result<Option<BoardProject>, String> {
-        let _ = slug;
-        Ok(None)
     }
 
     async fn create_task_attempt(&self, attempt: TaskAttempt) -> Result<TaskAttempt, String> {
@@ -3536,6 +4043,63 @@ pub async fn create_mission_store(
             let store = SqliteMissionStore::new(base_dir, user_id).await?;
             Ok(Box::new(store))
         }
+    }
+}
+
+#[cfg(test)]
+mod id_prefix_default_impl_tests {
+    use super::{InMemoryMissionStore, MissionStore};
+
+    /// The default (non-sqlite) implementation must have no scan ceiling.
+    /// A cap could report a single visible candidate as unambiguous while a
+    /// second match sat beyond the horizon — and the caller would then cancel
+    /// or message the wrong mission. An incomplete list is a nuisance; an
+    /// incomplete uniqueness proof is a correctness bug.
+    #[tokio::test]
+    async fn ambiguity_is_detected_past_any_paging_horizon() {
+        let store = InMemoryMissionStore::new();
+        let mut shared_prefix: Option<String> = None;
+        let mut expected = 0usize;
+
+        // Create enough missions that a naive cap would truncate, and seed two
+        // that genuinely share a prefix at opposite ends of the ordering.
+        for i in 0..40 {
+            let mission = store
+                .create_mission_with_parent(
+                    Some(&format!("m{i}")),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create mission");
+            let id = mission.id.to_string();
+            match shared_prefix.as_deref() {
+                None => {
+                    shared_prefix = Some(id[..1].to_string());
+                    expected = 1;
+                }
+                Some(prefix) if id.starts_with(prefix) => expected += 1,
+                _ => {}
+            }
+        }
+
+        let prefix = shared_prefix.expect("at least one mission");
+        let found = store
+            .find_missions_by_id_prefix(&prefix, 50)
+            .await
+            .expect("prefix lookup");
+        assert_eq!(
+            found.len(),
+            expected,
+            "every match must be seen, whatever its position"
+        );
     }
 }
 
@@ -3831,8 +4395,10 @@ mod tests {
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -3845,6 +4411,8 @@ mod tests {
             project: MissionProject::default(),
             activity: MissionActivity::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         }
     }
 
@@ -3924,5 +4492,645 @@ mod tests {
         assert!(m.is_past_deadline(now));
         m.scheduling.deadline = Some((now + chrono::Duration::minutes(1)).to_rfc3339());
         assert!(!m.is_past_deadline(now));
+    }
+}
+
+#[cfg(test)]
+mod admission_restore_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn status_restore_preserves_metadata_and_unrelated_tags_in_every_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let stores: Vec<Box<dyn MissionStore>> = vec![
+            Box::new(InMemoryMissionStore::new()),
+            Box::new(
+                FileMissionStore::new(dir.path().to_path_buf(), "file")
+                    .await
+                    .unwrap(),
+            ),
+            Box::new(
+                SqliteMissionStore::new(dir.path().to_path_buf(), "sqlite")
+                    .await
+                    .unwrap(),
+            ),
+        ];
+        for store in stores {
+            let mission = store
+                .create_mission(None, None, None, None, None, None, None)
+                .await
+                .unwrap();
+            store
+                .update_mission_status_with_reason(
+                    mission.id,
+                    MissionStatus::Interrupted,
+                    Some("original diagnosis"),
+                )
+                .await
+                .unwrap();
+            store
+                .set_mission_paused_at(mission.id, Some("2026-01-01T01:00:00Z".to_string()))
+                .await
+                .unwrap();
+            store
+                .set_terminal_evidence(mission.id, "original observation")
+                .await
+                .unwrap();
+            let before = store.get_mission(mission.id).await.unwrap().unwrap();
+            let saved = MissionStatusSnapshot::capture(&before);
+            store
+                .update_mission_status(mission.id, MissionStatus::Active)
+                .await
+                .unwrap();
+            store.set_mission_paused_at(mission.id, None).await.unwrap();
+            store
+                .update_mission_project(
+                    mission.id,
+                    MissionProjectPatch {
+                        tags: Some(vec!["orphaned".into()]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .restore_mission_status(mission.id, &saved)
+                .await
+                .unwrap();
+            let after = store.get_mission(mission.id).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(MissionStatusSnapshot::capture(&after)).unwrap(),
+                serde_json::to_value(&saved).unwrap()
+            );
+            assert_eq!(after.project.tags, vec!["orphaned"]);
+            store
+                .update_mission_project(
+                    mission.id,
+                    MissionProjectPatch {
+                        preserve_updated_at: true,
+                        title: Some(Some("restored identity".into())),
+                        tag_patch: Some(MissionTagPatch::capabilities(&["pr-writer".into()])),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let restored = store.get_mission(mission.id).await.unwrap().unwrap();
+            assert_eq!(restored.updated_at, after.updated_at);
+            assert_eq!(restored.title.as_deref(), Some("restored identity"));
+            assert_eq!(restored.project.tags, vec!["orphaned", "pr-writer"]);
+        }
+        let reopened = FileMissionStore::new(dir.path().to_path_buf(), "file")
+            .await
+            .unwrap();
+        let missions = reopened.list_missions(10, 0).await.unwrap();
+        assert_eq!(missions[0].status, MissionStatus::Interrupted);
+        assert_eq!(
+            missions[0].terminal_reason.as_deref(),
+            Some("original diagnosis")
+        );
+        assert_eq!(
+            missions[0].paused_at.as_deref(),
+            Some("2026-01-01T01:00:00Z")
+        );
+        assert_eq!(
+            missions[0].terminal_evidence.as_deref(),
+            Some("original observation")
+        );
+    }
+}
+
+/// Provenance captured when an execution lease is acquired, never looked up
+/// at event delivery time (which could belong to a newer run).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUpdateRun {
+    pub run_id: Uuid,
+    pub generation: u64,
+}
+
+/// Receipt for a newly inserted native attempt, distinct from native identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct NativePromptClaim {
+    claim_id: Uuid,
+    run: Option<SessionUpdateRun>,
+}
+
+impl From<&MissionRun> for SessionUpdateRun {
+    fn from(run: &MissionRun) -> Self {
+        Self {
+            run_id: run.run_id,
+            generation: run.generation,
+        }
+    }
+}
+
+/// A deliberately narrow legacy migration predicate. Native identity, runs,
+/// and trees must also be checked by the storage implementation.
+fn is_untouched_grok_placeholder(mission: &Mission) -> bool {
+    mission.backend == "grok"
+        && mission.status == MissionStatus::Pending
+        && mission.created_at == mission.updated_at
+        && mission
+            .activity
+            .last_status_change_at
+            .as_deref()
+            .is_none_or(|changed| changed == mission.created_at)
+        && mission.activity.last_agent_event_at.is_none()
+        && mission.activity.last_output_at.is_none()
+        && mission.history.is_empty()
+        && !mission.resumable
+        && mission.interrupted_at.is_none()
+        && mission.paused_at.is_none()
+        && mission.terminal_reason.is_none()
+        && mission.terminal_evidence.is_none()
+        && mission.desktop_sessions.is_empty()
+        && mission.session_id.as_deref().is_some_and(|id| {
+            Uuid::parse_str(id)
+                .ok()
+                .is_some_and(|id| id.get_version_num() == 4)
+        })
+}
+
+/// Select the current harness's own session without erasing other harnesses.
+/// Grok allocates native IDs itself: None means first entry, never --continue.
+fn select_harness_session(
+    mission: &Mission,
+    backend: Option<&str>,
+    allocated_id: &str,
+    sessions: &mut HashMap<String, String>,
+) -> Option<String> {
+    let target = backend.unwrap_or(&mission.backend);
+    if target == mission.backend {
+        return mission.session_id.clone();
+    }
+    if let Some(id) = mission.session_id.as_ref() {
+        sessions.insert(mission.backend.clone(), id.clone());
+    }
+    sessions
+        .get(target)
+        .cloned()
+        .or_else(|| (target != "grok").then(|| allocated_id.to_string()))
+}
+
+#[cfg(test)]
+mod harness_session_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn native_session_updates_reject_old_same_backend_generations() {
+        for kind in ["memory", "file", "sqlite"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().into(), "generation")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().into(), "generation")
+                        .await
+                        .unwrap(),
+                ),
+                _ => Arc::new(InMemoryMissionStore::new()),
+            };
+            let fresh = store
+                .create_mission(
+                    Some("fresh grok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("grok"),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                fresh.session_id.is_none(),
+                "{kind}: fresh Grok must not receive a placeholder"
+            );
+            let unchanged = store
+                .update_mission_run_settings(
+                    fresh.id,
+                    Some("grok"),
+                    None,
+                    Some(Some("another-model")),
+                    None,
+                    None,
+                    None,
+                    &Uuid::new_v4().to_string(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                unchanged.session_id.is_none(),
+                "{kind}: settings cannot invent a native ID"
+            );
+            let old = store
+                .begin_mission_run(fresh.id, "old-owner", None)
+                .await
+                .unwrap();
+            let old_stamp = SessionUpdateRun::from(&old);
+            assert!(store
+                .update_mission_session_id(fresh.id, "old-native", "grok", Some(&old_stamp))
+                .await
+                .unwrap());
+            assert!(store
+                .finish_mission_run(old.run_id, old.generation, Some("turn_complete"))
+                .await
+                .unwrap());
+            let new = store
+                .begin_mission_run(fresh.id, "new-owner", None)
+                .await
+                .unwrap();
+            let new_stamp = SessionUpdateRun::from(&new);
+            assert!(new.generation > old.generation);
+            assert!(store
+                .update_mission_session_id(fresh.id, "new-native", "grok", Some(&new_stamp))
+                .await
+                .unwrap());
+            for stale in [
+                Some(old_stamp.clone()),
+                Some(SessionUpdateRun {
+                    run_id: old.run_id,
+                    generation: new.generation,
+                }),
+                Some(SessionUpdateRun {
+                    run_id: new.run_id,
+                    generation: old.generation,
+                }),
+                None,
+            ] {
+                assert!(
+                    !store
+                        .update_mission_session_id(
+                            fresh.id,
+                            "must-not-replace",
+                            "grok",
+                            stale.as_ref()
+                        )
+                        .await
+                        .unwrap(),
+                    "{kind}: stale/unattributed update"
+                );
+            }
+            assert!(store
+                .finish_mission_run(new.run_id, new.generation, Some("turn_complete"))
+                .await
+                .unwrap());
+            // Final notifications can drain after settlement, but only for the
+            // latest acquired generation; older generations remain rejected.
+            assert!(store
+                .update_mission_session_id(fresh.id, "new-native-final", "grok", Some(&new_stamp))
+                .await
+                .unwrap());
+            assert!(!store
+                .update_mission_session_id(fresh.id, "old-native-late", "grok", Some(&old_stamp))
+                .await
+                .unwrap());
+            let returned = store
+                .update_mission_run_settings(
+                    fresh.id,
+                    Some("codex"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "codex-placeholder",
+                )
+                .await
+                .unwrap();
+            assert_ne!(returned.session_id.as_deref(), Some("new-native-final"));
+            let returned = store
+                .update_mission_run_settings(
+                    fresh.id,
+                    Some("grok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "random-placeholder",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                returned.session_id.as_deref(),
+                Some("new-native-final"),
+                "{kind}: return must preserve the latest Grok native identity"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_grok_placeholders_migrate_only_without_execution_evidence() {
+        for (kind, legacy_activity) in [
+            ("file", false),
+            ("sqlite", false),
+            ("file", true),
+            ("sqlite", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = if kind == "file" {
+                Arc::new(
+                    FileMissionStore::new(dir.path().to_path_buf(), "legacy-grok")
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                Arc::new(
+                    SqliteMissionStore::new(dir.path().to_path_buf(), "legacy-grok")
+                        .await
+                        .unwrap(),
+                )
+            };
+            let mut cases = Vec::new();
+            for case in [
+                "untouched",
+                "attributed",
+                "native",
+                "history",
+                "run",
+                "blocked",
+                "touched",
+                "status_touched",
+                "opaque",
+            ] {
+                let mission = store
+                    .create_mission(Some(case), None, None, None, None, Some("grok"), None)
+                    .await
+                    .unwrap();
+                let session = if case == "opaque" {
+                    "native-opaque-id".to_string()
+                } else {
+                    Uuid::new_v4().to_string()
+                };
+                if case != "untouched" {
+                    store
+                        .set_mission_origin(mission.id, "hermes", Some("operator-conversation"))
+                        .await
+                        .unwrap();
+                }
+                match case {
+                    "native" => {
+                        assert!(store
+                            .update_mission_session_id(mission.id, &session, "grok", None)
+                            .await
+                            .unwrap());
+                    }
+                    "history" => store
+                        .update_mission_history(
+                            mission.id,
+                            &[MissionHistoryEntry {
+                                role: "assistant".into(),
+                                content: "prior effect".into(),
+                            }],
+                        )
+                        .await
+                        .unwrap(),
+                    "run" => {
+                        store
+                            .begin_mission_run(mission.id, "fixture", None)
+                            .await
+                            .unwrap();
+                    }
+                    "blocked" => store
+                        .update_mission_status(mission.id, MissionStatus::Blocked)
+                        .await
+                        .unwrap(),
+                    _ => {}
+                }
+                cases.push((case, mission.id, session));
+            }
+            drop(store);
+            // Model pre-upgrade allocation on disk. Reset timestamps even for
+            // the negative cases so each evidence fence is independently tested.
+            if kind == "file" {
+                let path = dir.path().join("missions-legacy-grok.json");
+                let mut snapshot: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                for (case, id, session) in &cases {
+                    let m = &mut snapshot["missions"][id.to_string()];
+                    m["session_id"] = serde_json::json!(session);
+                    m["updated_at"] = if *case == "touched" {
+                        serde_json::json!("2026-09-16T00:00:00Z")
+                    } else {
+                        m["created_at"].clone()
+                    };
+                    if *case == "status_touched" {
+                        m["last_status_change_at"] = serde_json::json!("2026-09-16T00:00:00Z");
+                    } else if legacy_activity {
+                        m.as_object_mut().unwrap().remove("last_status_change_at");
+                    } else {
+                        m["last_status_change_at"] = m["created_at"].clone();
+                    }
+                }
+                std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            } else {
+                let conn =
+                    rusqlite::Connection::open(dir.path().join("missions-legacy-grok.db")).unwrap();
+                for (case, id, session) in &cases {
+                    conn.execute("UPDATE missions SET session_id = ?1, updated_at = CASE WHEN ?2 = 'touched' THEN '2026-09-16T00:00:00Z' ELSE created_at END, last_status_change_at = CASE WHEN ?2 = 'status_touched' THEN '2026-09-16T00:00:00Z' WHEN ?4 THEN NULL ELSE created_at END WHERE id = ?3",
+                        rusqlite::params![session, case, id.to_string(), legacy_activity]).unwrap();
+                    if *case == "history" {
+                        // SQLite history is derived from persisted events;
+                        // update_mission_history only touches updated_at.
+                        conn.execute("INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content) VALUES (?1, 1, 'assistant_message', '2026-09-15T00:00:00Z', 'prior effect')", [id.to_string()]).unwrap();
+                    }
+                }
+            }
+            for _ in 0..2 {
+                let reopened: Arc<dyn MissionStore> = if kind == "file" {
+                    Arc::new(
+                        FileMissionStore::new(dir.path().to_path_buf(), "legacy-grok")
+                            .await
+                            .unwrap(),
+                    )
+                } else {
+                    Arc::new(
+                        SqliteMissionStore::new(dir.path().to_path_buf(), "legacy-grok")
+                            .await
+                            .unwrap(),
+                    )
+                };
+                for (case, id, session) in &cases {
+                    let mission = reopened.get_mission(*id).await.unwrap().unwrap();
+                    assert_eq!(
+                        mission.session_id.as_deref(),
+                        if matches!(*case, "untouched" | "attributed") {
+                            None
+                        } else {
+                            Some(session.as_str())
+                        },
+                        "{kind}: {case}, legacy_activity={legacy_activity}"
+                    );
+                    if *case != "untouched" {
+                        assert_eq!(
+                            mission.origin_session_id.as_deref(),
+                            Some("operator-conversation")
+                        );
+                    }
+                    if *case == "run" {
+                        assert!(reopened
+                            .get_active_mission_run(*id)
+                            .await
+                            .unwrap()
+                            .is_some());
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_handoffs_preserve_identity_stop_evidence_and_late_updates() {
+        for kind in ["memory", "file", "sqlite"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().to_path_buf(), "harness-test")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().to_path_buf(), "harness-test")
+                        .await
+                        .unwrap(),
+                ),
+                _ => Arc::new(InMemoryMissionStore::new()),
+            };
+            let mission = store
+                .create_mission(
+                    Some("native handoff"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("codex"),
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .update_mission_session_id(mission.id, "codex-native:original", "codex", None)
+                .await
+                .unwrap();
+            store
+                .update_mission_status_with_reason(
+                    mission.id,
+                    MissionStatus::Blocked,
+                    Some("codex_continuity_required"),
+                )
+                .await
+                .unwrap();
+            let grok = store
+                .update_mission_run_settings(
+                    mission.id,
+                    Some("grok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "unverified-generated-id",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                grok.session_id, None,
+                "{kind}: first Grok entry is not a native continuation"
+            );
+            assert_eq!(grok.status, MissionStatus::Blocked);
+            assert_eq!(
+                grok.terminal_reason.as_deref(),
+                Some("codex_continuity_required")
+            );
+            // A late old-harness event is retained for that harness, not projected
+            // as the new harness's session while the old turn drains.
+            store
+                .update_mission_session_id(mission.id, "codex-native:late", "codex", None)
+                .await
+                .unwrap();
+            assert!(store
+                .get_mission(mission.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id
+                .is_none());
+            store
+                .update_mission_session_id(mission.id, "grok-real-native-id", "grok", None)
+                .await
+                .unwrap();
+            let changed = store
+                .update_mission_run_settings(
+                    mission.id,
+                    None,
+                    None,
+                    Some(Some("model-change")),
+                    None,
+                    None,
+                    None,
+                    "must-not-rotate",
+                )
+                .await
+                .unwrap();
+            assert_eq!(changed.session_id.as_deref(), Some("grok-real-native-id"));
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().to_path_buf(), "harness-test")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().to_path_buf(), "harness-test")
+                        .await
+                        .unwrap(),
+                ),
+                _ => store,
+            };
+            let codex = store
+                .update_mission_run_settings(
+                    mission.id,
+                    Some("codex"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "must-not-replace",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                codex.session_id.as_deref(),
+                Some("codex-native:late"),
+                "{kind}"
+            );
+            let grok = store
+                .update_mission_run_settings(
+                    mission.id,
+                    Some("grok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "must-not-replace",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                grok.session_id.as_deref(),
+                Some("grok-real-native-id"),
+                "{kind}"
+            );
+            assert!(store
+                .update_mission_session_id(mission.id, "unattributed", "", None)
+                .await
+                .is_err());
+        }
     }
 }

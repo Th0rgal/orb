@@ -1,13 +1,17 @@
 //! SQLite-based mission store with full event logging.
+#[path = "sqlite_transfer.rs"]
+mod machine_transfer;
+#[path = "sqlite_local_origin.rs"]
+mod sqlite_local_origin;
 
 use super::{
     now_string, sanitize_filename, Automation, AutomationExecution, AwaitingKind, BoardOutboxItem,
-    BoardProject, BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus, CommandSource,
-    DailyUsageStats, ExecutionStatus, FreshSession, HourlyUsageStats, Mission, MissionActivity,
-    MissionExecutionState, MissionHistoryEntry, MissionMode, MissionProject, MissionProjectPatch,
-    MissionRun, MissionScheduling, MissionStatus, MissionStatusCounts, MissionStore,
-    MissionSummary, MissionToolExecution, MissionToolExecutionState, ModelUsageStats, NewBoardTask,
-    PalomaCooldownState, PalomaDecision, PalomaMissionCard, PalomaSchedulerJob,
+    BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus, CommandSource, DailyUsageStats,
+    ExecutionStatus, FreshSession, HourlyUsageStats, Mission, MissionActivity,
+    MissionExecutionState, MissionFilter, MissionHistoryEntry, MissionMode, MissionProject,
+    MissionProjectPatch, MissionRun, MissionScheduling, MissionStatus, MissionStatusCounts,
+    MissionStore, MissionSummary, MissionToolExecution, MissionToolExecutionState, ModelUsageStats,
+    NewBoardTask, PalomaCooldownState, PalomaDecision, PalomaMissionCard, PalomaSchedulerJob,
     PalomaUserPreferences, RetryConfig, StopPolicy, StoredEvent, TaskAttempt,
     TelegramActionExecution, TelegramActionExecutionKind, TelegramActionExecutionStatus,
     TelegramAlert, TelegramAlertPreference, TelegramChannel, TelegramChatMission,
@@ -17,6 +21,7 @@ use super::{
     TelegramStructuredMemoryScope, TelegramStructuredMemorySearchHit, TelegramUser,
     TelegramUserCursor, TelegramUserRole, TelegramWorkflow, TelegramWorkflowEvent,
     TelegramWorkflowKind, TelegramWorkflowStatus, ToolCallSummary, TriggerType, WebhookConfig,
+    SUPERSEDED_TAG,
 };
 use crate::api::control::{AgentEvent, AgentTreeNode, DesktopSessionInfo, TextOp};
 use async_trait::async_trait;
@@ -508,12 +513,34 @@ CREATE TABLE IF NOT EXISTS missions (
     desired_state TEXT,
     next_check_at TEXT,
     awaiting_kind TEXT,
-    last_status_change_at TEXT
+    last_status_change_at TEXT,
+    origin TEXT,
+    origin_session_id TEXT,
+    requires_local_disk INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
 CREATE INDEX IF NOT EXISTS idx_missions_status_updated ON missions(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS mission_native_prompt_attempts (
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    backend TEXT NOT NULL,
+    PRIMARY KEY (mission_id, backend)
+);
+CREATE TABLE IF NOT EXISTS mission_native_prompt_claims (
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    backend TEXT NOT NULL,
+    claim_id TEXT NOT NULL,
+    run_stamp TEXT NOT NULL,
+    PRIMARY KEY(mission_id, backend)
+);
+CREATE TABLE IF NOT EXISTS mission_harness_sessions (
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    backend TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (mission_id, backend)
+);
 
 CREATE TABLE IF NOT EXISTS mission_runs (
     run_id TEXT PRIMARY KEY NOT NULL,
@@ -731,19 +758,6 @@ CREATE INDEX IF NOT EXISTS idx_board_tasks_boss ON board_tasks(boss_mission_id);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_worker ON board_tasks(worker_mission_id);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
 
-CREATE TABLE IF NOT EXISTS board_projects (
-    slug TEXT PRIMARY KEY,
-    repository TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    specification_path TEXT NOT NULL,
-    specification_revision TEXT NOT NULL,
-    compute_policy TEXT NOT NULL,
-    budget_policy TEXT NOT NULL DEFAULT '{}',
-    active_controller_lease TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS task_attempts (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -928,6 +942,7 @@ impl SqliteMissionStore {
             match stop_policy_str.as_str() {
                 "never" => StopPolicy::Never,
                 "after_first_fire" => StopPolicy::AfterFirstFire,
+                "when_mission_terminal" => StopPolicy::WhenMissionTerminal,
                 _ => StopPolicy::Never,
             }
         };
@@ -1046,6 +1061,8 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
 
             // Run schema
+            conn.execute_batch(machine_transfer::SCHEMA)
+                .map_err(|e| e.to_string())?;
             conn.execute_batch(SCHEMA)
                 .map_err(|e| format!("Failed to run schema: {}", e))?;
 
@@ -1057,6 +1074,36 @@ impl SqliteMissionStore {
         .await
         .map_err(|e| format!("Task join error: {}", e))??;
 
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            content_dir,
+        })
+    }
+
+    /// Open only an existing store for admission recovery. The caller holds
+    /// the durable admission lock; this never creates a store or actor and
+    /// never runs migrations while locating the owner of a pending receipt.
+    pub(crate) async fn open_for_admission_recovery(path: PathBuf) -> Result<Self, String> {
+        let user = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("missions-"))
+            .ok_or_else(|| "invalid mission database path".to_string())?;
+        let content_dir = path
+            .parent()
+            .ok_or_else(|| "missing mission database directory".to_string())?
+            .join("mission_data")
+            .join(user);
+        let conn = tokio::task::spawn_blocking(move || {
+            let conn =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .map_err(|e| e.to_string())?;
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(conn)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             content_dir,
@@ -1378,6 +1425,12 @@ impl SqliteMissionStore {
                 }
             }
         }
+
+        // board_projects never got wired up (the `projects` table in
+        // projects.db is the authoritative project object); every deployment
+        // audited at zero rows, so drop it outright.
+        conn.execute("DROP TABLE IF EXISTS board_projects", [])
+            .map_err(|e| format!("Failed to drop board_projects: {e}"))?;
 
         // Check if 'backend' column exists in missions table
         let has_backend_column: bool = conn
@@ -2280,6 +2333,27 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to add paused_at column: {}", e))?;
         }
 
+        // Placement is authority for local-disk admission after a restart.
+        // Existing rows predate this field and are deliberately migrated as
+        // local, the fail-closed compatibility policy.
+        let has_requires_local_disk_column: bool = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('missions') WHERE name = 'requires_local_disk'",
+            )
+            .map_err(|e| format!("Failed to check for requires_local_disk column: {e}"))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {e}"))?;
+        if !has_requires_local_disk_column {
+            tracing::info!(
+                "Running migration: adding 'requires_local_disk' column to missions table"
+            );
+            conn.execute(
+                "ALTER TABLE missions ADD COLUMN requires_local_disk INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .map_err(|e| format!("Failed to add requires_local_disk column: {e}"))?;
+        }
+
         // Project tagging + awaiting_kind classification + activity timestamps +
         // track state. Lets external consumers (Paloma) group/filter/route
         // missions, tell "needs a decision" apart from "finished, please ack",
@@ -2295,6 +2369,8 @@ impl SqliteMissionStore {
             ("next_check_at", "TEXT"),
             ("awaiting_kind", "TEXT"),
             ("last_status_change_at", "TEXT"),
+            ("origin", "TEXT"),
+            ("origin_session_id", "TEXT"),
         ] {
             // `github_pr` shipped briefly as INTEGER; it now holds a free-form
             // PR reference string (e.g. "owner/repo#123"). The column is freshly
@@ -2353,6 +2429,90 @@ impl SqliteMissionStore {
                 }
             }
         }
+
+        // Backfill `origin` for missions created by the Hermes assistant MCP
+        // before the dedicated column existed (the marker was only a tag).
+        // Non-fatal for the same concurrent-init reason as the ALTERs above.
+        if let Err(e) = conn.execute(
+            "UPDATE missions SET origin = 'hermes' \
+             WHERE origin IS NULL AND tags LIKE '%\"origin:hermes-assistant\"%'",
+            [],
+        ) {
+            tracing::warn!("origin backfill from tags skipped: {}", e);
+        }
+
+        // Indexes for the filtered listing. These MUST live here and not in
+        // SCHEMA: `execute_batch(SCHEMA)` runs BEFORE this function, and on an
+        // existing database `CREATE TABLE IF NOT EXISTS missions` is a no-op,
+        // so an index over a column the ALTERs above have not added yet would
+        // fail with "no such column" — failing store init and silently
+        // dropping the service to an in-memory store (same trap the ALTER
+        // comment above describes). Non-fatal for the same reason.
+        for (name, ddl) in [
+            (
+                "idx_missions_origin_session",
+                "CREATE INDEX IF NOT EXISTS idx_missions_origin_session ON missions(origin_session_id)",
+            ),
+            (
+                "idx_missions_project_track",
+                "CREATE INDEX IF NOT EXISTS idx_missions_project_track ON missions(project, track)",
+            ),
+            (
+                // `track` alone cannot use the composite above — SQLite can
+                // only seek an index by a prefix of its columns, and that one
+                // starts with `project`. Both client APIs and the control
+                // endpoint accept `track` without a project, so without this
+                // a rare or missing track scanned the whole fleet while the
+                // connection mutex was held, once per page.
+                "idx_missions_track_updated",
+                "CREATE INDEX IF NOT EXISTS idx_missions_track_updated ON missions(track, updated_at DESC)",
+            ),
+        ] {
+            if let Err(e) = conn.execute(ddl, []) {
+                tracing::warn!("creating {} skipped: {}", name, e);
+            }
+        }
+
+        // Guard-evidence side table (2026-08-06). A separate table, NOT a
+        // missions column: every mission SELECT here maps columns by
+        // position, and widening those projections risks the exact
+        // fall-back-to-memory failure the migration comments above warn
+        // about. Non-fatal like the indexes.
+        if let Err(e) = conn.execute(
+            "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (
+                mission_id TEXT PRIMARY KEY,
+                evidence TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            )",
+            [],
+        ) {
+            tracing::warn!("creating mission_terminal_evidence skipped: {}", e);
+        }
+
+        // Match the conservative file-store migration: an untouched pending
+        // Grok mission with no native/session or execution evidence. Use one
+        // conditional UPDATE so a concurrent writer cannot race a read/clear.
+        conn.execute(
+            "UPDATE missions SET session_id = NULL
+             WHERE backend = 'grok' AND status = 'pending'
+               AND created_at = updated_at
+               AND (last_status_change_at IS NULL OR last_status_change_at = created_at)
+               AND resumable = 0 AND interrupted_at IS NULL AND paused_at IS NULL
+               AND terminal_reason IS NULL
+               AND (desktop_sessions IS NULL OR desktop_sessions = '[]')
+               AND length(session_id) = 36 AND substr(session_id, 15, 1) = '4'
+               AND substr(session_id, 9, 1) = '-' AND substr(session_id, 14, 1) = '-'
+               AND substr(session_id, 19, 1) = '-' AND substr(session_id, 24, 1) = '-'
+               AND length(replace(session_id, '-', '')) = 32
+               AND lower(replace(session_id, '-', '')) NOT GLOB '*[^0-9a-f]*'
+               AND NOT EXISTS (SELECT 1 FROM mission_harness_sessions s WHERE s.mission_id = missions.id)
+               AND NOT EXISTS (SELECT 1 FROM mission_native_prompt_attempts p WHERE p.mission_id = missions.id)
+               AND NOT EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id = missions.id)
+               AND NOT EXISTS (SELECT 1 FROM mission_events e WHERE e.mission_id = missions.id)
+               AND NOT EXISTS (SELECT 1 FROM mission_trees t WHERE t.mission_id = missions.id)
+               AND NOT EXISTS (SELECT 1 FROM mission_terminal_evidence e WHERE e.mission_id = missions.id)",
+            [],
+        ).map_err(|e| format!("Failed to migrate unused Grok session placeholders: {e}"))?;
 
         Ok(())
     }
@@ -2605,6 +2765,92 @@ impl SqliteMissionStore {
     }
 }
 
+/// Map one row of [`MISSION_LIST_COLUMNS`] onto a `Mission`.
+/// Positional getters — only valid for that exact column list.
+fn row_to_mission(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mission> {
+    let id_str: String = row.get(0)?;
+    let status_str: String = row.get(1)?;
+    let workspace_id_str: String = row.get(8)?;
+    let desktop_sessions_json: Option<String> = row.get(17)?;
+    let backend: String = row.get(18)?;
+    let session_id: Option<String> = row.get(19)?;
+    let terminal_reason: Option<String> = row.get(20)?;
+    let config_profile: Option<String> = row.get(21)?;
+    let (project, awaiting_kind, last_status_change_at) = read_project_columns(row, 32)?;
+
+    Ok(Mission {
+        id: parse_uuid_or_nil(&id_str),
+        status: parse_status(&status_str),
+        title: row.get(2)?,
+        short_description: row.get(3)?,
+        metadata_updated_at: row.get(4)?,
+        metadata_source: row.get(5)?,
+        metadata_model: row.get(6)?,
+        metadata_version: row.get(7)?,
+        workspace_id: Uuid::parse_str(&workspace_id_str)
+            .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
+        workspace_name: row.get(9)?,
+        agent: row.get(10)?,
+        model_override: row.get(11)?,
+        model_effort: row.get(12)?,
+        fast_mode: row.get::<_, i32>(41)? != 0,
+        backend,
+        config_profile,
+        history: vec![], // Loaded separately if needed
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        interrupted_at: row.get(15)?,
+        paused_at: row.get(31).ok().flatten(),
+        resumable: row.get::<_, i32>(16)? != 0,
+        desktop_sessions: desktop_sessions_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        session_id,
+        terminal_reason,
+        terminal_evidence: None,
+        parent_mission_id: row
+            .get::<_, Option<String>>(22)?
+            .and_then(|s| Uuid::parse_str(&s).ok()),
+        working_directory: row.get(23)?,
+        mission_mode: row
+            .get::<_, Option<String>>(24)?
+            .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
+            .unwrap_or_default(),
+        goal_mode: row.get::<_, i32>(25).unwrap_or(0) != 0,
+        goal_objective: row.get(26).ok().flatten(),
+        first_viewed_at: row.get(27).ok().flatten(),
+        scheduling: MissionScheduling {
+            priority: row.get::<_, i32>(28).unwrap_or(0),
+            not_before: row.get(29).ok().flatten(),
+            deadline: row.get(30).ok().flatten(),
+        },
+        project,
+        activity: MissionActivity {
+            last_status_change_at,
+            ..Default::default()
+        },
+        awaiting_kind,
+        origin: row.get(42).ok().flatten(),
+        origin_session_id: row.get(43).ok().flatten(),
+        requires_local_disk: row.get::<_, i32>(44).unwrap_or(1) != 0,
+    })
+}
+
+/// Column list shared by every query that maps rows through the same
+/// `Mission` projection. The row getters below are positional, so the two
+/// listings MUST select the same columns in the same order — keeping one
+/// const is what stops them drifting.
+const MISSION_LIST_COLUMNS: &str = "id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, workspace_name, agent, model_override, \
+     model_effort, \
+     created_at, updated_at, interrupted_at, resumable, desktop_sessions, \
+     COALESCE(backend, 'opencode') as backend, session_id, terminal_reason, \
+     config_profile, parent_mission_id, working_directory, \
+     COALESCE(mission_mode, 'task') as mission_mode, \
+     COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at, \
+     COALESCE(priority, 0) as priority, not_before, deadline, paused_at, \
+     project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at, \
+     COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk";
+
 fn parse_status(s: &str) -> MissionStatus {
     match s {
         "pending" => MissionStatus::Pending,
@@ -2725,6 +2971,12 @@ fn read_project_columns(
 
 #[async_trait]
 impl MissionStore for SqliteMissionStore {
+    async fn sync_local_origin(
+        &self,
+        snapshot: crate::local_origin::Snapshot,
+    ) -> Result<(), String> {
+        sqlite_local_origin::sync(self, snapshot).await
+    }
     fn is_persistent(&self) -> bool {
         true
     }
@@ -2734,90 +2986,213 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, workspace_name, agent, model_override,
-                            model_effort,
-                            created_at, updated_at, interrupted_at, resumable, desktop_sessions,
-                            COALESCE(backend, 'opencode') as backend, session_id, terminal_reason,
-                            config_profile, parent_mission_id, working_directory,
-                            COALESCE(mission_mode, 'task') as mission_mode,
-                            COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at,
-                            COALESCE(priority, 0) as priority, not_before, deadline, paused_at,
-                            project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at,
-                            COALESCE(fast_mode, 0) as fast_mode
+                .prepare(&format!(
+                    "SELECT {MISSION_LIST_COLUMNS}
                      FROM missions
                      ORDER BY updated_at DESC
-                     LIMIT ?1 OFFSET ?2",
-                )
+                     LIMIT ?1 OFFSET ?2"
+                ))
                 .map_err(|e| e.to_string())?;
 
             let missions = stmt
-                .query_map(params![limit as i64, offset as i64], |row| {
-                    let id_str: String = row.get(0)?;
-                    let status_str: String = row.get(1)?;
-                    let workspace_id_str: String = row.get(8)?;
-                    let desktop_sessions_json: Option<String> = row.get(17)?;
-                    let backend: String = row.get(18)?;
-                    let session_id: Option<String> = row.get(19)?;
-                    let terminal_reason: Option<String> = row.get(20)?;
-                    let config_profile: Option<String> = row.get(21)?;
-                    let (project, awaiting_kind, last_status_change_at) =
-                        read_project_columns(row, 32)?;
-
-                    Ok(Mission {
-                        id: parse_uuid_or_nil(&id_str),
-                        status: parse_status(&status_str),
-                        title: row.get(2)?,
-                        short_description: row.get(3)?,
-                        metadata_updated_at: row.get(4)?,
-                        metadata_source: row.get(5)?,
-                        metadata_model: row.get(6)?,
-                        metadata_version: row.get(7)?,
-                        workspace_id: Uuid::parse_str(&workspace_id_str)
-                            .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
-                        workspace_name: row.get(9)?,
-                        agent: row.get(10)?,
-                        model_override: row.get(11)?,
-                        model_effort: row.get(12)?,
-                        fast_mode: row.get::<_, i32>(41)? != 0,
-                        backend,
-                        config_profile,
-                        history: vec![], // Loaded separately if needed
-                        created_at: row.get(13)?,
-                        updated_at: row.get(14)?,
-                        interrupted_at: row.get(15)?,
-                        paused_at: row.get(31).ok().flatten(),
-                        resumable: row.get::<_, i32>(16)? != 0,
-                        desktop_sessions: desktop_sessions_json
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default(),
-                        session_id,
-                        terminal_reason,
-                        parent_mission_id: row.get::<_, Option<String>>(22)?.and_then(|s| Uuid::parse_str(&s).ok()),
-                        working_directory: row.get(23)?,
-                        mission_mode: row.get::<_, Option<String>>(24)?
-                            .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
-                            .unwrap_or_default(),
-                            goal_mode: row.get::<_, i32>(25).unwrap_or(0) != 0,
-                            goal_objective: row.get(26).ok().flatten(),
-                            first_viewed_at: row.get(27).ok().flatten(),
-                            scheduling: MissionScheduling {
-                                priority: row.get::<_, i32>(28).unwrap_or(0),
-                                not_before: row.get(29).ok().flatten(),
-                                deadline: row.get(30).ok().flatten(),
-                            },
-                            project,
-                            activity: MissionActivity {
-                                last_status_change_at,
-                                ..Default::default()
-                            },
-                            awaiting_kind,
-                    })
-                })
+                .query_map(params![limit as i64, offset as i64], row_to_mission)
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
 
+            Ok(missions)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Exact filtered listing: the predicate runs in SQL, so a match is found
+    /// however deep it sits in the fleet (the generic scan gives up after
+    /// 5 000 rows, which is why old conversations showed zero workers).
+    ///
+    /// `tag` is the one field SQL only narrows: `tags` is a JSON TEXT column
+    /// and some rows hold malformed blobs, so `json_each` would fail the whole
+    /// query. A `LIKE` prefilter selects candidates and
+    /// [`MissionFilter::matches`] makes the final call — which means the
+    /// prefilter can over-select, hence the accumulate-until-satisfied loop.
+    async fn list_missions_filtered(
+        &self,
+        filter: &MissionFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Mission>, String> {
+        if filter.is_empty() {
+            return self.list_missions(limit, offset).await;
+        }
+        let conn = self.conn.clone();
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || {
+            const PAGE: i64 = 200;
+            let conn = conn.blocking_lock();
+
+            let mut clauses: Vec<String> = Vec::new();
+            let mut binds: Vec<String> = Vec::new();
+            let bind =
+                |clause: &str, value: &str, clauses: &mut Vec<String>, binds: &mut Vec<String>| {
+                    binds.push(value.to_string());
+                    clauses.push(clause.replace("?n", &format!("?{}", binds.len())));
+                };
+            if let Some(v) = filter.status.as_deref() {
+                bind("status = ?n", v, &mut clauses, &mut binds);
+            }
+            if let Some(v) = filter.project.as_deref() {
+                bind("project = ?n", v, &mut clauses, &mut binds);
+            }
+            if let Some(v) = filter.project_prefix.as_deref() {
+                // Range bounds, not `LIKE ?n || '-%'`: a LIKE whose pattern is
+                // a concatenation expression is never index-optimised, so the
+                // family lookup degraded into a full `SCAN missions` — on the
+                // fleets this feature exists for, while holding the connection
+                // mutex. `'-'` is 0x2D and `'.'` is 0x2E, so [`family-`,
+                // `family.`) is exactly the set of `family-*` values under
+                // BINARY collation, and both branches can use
+                // idx_missions_project_track.
+                binds.push(v.to_string());
+                let exact = binds.len();
+                binds.push(format!("{v}-"));
+                let lower = binds.len();
+                binds.push(format!("{v}."));
+                let upper = binds.len();
+                clauses.push(format!(
+                    "(project = ?{exact} OR (project >= ?{lower} AND project < ?{upper}))"
+                ));
+            }
+            if let Some(v) = filter.track.as_deref() {
+                bind("track = ?n", v, &mut clauses, &mut binds);
+            }
+            if let Some(v) = filter.origin_session_id.as_deref() {
+                bind("origin_session_id = ?n", v, &mut clauses, &mut binds);
+            }
+            if let Some(v) = filter.tag.as_deref() {
+                // Match the tag's JSON *serialization*, quotes included: a tag
+                // holding a quote/backslash/newline is escaped inside the
+                // column, so a raw-text LIKE would exclude it in SQL and the
+                // Rust re-check below would never get to see it.
+                //
+                // Then neutralise LIKE's own wildcards. Tags are free-form, so
+                // `?tag=%` would otherwise select nearly every row and make the
+                // loop page through them holding the connection lock — a
+                // selective prefilter is what keeps this off the critical path.
+                // Escape the escape character first, or `\` would be doubled.
+                let encoded = serde_json::to_string(v).unwrap_or_else(|_| format!("\"{v}\""));
+                let pattern = encoded
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                bind(
+                    r"tags LIKE '%' || ?n || '%' ESCAPE '\'",
+                    &pattern,
+                    &mut clauses,
+                    &mut binds,
+                );
+            }
+            if filter.attention_only {
+                clauses.push(
+                    "status NOT IN ('acknowledged', 'completed')".to_string(),
+                );
+                // Tags are a JSON array. The superseded token is stored as
+                // the JSON string `"superseded"`; this is a prefilter — the
+                // Rust `matches` call below is the authority.
+                let encoded = serde_json::to_string(SUPERSEDED_TAG)
+                    .unwrap_or_else(|_| format!("\"{SUPERSEDED_TAG}\""));
+                let pattern = encoded
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                bind(
+                    r"(tags IS NULL OR tags = '' OR tags = '[]' OR tags NOT LIKE '%' || ?n || '%' ESCAPE '\')",
+                    &pattern,
+                    &mut clauses,
+                    &mut binds,
+                );
+            }
+            let where_sql = if clauses.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", clauses.join(" AND "))
+            };
+
+            let sql = format!(
+                "SELECT {MISSION_LIST_COLUMNS} FROM missions {where_sql} \
+                 ORDER BY updated_at DESC LIMIT ?{} OFFSET ?{}",
+                binds.len() + 1,
+                binds.len() + 2
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+            let want = offset.saturating_add(limit);
+            let mut matched: Vec<Mission> = Vec::new();
+            let mut sql_offset: i64 = 0;
+            loop {
+                let mut args: Vec<&dyn rusqlite::ToSql> =
+                    binds.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                args.push(&PAGE);
+                args.push(&sql_offset);
+
+                let page = stmt
+                    .query_map(args.as_slice(), row_to_mission)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                let page_len = page.len();
+                for mission in page {
+                    // The tag prefilter can over-select; this is the authority.
+                    if filter.matches(&mission) {
+                        matched.push(mission);
+                        if matched.len() >= want {
+                            break;
+                        }
+                    }
+                }
+                if matched.len() >= want || (page_len as i64) < PAGE {
+                    break;
+                }
+                sql_offset += PAGE;
+            }
+            Ok(matched.into_iter().skip(offset).take(limit).collect())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Indexed prefix seek on the primary key: `id` is TEXT PRIMARY KEY, so
+    /// the range bounds below use its implicit index instead of scanning.
+    async fn find_missions_by_id_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<Mission>, String> {
+        let prefix = prefix.to_ascii_lowercase();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            // Half-open range over the PK. Incrementing the last byte gives the
+            // exclusive upper bound for "everything starting with prefix";
+            // mission ids are lowercase hex + hyphens, so the successor is
+            // always representable.
+            let mut upper = prefix.clone().into_bytes();
+            match upper.last_mut() {
+                Some(byte) if *byte < 0xFF => *byte += 1,
+                _ => upper.push(0),
+            }
+            let upper = String::from_utf8_lossy(&upper).to_string();
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {MISSION_LIST_COLUMNS} FROM missions \
+                     WHERE id >= ?1 AND id < ?2 \
+                     ORDER BY updated_at DESC LIMIT ?3"
+                ))
+                .map_err(|e| e.to_string())?;
+            let missions = stmt
+                .query_map(params![prefix, upper, limit as i64], row_to_mission)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
             Ok(missions)
         })
         .await
@@ -2842,15 +3217,102 @@ impl MissionStore for SqliteMissionStore {
             for row in rows {
                 let (status, count) = row.map_err(|e| e.to_string())?;
                 let count = usize::try_from(count).unwrap_or(0);
-                counts.total += count;
-                match parse_status(&status) {
-                    MissionStatus::Active => counts.active += count,
-                    MissionStatus::Completed => counts.completed += count,
-                    MissionStatus::Failed => counts.failed += count,
-                    _ => {}
-                }
+                counts.add(parse_status(&status), count);
             }
             Ok(counts)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn count_missions_updated_since(
+        &self,
+        since: &str,
+    ) -> Result<MissionStatusCounts, String> {
+        let conn = self.conn.clone();
+        let since = since.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT status, COUNT(*) FROM missions WHERE updated_at >= ?1 GROUP BY status",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![since], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut counts = MissionStatusCounts::default();
+            for row in rows {
+                let (status, count) = row.map_err(|e| e.to_string())?;
+                let count = usize::try_from(count).unwrap_or(0);
+                counts.add(parse_status(&status), count);
+            }
+            Ok(counts)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn restore_mission_status(
+        &self,
+        id: Uuid,
+        snapshot: &super::MissionStatusSnapshot,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let changed = tx
+                .execute(
+                    "UPDATE missions SET status=?2, interrupted_at=?3, paused_at=?4, resumable=?5,
+                 terminal_reason=?6, first_viewed_at=?7, awaiting_kind=?8,
+                 last_status_change_at=?9 WHERE id=?1 AND (status='active' OR status=?2)",
+                    params![
+                        id.to_string(),
+                        status_to_string(snapshot.status),
+                        snapshot.interrupted_at,
+                        snapshot.paused_at,
+                        snapshot.resumable,
+                        snapshot.terminal_reason,
+                        snapshot.first_viewed_at,
+                        snapshot.awaiting_kind.map(|kind| kind.as_str().to_string()),
+                        snapshot.last_status_change_at
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed != 1 {
+                return Err("mission status changed during rejected activation".into());
+            }
+            // Evidence uses a side table, not a positional missions column.
+            if let Some(evidence) = snapshot.terminal_evidence {
+                tx.execute("INSERT INTO mission_terminal_evidence(mission_id, evidence, recorded_at) VALUES (?1, ?2, ?3)
+                    ON CONFLICT(mission_id) DO UPDATE SET evidence=excluded.evidence", params![id.to_string(), evidence, now_string()]).map_err(|e| e.to_string())?;
+            } else {
+                tx.execute("DELETE FROM mission_terminal_evidence WHERE mission_id=?1", params![id.to_string()]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn set_terminal_evidence(&self, id: Uuid, evidence: &str) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let id_str = id.to_string();
+        let evidence = evidence.chars().take(2000).collect::<String>();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "INSERT INTO mission_terminal_evidence (mission_id, evidence, recorded_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mission_id) DO UPDATE SET evidence = ?2, recorded_at = ?3",
+                params![id_str, evidence, now_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?
@@ -2874,7 +3336,7 @@ impl MissionStore for SqliteMissionStore {
                             COALESCE(mission_mode, 'task') as mission_mode, COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at,
                             COALESCE(priority, 0) as priority, not_before, deadline, paused_at,
                             project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at,
-                            COALESCE(fast_mode, 0) as fast_mode FROM missions WHERE id = ?1",
+                            COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk FROM missions WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -2920,6 +3382,7 @@ impl MissionStore for SqliteMissionStore {
                             .unwrap_or_default(),
                         session_id,
                         terminal_reason,
+                        terminal_evidence: None,
                         parent_mission_id: row.get::<_, Option<String>>(22)?.and_then(|s| Uuid::parse_str(&s).ok()),
                         working_directory: row.get(23)?,
                         mission_mode: row.get::<_, Option<String>>(24)?
@@ -2939,6 +3402,9 @@ impl MissionStore for SqliteMissionStore {
                                 ..Default::default()
                             },
                             awaiting_kind,
+                            origin: row.get(42).ok().flatten(),
+                            origin_session_id: row.get(43).ok().flatten(),
+                            requires_local_disk: row.get::<_, i32>(44).unwrap_or(1) != 0,
                     })
                 })
                 .optional()
@@ -2980,6 +3446,16 @@ impl MissionStore for SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
 
                 m.history = history;
+                // Guard evidence lives in its own side table (see
+                // run_migrations); the single-mission read is the one path
+                // that carries it — list projections stay lean.
+                m.terminal_evidence = conn
+                    .query_row(
+                        "SELECT evidence FROM mission_terminal_evidence WHERE mission_id = ?1",
+                        params![&id_str],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok();
                 Ok(Some(m))
             } else {
                 Ok(None)
@@ -2987,6 +3463,17 @@ impl MissionStore for SqliteMissionStore {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    async fn machine_transfers(&self, id: Uuid) -> Result<Vec<super::transfer::Transfer>, String> {
+        machine_transfer::list(self, id).await
+    }
+    async fn save_machine_transfer(
+        &self,
+        action: super::transfer::Transfer,
+        expected: Option<u64>,
+    ) -> Result<super::transfer::Transfer, String> {
+        machine_transfer::save(self, action, expected).await
     }
 
     async fn begin_mission_run(
@@ -3001,6 +3488,10 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
             let tx = conn.transaction().map_err(|error| error.to_string())?;
+            machine_transfer::guard_start(&tx, mission_id)?;
+            machine_transfer::guard_placement(&tx,mission_id,&owner_actor_id,scope_unit.as_deref())?;
+            let cwd=scope_unit.as_deref().and_then(|s|s.strip_prefix("orb-cwd:"));
+            machine_transfer::guard_workspace(&tx,mission_id,cwd)?;
             let mission_status = tx
                 .query_row(
                     "SELECT status FROM missions WHERE id = ?1",
@@ -3017,7 +3508,7 @@ impl MissionStore for SqliteMissionStore {
                     "acknowledged mission {mission_id} cannot acquire a non-terminal run"
                 ));
             }
-            if !matches!(mission_status.as_str(), "pending" | "active") {
+            if !owner_actor_id.starts_with("orb-client:") && !matches!(mission_status.as_str(), "pending" | "active") {
                 return Err(format!(
                     "mission {mission_id} has status {mission_status}; activate it before acquiring a non-terminal run"
                 ));
@@ -3036,6 +3527,9 @@ impl MissionStore for SqliteMissionStore {
                     "mission {mission_id} already has non-terminal run {} generation {}",
                     existing.run_id, existing.generation
                 ));
+            }
+            if owner_actor_id.starts_with("orb-client:") {
+                tx.execute("UPDATE missions SET status='active',updated_at=?2,working_directory=COALESCE(?3,working_directory) WHERE id=?1",params![mission_id.to_string(),now_string(),cwd]).map_err(|e|e.to_string())?;
             }
             let generation = tx
                 .query_row(
@@ -3088,6 +3582,23 @@ impl MissionStore for SqliteMissionStore {
             conn.query_row(
                 "SELECT run_id, mission_id, generation, execution_state, owner_actor_id, scope_unit, started_at, heartbeat_at, stopping_at, ended_at, terminal_reason
                  FROM mission_runs WHERE mission_id = ?1 AND execution_state <> 'terminal'",
+                params![mission_id.to_string()],
+                parse_mission_run_row,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn get_latest_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.query_row(
+                "SELECT run_id, mission_id, generation, execution_state, owner_actor_id, scope_unit, started_at, heartbeat_at, stopping_at, ended_at, terminal_reason
+                 FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1",
                 params![mission_id.to_string()],
                 parse_mission_run_row,
             )
@@ -3297,7 +3808,7 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|error| error.to_string())?
     }
 
-    async fn create_mission_with_parent(
+    async fn create_mission_with_parent_and_placement(
         &self,
         title: Option<&str>,
         workspace_id: Option<Uuid>,
@@ -3309,10 +3820,12 @@ impl MissionStore for SqliteMissionStore {
         config_profile: Option<&str>,
         parent_mission_id: Option<Uuid>,
         working_directory: Option<&str>,
+        requires_local_disk: bool,
+        assigned_id: Option<Uuid>,
     ) -> Result<Mission, String> {
         let conn = self.conn.clone();
         let now = now_string();
-        let id = Uuid::new_v4();
+        let id = assigned_id.unwrap_or_else(Uuid::new_v4);
         // Inherit workspace from parent mission when not explicitly provided.
         let workspace_id = if let Some(ws) = workspace_id {
             ws
@@ -3361,10 +3874,12 @@ impl MissionStore for SqliteMissionStore {
             paused_at: None,
             resumable: false,
             desktop_sessions: Vec::new(),
-            session_id: Some(session_id.clone()),
+            session_id: (backend != "grok").then(|| session_id.clone()),
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id,
             working_directory: working_directory.map(|s| s.to_string()),
+            requires_local_disk,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -3373,6 +3888,8 @@ impl MissionStore for SqliteMissionStore {
             project: MissionProject::default(),
             activity: MissionActivity::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let m = mission.clone();
@@ -3383,8 +3900,8 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "INSERT INTO missions (id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, resumable, session_id, parent_mission_id, working_directory, mission_mode, goal_mode, goal_objective, last_status_change_at, fast_mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                "INSERT INTO missions (id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, resumable, session_id, parent_mission_id, working_directory, mission_mode, goal_mode, goal_objective, last_status_change_at, fast_mode, requires_local_disk)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     m.id.to_string(),
                     status_to_string(m.status),
@@ -3411,6 +3928,7 @@ impl MissionStore for SqliteMissionStore {
                     m.goal_objective,
                     m.created_at,
                     if m.fast_mode { 1i64 } else { 0i64 },
+                    if m.requires_local_disk { 1i64 } else { 0i64 },
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -3422,13 +3940,43 @@ impl MissionStore for SqliteMissionStore {
         Ok(mission)
     }
 
+    async fn create_mission_with_parent(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        fast_mode: bool,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+    ) -> Result<Mission, String> {
+        self.create_mission_with_parent_and_placement(
+            title,
+            workspace_id,
+            agent,
+            model_override,
+            model_effort,
+            fast_mode,
+            backend,
+            config_profile,
+            parent_mission_id,
+            working_directory,
+            true,
+            None,
+        )
+        .await
+    }
+
     async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
         let conn = self.conn.clone();
         let parent_id_str = parent_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
-                .prepare("SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, interrupted_at, resumable, session_id, terminal_reason, parent_mission_id, working_directory, COALESCE(mission_mode, 'task') as mission_mode, COALESCE(fast_mode, 0) as fast_mode FROM missions WHERE parent_mission_id = ?1")
+                .prepare("SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, interrupted_at, resumable, session_id, terminal_reason, parent_mission_id, working_directory, COALESCE(mission_mode, 'task') as mission_mode, COALESCE(fast_mode, 0) as fast_mode, COALESCE(requires_local_disk, 1) as requires_local_disk FROM missions WHERE parent_mission_id = ?1")
                 .map_err(|e| e.to_string())?;
             let missions = stmt
                 .query_map(params![parent_id_str], |row| {
@@ -3458,8 +4006,10 @@ impl MissionStore for SqliteMissionStore {
                         desktop_sessions: Vec::new(),
                         session_id: row.get(18)?,
                         terminal_reason: row.get(19)?,
+                        terminal_evidence: None,
                         parent_mission_id: row.get::<_, Option<String>>(20)?.and_then(|s| Uuid::parse_str(&s).ok()),
                         working_directory: row.get(21)?,
+                        requires_local_disk: row.get::<_, i32>(24)? != 0,
                         mission_mode: row.get::<_, Option<String>>(22)?
                             .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
                             .unwrap_or_default(),
@@ -3470,6 +4020,8 @@ impl MissionStore for SqliteMissionStore {
                             project: MissionProject::default(),
                             activity: MissionActivity::default(),
                             awaiting_kind: None,
+                            origin: None,
+                            origin_session_id: None,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -3479,6 +4031,33 @@ impl MissionStore for SqliteMissionStore {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    async fn set_mission_requires_local_disk(
+        &self,
+        id: Uuid,
+        requires_local_disk: bool,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "UPDATE missions SET requires_local_disk = ?1, updated_at = ?2 WHERE id = ?3",
+                params![
+                    if requires_local_disk { 1i64 } else { 0i64 },
+                    now_string(),
+                    id.to_string()
+                ],
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|updated| {
+                (updated == 1)
+                    .then_some(())
+                    .ok_or_else(|| format!("mission {id} not found while persisting placement"))
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String> {
@@ -3574,7 +4153,7 @@ impl MissionStore for SqliteMissionStore {
                     |row| row.get(0),
                 )
                 .ok();
-            if clear_first_viewed_at {
+            let updated = if clear_first_viewed_at {
                 conn.execute(
                     "UPDATE missions SET status = ?1, updated_at = ?2, interrupted_at = ?3, resumable = ?4, terminal_reason = ?5, first_viewed_at = NULL, awaiting_kind = CASE WHEN ?7 THEN NULL ELSE awaiting_kind END, last_status_change_at = CASE WHEN status <> ?1 THEN ?2 ELSE last_status_change_at END WHERE id = ?6",
                     params![
@@ -3587,7 +4166,7 @@ impl MissionStore for SqliteMissionStore {
                         clear_awaiting_kind,
                     ],
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
             } else {
                 conn.execute(
                     "UPDATE missions SET status = ?1, updated_at = ?2, interrupted_at = ?3, resumable = ?4, terminal_reason = ?5, awaiting_kind = CASE WHEN ?7 THEN NULL ELSE awaiting_kind END, last_status_change_at = CASE WHEN status <> ?1 THEN ?2 ELSE last_status_change_at END WHERE id = ?6",
@@ -3601,7 +4180,13 @@ impl MissionStore for SqliteMissionStore {
                         clear_awaiting_kind,
                     ],
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+            };
+            if updated != 1 {
+                return Err(format!(
+                    "mission {id} not found while updating status to {}",
+                    status_to_string(status)
+                ));
             }
             // Only reset cooldown on a *genuine* status transition. Best
             // effort — if the table is missing or the row is gone, nothing
@@ -3613,10 +4198,11 @@ impl MissionStore for SqliteMissionStore {
                     params![id.to_string()],
                 );
             }
-            Ok(())
+            Ok::<(), String>(())
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+        Ok(())
     }
 
     async fn update_mission_history(
@@ -3855,7 +4441,29 @@ impl MissionStore for SqliteMissionStore {
         let id_str = id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+            let mut connection = conn.blocking_lock();
+            let conn = connection.transaction().map_err(|e| e.to_string())?;
+            let (old_backend, old_session): (String, Option<String>) = conn.query_row(
+                "SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1",
+                params![id_str], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|e| e.to_string())?;
+            let target = backend.as_deref().unwrap_or(&old_backend);
+            let selected_session = if target == old_backend {
+                old_session
+            } else {
+                if let Some(previous) = old_session {
+                    conn.execute(
+                        "INSERT INTO mission_harness_sessions (mission_id, backend, session_id) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(mission_id, backend) DO UPDATE SET session_id = excluded.session_id",
+                        params![id_str, old_backend, previous],
+                    ).map_err(|e| e.to_string())?;
+                }
+                conn.query_row(
+                    "SELECT session_id FROM mission_harness_sessions WHERE mission_id = ?1 AND backend = ?2",
+                    params![id_str, target], |row| row.get::<_, String>(0),
+                ).optional().map_err(|e| e.to_string())?
+                    .or_else(|| (target != "grok").then(|| session_id.clone()))
+            };
             let changed = conn
                 .execute(
                     "UPDATE missions
@@ -3866,9 +4474,6 @@ impl MissionStore for SqliteMissionStore {
                          fast_mode = CASE WHEN ?9 THEN ?10 ELSE fast_mode END,
                          config_profile = CASE WHEN ?11 THEN ?12 ELSE config_profile END,
                          session_id = ?13,
-                         resumable = 0,
-                         interrupted_at = NULL,
-                         terminal_reason = NULL,
                          updated_at = ?14
                      WHERE id = ?15",
                     params![
@@ -3884,7 +4489,7 @@ impl MissionStore for SqliteMissionStore {
                         fast_mode,
                         config_profile_set,
                         config_profile,
-                        session_id,
+                        selected_session,
                         now,
                         id_str,
                     ],
@@ -3893,6 +4498,7 @@ impl MissionStore for SqliteMissionStore {
             if changed == 0 {
                 return Err(format!("Mission {} not found", id_str));
             }
+            conn.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
         .await
@@ -3979,24 +4585,44 @@ impl MissionStore for SqliteMissionStore {
 
         let conn = self.conn.clone();
         let now = now_string();
+        let title_set = patch.title.is_some();
+        let title = patch.title.flatten();
         let project_set = patch.project.is_some();
         let track_set = patch.track.is_some();
         let intent_set = patch.intent.is_some();
         let github_pr_set = patch.github_pr.is_some();
-        let tags_set = patch.tags.is_some();
+        let tags_set = patch.tags.is_some() || patch.tag_patch.is_some();
         let desired_state_set = patch.desired_state.is_some();
         let next_check_at_set = patch.next_check_at.is_some();
         let project = patch.project.flatten();
         let track = patch.track.flatten();
         let intent = patch.intent.flatten();
         let github_pr = patch.github_pr.flatten();
-        let tags_json = patch.tags.as_deref().and_then(tags_to_json);
+        let mut tags_json = patch.tags.as_deref().and_then(tags_to_json);
         let desired_state = patch.desired_state.flatten();
         let next_check_at = patch.next_check_at.flatten();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute(
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            if let Some(delta) = patch.tag_patch {
+                let raw: Option<String> = tx
+                    .query_row(
+                        "SELECT tags FROM missions WHERE id=?1",
+                        params![id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mut tags: Vec<String> = match tags_json.as_ref().or(raw.as_ref()) {
+                    Some(raw) => serde_json::from_str(raw).map_err(|e| e.to_string())?,
+                    None => Vec::new(),
+                };
+                delta.apply(&mut tags);
+                tags_json = tags_to_json(&tags);
+            }
+            tx.execute(
                 "UPDATE missions
                  SET project = CASE WHEN ?1 THEN ?2 ELSE project END,
                      track = CASE WHEN ?3 THEN ?4 ELSE track END,
@@ -4005,7 +4631,8 @@ impl MissionStore for SqliteMissionStore {
                      tags = CASE WHEN ?9 THEN ?10 ELSE tags END,
                      desired_state = CASE WHEN ?11 THEN ?12 ELSE desired_state END,
                      next_check_at = CASE WHEN ?13 THEN ?14 ELSE next_check_at END,
-                     updated_at = ?15
+                     updated_at = CASE WHEN ?19 THEN updated_at ELSE ?15 END,
+                     title = CASE WHEN ?17 THEN ?18 ELSE title END
                  WHERE id = ?16",
                 params![
                     project_set,
@@ -4024,7 +4651,32 @@ impl MissionStore for SqliteMissionStore {
                     next_check_at,
                     now,
                     id.to_string(),
+                    title_set,
+                    title,
+                    patch.preserve_updated_at,
                 ],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn set_mission_origin(
+        &self,
+        id: Uuid,
+        origin: &str,
+        origin_session_id: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let origin = origin.to_string();
+        let origin_session_id = origin_session_id.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "UPDATE missions SET origin = ?1, origin_session_id = ?2 WHERE id = ?3",
+                params![origin, origin_session_id, id.to_string()],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -4089,20 +4741,51 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let placeholders = vec!["?"; id_strings.len()].join(",");
             let sql = format!(
-                "SELECT id, title, status, workspace_name, awaiting_kind \
+                "SELECT id, title, status, workspace_name, awaiting_kind, \
+                 origin_session_id, updated_at, last_status_change_at \
                  FROM missions WHERE id IN ({placeholders})"
             );
+            let now = chrono::Utc::now();
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(id_strings.iter()), |row| {
                     let mid: String = row.get(0)?;
+                    let status: String = row.get(2)?;
+                    let awaiting_kind: Option<String> = row.get(4)?;
+                    let origin_session_id: Option<String> = row.get(5)?;
+                    let updated_at: String = row.get(6)?;
+                    let last_status_change_at: Option<String> = row.get(7)?;
+                    let persisted_clock = last_status_change_at
+                        .as_deref()
+                        .unwrap_or(updated_at.as_str());
+                    let parsed_status =
+                        serde_json::from_value::<crate::api::control::events::MissionStatus>(
+                            serde_json::Value::String(status.clone()),
+                        )
+                        .unwrap_or(crate::api::control::events::MissionStatus::Active);
+                    let needs_operator = crate::api::operator_attention::needs_operator(
+                        &crate::api::operator_attention::OperatorAttentionInput {
+                            status: parsed_status,
+                            awaiting_kind: awaiting_kind.as_deref(),
+                            has_origin_session: origin_session_id
+                                .as_deref()
+                                .is_some_and(|id| !id.is_empty()),
+                            updated_at: persisted_clock,
+                            waiting_for_user_tool: false,
+                            wait_started_at: None,
+                        },
+                        now,
+                    );
                     Ok((
                         mid,
                         MissionSummary {
                             title: row.get(1)?,
-                            status: row.get(2)?,
+                            status,
                             workspace_name: row.get(3)?,
-                            awaiting_kind: row.get(4)?,
+                            awaiting_kind,
+                            needs_operator,
+                            origin_session_id,
+                            updated_at,
                         },
                     ))
                 })
@@ -4140,22 +4823,113 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| e.to_string())?
     }
 
-    async fn update_mission_session_id(&self, id: Uuid, session_id: &str) -> Result<(), String> {
+    async fn native_prompt_attempted(&self, id: Uuid, backend: &str) -> Result<bool, String> {
         let conn = self.conn.clone();
-        let now = now_string();
-        let session_id = session_id.to_string();
-
+        let backend = backend.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            conn.execute(
-                "UPDATE missions SET session_id = ?1, updated_at = ?2 WHERE id = ?3",
-                params![session_id, now, id.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| e.to_string())?
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM mission_native_prompt_attempts WHERE mission_id = ?1 AND backend = ?2)", params![id.to_string(), backend], |r| r.get(0)).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn claim_native_prompt(
+        &self,
+        id: Uuid,
+        backend: &str,
+        session_id: Option<&str>,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        let backend = backend.to_string();
+        let session_id = session_id.map(str::to_string);
+        let run_stamp = serde_json::to_string(&run).map_err(|e| e.to_string())?;
+        let run = run.map(|r| (r.run_id.to_string(), r.generation));
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let (current_backend, current_session): (String, Option<String>) = tx.query_row("SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
+            let latest: Option<(String, u64)> = tx.query_row("SELECT run_id, generation FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
+            if backend.is_empty() || current_backend != backend || current_session != session_id || latest != run { return Ok(false); }
+            let prior: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_native_prompt_attempts WHERE mission_id = ?1 AND backend = ?2)", params![id.to_string(), backend], |r| r.get(0)).map_err(|e| e.to_string())?;
+            if prior && session_id.is_none() { return Ok(false); }
+            tx.execute("INSERT OR IGNORE INTO mission_native_prompt_attempts (mission_id, backend) VALUES (?1, ?2)", params![id.to_string(), backend]).map_err(|e| e.to_string())?;
+            if !prior {
+                tx.execute("INSERT INTO mission_native_prompt_claims (mission_id, backend, claim_id, run_stamp) VALUES (?1, ?2, ?3, ?4)", params![id.to_string(), backend, claim_id.to_string(), run_stamp]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn release_native_prompt_no_launch(
+        &self,
+        id: Uuid,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        let backend = backend.to_string();
+        let run_stamp = serde_json::to_string(&run).map_err(|e| e.to_string())?;
+        let run = run.map(|r| (r.run_id.to_string(), r.generation));
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let (current_backend, session): (String, Option<String>) = tx.query_row("SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
+            let latest: Option<(String, u64)> = tx.query_row("SELECT run_id, generation FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
+            if backend.is_empty() || current_backend != backend || session.is_some() || latest != run { return Ok(false); }
+            let deleted = tx.execute("DELETE FROM mission_native_prompt_claims WHERE mission_id = ?1 AND backend = ?2 AND claim_id = ?3 AND run_stamp = ?4", params![id.to_string(), backend, claim_id.to_string(), run_stamp]).map_err(|e| e.to_string())?;
+            if deleted != 1 { return Ok(false); }
+            tx.execute("DELETE FROM mission_native_prompt_attempts WHERE mission_id = ?1 AND backend = ?2", params![id.to_string(), backend]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn update_mission_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+    ) -> Result<bool, String> {
+        if backend.is_empty() {
+            return Err("native session update requires harness provenance".into());
+        }
+        let conn = self.conn.clone();
+        let now = now_string();
+        let run = run.map(|r| (r.run_id.to_string(), r.generation));
+        let session_id = session_id.to_string();
+        let backend = backend.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = conn.blocking_lock();
+            let tx = connection.transaction().map_err(|e| e.to_string())?;
+            let current_backend: String = tx.query_row(
+                "SELECT COALESCE(backend, 'opencode') FROM missions WHERE id = ?1",
+                params![id.to_string()], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            let latest: Option<(String, u64)> = tx.query_row(
+                "SELECT run_id, generation FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1",
+                params![id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(|e| e.to_string())?;
+            if latest != run {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO mission_harness_sessions (mission_id, backend, session_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mission_id, backend) DO UPDATE SET session_id = excluded.session_id",
+                params![id.to_string(), backend, session_id],
+            ).map_err(|e| e.to_string())?;
+            if current_backend == backend {
+                tx.execute(
+                    "UPDATE missions SET session_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![session_id, now, id.to_string()],
+                ).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
     }
 
     async fn update_mission_goal(
@@ -4233,7 +5007,7 @@ impl MissionStore for SqliteMissionStore {
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String> {
         let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let removed = tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let rows = conn
                 .execute(
@@ -4241,10 +5015,11 @@ impl MissionStore for SqliteMissionStore {
                     params![id.to_string()],
                 )
                 .map_err(|e| e.to_string())?;
-            Ok(rows > 0)
+            Ok::<bool, String>(rows > 0)
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+        Ok(removed)
     }
 
     async fn delete_empty_untitled_missions_excluding(
@@ -4319,72 +5094,26 @@ impl MissionStore for SqliteMissionStore {
         // fall back to `updated_at` via COALESCE.
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
-                            created_at, updated_at, interrupted_at, resumable, desktop_sessions,
-                            COALESCE(backend, 'opencode') as backend, COALESCE(goal_mode, 0) as goal_mode, goal_objective FROM missions m
-                     WHERE status = 'active'
-                       AND max(
-                             m.updated_at,
-                             COALESCE(
-                               (SELECT MAX(timestamp) FROM mission_events
-                                WHERE mission_id = m.id),
-                               m.updated_at
-                             )
-                           ) < ?1",
-                )
-                .map_err(|e| e.to_string())?;
+            // Must use MISSION_LIST_COLUMNS / row_to_mission so origin +
+            // project.tags survive. A stub projection left those empty and
+            // the 2h cleanup treated Hermes writers as untagged (#842 skip
+            // never fired on 08306fdb / 203a49d5).
+            let sql = format!(
+                "SELECT {MISSION_LIST_COLUMNS} FROM missions
+                 WHERE status = 'active'
+                   AND max(
+                         updated_at,
+                         COALESCE(
+                           (SELECT MAX(timestamp) FROM mission_events
+                            WHERE mission_id = missions.id),
+                           updated_at
+                         )
+                       ) < ?1"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
             let missions = stmt
-                .query_map(params![cutoff_str], |row| {
-                    let id_str: String = row.get(0)?;
-                    let status_str: String = row.get(1)?;
-                    let workspace_id_str: String = row.get(3)?;
-                    let desktop_sessions_json: Option<String> = row.get(11)?;
-                    let backend: String = row.get(12)?;
-
-                    Ok(Mission {
-                        id: parse_uuid_or_nil(&id_str),
-                        status: parse_status(&status_str),
-                        title: row.get(2)?,
-                        short_description: None,
-                        metadata_updated_at: None,
-                        metadata_source: None,
-                        metadata_model: None,
-                        metadata_version: None,
-                        workspace_id: Uuid::parse_str(&workspace_id_str)
-                            .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
-                        workspace_name: row.get(4)?,
-                        agent: row.get(5)?,
-                        model_override: row.get(6)?,
-                        model_effort: None, // Not needed for stale mission checks
-                        fast_mode: false,
-                        backend,
-                        config_profile: None, // Not needed for stale mission checks
-                        history: vec![],
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        interrupted_at: row.get(9)?,
-                        paused_at: None,
-                        resumable: row.get::<_, i32>(10)? != 0,
-                        desktop_sessions: desktop_sessions_json
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default(),
-                        session_id: None, // Not needed for stale mission checks
-                        terminal_reason: None,
-                        parent_mission_id: None,
-                        working_directory: None,
-                        mission_mode: MissionMode::default(),
-                        goal_mode: false,
-                        goal_objective: None,
-                        first_viewed_at: None,
-                        scheduling: Default::default(),
-                        project: MissionProject::default(),
-                        activity: MissionActivity::default(),
-                        awaiting_kind: None,
-                    })
-                })
+                .query_map(params![cutoff_str], row_to_mission)
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
@@ -4450,8 +5179,10 @@ impl MissionStore for SqliteMissionStore {
                             .unwrap_or_default(),
                         session_id: None,
                         terminal_reason: None,
+                        terminal_evidence: None,
                         parent_mission_id: None,
                         working_directory: None,
+                        requires_local_disk: true,
                         mission_mode: row
                             .get::<_, Option<String>>(13)?
                             .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
@@ -4463,6 +5194,8 @@ impl MissionStore for SqliteMissionStore {
                         project: MissionProject::default(),
                         activity: MissionActivity::default(),
                         awaiting_kind: None,
+                        origin: None,
+                        origin_session_id: None,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -4535,9 +5268,8 @@ impl MissionStore for SqliteMissionStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
+            let sql = format!(
+                "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
                             created_at, updated_at, interrupted_at, resumable, desktop_sessions,
                             COALESCE(backend, 'opencode') as backend,
                             COALESCE(mission_mode, 'task') as mission_mode,
@@ -4545,10 +5277,11 @@ impl MissionStore for SqliteMissionStore {
                             goal_objective,
                             COALESCE(priority, 0) as priority, not_before, deadline
                      FROM missions
-                     WHERE status = 'pending' AND deferred_goal IS NOT NULL
+                     WHERE status = 'pending' AND deferred_goal IS NOT NULL{}
                      ORDER BY created_at ASC",
-                )
-                .map_err(|e| e.to_string())?;
+                crate::api::control::client_placement::SQL_EXCLUDE
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
             let missions = stmt
                 .query_map(params![], |row| {
@@ -4587,8 +5320,10 @@ impl MissionStore for SqliteMissionStore {
                             .unwrap_or_default(),
                         session_id: None,
                         terminal_reason: None,
+                        terminal_evidence: None,
                         parent_mission_id: None,
                         working_directory: None,
+                        requires_local_disk: true,
                         mission_mode: row
                             .get::<_, Option<String>>(13)?
                             .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
@@ -4604,6 +5339,8 @@ impl MissionStore for SqliteMissionStore {
                         project: MissionProject::default(),
                         activity: MissionActivity::default(),
                         awaiting_kind: None,
+                        origin: None,
+                        origin_session_id: None,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -4632,7 +5369,7 @@ impl MissionStore for SqliteMissionStore {
                      FROM missions
                      WHERE status = 'interrupted'
                        AND resumable = 1
-                       AND terminal_reason = 'server_shutdown'
+                       AND terminal_reason IN ('server_shutdown', 'service_restart')
                        AND COALESCE(mission_mode, 'task') != 'assistant'
                        AND interrupted_at IS NOT NULL
                        AND interrupted_at >= ?1
@@ -4682,6 +5419,43 @@ impl MissionStore for SqliteMissionStore {
             )
             .map_err(|e| e.to_string())?;
             Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn latest_assistant_text(&self, mission_id: Uuid) -> Result<Option<String>, String> {
+        let conn = self.conn.clone();
+        let id_str = mission_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let row = conn
+                .query_row(
+                    "SELECT content, content_file FROM mission_events
+                     WHERE mission_id = ?1
+                       AND event_type IN ('assistant_message', 'assistant_message_canonical')
+                     ORDER BY sequence DESC LIMIT 1",
+                    params![id_str],
+                    |row| {
+                        let content: Option<String> = row.get(0)?;
+                        let content_file: Option<String> = row.get(1)?;
+                        Ok((content, content_file))
+                    },
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            Ok(match row {
+                Some((content, content_file)) => {
+                    let text = Self::load_content(content.as_deref(), content_file.as_deref());
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => None,
+            })
         })
         .await
         .map_err(|e| e.to_string())?
@@ -4832,7 +5606,11 @@ impl MissionStore for SqliteMissionStore {
                 Some(id.to_string()),
                 None,
                 None,
-                content.clone(),
+                if source.as_deref() == Some("scheduler") {
+                    crate::api::control::deferred_messages::strip(content)
+                } else {
+                    content.clone()
+                },
                 {
                     // Always record `queued`; record `source` only when present so
                     // the persisted metadata is the forensic record of who/what
@@ -4841,6 +5619,13 @@ impl MissionStore for SqliteMissionStore {
                     meta.insert("queued".to_string(), serde_json::json!(queued));
                     if let Some(src) = source {
                         meta.insert("source".to_string(), serde_json::json!(src));
+                        if src == "scheduler" {
+                            let messages =
+                                crate::api::control::deferred_messages::decode(content).1;
+                            if !messages.is_empty() {
+                                meta.insert("messages".into(), serde_json::json!(messages));
+                            }
+                        }
                     }
                     serde_json::Value::Object(meta)
                 },
@@ -4930,14 +5715,18 @@ impl MissionStore for SqliteMissionStore {
             ),
             AgentEvent::TextOp { .. } => return Ok(()),
             AgentEvent::MissionStatusChanged {
-                status, summary, ..
+                status,
+                summary,
+                execution,
+                completion,
+                ..
             } => (
                 "mission_status_changed",
                 None,
                 None,
                 None,
                 summary.clone().unwrap_or_default(),
-                serde_json::json!({ "status": status.to_string() }),
+                serde_json::json!({ "status": status.to_string(), "execution": execution, "completion": completion }),
             ),
             AgentEvent::MissionMetadataUpdated {
                 title,
@@ -6531,6 +7320,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let stop_policy_str = match &a.stop_policy {
                 StopPolicy::Never => "never".to_string(),
+                StopPolicy::WhenMissionTerminal => "when_mission_terminal".to_string(),
                 StopPolicy::WhenFailingConsecutively { count } => format!("consecutive_failures:{}", count),
                 StopPolicy::WhenAllIssuesClosedAndPRsMerged { repo } => format!("all_issues_closed_and_prs_merged:{}", repo),
                 StopPolicy::AfterFirstFire => "after_first_fire".to_string(),
@@ -6774,6 +7564,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let stop_policy_str = match &automation.stop_policy {
                 StopPolicy::Never => "never".to_string(),
+                StopPolicy::WhenMissionTerminal => "when_mission_terminal".to_string(),
                 StopPolicy::WhenFailingConsecutively { count } => format!("consecutive_failures:{}", count),
                 StopPolicy::WhenAllIssuesClosedAndPRsMerged { repo } => format!("all_issues_closed_and_prs_merged:{}", repo),
                 StopPolicy::AfterFirstFire => "after_first_fire".to_string(),
@@ -7102,8 +7893,10 @@ impl MissionStore for SqliteMissionStore {
                         desktop_sessions: vec![],
                         session_id: None,
                         terminal_reason: None,
+                        terminal_evidence: None,
                         parent_mission_id: None,
                         working_directory: None,
+                        requires_local_disk: true,
                         mission_mode: serde_json::from_value(serde_json::Value::String(mode_str))
                             .unwrap_or_default(),
                         goal_mode: false,
@@ -7113,6 +7906,8 @@ impl MissionStore for SqliteMissionStore {
                         project: MissionProject::default(),
                         activity: MissionActivity::default(),
                         awaiting_kind: None,
+                        origin: None,
+                        origin_session_id: None,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -10413,6 +11208,7 @@ impl MissionStore for SqliteMissionStore {
                     .unwrap_or_else(|_| "{}".to_string());
                 let stop_policy_str = match &auto.stop_policy {
                     StopPolicy::Never => "never".to_string(),
+                    StopPolicy::WhenMissionTerminal => "when_mission_terminal".to_string(),
                     StopPolicy::WhenFailingConsecutively { count } => {
                         format!("consecutive_failures:{}", count)
                     }
@@ -10570,7 +11366,34 @@ impl MissionStore for SqliteMissionStore {
                         .map_err(|e| format!("Failed to update board task: {e}"))?;
                         id
                     }
-                    Some((id, _)) => id, // non-pending: leave untouched
+                    Some((id, status)) if status == "running" => {
+                        // A worker is already executing this task, so its
+                        // prompt/backend/deps are frozen — but the OUTCOME
+                        // CONTRACT may still be corrected. `plan_tasks` warns
+                        // about missing acceptance criteria only after
+                        // registration, and the scheduler can spawn the task
+                        // within one pass (~3s), before the boss reads the
+                        // warning. Letting the contract fields through means
+                        // that correction still lands: verdict guidance and
+                        // the retry prompt read them live, and a retry's
+                        // worker contract delivers them.
+                        conn.execute(
+                            "UPDATE board_tasks SET acceptance_criteria = ?1, \
+                             verification_command = ?2, risk_class = ?3, updated_at = ?4 \
+                             WHERE id = ?5",
+                            params![
+                                serde_json::to_string(&t.acceptance_criteria)
+                                    .unwrap_or_else(|_| "[]".into()),
+                                t.verification_command,
+                                t.risk_class,
+                                now,
+                                id,
+                            ],
+                        )
+                        .map_err(|e| format!("Failed to update running task contract: {e}"))?;
+                        id
+                    }
+                    Some((id, _)) => id, // settled/terminal: leave untouched
                     None => {
                         let id = Uuid::new_v4().to_string();
                         conn.execute(
@@ -10636,6 +11459,36 @@ impl MissionStore for SqliteMissionStore {
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(params![boss_mission_id.to_string()], parse_board_task_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+    }
+
+    async fn list_board_tasks_for_project(&self, project: &str) -> Result<Vec<BoardTask>, String> {
+        let conn = self.conn.clone();
+        let project = project.to_string();
+        // Qualify every column so the missions join can't shadow board task
+        // columns (both tables have id/status/created_at/...).
+        let columns = BOARD_TASK_COLUMNS
+            .split(',')
+            .map(|column| format!("bt.{}", column.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {columns} FROM board_tasks bt \
+                     JOIN missions m ON m.id = bt.boss_mission_id \
+                     WHERE {BOARD_TASK_PROJECT_FAMILY_PREDICATE} \
+                     ORDER BY bt.created_at ASC, bt.task_key ASC"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![project], parse_board_task_row)
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())
@@ -10767,56 +11620,6 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| format!("Task join error: {e}"))?
     }
 
-    async fn upsert_board_project(&self, project: BoardProject) -> Result<BoardProject, String> {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let now = now_string();
-            let budget = serde_json::to_string(&project.budget_policy)
-                .map_err(|error| format!("Failed to serialize project budget: {error}"))?;
-            conn.execute(
-                "INSERT INTO board_projects (slug, repository, workspace_id, specification_path, \
-                 specification_revision, compute_policy, budget_policy, active_controller_lease, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9) \
-                 ON CONFLICT(slug) DO UPDATE SET repository = excluded.repository, workspace_id = excluded.workspace_id, \
-                 specification_path = excluded.specification_path, specification_revision = excluded.specification_revision, \
-                 compute_policy = excluded.compute_policy, budget_policy = excluded.budget_policy, \
-                 active_controller_lease = excluded.active_controller_lease, updated_at = excluded.updated_at",
-                params![
-                    project.slug,
-                    project.repository,
-                    project.workspace_id.to_string(),
-                    project.specification_path,
-                    project.specification_revision,
-                    project.compute_policy,
-                    budget,
-                    project.active_controller_lease,
-                    now,
-                ],
-            )
-            .map_err(|error| format!("Failed to upsert project: {error}"))?;
-            parse_board_project(
-                &conn,
-                &project.slug,
-            )
-            .map_err(|error| format!("Failed to read project: {error}"))?
-            .ok_or_else(|| "Project disappeared after upsert".to_string())
-        })
-        .await
-        .map_err(|error| format!("Task join error: {error}"))?
-    }
-
-    async fn get_board_project(&self, slug: &str) -> Result<Option<BoardProject>, String> {
-        let conn = self.conn.clone();
-        let slug = slug.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            parse_board_project(&conn, &slug).map_err(|error| error.to_string())
-        })
-        .await
-        .map_err(|error| format!("Task join error: {error}"))?
-    }
-
     async fn create_task_attempt(&self, attempt: TaskAttempt) -> Result<TaskAttempt, String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -10940,6 +11743,55 @@ impl MissionStore for SqliteMissionStore {
     }
 }
 
+/// Byte-exact family match: `?1` itself or `?1-` as a literal prefix.
+/// Deliberately NOT `LIKE` — its `_` wildcard would make `foo_bar` match
+/// `fooXbar-*`, and its ASCII case-folding would merge differently-cased
+/// slugs; `substr`/`||` compare bytes, matching `project_prefix` semantics.
+const BOARD_TASK_PROJECT_FAMILY_PREDICATE: &str =
+    "(m.project = ?1 OR substr(m.project, 1, length(?1) + 1) = ?1 || '-')";
+
+/// Read board tasks for a project family straight from a mission DB file —
+/// the offline-store path (`ControlHub::collect_project_board_tasks` for
+/// users with no live control session). Read-only, tolerant of pre-board
+/// databases (no `board_tasks` table → empty).
+pub(crate) fn read_board_tasks_for_project(
+    path: &std::path::Path,
+    project: &str,
+) -> Result<Vec<BoardTask>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let has_board: bool = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'board_tasks'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .map_err(|error| error.to_string())?;
+    if !has_board {
+        return Ok(Vec::new());
+    }
+    let columns = BOARD_TASK_COLUMNS
+        .split(',')
+        .map(|column| format!("bt.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {columns} FROM board_tasks bt \
+             JOIN missions m ON m.id = bt.boss_mission_id \
+             WHERE {BOARD_TASK_PROJECT_FAMILY_PREDICATE} \
+             ORDER BY bt.created_at ASC, bt.task_key ASC"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project], parse_board_task_row)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 /// Column list shared by every board task SELECT so `parse_board_task_row`
 /// indices stay in sync.
 const BOARD_TASK_COLUMNS: &str = "id, boss_mission_id, task_key, title, prompt, backend, \
@@ -10996,35 +11848,6 @@ fn parse_board_task_row(row: &rusqlite::Row<'_>) -> Result<BoardTask, rusqlite::
         created_at: row.get(29)?,
         updated_at: row.get(30)?,
     })
-}
-
-fn parse_board_project(
-    conn: &Connection,
-    slug: &str,
-) -> Result<Option<BoardProject>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT slug, repository, workspace_id, specification_path, specification_revision, \
-         compute_policy, budget_policy, active_controller_lease, created_at, updated_at \
-         FROM board_projects WHERE slug = ?1",
-        params![slug],
-        |row| {
-            let workspace_id: String = row.get(2)?;
-            let budget_policy: String = row.get(6)?;
-            Ok(BoardProject {
-                slug: row.get(0)?,
-                repository: row.get(1)?,
-                workspace_id: Uuid::parse_str(&workspace_id).unwrap_or_default(),
-                specification_path: row.get(3)?,
-                specification_revision: row.get(4)?,
-                compute_policy: row.get(5)?,
-                budget_policy: serde_json::from_str(&budget_policy).unwrap_or_default(),
-                active_controller_lease: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-            })
-        },
-    )
-    .optional()
 }
 
 fn parse_task_attempt_row(row: &rusqlite::Row<'_>) -> Result<TaskAttempt, rusqlite::Error> {
@@ -11622,6 +12445,65 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn native_claim_sql_failure_rolls_back_insert_and_release_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "claim-failure")
+            .await
+            .unwrap();
+        let m = store
+            .create_mission(Some("claim"), None, None, None, None, Some("grok"), None)
+            .await
+            .unwrap();
+        // Fail AFTER attempt insertion, while writing its rollback receipt.
+        store.conn.lock().await.execute_batch("CREATE TRIGGER fail_claim BEFORE INSERT ON mission_native_prompt_claims BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END;").unwrap();
+        let failed = Uuid::new_v4();
+        assert!(store
+            .claim_native_prompt(m.id, "grok", None, None, failed)
+            .await
+            .is_err());
+        assert!(!store.native_prompt_attempted(m.id, "grok").await.unwrap());
+        store
+            .conn
+            .lock()
+            .await
+            .execute_batch("DROP TRIGGER fail_claim;")
+            .unwrap();
+        let receipt = Uuid::new_v4();
+        assert!(store
+            .claim_native_prompt(m.id, "grok", None, None, receipt)
+            .await
+            .unwrap());
+        assert!(!store
+            .release_native_prompt_no_launch(m.id, "grok", None, failed)
+            .await
+            .unwrap());
+        // Fail AFTER token deletion: transaction rollback must restore both rows.
+        store.conn.lock().await.execute_batch("CREATE TRIGGER fail_release BEFORE DELETE ON mission_native_prompt_attempts BEGIN SELECT RAISE(ABORT, 'injected release failure'); END;").unwrap();
+        assert!(store
+            .release_native_prompt_no_launch(m.id, "grok", None, receipt)
+            .await
+            .is_err());
+        assert!(store.native_prompt_attempted(m.id, "grok").await.unwrap());
+        store
+            .conn
+            .lock()
+            .await
+            .execute_batch("DROP TRIGGER fail_release;")
+            .unwrap();
+        assert!(store
+            .release_native_prompt_no_launch(m.id, "grok", None, receipt)
+            .await
+            .unwrap());
+        let reopened = SqliteMissionStore::new(dir.path().into(), "claim-failure")
+            .await
+            .unwrap();
+        assert!(!reopened
+            .native_prompt_attempted(m.id, "grok")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn codex_fast_mode_round_trips_and_updates() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
@@ -11696,6 +12578,8 @@ mod tests {
                 .log_event(
                     mission.id,
                     &AgentEvent::MissionStatusChanged {
+                        completion: None,
+                        execution: None,
                         mission_id: mission.id,
                         status: *status,
                         summary: Some(format!("{title} status change")),
@@ -12864,6 +13748,9 @@ mod tests {
             .update_mission_project(
                 mission.id,
                 MissionProjectPatch {
+                    preserve_updated_at: false,
+                    tag_patch: None,
+                    title: None,
                     project: Some(Some("verity-core".to_string())),
                     track: Some(Some("C3-bridge-collapse".to_string())),
                     intent: Some(Some("review_merge_pr".to_string())),
@@ -12949,6 +13836,69 @@ mod tests {
         assert_eq!(
             fetched.awaiting_kind, None,
             "awaiting_kind must clear when leaving AwaitingUser"
+        );
+    }
+
+    #[tokio::test]
+    async fn mission_origin_roundtrip_and_tag_backfill() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Spawned"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+        assert_eq!(mission.origin, None);
+        assert_eq!(mission.origin_session_id, None);
+
+        store
+            .set_mission_origin(mission.id, "hermes", Some("20260804_101500_ab12cd34"))
+            .await
+            .expect("set origin");
+        let fetched = store
+            .get_mission(mission.id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert_eq!(fetched.origin.as_deref(), Some("hermes"));
+        assert_eq!(
+            fetched.origin_session_id.as_deref(),
+            Some("20260804_101500_ab12cd34")
+        );
+        let listed = store.list_missions(10, 0).await.expect("list");
+        let listed = listed.iter().find(|m| m.id == mission.id).expect("listed");
+        assert_eq!(listed.origin.as_deref(), Some("hermes"));
+
+        // Legacy hermes missions (tag only, no origin column) get backfilled by
+        // the migration pass.
+        let legacy = store
+            .create_mission(Some("Legacy"), None, None, None, None, None, None)
+            .await
+            .expect("legacy mission");
+        store
+            .update_mission_project(
+                legacy.id,
+                MissionProjectPatch {
+                    tags: Some(vec!["origin:hermes-assistant".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag legacy");
+        {
+            let conn = store.conn.lock().await;
+            SqliteMissionStore::run_migrations(&conn).expect("re-run migration");
+        }
+        let fetched = store
+            .get_mission(legacy.id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert_eq!(
+            fetched.origin.as_deref(),
+            Some("hermes"),
+            "tag-only hermes mission must be backfilled to origin='hermes'"
         );
     }
 
@@ -14965,6 +15915,67 @@ mod tests {
         );
     }
 
+    // The `GET /events` handler routes a cursor-less request to
+    // `get_events_before(i64::MAX)` so the default page is the NEWEST `limit`
+    // events (the tail), ascending — not the oldest rows. This locks in that
+    // contract and the X-Max-Sequence value the handler reports alongside it.
+    #[tokio::test]
+    async fn no_cursor_default_returns_newest_page_ascending() {
+        use crate::api::control::AgentEvent;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("default page"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        for i in 0..10 {
+            store
+                .log_event(
+                    mission.id,
+                    &AgentEvent::UserMessage {
+                        id: Uuid::new_v4(),
+                        content: format!("msg {i}"),
+                        queued: false,
+                        mission_id: Some(mission.id),
+                        source: None,
+                    },
+                )
+                .await
+                .expect("log user message");
+        }
+
+        // No-cursor + limit=3 must yield the newest three (8, 9, 10) ASC,
+        // exactly what the handler now emits for `?limit=3` with no cursor.
+        let newest = store
+            .get_events_before(mission.id, i64::MAX, None, Some(3))
+            .await
+            .expect("get newest page");
+        assert_eq!(
+            newest.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![8, 9, 10],
+            "no-cursor default should return the tail, not the oldest rows"
+        );
+
+        // X-Max-Sequence reflects the true tail regardless of the page limit.
+        let max = store.max_event_sequence(mission.id).await.expect("max seq");
+        assert_eq!(max, 10);
+
+        // Explicit forward replay (`since_seq=0`) still pages from the start —
+        // this path is untouched by the default change.
+        let from_start = store
+            .get_events_since(mission.id, 0, None, Some(3))
+            .await
+            .expect("get_events_since zero");
+        assert_eq!(
+            from_start.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
     #[tokio::test]
     async fn max_event_sequence_is_zero_for_mission_with_no_events() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -15123,6 +16134,40 @@ mod tests {
 
         assert!(mission_ids.contains(&task_mission.id));
         assert!(!mission_ids.contains(&assistant_mission.id));
+
+        let restart_mission = store
+            .create_mission(Some("restart"), None, None, None, None, None, None)
+            .await
+            .expect("restart mission");
+        store
+            .update_mission_status_with_reason(
+                restart_mission.id,
+                MissionStatus::Interrupted,
+                Some("service_restart"),
+            )
+            .await
+            .expect("mark service_restart");
+        let cancelled = store
+            .create_mission(Some("cancelled"), None, None, None, None, None, None)
+            .await
+            .expect("cancelled mission");
+        store
+            .update_mission_status_with_reason(
+                cancelled.id,
+                MissionStatus::Interrupted,
+                Some("cancelled"),
+            )
+            .await
+            .expect("mark cancelled");
+        let mission_ids = store
+            .get_recent_server_shutdown_mission_ids(48)
+            .await
+            .expect("recent restart missions");
+        assert!(
+            mission_ids.contains(&restart_mission.id),
+            "service_restart must be recovered with server_shutdown"
+        );
+        assert!(!mission_ids.contains(&cancelled.id));
     }
 
     #[tokio::test]
@@ -15636,10 +16681,130 @@ mod tests {
         assert_eq!(fetched.task_key, "t2");
     }
 
+    /// The roadmap read: tasks resolve to a project through their boss
+    /// mission's tag with family-prefix semantics, so `verity` sees the tasks
+    /// of a boss tagged `verity-core` — and `verity-x` never leaks into `ver`.
+    #[tokio::test]
+    async fn board_tasks_resolve_to_their_boss_missions_project_family() {
+        use crate::api::mission_store::NewBoardTask;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("store");
+
+        let tag = |project: &str| MissionProjectPatch {
+            preserve_updated_at: false,
+            tag_patch: None,
+            title: None,
+            project: Some(Some(project.to_string())),
+            track: None,
+            intent: None,
+            github_pr: None,
+            tags: None,
+            desired_state: None,
+            next_check_at: None,
+        };
+        let task = |key: &str| NewBoardTask {
+            task_key: key.to_string(),
+            title: format!("title-{key}"),
+            prompt: "p".to_string(),
+            backend: "codex".to_string(),
+            ..Default::default()
+        };
+
+        let core_boss = store
+            .create_mission(Some("core boss"), None, None, None, None, None, None)
+            .await
+            .expect("boss");
+        store
+            .update_mission_project(core_boss.id, tag("verity-core"))
+            .await
+            .expect("tag core");
+        store
+            .upsert_board_tasks(core_boss.id, vec![task("c1"), task("c2")])
+            .await
+            .expect("core tasks");
+
+        let exact_boss = store
+            .create_mission(Some("exact boss"), None, None, None, None, None, None)
+            .await
+            .expect("boss");
+        store
+            .update_mission_project(exact_boss.id, tag("verity"))
+            .await
+            .expect("tag exact");
+        store
+            .upsert_board_tasks(exact_boss.id, vec![task("e1")])
+            .await
+            .expect("exact tasks");
+
+        let other_boss = store
+            .create_mission(Some("other boss"), None, None, None, None, None, None)
+            .await
+            .expect("boss");
+        store
+            .update_mission_project(other_boss.id, tag("lido"))
+            .await
+            .expect("tag other");
+        store
+            .upsert_board_tasks(other_boss.id, vec![task("o1")])
+            .await
+            .expect("other tasks");
+
+        let verity = store
+            .list_board_tasks_for_project("verity")
+            .await
+            .expect("verity tasks");
+        let keys: Vec<&str> = verity.iter().map(|t| t.task_key.as_str()).collect();
+        assert_eq!(verity.len(), 3, "family = exact + prefixed: {keys:?}");
+        assert!(keys.contains(&"c1") && keys.contains(&"c2") && keys.contains(&"e1"));
+
+        // `ver` is not a family of `verity` (prefix must break on '-').
+        assert!(store
+            .list_board_tasks_for_project("ver")
+            .await
+            .expect("ver")
+            .is_empty());
+        assert_eq!(
+            store
+                .list_board_tasks_for_project("lido")
+                .await
+                .expect("lido")
+                .len(),
+            1
+        );
+
+        // `_` is a literal, not a LIKE wildcard: `verity_x` must not match
+        // the `verityXx-*` family (and vice versa).
+        let odd_boss = store
+            .create_mission(Some("odd boss"), None, None, None, None, None, None)
+            .await
+            .expect("boss");
+        store
+            .update_mission_project(odd_boss.id, tag("verityXx-core"))
+            .await
+            .expect("tag odd");
+        store
+            .upsert_board_tasks(odd_boss.id, vec![task("x1")])
+            .await
+            .expect("odd tasks");
+        assert!(store
+            .list_board_tasks_for_project("verity_x")
+            .await
+            .expect("underscore literal")
+            .is_empty());
+
+        // The offline read path (raw DB file, no live store) sees the same
+        // families — this is what a fresh restart serves the roadmap from.
+        let db_path = temp_dir.path().join("missions-test-user.db");
+        let offline = super::read_board_tasks_for_project(&db_path, "verity").expect("offline");
+        assert_eq!(offline.len(), 3, "offline read matches the live family");
+    }
+
     #[tokio::test]
     async fn project_attempt_and_outbox_ledgers_are_idempotent() {
         use crate::api::mission_store::{
-            BoardOutboxItem, BoardProject, BoardTaskRole, NewBoardTask, TaskAttempt,
+            BoardOutboxItem, BoardTaskRole, NewBoardTask, TaskAttempt,
         };
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
@@ -15662,29 +16827,6 @@ mod tests {
             .await
             .expect("task")
             .remove(0);
-
-        let project = BoardProject {
-            slug: "beal".into(),
-            repository: "owner/beal".into(),
-            workspace_id: boss.workspace_id,
-            specification_path: "SPEC.md".into(),
-            specification_revision: "abc123".into(),
-            compute_policy: "remote_required".into(),
-            budget_policy: serde_json::json!({"cost_cents": 500}),
-            active_controller_lease: Some("controller-1".into()),
-            created_at: now_string(),
-            updated_at: now_string(),
-        };
-        store.upsert_board_project(project).await.expect("project");
-        assert_eq!(
-            store
-                .get_board_project("beal")
-                .await
-                .unwrap()
-                .unwrap()
-                .compute_policy,
-            "remote_required"
-        );
 
         let attempt = TaskAttempt {
             id: Uuid::new_v4(),
@@ -15890,6 +17032,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn updating_missing_mission_status_fails_closed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "missing-status")
+            .await
+            .expect("sqlite store");
+
+        let missing = Uuid::new_v4();
+        let error = store
+            .update_mission_status(missing, MissionStatus::Acknowledged)
+            .await
+            .expect_err("missing mission status update must not report success");
+        assert!(error.contains("not found"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
     async fn mission_run_generations_exclude_ack_and_ignore_late_updates() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "run-test")
@@ -16034,5 +17191,585 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::SqliteMissionStore;
+    use crate::api::mission_store::{
+        MissionFilter, MissionProjectPatch, MissionStatus, MissionStore,
+    };
+
+    async fn store(dir: &tempfile::TempDir) -> SqliteMissionStore {
+        SqliteMissionStore::new(dir.path().to_path_buf(), "filter-user")
+            .await
+            .expect("sqlite store")
+    }
+
+    async fn seed(
+        store: &SqliteMissionStore,
+        title: &str,
+        project: Option<&str>,
+        track: Option<&str>,
+        origin_session: Option<&str>,
+    ) -> uuid::Uuid {
+        let mission = store
+            .create_mission_with_parent(
+                Some(title),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        if project.is_some() || track.is_some() {
+            store
+                .update_mission_project(
+                    mission.id,
+                    MissionProjectPatch {
+                        project: Some(project.map(str::to_string)),
+                        track: Some(track.map(str::to_string)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("tag mission");
+        }
+        if let Some(session) = origin_session {
+            store
+                .set_mission_origin(mission.id, "hermes", Some(session))
+                .await
+                .expect("set origin");
+        }
+        mission.id
+    }
+
+    /// The regression that motivated the pushdown: the in-memory scan gave up
+    /// after 5 000 rows, so a conversation whose missions had scrolled past it
+    /// silently showed zero workers. SQL has no such horizon.
+    #[tokio::test]
+    async fn finds_a_match_buried_under_a_large_fleet() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+
+        let needle = seed(&store, "needle", Some("verity"), None, Some("sess-old")).await;
+        for i in 0..250 {
+            seed(&store, &format!("noise {i}"), Some("other"), None, None).await;
+        }
+
+        let found = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    origin_session_id: Some("sess-old".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        assert_eq!(found.len(), 1, "the buried match must still be returned");
+        assert_eq!(found[0].id, needle);
+    }
+
+    #[tokio::test]
+    async fn project_prefix_matches_the_family_and_nothing_adjacent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+
+        seed(&store, "family root", Some("verity"), None, None).await;
+        seed(&store, "phase", Some("verity-phase1d"), None, None).await;
+        seed(&store, "lookalike", Some("verityx"), None, None).await;
+        seed(&store, "reversed", Some("x-verity"), None, None).await;
+
+        let found = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    project_prefix: Some("verity".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        let projects: Vec<String> = found
+            .iter()
+            .filter_map(|m| m.project.project.clone())
+            .collect();
+        assert_eq!(projects.len(), 2, "got {projects:?}");
+        assert!(projects.contains(&"verity".to_string()));
+        assert!(projects.contains(&"verity-phase1d".to_string()));
+    }
+
+    /// `project` must stay EXACT — widening it would silently change what
+    /// every existing caller (dashboard, iOS, Paloma) gets back.
+    #[tokio::test]
+    async fn project_filter_stays_exact() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        seed(&store, "root", Some("verity"), None, None).await;
+        seed(&store, "phase", Some("verity-phase1d"), None, None).await;
+
+        let found = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    project: Some("verity".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].project.project.as_deref(), Some("verity"));
+    }
+
+    #[tokio::test]
+    async fn attention_only_hides_acknowledged_completed_and_superseded() {
+        use crate::api::control::events::MissionStatus;
+        use crate::api::mission_store::{MissionStore, SUPERSEDED_TAG};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        let live = seed(&store, "live", Some("verity"), Some("core"), None).await;
+        let acked = seed(&store, "acked", Some("verity"), Some("old"), None).await;
+        let done = seed(&store, "done", Some("verity"), Some("old"), None).await;
+        let absorbed = seed(&store, "absorbed", Some("verity"), Some("core"), None).await;
+        store
+            .update_mission_status(acked, MissionStatus::Acknowledged)
+            .await
+            .expect("ack");
+        store
+            .update_mission_status(done, MissionStatus::Completed)
+            .await
+            .expect("complete");
+        store
+            .update_mission_project(
+                absorbed,
+                MissionProjectPatch {
+                    tags: Some(vec![SUPERSEDED_TAG.to_string()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag superseded");
+
+        let found = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    project: Some("verity".into()),
+                    attention_only: true,
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        let ids: Vec<_> = found.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&live));
+        assert!(!ids.contains(&acked));
+        assert!(!ids.contains(&done));
+        assert!(!ids.contains(&absorbed));
+    }
+
+    #[tokio::test]
+    async fn track_filter_and_offset_count_matches_not_rows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        for i in 0..3 {
+            seed(
+                &store,
+                &format!("t{i}"),
+                Some("verity"),
+                Some("core-c3"),
+                None,
+            )
+            .await;
+            seed(
+                &store,
+                &format!("n{i}"),
+                Some("verity"),
+                Some("other"),
+                None,
+            )
+            .await;
+        }
+
+        let filter = MissionFilter {
+            track: Some("core-c3".into()),
+            ..Default::default()
+        };
+        let first = store
+            .list_missions_filtered(&filter, 2, 0)
+            .await
+            .expect("page 1");
+        let second = store
+            .list_missions_filtered(&filter, 2, 2)
+            .await
+            .expect("page 2");
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1, "offset skips MATCHES, not raw rows");
+        assert!(first
+            .iter()
+            .chain(second.iter())
+            .all(|m| m.project.track.as_deref() == Some("core-c3")));
+    }
+
+    /// The family predicate must stay indexable. `LIKE ?n || '-%'` looked
+    /// right but is a concatenation expression, which SQLite never optimises
+    /// into an index seek — every family lookup became a full table scan under
+    /// the connection mutex. Assert the plan, not just the rows: a regression
+    /// here is invisible in behaviour and only shows up as latency.
+    #[tokio::test]
+    async fn project_family_lookup_uses_an_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        seed(&store, "m", Some("verity-core"), None, None).await;
+
+        let plan: Vec<String> = {
+            let conn = store.conn.lock().await;
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT id FROM missions \
+                     WHERE (project = ?1 OR (project >= ?2 AND project < ?3)) \
+                     ORDER BY updated_at DESC LIMIT 200 OFFSET 0",
+                )
+                .expect("prepare plan");
+            stmt.query_map(rusqlite::params!["verity", "verity-", "verity."], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan detail")
+        };
+
+        let detail = plan.join(" | ");
+        assert!(
+            detail.contains("idx_missions_project_track") || detail.contains("SEARCH"),
+            "family lookup should seek an index, got: {detail}"
+        );
+        assert!(
+            !detail.contains("SCAN missions"),
+            "family lookup must not scan the table, got: {detail}"
+        );
+    }
+
+    /// A `track` filter with no project must seek too. The composite index
+    /// starts with `project`, and SQLite can only seek an index by a prefix of
+    /// its columns — so track-alone fell back to `SCAN missions`, once per
+    /// page, with the connection mutex held. Both client APIs and the control
+    /// endpoint permit that combination, so it is a reachable path and not a
+    /// theoretical one.
+    #[tokio::test]
+    async fn track_only_lookup_uses_an_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        seed(&store, "m", Some("verity"), Some("core-c3"), None).await;
+
+        let plan: Vec<String> = {
+            let conn = store.conn.lock().await;
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT id FROM missions \
+                     WHERE track = ?1 ORDER BY updated_at DESC LIMIT 200 OFFSET 0",
+                )
+                .expect("prepare plan");
+            stmt.query_map(rusqlite::params!["core-c3"], |row| row.get::<_, String>(3))
+                .expect("plan rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("plan detail")
+        };
+
+        let detail = plan.join(" | ");
+        assert!(
+            !detail.contains("SCAN missions"),
+            "track-only lookup must not scan the table, got: {detail}"
+        );
+        assert!(
+            detail.contains("idx_missions_track_updated"),
+            "track-only lookup should seek the track index, got: {detail}"
+        );
+    }
+
+    /// LIKE wildcards inside a free-form tag must not widen the prefilter:
+    /// `?tag=%` would otherwise select nearly every row and make the loop page
+    /// through them while holding the connection lock.
+    #[tokio::test]
+    async fn tag_filter_treats_like_wildcards_as_literals() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+
+        let literal = seed(&store, "literal", Some("verity"), None, None).await;
+        store
+            .update_mission_project(
+                literal,
+                MissionProjectPatch {
+                    tags: Some(vec!["100%".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        let other = seed(&store, "other", Some("verity"), None, None).await;
+        store
+            .update_mission_project(
+                other,
+                MissionProjectPatch {
+                    tags: Some(vec!["unrelated".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+
+        // A bare wildcard matches nothing: it is a literal, not "everything".
+        let wild = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    tag: Some("%".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        assert!(wild.is_empty(), "'%' must not behave as a wildcard");
+
+        // And a tag that genuinely contains '%' is still found.
+        let exact = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    tag: Some("100%".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].id, literal);
+    }
+
+    /// A tag holding a JSON-escaped character is stored escaped in the column,
+    /// so the prefilter has to match its SERIALIZATION, not its raw text —
+    /// otherwise SQL drops it before the Rust re-check can rescue it.
+    #[tokio::test]
+    async fn tag_filter_matches_json_escaped_tags() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        for tag in [r#"quote"inside"#, r"back\slash", "new\nline"] {
+            let id = seed(&store, tag, Some("verity"), None, None).await;
+            store
+                .update_mission_project(
+                    id,
+                    MissionProjectPatch {
+                        tags: Some(vec![tag.to_string()]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("tag");
+
+            let found = store
+                .list_missions_filtered(
+                    &MissionFilter {
+                        tag: Some(tag.to_string()),
+                        ..Default::default()
+                    },
+                    50,
+                    0,
+                )
+                .await
+                .expect("filtered list");
+            assert_eq!(found.len(), 1, "tag {tag:?} must be findable");
+            assert_eq!(found[0].id, id);
+        }
+    }
+
+    /// `tags` is JSON TEXT and some rows hold malformed blobs, which is why
+    /// the tag filter is a SQL prefilter plus a Rust re-check rather than
+    /// `json_each` (that would fail the whole query on the bad row).
+    #[tokio::test]
+    async fn tag_filter_survives_a_malformed_tags_blob() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        let tagged = seed(&store, "tagged", Some("verity"), None, None).await;
+        store
+            .update_mission_project(
+                tagged,
+                MissionProjectPatch {
+                    tags: Some(vec!["origin:hermes-assistant".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        let broken = seed(&store, "broken", Some("verity"), None, None).await;
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "UPDATE missions SET tags = '{not json' WHERE id = ?1",
+                rusqlite::params![broken.to_string()],
+            )
+            .expect("corrupt tags");
+        }
+
+        let found = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    tag: Some("origin:hermes-assistant".into()),
+                    ..Default::default()
+                },
+                50,
+                0,
+            )
+            .await
+            .expect("filtered list");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, tagged);
+    }
+
+    #[tokio::test]
+    async fn stale_active_scan_keeps_hermes_ownership_tags() {
+        // Prod 2026-08-15: the short stale SELECT dropped origin/tags, so
+        // cleanup treated Hermes writers as untagged and Completed them.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        let mission = store
+            .create_mission(Some("Grok repair"), None, None, None, None, None, None)
+            .await
+            .expect("create");
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("active");
+        store
+            .update_mission_project(
+                mission.id,
+                MissionProjectPatch {
+                    tags: Some(vec!["origin:hermes-assistant".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tags");
+        store
+            .force_backdate_for_test(mission.id, "2026-08-15T00:00:00+00:00")
+            .await
+            .expect("backdate");
+
+        let stale = store
+            .get_stale_active_missions(2)
+            .await
+            .expect("stale scan");
+        let found = stale
+            .iter()
+            .find(|row| row.id == mission.id)
+            .expect("mission should be in the stale set");
+        assert!(
+            found
+                .project
+                .tags
+                .iter()
+                .any(|tag| tag == "origin:hermes-assistant"),
+            "stale scan must keep Hermes tags, got {:?}",
+            found.project.tags
+        );
+    }
+}
+
+#[cfg(test)]
+mod id_prefix_tests {
+    use super::SqliteMissionStore;
+    use crate::api::mission_store::MissionStore;
+
+    async fn store(dir: &tempfile::TempDir) -> SqliteMissionStore {
+        SqliteMissionStore::new(dir.path().to_path_buf(), "prefix-user")
+            .await
+            .expect("sqlite store")
+    }
+
+    async fn make(store: &SqliteMissionStore, title: &str) -> uuid::Uuid {
+        store
+            .create_mission_with_parent(
+                Some(title),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission")
+            .id
+    }
+
+    #[tokio::test]
+    async fn resolves_the_prefix_dashboards_display() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        let id = make(&store, "target").await;
+        for i in 0..5 {
+            make(&store, &format!("noise {i}")).await;
+        }
+
+        let short = &id.to_string()[..8];
+        let found = store
+            .find_missions_by_id_prefix(short, 10)
+            .await
+            .expect("prefix lookup");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn reports_every_candidate_so_the_caller_can_disambiguate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        let a = make(&store, "a").await;
+        let b = make(&store, "b").await;
+        // Their common prefix is at minimum the empty string; use the first
+        // character both share to force a multi-match without depending on
+        // generated values.
+        let shared = &a.to_string()[..1];
+        if b.to_string().starts_with(shared) {
+            let found = store
+                .find_missions_by_id_prefix(shared, 10)
+                .await
+                .expect("prefix lookup");
+            assert!(
+                found.len() >= 2,
+                "an ambiguous prefix must surface every candidate, got {}",
+                found.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_prefix_finds_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = store(&dir).await;
+        make(&store, "only").await;
+        let found = store
+            .find_missions_by_id_prefix("ffffffff", 10)
+            .await
+            .expect("prefix lookup");
+        assert!(found.is_empty());
     }
 }

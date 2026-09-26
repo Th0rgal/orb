@@ -7,6 +7,14 @@
 #[allow(unused_imports)]
 use super::*;
 
+/// Immutable outcome coupled to a native execution at terminal publication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionCompletionSnapshot {
+    pub result_summary: Option<String>,
+    pub terminal_reason: Option<String>,
+    pub terminal_evidence: Option<String>,
+}
+
 /// A structured event emitted by the control session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -114,7 +122,7 @@ pub enum AgentEvent {
         mission_id: Option<Uuid>,
     },
     /// Goal status transitioned. Carries the canonical status string from
-    /// codex's `thread/goal/updated`: `active`, `paused`, `budgetLimited`,
+    /// codex's `thread/goal/updated`: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`,
     /// `complete`, or `cleared` when the goal was explicitly aborted.
     GoalStatus {
         status: String,
@@ -124,6 +132,11 @@ pub enum AgentEvent {
     },
     /// Mission status changed (by agent or user)
     MissionStatusChanged {
+        /// Captured by the terminal writer, never inferred from a successor run.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution: Option<MissionRun>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completion: Option<MissionCompletionSnapshot>,
         mission_id: Uuid,
         status: MissionStatus,
         summary: Option<String>,
@@ -189,6 +202,11 @@ pub enum AgentEvent {
     },
     /// Session ID update (for backends that generate their own session IDs)
     SessionIdUpdate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<crate::api::mission_store::SessionUpdateRun>,
+        /// Harness that issued this ID; late updates must not replace another harness.
+        #[serde(default)]
+        backend: String,
         /// The new session ID to use for continuation
         session_id: String,
         /// Mission this session ID belongs to
@@ -352,6 +370,12 @@ pub enum UserMessageAck {
     Queued,
     /// The message was delivered and a turn is starting now.
     Delivered,
+    /// Accepted wake of an idle mission with an authenticated terminal
+    /// predecessor, captured before admission (never from later readback).
+    Continued {
+        queued: bool,
+        previous_execution: MessagePreviousExecution,
+    },
     /// The message was dropped (parallel cap reached, mission load failure,
     /// rejected goal kickoff, …). An `AgentEvent::Error` with details was
     /// emitted on the event stream.
@@ -361,9 +385,29 @@ pub enum UserMessageAck {
     Rejected(String),
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MessagePreviousExecution {
+    pub run_id: Uuid,
+    pub generation: u64,
+}
+
 /// Internal control commands (queued and processed by the actor).
 #[derive(Debug)]
 pub enum ControlCommand {
+    #[cfg(test)]
+    InspectActorContext {
+        respond: oneshot::Sender<(Option<Uuid>, Vec<(String, String)>)>,
+    },
+    UpdateProject {
+        mission_id: Uuid,
+        user: crate::api::auth::AuthUser,
+        request: super::UpdateMissionProjectRequest,
+        respond: oneshot::Sender<Result<Mission, (axum::http::StatusCode, String)>>,
+    },
+    AdmitDispatch {
+        admission: Box<super::DispatchAdmission>,
+        command: Box<ControlCommand>,
+    },
     UserMessage {
         id: Uuid,
         content: String,
@@ -430,6 +474,11 @@ pub enum ControlCommand {
         /// Whether creation consumes the API host's local scratch space.
         /// Remote-node missions bypass the host disk-pressure gate.
         requires_local_disk: bool,
+        /// Expected local scratch peak; absent values use the safe default.
+        estimated_disk_gib: Option<u64>,
+        /// Tags written atomically with creation.  The control actor uses this
+        /// for durable local-disk admission reservations.
+        admission_tags: Vec<String>,
         respond: oneshot::Sender<Result<Mission, String>>,
     },
     /// Update mission status
@@ -497,6 +546,7 @@ pub enum ControlCommand {
     },
     /// Resume an interrupted mission
     ResumeMission {
+        content: Option<String>,
         mission_id: Uuid,
         /// If true, clean the mission's work directory before resuming
         clean_workspace: bool,
@@ -538,7 +588,7 @@ pub enum CancelMissionOutcome {
 // ==================== Mission Types ====================
 
 /// Mission status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MissionStatus {
     /// Mission created but hasn't received any messages yet

@@ -9,9 +9,10 @@
 //! - **Host**: Execute directly on the remote host environment
 //! - **Container**: Execute inside an isolated container environment (systemd-nspawn)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 // Per-backend config generation (Phase 4 of the decomposition).
 pub mod config;
@@ -254,6 +255,11 @@ pub struct Workspace {
     /// so env injection does not re-read the connection file.
     #[serde(skip, default)]
     pub resolved_git_credentials: Option<git_credentials::GitCredentialConfig>,
+    /// Host-side directory containing the per-mission read-only git/gh guards.
+    /// WorkspaceExec translates it into the container namespace before adding
+    /// it to PATH/GH_CONFIG_DIR.
+    #[serde(skip, default)]
+    pub read_only_command_guard_dir: Option<PathBuf>,
     /// Harness CLI versions last probed inside this container workspace
     /// (after harness bootstrap on build/rebuild). None = never probed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,7 +369,7 @@ impl Workspace {
         let port = std::env::var("PORT")
             .ok()
             .filter(|s| !s.trim().is_empty())?;
-        let host_dir = mission_workspace_dir_for_root(&self.path, mission_id);
+        let host_dir = mission_workspace_dir_for_workspace(self, mission_id);
         let short = &mission_id.to_string()[..8];
         let guest_dir = if self.workspace_type == WorkspaceType::Container {
             format!("/workspaces/mission-{}", short)
@@ -512,6 +518,7 @@ impl Workspace {
             mcps_replace_defaults: true,
             config_profile: None,
             resolved_git_credentials: None,
+            read_only_command_guard_dir: None,
             harness_versions: None,
         }
     }
@@ -540,6 +547,7 @@ impl Workspace {
             mcps: Vec::new(),
             mcps_replace_defaults: true,
             resolved_git_credentials: None,
+            read_only_command_guard_dir: None,
             harness_versions: None,
         }
     }
@@ -593,14 +601,24 @@ impl WorkspaceStore {
             }
         }
 
+        // A custom workspace may be a removable/mounted filesystem.  Persist
+        // its mission-root registry in this store's control directory before
+        // any mission code can consult it.  Copy the old colocated registry
+        // while it is still reachable; if it is not, write an empty control
+        // registry so first-use is distinguishable from a lost file.
+        for workspace in workspaces.values_mut() {
+            stamp_custom_workspace_control_registry(workspace, &working_dir);
+        }
+
         // Scan for orphaned containers and restore them
         let orphaned = store.scan_orphaned_containers(&workspaces).await;
-        for workspace in orphaned {
+        for mut workspace in orphaned {
             tracing::info!(
                 "Restored orphaned container workspace: {} at {}",
                 workspace.name,
                 workspace.path.display()
             );
+            stamp_custom_workspace_control_registry(&mut workspace, &working_dir);
             workspaces.insert(workspace.id, workspace);
         }
 
@@ -734,6 +752,7 @@ impl WorkspaceStore {
                     mcps_replace_defaults: true,
                     config_profile: None,
                     resolved_git_credentials: None,
+                    read_only_command_guard_dir: None,
                     harness_versions: None,
                 };
 
@@ -766,7 +785,8 @@ impl WorkspaceStore {
     }
 
     /// Add a new workspace.
-    pub async fn add(&self, workspace: Workspace) -> Uuid {
+    pub async fn add(&self, mut workspace: Workspace) -> Uuid {
+        stamp_custom_workspace_control_registry(&mut workspace, &self.working_dir);
         let id = workspace.id;
         {
             let mut guard = self.workspaces.write().await;
@@ -781,12 +801,13 @@ impl WorkspaceStore {
     }
 
     /// Update a workspace.
-    pub async fn update(&self, workspace: Workspace) -> bool {
+    pub async fn update(&self, mut workspace: Workspace) -> bool {
         let updated = {
             let mut guard = self.workspaces.write().await;
             if let std::collections::hash_map::Entry::Occupied(mut entry) =
                 guard.entry(workspace.id)
             {
+                preserve_control_registry_authority(entry.get(), &mut workspace, &self.working_dir);
                 entry.insert(workspace);
                 true
             } else {
@@ -809,18 +830,30 @@ impl WorkspaceStore {
             return false; // Cannot delete default workspace
         }
 
-        let existed = {
+        let removed = {
             let mut guard = self.workspaces.write().await;
-            guard.remove(&id).is_some()
+            guard.remove(&id)
         };
 
-        if existed {
+        if let Some(workspace) = removed {
+            let registry = mission_workspace_roots_path(&workspace);
+            if registry.exists() {
+                if let Err(error) = std::fs::remove_file(&registry) {
+                    tracing::warn!(
+                        workspace = %id,
+                        path = %registry.display(),
+                        %error,
+                        "failed to remove mission-root registry after workspace delete"
+                    );
+                }
+            }
             if let Err(e) = self.save_to_disk().await {
                 tracing::error!("Failed to save workspaces to disk: {}", e);
             }
+            true
+        } else {
+            false
         }
-
-        existed
     }
 }
 
@@ -886,6 +919,990 @@ pub fn mission_workspace_dir_for_root(root: &Path, mission_id: Uuid) -> PathBuf 
     workspaces_root_for(root).join(format!("mission-{}", short_id))
 }
 
+const MISSION_WORKSPACE_ROOTS_FILE: &str = "mission-workspace-roots.json";
+const CONTROL_REGISTRY_CONFIG_KEY: &str = "mission_workspace_registry_control_root";
+/// Reserved registry key for the custom workspace volume itself, not a mission.
+const WORKSPACE_ROOT_REGISTRY_KEY: &str = "__workspace_root__";
+static MISSION_WORKSPACE_ROOTS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// The filesystem that owned a mission root when it was selected.  A path is
+/// not an identity: after an unmount its mountpoint can remain as an ordinary
+/// directory on the parent filesystem.  On Unix the device and inode of the
+/// selected root together distinguish that replacement while remaining stable
+/// across an ordinary reboot/remount of the same filesystem.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct MissionWorkspaceRootRecord {
+    path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filesystem_identity: Option<String>,
+}
+
+/// A mission turn must not continue when its prepared directory cannot be
+/// verified.  In particular, callers must not substitute the workspace root:
+/// a persisted placement can refer to a temporarily unavailable or replaced
+/// filesystem at the same path.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to prepare verified mission workspace: {source}")]
+pub struct MissionWorkspacePreparationError {
+    #[source]
+    source: anyhow::Error,
+}
+
+/// Convert preparation failures into the typed, fail-closed boundary used by
+/// every execution entry point.  Keeping this conversion centralized makes a
+/// raw-workspace fallback impossible to reintroduce accidentally.
+pub fn require_verified_mission_workspace(
+    prepared: anyhow::Result<PathBuf>,
+) -> Result<PathBuf, MissionWorkspacePreparationError> {
+    prepared.map_err(|source| MissionWorkspacePreparationError { source })
+}
+
+/// Accept the path-only format written by releases before filesystem identity
+/// was recorded.  The first successful use upgrades it under the registry
+/// lock; an unavailable legacy root is never replaced by the configured root.
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum MissionWorkspaceRootRecordOnDisk {
+    Legacy(String),
+    Current(MissionWorkspaceRootRecord),
+}
+
+impl From<MissionWorkspaceRootRecordOnDisk> for MissionWorkspaceRootRecord {
+    fn from(value: MissionWorkspaceRootRecordOnDisk) -> Self {
+        match value {
+            MissionWorkspaceRootRecordOnDisk::Legacy(path) => Self {
+                path,
+                filesystem_identity: None,
+            },
+            MissionWorkspaceRootRecordOnDisk::Current(record) => record,
+        }
+    }
+}
+
+fn legacy_mission_workspace_roots_path(workspace: &Workspace) -> PathBuf {
+    config_root(&workspace.path).join(MISSION_WORKSPACE_ROOTS_FILE)
+}
+
+/// Custom workspaces can themselves be mounted filesystems.  Their placement
+/// authority must therefore live with the server control store, not on the
+/// volume it is meant to verify.  WorkspaceStore stamps this path into the
+/// persisted workspace definition during migration; the default workspace
+/// keeps its established location for compatibility.
+fn mission_workspace_roots_path(workspace: &Workspace) -> PathBuf {
+    if workspace.id != DEFAULT_WORKSPACE_ID {
+        if let Some(root) = workspace
+            .config
+            .get(CONTROL_REGISTRY_CONFIG_KEY)
+            .and_then(serde_json::Value::as_str)
+        {
+            return PathBuf::from(root)
+                .join(".sandboxed-sh")
+                .join("mission-workspace-roots")
+                .join(format!("{}.json", workspace.id));
+        }
+    }
+    legacy_mission_workspace_roots_path(workspace)
+}
+
+/// Stamp control-storage authority onto a custom workspace and ensure an
+/// empty registry exists.  A missing destination after this stamp is a lost
+/// file, not a first-use workspace.
+fn stamp_custom_workspace_control_registry(workspace: &mut Workspace, working_dir: &Path) {
+    if workspace.id == DEFAULT_WORKSPACE_ID {
+        return;
+    }
+    if workspace
+        .config
+        .get(CONTROL_REGISTRY_CONFIG_KEY)
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|root| root.is_empty())
+    {
+        if !workspace.config.is_object() {
+            workspace.config = serde_json::json!({});
+        }
+        workspace.config[CONTROL_REGISTRY_CONFIG_KEY] =
+            serde_json::Value::String(working_dir.to_string_lossy().into_owned());
+    }
+    let destination = mission_workspace_roots_path(workspace);
+    if destination.exists() {
+        ensure_workspace_root_identity_recorded(workspace);
+        return;
+    }
+    if let Some(parent) = destination.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::error!(
+                workspace = %workspace.id,
+                error = %error,
+                "failed to create control mission-root registry directory"
+            );
+            return;
+        }
+    }
+    let legacy = legacy_mission_workspace_roots_path(workspace);
+    if legacy.exists() {
+        if let Err(error) = std::fs::copy(&legacy, &destination) {
+            tracing::error!(
+                workspace = %workspace.id,
+                error = %error,
+                "failed to migrate custom mission-root registry to control storage"
+            );
+        } else {
+            return;
+        }
+    }
+    let mut roots = HashMap::new();
+    if let Some(record) = workspace_root_registry_record(workspace) {
+        roots.insert(WORKSPACE_ROOT_REGISTRY_KEY.to_string(), record);
+    }
+    if let Err(error) = atomic_write_mission_workspace_roots(&destination, &roots) {
+        tracing::error!(
+            workspace = %workspace.id,
+            error = %error,
+            "failed to initialize empty control mission-root registry"
+        );
+    }
+}
+
+fn preserve_control_registry_authority(
+    existing: &Workspace,
+    incoming: &mut Workspace,
+    working_dir: &Path,
+) {
+    if incoming.id == DEFAULT_WORKSPACE_ID {
+        return;
+    }
+    let existing_root = existing
+        .config
+        .get(CONTROL_REGISTRY_CONFIG_KEY)
+        .cloned()
+        .filter(|value| value.as_str().is_some_and(|root| !root.is_empty()));
+    if !incoming.config.is_object() {
+        incoming.config = existing.config.clone();
+        if incoming.config.is_object() {
+            if let Some(root) = existing_root {
+                incoming.config[CONTROL_REGISTRY_CONFIG_KEY] = root;
+            }
+            return;
+        }
+        incoming.config = serde_json::json!({});
+    }
+    if let Some(root) = existing_root {
+        incoming.config[CONTROL_REGISTRY_CONFIG_KEY] = root;
+    } else {
+        stamp_custom_workspace_control_registry(incoming, working_dir);
+    }
+}
+
+fn workspace_root_registry_record(workspace: &Workspace) -> Option<MissionWorkspaceRootRecord> {
+    let canonical = workspace.path.canonicalize().ok()?;
+    let identity = filesystem_identity(&canonical).ok()?;
+    Some(MissionWorkspaceRootRecord {
+        path: canonical.to_string_lossy().into_owned(),
+        filesystem_identity: Some(identity),
+    })
+}
+
+fn persist_workspace_root_identity(
+    workspace: &Workspace,
+    record: MissionWorkspaceRootRecord,
+) -> std::io::Result<()> {
+    let path = mission_workspace_roots_path(workspace);
+    std::fs::create_dir_all(
+        path.parent()
+            .expect("mission workspace root registry has a parent"),
+    )?;
+    let _guard = MISSION_WORKSPACE_ROOTS_LOCK
+        .lock()
+        .expect("registry lock poisoned");
+    let lock_path = path.with_extension("json.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock_file)?;
+    let mut roots: HashMap<String, MissionWorkspaceRootRecord> =
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                serde_json::from_str::<HashMap<String, MissionWorkspaceRootRecordOnDisk>>(&contents)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+                    .into_iter()
+                    .map(|(id, value)| (id, value.into()))
+                    .collect()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error),
+        };
+    roots.insert(WORKSPACE_ROOT_REGISTRY_KEY.to_string(), record);
+    atomic_write_mission_workspace_roots(&path, &roots)?;
+    fs2::FileExt::unlock(&lock_file)?;
+    Ok(())
+}
+
+fn ensure_workspace_root_identity_recorded(workspace: &Workspace) {
+    if workspace.id == DEFAULT_WORKSPACE_ID {
+        return;
+    }
+    let Ok(roots) = read_mission_workspace_roots(workspace) else {
+        return;
+    };
+    if roots.contains_key(WORKSPACE_ROOT_REGISTRY_KEY) {
+        return;
+    }
+    if let Some(record) = workspace_root_registry_record(workspace) {
+        if let Err(error) = persist_workspace_root_identity(workspace, record) {
+            tracing::error!(
+                workspace = %workspace.id,
+                error = %error,
+                "failed to record custom workspace volume identity"
+            );
+        }
+    }
+}
+
+fn ensure_custom_workspace_volume_identity(workspace: &Workspace) -> std::io::Result<()> {
+    if workspace.id == DEFAULT_WORKSPACE_ID {
+        return Ok(());
+    }
+    let path = mission_workspace_roots_path(workspace);
+    let contents = match std::fs::read_to_string(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "persisted control registry for custom workspace {} is unavailable",
+                    workspace.id
+                ),
+            ));
+        }
+        Err(error) => return Err(error),
+        Ok(contents) => contents,
+    };
+    let roots: HashMap<String, MissionWorkspaceRootRecordOnDisk> = serde_json::from_str(&contents)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    match roots.get(WORKSPACE_ROOT_REGISTRY_KEY) {
+        Some(on_disk) => {
+            let record: MissionWorkspaceRootRecord = on_disk.clone().into();
+            validate_mission_workspace_root(&record)?;
+            Ok(())
+        }
+        None => {
+            if let Some(record) = workspace_root_registry_record(workspace) {
+                persist_workspace_root_identity(workspace, record)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "custom workspace {} volume identity is missing and the mount is unavailable",
+                        workspace.id
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+pub(crate) fn filesystem_identity(path: &Path) -> std::io::Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let canonical = path.canonicalize()?;
+        let metadata = std::fs::metadata(&canonical)?;
+        let mount = linux_mount_identity(&canonical)?;
+        // Do not persist `st_dev`: Linux may renumber block devices across a
+        // reboot, and a bind mount shares it with the directory revealed when
+        // that mount disappears.  The mount source/root plus statvfs fsid is
+        // the filesystem authority; the selected root inode additionally
+        // binds the placement to the directory on that filesystem.
+        Ok(format!("linux-v2:{mount}:root-ino:{}", metadata.ino()))
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // There is no portable mount-source API. Refuse to pretend a path is
+        // a filesystem identity; callers fail closed instead.
+        let _ = path;
+        Err(std::io::Error::other(
+            "stable filesystem identity requires Linux mountinfo",
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        // The production deployment is Linux.  Keep non-Unix builds safe by
+        // requiring the resolved location to remain unchanged rather than
+        // pretending that an unverified path is a stable filesystem identity.
+        Ok(format!("path:{}", path.canonicalize()?.display()))
+    }
+}
+
+/// Linux mount identity deliberately excludes mount ID and `st_dev`, both of
+/// which are namespace/boot volatile.  `/proc/self/mountinfo` supplies the
+/// backing source and filesystem root while `statvfs.f_fsid` distinguishes
+/// otherwise identical overlay sources.  Failure to read either is a
+/// verification failure, never a path-only fallback.
+#[cfg(target_os = "linux")]
+fn linux_mount_identity(path: &Path) -> std::io::Result<String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let contents = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let mut selected: Option<(PathBuf, String, String, String)> = None;
+    for line in contents.lines() {
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields: Vec<_> = left.split_whitespace().collect();
+        let right: Vec<_> = right.split_whitespace().collect();
+        if fields.len() < 5 || right.len() < 2 {
+            continue;
+        }
+        let mountpoint = PathBuf::from(unescape_mountinfo(fields[4]));
+        if !path.starts_with(&mountpoint) {
+            continue;
+        }
+        let candidate = (
+            mountpoint,
+            unescape_mountinfo(fields[3]),
+            right[0].to_string(),
+            unescape_mountinfo(right[1]),
+        );
+        if selected
+            .as_ref()
+            .is_none_or(|current| candidate.0.as_os_str().len() > current.0.as_os_str().len())
+        {
+            selected = Some(candidate);
+        }
+    }
+    let Some((_mountpoint, root, fstype, source)) = selected else {
+        return Err(std::io::Error::other(
+            "no mountinfo entry for persisted root",
+        ));
+    };
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(format!(
+        "fsid:{}:type:{}:source:{}:mount-root:{}",
+        stat.f_fsid, fstype, source, root
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(value: &str) -> String {
+    value
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+fn read_mission_workspace_roots(
+    workspace: &Workspace,
+) -> std::io::Result<HashMap<String, MissionWorkspaceRootRecord>> {
+    let contents = std::fs::read_to_string(mission_workspace_roots_path(workspace))?;
+    let roots: HashMap<String, MissionWorkspaceRootRecordOnDisk> = serde_json::from_str(&contents)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(roots
+        .into_iter()
+        .map(|(id, root)| (id, root.into()))
+        .collect())
+}
+
+fn validate_mission_workspace_root(
+    record: &MissionWorkspaceRootRecord,
+) -> std::io::Result<(PathBuf, String)> {
+    let root = PathBuf::from(&record.path).canonicalize()?;
+    if !root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "persisted mission workspace root {} is not a directory",
+                record.path
+            ),
+        ));
+    }
+    let actual_identity = filesystem_identity(&root)?;
+    if let Some(expected_identity) = &record.filesystem_identity {
+        // The immediately preceding build recorded a namespace-local mount
+        // ID before the stable `dev:…:ino:…` suffix.  Preserve that upgrade
+        // path, but never accept a device-only identity: a bind mount can be
+        // unmounted to reveal a same-device directory at the same path.
+        let legacy_mount_identity =
+            legacy_mount_identity_matches(expected_identity, &actual_identity);
+        let legacy_device_identity =
+            legacy_device_identity_matches(expected_identity, &actual_identity);
+        if expected_identity != &actual_identity
+            && !legacy_mount_identity
+            && !legacy_device_identity
+        {
+            return Err(std::io::Error::other(format!(
+                    "persisted mission workspace root {} changed filesystem identity (expected {}, got {})",
+                    root.display(), expected_identity, actual_identity
+                )));
+        }
+    }
+    Ok((root, actual_identity))
+}
+
+fn legacy_mount_identity_matches(identity: &str, actual_identity: &str) -> bool {
+    identity
+        .strip_prefix("mount:")
+        // Legacy records were `mount:<namespace-local-id>:<stable-id>`.
+        // The stable suffix changed from dev/inode to linux-v2, but the
+        // mount ID itself was never an authority and is discarded here.
+        .and_then(|value| value.split_once(':').map(|(_, stable)| stable))
+        .is_some_and(|stable_suffix| stable_suffix == actual_identity)
+}
+
+/// `dev:…:ino:…` was emitted before v2. Device numbers are not stable across
+/// reboot, so migrate it only when the selected-root inode still agrees. This
+/// is a one-time compatibility bridge; the rewritten v2 record thereafter
+/// verifies mount source/fsid and fails closed on a replacement mount.
+fn legacy_device_identity_matches(identity: &str, actual_identity: &str) -> bool {
+    let old_inode = identity
+        .strip_prefix("dev:")
+        .and_then(|v| v.rsplit_once(":ino:"))
+        .map(|(_, inode)| inode);
+    let new_inode = actual_identity
+        .rsplit_once(":root-ino:")
+        .map(|(_, inode)| inode);
+    old_inode
+        .zip(new_inode)
+        .is_some_and(|(old, new)| old == new)
+}
+
+fn is_legacy_mount_identity(identity: &str) -> bool {
+    // Both the original dev/inode form and the immediately preceding v2 form
+    // used a namespace-local `mount:<id>:` prefix.  The prefix is not stable
+    // across restart, but validation above has already compared its stable
+    // suffix before this permits the one-time rewrite.
+    identity.starts_with("mount:")
+}
+
+/// Refuse to create a replacement directory when an existing mission's
+/// recorded root cannot be reached.  Falling back here would abandon its
+/// checkout during a transient unmount.
+pub fn ensure_persisted_mission_root_is_available(
+    workspace: &Workspace,
+    mission_id: Uuid,
+) -> std::io::Result<()> {
+    ensure_custom_workspace_volume_identity(workspace)?;
+    let path = mission_workspace_roots_path(workspace);
+    let contents = match std::fs::read_to_string(&path) {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && workspace.id != DEFAULT_WORKSPACE_ID
+                && workspace.config.get(CONTROL_REGISTRY_CONFIG_KEY).is_some() =>
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "persisted control registry for custom workspace {} is unavailable",
+                    workspace.id
+                ),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(contents) => contents,
+    };
+    let mut roots: HashMap<String, MissionWorkspaceRootRecordOnDisk> =
+        serde_json::from_str(&contents)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let Some(on_disk) = roots.remove(&mission_id.to_string()) else {
+        return Ok(());
+    };
+    let record: MissionWorkspaceRootRecord = on_disk.into();
+    let (_, identity) = validate_mission_workspace_root(&record)?;
+    if record
+        .filesystem_identity
+        .as_deref()
+        .is_none_or(|identity| is_legacy_mount_identity(identity) || identity.starts_with("dev:"))
+    {
+        // Compatibility migration: bind the identity only after the legacy
+        // path was successfully reached.  This closes the mountpoint hole for
+        // every later caller and never permits a fallback while unavailable.
+        persist_mission_workspace_root_record(
+            workspace,
+            mission_id,
+            MissionWorkspaceRootRecord {
+                path: record.path,
+                filesystem_identity: Some(identity),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Verify the persisted owner of an explicit directory below a mission
+/// workspace.  A worker can legitimately run in a boss's worktree, but the
+/// worker's own selected root says nothing about the filesystem that owns that
+/// worktree.  Resolve the physical `workspaces/mission-<short>` ancestor,
+/// require exactly one registry owner, and validate that owner's persisted
+/// root before accepting any descendant.
+///
+/// Callers intentionally receive an error for a directory outside a mission
+/// workspace: an explicit override is a capability, not a generic escape hatch
+/// from the selected mission placement.
+pub fn verify_explicit_mission_working_directory_owner(
+    workspace: &Workspace,
+    requested: &Path,
+) -> std::io::Result<Uuid> {
+    let requested = requested.canonicalize()?;
+    let mission_dir = requested
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("mission-"))
+                .is_some_and(|short| {
+                    short.len() == 8 && short.chars().all(|c| c.is_ascii_hexdigit())
+                })
+                && ancestor
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some("workspaces")
+        })
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "explicit working directory {} has no mission workspace owner",
+                requested.display()
+            ))
+        })?;
+    let short = mission_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("mission-"))
+        .expect("checked mission directory name");
+
+    let roots = match read_mission_workspace_roots(workspace) {
+        Ok(roots) => roots,
+        // A missing registry is the pre-feature state, not a corrupt one.
+        // Callers that know candidate owners can adopt the generated path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(error) => return Err(error),
+    };
+    let mut matches = Vec::new();
+    for (id, record) in roots {
+        if !id.starts_with(short) {
+            continue;
+        }
+        let mission_id = Uuid::parse_str(&id).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid mission root registry id",
+            )
+        })?;
+        let (root, _) = validate_mission_workspace_root(&record)?;
+        let expected = mission_workspace_dir_for_root(&root, mission_id).canonicalize()?;
+        if expected == mission_dir {
+            matches.push(mission_id);
+        }
+    }
+    match matches.as_slice() {
+        [mission_id] => Ok(*mission_id),
+        [] => Err(std::io::Error::other(format!(
+            "explicit working directory {} is not a verified persisted mission placement",
+            requested.display()
+        ))),
+        _ => Err(std::io::Error::other(format!(
+            "explicit working directory {} has ambiguous mission ownership",
+            requested.display()
+        ))),
+    }
+}
+
+/// Whether `requested` lives under a generated `workspaces/mission-<short>`
+/// directory owned by one of this workspace's known roots.  Used to adopt
+/// pre-registry placements without treating an arbitrary path as a mission.
+pub fn is_generated_mission_directory_under_known_root(
+    workspace: &Workspace,
+    requested: &Path,
+) -> bool {
+    let Ok(requested) = requested.canonicalize() else {
+        return false;
+    };
+    let Some(mission_dir) = requested.ancestors().find(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("mission-"))
+            .is_some_and(|short| short.len() == 8 && short.chars().all(|c| c.is_ascii_hexdigit()))
+            && ancestor
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("workspaces")
+    }) else {
+        return false;
+    };
+    mission_workspace_roots_for_workspace(workspace)
+        .into_iter()
+        .any(|root| {
+            workspaces_root_for(&root)
+                .canonicalize()
+                .ok()
+                .is_some_and(|expected| Some(expected.as_path()) == mission_dir.parent())
+        })
+}
+
+/// Register a pre-registry generated directory for a candidate owner whose
+/// short id matches the physical `mission-<short>` ancestor.
+pub fn adopt_legacy_explicit_working_directory(
+    workspace: &Workspace,
+    requested: &Path,
+    candidates: &[Uuid],
+) -> std::io::Result<Option<Uuid>> {
+    let requested = match requested.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(mission_dir) = requested.ancestors().find(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("mission-"))
+            .is_some_and(|short| short.len() == 8 && short.chars().all(|c| c.is_ascii_hexdigit()))
+            && ancestor
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("workspaces")
+    }) else {
+        return Ok(None);
+    };
+    let Some(short) = mission_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("mission-"))
+    else {
+        return Ok(None);
+    };
+    let Some(root) = mission_dir.parent().and_then(|parent| parent.parent()) else {
+        return Ok(None);
+    };
+    if !mission_workspace_roots_for_workspace(workspace)
+        .into_iter()
+        .any(|known| known.canonicalize().ok().is_some_and(|known| known == root) || known == root)
+    {
+        return Ok(None);
+    }
+    for candidate in candidates {
+        if !candidate.to_string().starts_with(short) {
+            continue;
+        }
+        let expected = mission_workspace_dir_for_root(root, *candidate);
+        if expected.canonicalize().ok().as_deref() != Some(mission_dir) && expected != mission_dir {
+            continue;
+        }
+        persist_mission_workspace_root(workspace, *candidate, root)?;
+        return Ok(Some(*candidate));
+    }
+    Ok(None)
+}
+
+/// Verify a persisted owner, or adopt a pre-registry generated directory
+/// belonging to one of `candidates`.  A generated directory under a known
+/// root with no matching candidate is accepted only as a compatibility
+/// signal via [`is_generated_mission_directory_under_known_root`].
+pub fn verify_or_adopt_explicit_mission_working_directory(
+    workspace: &Workspace,
+    requested: &Path,
+    candidates: &[Uuid],
+) -> std::io::Result<Uuid> {
+    match verify_explicit_mission_working_directory_owner(workspace, requested) {
+        Ok(owner) => Ok(owner),
+        Err(error) => {
+            if let Some(owner) =
+                adopt_legacy_explicit_working_directory(workspace, requested, candidates)?
+            {
+                return Ok(owner);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Atomically replace a registry file and make both the file and the rename
+/// durable before releasing the registry lock. Readers therefore see either a
+/// complete old JSON document or a complete new one, never a truncation.
+fn atomic_write_mission_workspace_roots(
+    path: &Path,
+    roots: &HashMap<String, MissionWorkspaceRootRecord>,
+) -> std::io::Result<()> {
+    let parent = path.parent().expect("mission root registry has parent");
+    let temp = parent.join(format!(
+        ".{MISSION_WORKSPACE_ROOTS_FILE}.{}.tmp",
+        Uuid::new_v4()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(roots).expect("root map serializes");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Persist the selected root before creating a mission directory.  The
+/// registry lives with the workspace configuration rather than the generated
+/// directory, so it survives restarts and a later environment/config drift.
+pub(crate) fn persist_mission_workspace_root(
+    workspace: &Workspace,
+    mission_id: Uuid,
+    root: &Path,
+) -> std::io::Result<()> {
+    let canonical = root.canonicalize()?;
+    let identity = filesystem_identity(&canonical)?;
+    persist_mission_workspace_root_record(
+        workspace,
+        mission_id,
+        MissionWorkspaceRootRecord {
+            path: canonical.to_string_lossy().into_owned(),
+            filesystem_identity: Some(identity),
+        },
+    )
+}
+
+fn persist_mission_workspace_root_record(
+    workspace: &Workspace,
+    mission_id: Uuid,
+    record: MissionWorkspaceRootRecord,
+) -> std::io::Result<()> {
+    (|| -> std::io::Result<()> {
+        let path = mission_workspace_roots_path(workspace);
+        std::fs::create_dir_all(
+            path.parent()
+                .expect("mission workspace root registry has a parent"),
+        )?;
+        // The process-local lock avoids blocking an async executor on an
+        // advisory file lock when many preparations race. The file lock also
+        // serializes independent server processes sharing this workspace.
+        let _guard = MISSION_WORKSPACE_ROOTS_LOCK
+            .lock()
+            .expect("registry lock poisoned");
+        let lock_path = path.with_extension("json.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+        let mut roots: HashMap<String, MissionWorkspaceRootRecord> =
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => serde_json::from_str::<
+                    HashMap<String, MissionWorkspaceRootRecordOnDisk>,
+                >(&contents)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+                .into_iter()
+                .map(|(id, value)| (id, value.into()))
+                .collect(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+                Err(error) => return Err(error),
+            };
+        let changed = match roots.entry(mission_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(record);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if entry
+                    .get()
+                    .filesystem_identity
+                    .as_deref()
+                    .is_none_or(|identity| {
+                        is_legacy_mount_identity(identity)
+                            || (identity.starts_with("dev:") && identity.contains(":ino:"))
+                    }) =>
+            {
+                entry.insert(record);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        };
+        if changed {
+            atomic_write_mission_workspace_roots(&path, &roots)?;
+        }
+        fs2::FileExt::unlock(&lock_file)?;
+        Ok(())
+    })()
+}
+
+/// Resolve the root used for newly-created default-host mission directories.
+///
+/// `MISSION_WORKSPACE_ROOT` is deliberately only a placement override for the
+/// generated per-mission scratch tree.  Workspace records continue to own
+/// their configured paths, so enabling it never rewrites or moves an existing
+/// workspace.  A bad override fails safely back to the established root.
+pub fn configured_mission_workspace_root(fallback: &Path) -> PathBuf {
+    resolve_mission_workspace_root(
+        std::env::var_os("MISSION_WORKSPACE_ROOT")
+            .map(PathBuf::from)
+            .as_deref(),
+        fallback,
+    )
+}
+
+fn resolve_mission_workspace_root(candidate: Option<&Path>, fallback: &Path) -> PathBuf {
+    resolve_mission_workspace_root_with(candidate, fallback, mission_workspace_root_is_writable)
+}
+
+fn resolve_mission_workspace_root_with(
+    candidate: Option<&Path>,
+    fallback: &Path,
+    is_writable: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let Some(candidate) = candidate else {
+        return fallback.to_path_buf();
+    };
+    let candidate = candidate.to_path_buf();
+    if !candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        tracing::warn!(path = %candidate.display(), "Ignoring unsafe MISSION_WORKSPACE_ROOT; using workspace root");
+        return fallback.to_path_buf();
+    }
+    match std::fs::canonicalize(&candidate) {
+        Ok(path) if path.is_dir() && is_writable(&path) => path,
+        Ok(path) => {
+            tracing::warn!(path = %path.display(), "MISSION_WORKSPACE_ROOT is not a writable directory; using workspace root");
+            fallback.to_path_buf()
+        }
+        Err(error) => {
+            tracing::warn!(path = %candidate.display(), %error, "Cannot resolve MISSION_WORKSPACE_ROOT; using workspace root");
+            fallback.to_path_buf()
+        }
+    }
+}
+
+fn mission_workspace_root_is_writable(root: &Path) -> bool {
+    // Metadata permissions are not enough (ACLs and read-only mounts can
+    // disagree), so make and remove only an unpredictable, empty probe we own.
+    let probe = root.join(format!(".sandboxed-sh-write-probe-{}", Uuid::new_v4()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => std::fs::remove_file(probe).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// The root that will hold this mission's generated workspace directory.
+/// Existing generated directories always win, which keeps active missions and
+/// historic workspace records compatible after an operator enables a new root.
+pub fn mission_workspace_root_for_workspace(workspace: &Workspace, mission_id: Uuid) -> PathBuf {
+    // All operational callers must use `ensure_persisted_mission_root_is_available`
+    // before resolving.  Do not silently treat an invalid persisted record as
+    // absent here: retain its path so an accidental caller cannot create under
+    // today's configured root.
+    if let Ok(roots) = read_mission_workspace_roots(workspace) {
+        if let Some(record) = roots.get(&mission_id.to_string()) {
+            return PathBuf::from(&record.path);
+        }
+    }
+    let legacy = mission_workspace_dir_for_root(&workspace.path, mission_id);
+    if legacy.exists() || workspace.id != DEFAULT_WORKSPACE_ID {
+        return workspace.path.clone();
+    }
+    configured_mission_workspace_root(&workspace.path)
+}
+
+/// Generated directory for a mission, preserving an existing legacy location.
+pub fn mission_workspace_dir_for_workspace(workspace: &Workspace, mission_id: Uuid) -> PathBuf {
+    mission_workspace_dir_for_root(
+        &mission_workspace_root_for_workspace(workspace, mission_id),
+        mission_id,
+    )
+}
+
+/// Roots that can contain generated mission directories for this workspace.
+/// Used by maintenance scans; registered roots preserve discoverability after
+/// an operator changes `MISSION_WORKSPACE_ROOT`.
+pub fn mission_workspace_roots_for_workspace(workspace: &Workspace) -> Vec<PathBuf> {
+    let mut roots = vec![workspace.path.clone()];
+    {
+        // Every workspace owns a registry.  A custom workspace is just as
+        // capable of hosting a relocated mission as the default host; making
+        // it registry-less forced explicit-directory checks to accidentally
+        // consult the default host's placement authority.
+        if workspace.id == DEFAULT_WORKSPACE_ID {
+            roots.push(configured_mission_workspace_root(&workspace.path));
+        }
+        if let Ok(contents) = std::fs::read_to_string(mission_workspace_roots_path(workspace)) {
+            if let Ok(saved) =
+                serde_json::from_str::<HashMap<String, MissionWorkspaceRootRecordOnDisk>>(&contents)
+            {
+                roots.extend(saved.into_values().filter_map(|root| {
+                    let record: MissionWorkspaceRootRecord = root.into();
+                    validate_mission_workspace_root(&record)
+                        .ok()
+                        .map(|(root, _)| root)
+                }));
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Whether a generated directory is owned by this workspace's persisted
+/// placement authority.  This is deliberately stronger than membership in a
+/// scan root: configured roots may overlap a custom workspace, and scan order
+/// must never select the configuration used to rewrite a mission's MCP file.
+fn owns_persisted_mission_directory(workspace: &Workspace, directory: &Path) -> bool {
+    let Ok(directory) = directory.canonicalize() else {
+        return false;
+    };
+    let Some(short) = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("mission-"))
+    else {
+        return false;
+    };
+    if short.len() != 8 || !short.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let Ok(roots) = read_mission_workspace_roots(workspace) else {
+        return false;
+    };
+    roots.into_iter().any(|(id, record)| {
+        let Ok(mission_id) = Uuid::parse_str(&id) else {
+            return false;
+        };
+        if !id.starts_with(short) {
+            return false;
+        }
+        let Ok((root, _)) = validate_mission_workspace_root(&record) else {
+            return false;
+        };
+        mission_workspace_dir_for_root(&root, mission_id)
+            .canonicalize()
+            .is_ok_and(|expected| expected == directory)
+    })
+}
+
 /// Resolve a configured project directory to its host-visible path.
 ///
 /// Mission state (harness config, HOME and XDG data) deliberately lives in a
@@ -907,8 +1924,9 @@ fn configured_project_dir_with_nspawn(
     // orchestrator-owned git worktree) is authoritative. Only replace the
     // generated per-mission state directory; otherwise every worker would be
     // redirected back to the shared LEAN_PROJECT_PATH checkout.
-    let generated_workspaces = workspaces_root_for(&workspace.path);
-    let is_generated_mission_dir = fallback.parent() == Some(generated_workspaces.as_path())
+    let is_generated_mission_dir = mission_workspace_roots_for_workspace(workspace)
+        .iter()
+        .any(|root| fallback.parent() == Some(workspaces_root_for(root).as_path()))
         && fallback
             .file_name()
             .and_then(|name| name.to_str())
@@ -973,6 +1991,25 @@ pub fn task_workspace_dir_for_root(root: &Path, task_id: Uuid) -> PathBuf {
 
 fn mcp_launcher_shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Relative path of `child` inside `workspace_root`.
+///
+/// Prod workspaces are often stored as `/root/.sandboxed-sh/containers/<name>`
+/// while `MISSION_WORKSPACE_ROOT` resolves the same directory through the
+/// `/srv/sandboxed-storage/...` target of that symlink. `Path::strip_prefix`
+/// is lexical and treats those as unrelated, which made every container
+/// resume fail with "MCP launcher is outside the container workspace".
+pub(crate) fn strip_workspace_prefix(child: &Path, workspace_root: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = child.strip_prefix(workspace_root) {
+        return Some(relative.to_path_buf());
+    }
+    let canonical_child = std::fs::canonicalize(child).ok()?;
+    let canonical_root = std::fs::canonicalize(workspace_root).ok()?;
+    canonical_child
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1057,9 +2094,8 @@ fn write_mcp_env_launcher(
     write_result?;
 
     if workspace_type == WorkspaceType::Container && !container_fallback {
-        let relative = launcher_host_path
-            .strip_prefix(workspace_root)
-            .map_err(|_| anyhow::anyhow!("MCP launcher is outside the container workspace"))?;
+        let relative = strip_workspace_prefix(&launcher_host_path, workspace_root)
+            .ok_or_else(|| anyhow::anyhow!("MCP launcher is outside the container workspace"))?;
         Ok(format!("/{}", relative.to_string_lossy()))
     } else {
         Ok(launcher_host_path.to_string_lossy().to_string())
@@ -1264,9 +2300,8 @@ fn opencode_entry_from_mcp(
                 && nspawn::nspawn_available();
 
             if workspace_type == WorkspaceType::Container && !container_fallback {
-                let relative = workspace_dir
-                    .strip_prefix(workspace_root)
-                    .unwrap_or_else(|_| Path::new(""));
+                let relative =
+                    strip_workspace_prefix(workspace_dir, workspace_root).unwrap_or_default();
                 let guest_dir = if relative.as_os_str().is_empty() {
                     "/".to_string()
                 } else {
@@ -1299,9 +2334,7 @@ fn opencode_entry_from_mcp(
             )?;
 
             if use_nspawn {
-                let rel = workspace_dir
-                    .strip_prefix(workspace_root)
-                    .unwrap_or_else(|_| Path::new(""));
+                let rel = strip_workspace_prefix(workspace_dir, workspace_root).unwrap_or_default();
                 let rel_str = if rel.as_os_str().is_empty() {
                     "/".to_string()
                 } else {
@@ -2165,6 +3198,43 @@ pub async fn sync_agents_to_dir(
     Ok(())
 }
 
+/// A recorded placement belongs to an existing attempt. Losing its mission
+/// directory must not turn resume into provisioning a config-only replacement.
+fn verify_mission_directory_before_preparation(
+    workspace: &Workspace,
+    mission_id: Uuid,
+    explicit_worktree: Option<&Path>,
+) -> anyhow::Result<()> {
+    let roots = match read_mission_workspace_roots(workspace) {
+        Ok(roots) => roots,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(record) = roots.get(&mission_id.to_string()) {
+        let (root, _) = validate_mission_workspace_root(record)?;
+        let directory = mission_workspace_dir_for_root(&root, mission_id);
+        if !directory.is_dir() {
+            if let Some(source) = explicit_worktree {
+                anyhow::ensure!(
+                    source.is_dir(),
+                    "explicit working_directory is unavailable: {}",
+                    source.display()
+                );
+                verify_explicit_mission_working_directory_owner(workspace, source)?;
+                // Source lives in a separately verified worktree. This missing
+                // generated directory is auxiliary configuration, not source.
+                return Ok(());
+            }
+        }
+        anyhow::ensure!(
+            directory.is_dir(),
+            "recorded mission directory is unavailable: {}; restore its source before resume",
+            directory.display()
+        );
+    }
+    Ok(())
+}
+
 async fn prepare_workspace_dir(path: &Path) -> anyhow::Result<PathBuf> {
     tokio::fs::create_dir_all(path.join("output")).await?;
     tokio::fs::create_dir_all(path.join("temp")).await?;
@@ -2175,7 +3245,7 @@ fn remote_build_wrapper_path(workspace: &Workspace, mission_id: Uuid) -> PathBuf
     if workspace.workspace_type == WorkspaceType::Container && !is_container_fallback(workspace) {
         PathBuf::from("/usr/local/lib/sandboxed-sh/bin/remote-lean-build")
     } else {
-        mission_workspace_dir_for_root(&workspace.path, mission_id)
+        mission_workspace_dir_for_workspace(workspace, mission_id)
             .join(".sandboxed-sh/bin/remote-lean-build")
     }
 }
@@ -2224,6 +3294,24 @@ pub(crate) async fn install_remote_build_wrapper(
             tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await?;
         }
         tokio::fs::rename(&tmp, &destination).await?;
+    }
+
+    // Older container images shipped a second, unmanaged copy at
+    // `/usr/local/bin/remote-lean-build`.  Keep that historical entry point as
+    // an alias to the mission-managed wrapper so agents cannot inspect or run
+    // a stale protocol implementation by using the absolute legacy path.
+    #[cfg(unix)]
+    if workspace.workspace_type == WorkspaceType::Container && !is_container_fallback(workspace) {
+        use std::os::unix::fs::symlink;
+
+        let legacy = workspace.path.join("usr/local/bin/remote-lean-build");
+        if let Some(parent) = legacy.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp = legacy.with_extension(format!("tmp-{}-{mission_id}", std::process::id()));
+        let _ = tokio::fs::remove_file(&tmp).await;
+        symlink("/usr/local/lib/sandboxed-sh/bin/remote-lean-build", &tmp)?;
+        tokio::fs::rename(&tmp, &legacy).await?;
     }
     Ok(())
 }
@@ -2308,8 +3396,15 @@ pub async fn prepare_mission_workspace_in(
 ) -> anyhow::Result<PathBuf> {
     // Use a mission-specific directory under the workspace root so multiple missions
     // can run concurrently without clobbering per-workspace config files.
-    let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
+    ensure_persisted_mission_root_is_available(workspace, mission_id)?;
+    verify_mission_directory_before_preparation(workspace, mission_id, None)?;
+    let root = mission_workspace_root_for_workspace(workspace, mission_id);
+    let dir = mission_workspace_dir_for_root(&root, mission_id);
     prepare_workspace_dir(&dir).await?;
+    // Record placement only after initial directory creation succeeds. A failed
+    // first preparation must remain retryable, while a recorded directory that
+    // later disappears still fails the source-loss guard above.
+    persist_mission_workspace_root(workspace, mission_id, &root)?;
     install_remote_build_wrapper(workspace, mission_id).await?;
     let mcp_configs = filter_mcp_configs_for_workspace(
         mcp.list_configs().await,
@@ -2345,9 +3440,197 @@ pub async fn prepare_mission_workspace_with_skills(
     mission_id: Uuid,
 ) -> anyhow::Result<PathBuf> {
     prepare_mission_workspace_with_skills_backend(
-        workspace, mcp, library, mission_id, "opencode", None, None, None, None,
+        workspace, mcp, library, mission_id, "opencode", None, None, None, None, true,
     )
     .await
+}
+
+#[cfg(unix)]
+async fn install_read_only_command_guards(dir: &Path) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard_dir = dir.join(".sandboxed-sh").join("read-only-bin");
+    let fixture_root = dir.join(".sandboxed-sh").join("read-only-fixtures");
+    tokio::fs::create_dir_all(&guard_dir).await?;
+    tokio::fs::create_dir_all(&fixture_root).await?;
+    let git_guard = guard_dir.join("git");
+    let gh_guard = guard_dir.join("gh");
+    let git_script = r#"#!/bin/sh
+set -eu
+case "$0" in
+  */*) guard_path="$0" ;;
+  *) guard_path=$(command -v "$0") || exit 73 ;;
+esac
+guard_dir=$(CDPATH= cd -P "${guard_path%/*}" 2>/dev/null && pwd -P) || exit 73
+fixture_root=$(CDPATH= cd -P "$guard_dir/../read-only-fixtures" 2>/dev/null && pwd -P) || exit 73
+subcommand=""
+skip_next=0
+skip_capture=""
+c_arg_dir=""
+env_value_form=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then
+    skip_next=0
+    if [ "$skip_capture" = C ]; then
+      if [ -n "$arg" ]; then
+        case "$arg" in
+          /*) c_arg_dir="$arg" ;;
+          *)
+            if [ -n "$c_arg_dir" ]; then c_arg_dir="$c_arg_dir/$arg"; else c_arg_dir="$PWD/$arg"; fi
+            ;;
+        esac
+      fi
+      skip_capture=""
+    fi
+    continue
+  fi
+  case "$arg" in
+    -C)
+      skip_next=1
+      skip_capture=C
+      ;;
+    -C?*)
+      c_value=${arg#-C}
+      if [ -n "$c_value" ]; then
+        case "$c_value" in
+          /*) c_arg_dir="$c_value" ;;
+          *)
+            if [ -n "$c_arg_dir" ]; then c_arg_dir="$c_arg_dir/$c_value"; else c_arg_dir="$PWD/$c_value"; fi
+            ;;
+        esac
+      fi
+      ;;
+    -c)
+      skip_next=1
+      ;;
+    --git-dir|--work-tree|--namespace)
+      skip_next=1
+      env_value_form=1
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*)
+      env_value_form=1
+      ;;
+    -*) ;;
+    *) subcommand="$arg"; break ;;
+  esac
+done
+deny_commit() {
+  echo "sandboxed.sh: git commit is disabled for this pr-readonly mission (not an isolated fixture repository)" >&2
+  exit 73
+}
+case "$subcommand" in
+  push|merge|rebase|tag|am|cherry-pick|revert)
+    echo "sandboxed.sh: git $subcommand is disabled for this pr-readonly mission" >&2
+    exit 73
+    ;;
+  commit)
+    if [ "$env_value_form" = 1 ]; then deny_commit; fi
+    if [ -n "${GIT_DIR:-}" ] || [ -n "${GIT_WORK_TREE:-}" ] || \
+       [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${GIT_OBJECT_DIRECTORY:-}" ] || \
+       [ -n "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] || [ -n "${GIT_COMMON_DIR:-}" ]; then
+      deny_commit
+    fi
+    effective_dir="$PWD"
+    if [ -n "$c_arg_dir" ]; then effective_dir="$c_arg_dir"; fi
+    resolved_dir=$(cd -P "$effective_dir" 2>/dev/null && pwd -P) || deny_commit
+    case "$resolved_dir/" in
+      "$fixture_root"/*) ;;
+      *) deny_commit ;;
+    esac
+    toplevel=$(PATH="${PATH#*:}" git -C "$resolved_dir" rev-parse --show-toplevel 2>/dev/null) || deny_commit
+    resolved_toplevel=$(cd -P "$toplevel" 2>/dev/null && pwd -P) || deny_commit
+    case "$resolved_toplevel/" in
+      "$fixture_root"/*) ;;
+      *) deny_commit ;;
+    esac
+    if (cd -P "$resolved_toplevel" 2>/dev/null && [ -d .git ] && [ ! -L .git ]); then
+      :
+    else
+      deny_commit
+    fi
+    resolved_git_dir=$(cd -P "$resolved_toplevel/.git" 2>/dev/null && pwd -P) || deny_commit
+    case "$resolved_git_dir/" in
+      "$fixture_root"/*) ;;
+      *) deny_commit ;;
+    esac
+    if find "$resolved_git_dir" -type l -print -quit 2>/dev/null | grep -q .; then deny_commit; fi
+    common_dir=$(PATH="${PATH#*:}" git -C "$resolved_toplevel" rev-parse --git-common-dir 2>/dev/null) || deny_commit
+    case "$common_dir" in
+      /*) common_path="$common_dir" ;;
+      *) common_path="$resolved_toplevel/$common_dir" ;;
+    esac
+    resolved_common_dir=$(cd -P "$common_path" 2>/dev/null && pwd -P) || deny_commit
+    case "$resolved_common_dir/" in
+      "$fixture_root"/*) ;;
+      *) deny_commit ;;
+    esac
+    if find "$resolved_common_dir" -type l -print -quit 2>/dev/null | grep -q .; then deny_commit; fi
+    ;;
+esac
+PATH="${PATH#*:}" exec git "$@"
+"#;
+    let gh_script = r#"#!/bin/sh
+set -eu
+first="${1:-}"
+second="${2:-}"
+deny=""
+case "$first:$second" in
+  pr:create|pr:merge|pr:close|pr:edit|pr:ready|pr:reopen|pr:comment|pr:review|\
+  issue:create|issue:close|issue:edit|issue:reopen|issue:comment|\
+  workflow:run|workflow:enable|workflow:disable|\
+  run:cancel|run:rerun|run:delete|\
+  release:create|release:delete|release:edit|release:upload|\
+  repo:create|repo:delete|repo:edit|repo:rename|\
+  label:create|label:delete|label:edit)
+    deny="$first $second"
+    ;;
+  secret:*|variable:*) deny="$first" ;;
+esac
+if [ "$first" = api ]; then
+  graphql=0
+  mutation=0
+  explicit_write=0
+  fields=0
+  expect_method=0
+  for arg in "$@"; do
+    if [ "$expect_method" = 1 ]; then
+      case "$arg" in POST|PATCH|PUT|DELETE) explicit_write=1 ;; esac
+      expect_method=0
+      continue
+    fi
+    [ "$arg" = graphql ] && graphql=1
+    case "$arg" in
+      *mutation*) mutation=1 ;;
+      -X|--method) expect_method=1 ;;
+      -XPOST|-XPATCH|-XPUT|-XDELETE|--method=POST|--method=PATCH|--method=PUT|--method=DELETE)
+        explicit_write=1 ;;
+      -f|--field|-F|--raw-field|--input|--input=*) fields=1 ;;
+    esac
+  done
+  if [ "$mutation" = 1 ] || [ "$explicit_write" = 1 ] || { [ "$fields" = 1 ] && [ "$graphql" = 0 ]; }; then
+    deny="api mutation"
+  fi
+fi
+if [ -n "$deny" ]; then
+  echo "sandboxed.sh: gh $deny is disabled for this pr-readonly mission" >&2
+  exit 73
+fi
+PATH="${PATH#*:}" exec gh "$@"
+"#;
+    tokio::fs::write(&git_guard, git_script).await?;
+    tokio::fs::write(&gh_guard, gh_script).await?;
+    tokio::fs::set_permissions(&git_guard, std::fs::Permissions::from_mode(0o755)).await?;
+    tokio::fs::set_permissions(&gh_guard, std::fs::Permissions::from_mode(0o755)).await?;
+    Ok(guard_dir)
+}
+
+#[cfg(not(unix))]
+async fn install_read_only_command_guards(dir: &Path) -> anyhow::Result<PathBuf> {
+    let guard_dir = dir.join(".sandboxed-sh").join("read-only-bin");
+    let fixture_root = dir.join(".sandboxed-sh").join("read-only-fixtures");
+    tokio::fs::create_dir_all(&guard_dir).await?;
+    tokio::fs::create_dir_all(&fixture_root).await?;
+    Ok(guard_dir)
 }
 
 /// Read custom providers from the ai_providers.json file.
@@ -2394,6 +3677,35 @@ fn read_custom_providers_from_file(workspace_root: &Path) -> Vec<AIProvider> {
     Vec::new()
 }
 
+fn read_managed_opencode_provider_keys(workspace_root: &Path) -> HashSet<String> {
+    let mut keys = HashSet::from(["kimi".to_string()]);
+    let candidates = [
+        workspace_root.join(AI_PROVIDERS_PATH),
+        std::path::PathBuf::from(home_dir()).join(AI_PROVIDERS_PATH),
+    ];
+    for path in &candidates {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(providers) = serde_json::from_str::<Vec<AIProvider>>(&contents) else {
+            continue;
+        };
+        for provider in providers {
+            if matches!(
+                provider.provider_type,
+                ProviderType::Custom | ProviderType::Kimi
+            ) {
+                keys.insert(sanitize_key(&provider.name));
+                if provider.provider_type == ProviderType::Kimi {
+                    keys.insert("kimi".to_string());
+                }
+            }
+        }
+        break;
+    }
+    keys
+}
+
 /// Prepare a workspace directory for a mission with skill and tool syncing for a specific backend.
 ///
 /// `boss_user_id` is the API user that owns this (boss) mission. When set, it
@@ -2412,12 +3724,58 @@ pub async fn prepare_mission_workspace_with_skills_backend(
     config_profile: Option<&str>,
     boss_user_id: Option<&str>,
     app_working_dir: Option<&Path>,
+    allow_git_mutations: bool,
+) -> anyhow::Result<PathBuf> {
+    prepare_mission_workspace_with_skills_backend_at(
+        workspace,
+        mcp,
+        library,
+        mission_id,
+        backend_id,
+        custom_providers,
+        config_profile,
+        boss_user_id,
+        app_working_dir,
+        allow_git_mutations,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
+    workspace: &mut Workspace,
+    mcp: &McpRegistry,
+    library: Option<&LibraryStore>,
+    mission_id: Uuid,
+    backend_id: &str,
+    custom_providers: Option<&[AIProvider]>,
+    config_profile: Option<&str>,
+    boss_user_id: Option<&str>,
+    app_working_dir: Option<&Path>,
+    allow_git_mutations: bool,
+    explicit_worktree: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     // Mission workspace directory lives under the selected workspace root.
     // This keeps filesystem and config effects scoped to the mission.
-    let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
+    ensure_persisted_mission_root_is_available(workspace, mission_id)?;
+    verify_mission_directory_before_preparation(workspace, mission_id, explicit_worktree)?;
+    let root = mission_workspace_root_for_workspace(workspace, mission_id);
+    let dir = mission_workspace_dir_for_root(&root, mission_id);
     prepare_workspace_dir(&dir).await?;
+    // Record placement only after initial directory creation succeeds. A failed
+    // first preparation must remain retryable, while a recorded directory that
+    // later disappears still fails the source-loss guard above.
+    persist_mission_workspace_root(workspace, mission_id, &root)?;
     install_remote_build_wrapper(workspace, mission_id).await?;
+    // Reviewers still need authenticated read access to private repositories.
+    // The capability boundary is therefore enforced by command guards and
+    // push-url overrides rather than by removing the connected account.
+    workspace.read_only_command_guard_dir = if allow_git_mutations {
+        None
+    } else {
+        Some(install_read_only_command_guards(&dir).await?)
+    };
 
     // Get custom providers: use provided list or read from file
     let providers_from_file;
@@ -2666,6 +4024,13 @@ pub async fn prepare_mission_workspace_with_skills_backend(
         mission_id,
         app_working_dir,
     );
+    if !allow_git_mutations {
+        tracing::info!(
+            mission = %mission_id,
+            workspace = %workspace.name,
+            "PR read-only capability active; installed git/gh mutation guards"
+        );
+    }
 
     // Sync native opencode agents from profile into the workspace path read by
     // vanilla `opencode`.
@@ -2974,31 +4339,83 @@ pub fn runtime_workspace_file_path(working_dir_root: &Path, mission_id: Option<U
 
 /// Regenerate `opencode.json` for all workspace directories.
 pub async fn sync_all_workspaces(config: &Config, mcp: &McpRegistry) -> anyhow::Result<usize> {
-    let root = workspaces_root(&config.working_dir);
-    if !root.exists() {
-        return Ok(0);
-    }
-
     let mut count = 0;
     let mcp_configs = mcp.list_configs().await;
-    let workspace_env = HashMap::new();
 
-    let mut entries = tokio::fs::read_dir(&root).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    // This entry point is also used by MCP mutations, where only Config is
+    // available.  Load the persisted workspace inventory so custom workspaces
+    // and every verified historic relocated root participate, rather than
+    // scanning only today's default working_dir.
+    let workspace_path = config.working_dir.join(".sandboxed-sh/workspaces.json");
+    let mut workspaces = match std::fs::read_to_string(&workspace_path) {
+        Ok(contents) => serde_json::from_str::<Vec<Workspace>>(&contents)
+            .map_err(|error| anyhow::anyhow!("parse {}: {error}", workspace_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "read {}: {error}",
+                workspace_path.display()
+            ))
         }
+    };
+    if !workspaces
+        .iter()
+        .any(|workspace| workspace.id == DEFAULT_WORKSPACE_ID)
+    {
+        workspaces.push(Workspace::default_host(config.working_dir.clone()));
+    }
+    let mut dirs = std::collections::BTreeMap::new();
+    for workspace in workspaces {
+        // `mission_workspace_roots_for_workspace` validates persisted identity
+        // before returning it. An unavailable/replaced root is therefore not
+        // written through during a global MCP update.
+        for root in mission_workspace_roots_for_workspace(&workspace) {
+            let root = root.canonicalize().map_err(|error| {
+                anyhow::anyhow!(
+                    "canonicalize mission workspace root {}: {error}",
+                    root.display()
+                )
+            })?;
+            let scan_root = workspaces_root_for(&root);
+            if !scan_root.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&scan_root)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    if owns_persisted_mission_directory(&workspace, &path) {
+                        // A verified owner always wins over a provisional
+                        // scan-root match from an overlapping workspace.
+                        dirs.insert(path, workspace.clone());
+                    } else {
+                        dirs.entry(path).or_insert_with(|| workspace.clone());
+                    }
+                }
+            }
+        }
+    }
+    for (path, workspace) in dirs {
+        let mcp_configs = filter_mcp_configs_for_workspace(
+            mcp_configs.clone(),
+            &workspace.mcps,
+            workspace.mcps_replace_defaults,
+        );
+        let skill_allowlist = (!workspace.skills.is_empty()).then_some(workspace.skills.as_slice());
+        // This is a rewrite, not a fresh config.  Preserve the workspace's
+        // own Custom and Kimi provider definitions just as mission
+        // preparation does; otherwise an MCP mutation on a relocated/custom
+        // workspace silently removes the only provider OpenCode can use.
+        let custom_providers = read_custom_providers_from_file(&workspace.path);
         if write_opencode_config(
             &path,
-            mcp_configs.clone(),
-            &config.working_dir,
-            WorkspaceType::Host,
-            &workspace_env,
+            mcp_configs,
+            &workspace.path,
+            workspace.workspace_type,
+            &workspace.env_vars,
+            skill_allowlist,
             None,
-            None, // No command_contents for migration
-            None, // shared_network: not relevant for host workspaces
-            None, // custom_providers: none for migration
+            workspace.shared_network,
+            (!custom_providers.is_empty()).then_some(custom_providers.as_slice()),
         )
         .await
         .is_ok()
@@ -3623,6 +5040,19 @@ if [ "@INSTALL_CODEX@" = "true" ] && [ -n "$NATIVE_PKG_MGR" ] && needs_install c
     echo "[sandboxed] Codex install failed"
   fi
 fi
+# Codex >= 0.150 spawns a sidecar, codex-code-mode-host, that it expects next to
+# the `codex` launcher (/usr/local/bin). The npm/bun package ships it under the
+# platform vendor directory but does not link it, so every tool call died with
+# "failed to spawn code-mode host" (2026-09-04). Expose it whenever it exists.
+if [ "@INSTALL_CODEX@" = "true" ] && command -v codex >/dev/null 2>&1 && [ ! -x /usr/local/bin/codex-code-mode-host ]; then
+  host_bin=$(find /usr/local/lib /usr/lib /root/.bun /root/.npm-global /root/.local -xdev -type f -name codex-code-mode-host 2>/dev/null | head -1)
+  if [ -n "$host_bin" ]; then
+    ln -sfn "$host_bin" /usr/local/bin/codex-code-mode-host
+    echo "[sandboxed] Linked codex-code-mode-host -> $host_bin"
+  else
+    echo "[sandboxed] WARNING: codex-code-mode-host not found in the Codex package; Codex tool calls will fail"
+  fi
+fi
 
 if [ "@INSTALL_GEMINI@" = "true" ] && [ -n "$PKG_MGR" ] && needs_install gemini "$GEMINI_VERSION"; then
   echo "[sandboxed] Installing Gemini CLI ${GEMINI_VERSION:-latest} via $PKG_MGR..."
@@ -4025,6 +5455,380 @@ pub async fn read_sandboxed_config(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_command_guards_block_mutations_and_allow_git_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let guard_dir = install_read_only_command_guards(root.path()).await.unwrap();
+        let original_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        let guarded_path = format!("{}:{original_path}", guard_dir.display());
+
+        let read = std::process::Command::new(guard_dir.join("git"))
+            .arg("--version")
+            .env("PATH", &guarded_path)
+            .output()
+            .unwrap();
+        assert!(read.status.success(), "git read failed: {:?}", read);
+
+        let push = std::process::Command::new(guard_dir.join("git"))
+            .arg("push")
+            .env("PATH", &guarded_path)
+            .output()
+            .unwrap();
+        assert_eq!(push.status.code(), Some(73));
+        assert!(String::from_utf8_lossy(&push.stderr).contains("pr-readonly"));
+
+        let comment = std::process::Command::new(guard_dir.join("gh"))
+            .args(["pr", "comment", "1", "--body", "must not publish"])
+            .env("PATH", &guarded_path)
+            .output()
+            .unwrap();
+        assert_eq!(comment.status.code(), Some(73));
+
+        let api_write = std::process::Command::new(guard_dir.join("gh"))
+            .args(["api", "repos/o/r/issues/1", "--method", "PATCH"])
+            .env("PATH", &guarded_path)
+            .output()
+            .unwrap();
+        assert_eq!(api_write.status.code(), Some(73));
+    }
+
+    #[cfg(unix)]
+    fn clean_git_envs() -> Vec<(&'static str, std::ffi::OsString)> {
+        vec![
+            ("GIT_CONFIG_NOSYSTEM", "1".into()),
+            ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+            ("GIT_CONFIG_SYSTEM", "/dev/null".into()),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn run_real_git(args: &[String], cwd: Option<&std::path::Path>) -> std::process::Output {
+        let original_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args).env_clear().env("PATH", &original_path);
+        for (key, value) in clean_git_envs() {
+            cmd.env(key, value);
+        }
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.output().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn run_guard_git(
+        guard_git: &std::path::Path,
+        guarded_path: &str,
+        args: &[String],
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, std::ffi::OsString)],
+    ) -> std::process::Output {
+        let mut cmd = std::process::Command::new(guard_git);
+        cmd.args(args).env_clear().env("PATH", guarded_path);
+        for (key, value) in clean_git_envs() {
+            cmd.env(key, value);
+        }
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.output().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn git_args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    fn repo_path_str(path: &std::path::Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    fn init_repo_with_staged_file(path: &std::path::Path, file_name: &str) {
+        let repo = repo_path_str(path);
+        let init = run_real_git(&git_args(&["init", &repo]), None);
+        assert!(init.status.success(), "git init failed: {:?}", init);
+        let email = run_real_git(
+            &git_args(&["-C", &repo, "config", "user.email", "fixture@example.com"]),
+            None,
+        );
+        assert!(
+            email.status.success(),
+            "git config email failed: {:?}",
+            email
+        );
+        let name = run_real_git(
+            &git_args(&["-C", &repo, "config", "user.name", "Fixture Test"]),
+            None,
+        );
+        assert!(name.status.success(), "git config name failed: {:?}", name);
+        std::fs::write(path.join(file_name), "fixture content\n").unwrap();
+        let add = run_real_git(&git_args(&["-C", &repo, "add", file_name]), None);
+        assert!(add.status.success(), "git add failed: {:?}", add);
+    }
+
+    #[cfg(unix)]
+    fn assert_guard_denies(output: &std::process::Output, context: &str, subcommand: &str) {
+        assert_eq!(
+            output.status.code(),
+            Some(73),
+            "{context}: git {subcommand} must exit 73, got {:?}",
+            output
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("pr-readonly"),
+            "{context}: git {subcommand} stderr must mention pr-readonly: {:?}",
+            output
+        );
+    }
+
+    #[cfg(unix)]
+    async fn read_only_guard_setup() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let guard_dir = install_read_only_command_guards(root.path()).await.unwrap();
+        let fixture_root = root.path().join(".sandboxed-sh").join("read-only-fixtures");
+        let original_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        let guarded_path = format!("{}:{original_path}", guard_dir.display());
+        (root, fixture_root, guard_dir.join("git"), guarded_path)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guards_allow_commit_inside_isolated_fixture_repo() {
+        let (root, fixture_root, guard_git, guarded_path) = read_only_guard_setup().await;
+        let repo = fixture_root.join("fixture-repo");
+        init_repo_with_staged_file(&repo, "notes.txt");
+
+        let commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "fixture commit one"]),
+            Some(&repo),
+            &[],
+        );
+        assert!(
+            commit.status.success(),
+            "fixture commit must succeed: {:?}",
+            commit
+        );
+
+        let log = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["log", "-1", "--format=%s"]),
+            Some(&repo),
+            &[],
+        );
+        assert!(log.status.success());
+        assert!(String::from_utf8_lossy(&log.stdout).contains("fixture commit one"));
+
+        std::fs::write(repo.join("notes2.txt"), "more fixture content\n").unwrap();
+        let add = run_real_git(
+            &git_args(&["-C", &repo_path_str(&repo), "add", "notes2.txt"]),
+            None,
+        );
+        assert!(add.status.success(), "git add failed: {:?}", add);
+
+        let commit_c_form = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&[
+                "-C",
+                &repo_path_str(&fixture_root),
+                "-C",
+                "fixture-repo",
+                "commit",
+                "-m",
+                "fixture commit two",
+            ]),
+            Some(root.path()),
+            &[],
+        );
+        assert!(
+            commit_c_form.status.success(),
+            "git -C form fixture commit must succeed: {:?}",
+            commit_c_form
+        );
+
+        let log = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["log", "-1", "--format=%s"]),
+            Some(&repo),
+            &[],
+        );
+        assert!(log.status.success());
+        assert!(String::from_utf8_lossy(&log.stdout).contains("fixture commit two"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guards_block_commit_outside_fixture_root() {
+        let (_root, _fixture_root, guard_git, guarded_path) = read_only_guard_setup().await;
+        let protected = tempfile::tempdir().unwrap();
+        let repo = protected.path().join("checkout");
+        init_repo_with_staged_file(&repo, "file.txt");
+
+        let commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "must not commit"]),
+            Some(&repo),
+            &[],
+        );
+        assert_guard_denies(&commit, "protected checkout", "commit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guards_block_commit_through_symlink_escape() {
+        let (_root, fixture_root, guard_git, guarded_path) = read_only_guard_setup().await;
+        let protected = tempfile::tempdir().unwrap();
+        let protected_repo = protected.path().join("checkout");
+        init_repo_with_staged_file(&protected_repo, "file.txt");
+
+        let link = fixture_root.join("escape-link");
+        std::os::unix::fs::symlink(&protected_repo, &link).unwrap();
+
+        let commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "symlink escape"]),
+            Some(&link),
+            &[],
+        );
+        assert_guard_denies(&commit, "symlink escape", "commit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guards_block_commit_with_gitfile_or_env_escape() {
+        let (_root, fixture_root, guard_git, guarded_path) = read_only_guard_setup().await;
+        let protected = tempfile::tempdir().unwrap();
+        let protected_repo = protected.path().join("checkout");
+        init_repo_with_staged_file(&protected_repo, "file.txt");
+
+        let gitfile_repo = fixture_root.join("gitfile-repo");
+        init_repo_with_staged_file(&gitfile_repo, "file.txt");
+        std::fs::remove_dir_all(gitfile_repo.join(".git")).unwrap();
+        std::fs::write(
+            gitfile_repo.join(".git"),
+            format!("gitdir: {}/.git\n", repo_path_str(&protected_repo)),
+        )
+        .unwrap();
+        let gitfile_commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "gitfile escape"]),
+            Some(&gitfile_repo),
+            &[],
+        );
+        assert_guard_denies(&gitfile_commit, "gitfile escape", "commit");
+
+        let metadata_link_repo = fixture_root.join("metadata-link-repo");
+        init_repo_with_staged_file(&metadata_link_repo, "file.txt");
+        std::fs::remove_dir_all(metadata_link_repo.join(".git/refs")).unwrap();
+        std::os::unix::fs::symlink(
+            protected_repo.join(".git/refs"),
+            metadata_link_repo.join(".git/refs"),
+        )
+        .unwrap();
+        let metadata_link_commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "metadata link escape"]),
+            Some(&metadata_link_repo),
+            &[],
+        );
+        assert_guard_denies(&metadata_link_commit, "metadata link escape", "commit");
+
+        let clean_repo = fixture_root.join("clean-repo");
+        init_repo_with_staged_file(&clean_repo, "file.txt");
+        let env_commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "env escape"]),
+            Some(&clean_repo),
+            &[(
+                "GIT_DIR",
+                std::ffi::OsString::from(format!("{}/.git", repo_path_str(&protected_repo))),
+            )],
+        );
+        assert_guard_denies(&env_commit, "GIT_DIR env escape", "commit");
+
+        for variable in [
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ] {
+            let env_commit = run_guard_git(
+                &guard_git,
+                &guarded_path,
+                &git_args(&["commit", "-m", "metadata env escape"]),
+                Some(&clean_repo),
+                &[(
+                    variable,
+                    std::ffi::OsString::from(protected_repo.join(".git")),
+                )],
+            );
+            assert_guard_denies(&env_commit, variable, "commit");
+        }
+
+        let commondir_repo = fixture_root.join("commondir-repo");
+        init_repo_with_staged_file(&commondir_repo, "file.txt");
+        std::fs::write(
+            commondir_repo.join(".git/commondir"),
+            format!("{}\n", repo_path_str(&protected_repo.join(".git"))),
+        )
+        .unwrap();
+        let commondir_commit = run_guard_git(
+            &guard_git,
+            &guarded_path,
+            &git_args(&["commit", "-m", "commondir escape"]),
+            Some(&commondir_repo),
+            &[],
+        );
+        assert_guard_denies(&commondir_commit, "commondir escape", "commit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guards_block_push_and_history_rewrites_from_fixture() {
+        let (_root, fixture_root, guard_git, guarded_path) = read_only_guard_setup().await;
+        let repo = fixture_root.join("fixture-repo");
+        init_repo_with_staged_file(&repo, "file.txt");
+
+        for subcommand in [
+            "push",
+            "merge",
+            "rebase",
+            "tag",
+            "am",
+            "cherry-pick",
+            "revert",
+        ] {
+            let output = run_guard_git(
+                &guard_git,
+                &guarded_path,
+                &git_args(&[subcommand]),
+                Some(&repo),
+                &[],
+            );
+            assert_guard_denies(&output, "from allowed fixture repo", subcommand);
+        }
+    }
+
     fn all_bootstrap_flags() -> HarnessBootstrapFlags {
         HarnessBootstrapFlags {
             claudecode: true,
@@ -4052,6 +5856,10 @@ mod tests {
         // Unpinned harnesses get an empty pin (= install latest when missing).
         assert!(script.contains("GEMINI_VERSION=\"\""));
         assert!(script.contains("@openai/codex@"));
+        assert!(
+            script.contains("codex-code-mode-host"),
+            "the Codex sidecar must be linked after install"
+        );
         assert!(script.contains("@google/gemini-cli@"));
         assert!(script.contains("[ \"$ni_installed\" != \"$ni_expected\" ]"));
         assert!(!script.contains("GROK_VERSION="));
@@ -4150,6 +5958,24 @@ sandboxed-harness-version:grok=\n";
     }
 
     #[test]
+    fn configured_project_path_recognizes_relocated_mission_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut workspace = Workspace::default_host(root.path().to_path_buf());
+        workspace.env_vars.insert(
+            "LEAN_PROJECT_PATH".to_string(),
+            project.to_string_lossy().into_owned(),
+        );
+        let mission = Uuid::new_v4();
+        persist_mission_workspace_root(&workspace, mission, storage.path()).unwrap();
+        let mission_dir = mission_workspace_dir_for_workspace(&workspace, mission);
+
+        assert_eq!(configured_project_dir(&workspace, &mission_dir), project);
+    }
+
+    #[test]
     fn configured_project_path_rejects_parent_traversal() {
         let root = tempfile::tempdir().unwrap();
         let mut workspace =
@@ -4244,6 +6070,12 @@ sandboxed-harness-version:grok=\n";
         assert_eq!(
             tokio::fs::read(shim).await.unwrap(),
             include_bytes!("../../scripts/lake")
+        );
+        assert_eq!(
+            tokio::fs::read_link(root.path().join("usr/local/bin/remote-lean-build"))
+                .await
+                .unwrap(),
+            PathBuf::from("/usr/local/lib/sandboxed-sh/bin/remote-lean-build")
         );
     }
 
@@ -4527,5 +6359,776 @@ WORKING_DIR = "/workspaces/mission-old"
     fn test_codex_reasoning_summary_on_empty_config() {
         let result = ensure_codex_reasoning_summary("");
         assert!(result.starts_with("model_reasoning_summary = \"detailed\"\n"));
+    }
+
+    #[test]
+    fn mission_workspace_root_canonicalizes_symlink_and_rejects_unsafe_fallbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = temp.path().join("legacy");
+        let target = temp.path().join("storage");
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, temp.path().join("storage-link")).unwrap();
+
+        #[cfg(unix)]
+        assert_eq!(
+            resolve_mission_workspace_root(Some(&temp.path().join("storage-link")), &fallback),
+            target.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_mission_workspace_root(Some(&temp.path().join("missing")), &fallback),
+            fallback
+        );
+        assert_eq!(
+            resolve_mission_workspace_root(Some(std::path::Path::new("/tmp/../unsafe")), &fallback),
+            fallback
+        );
+        assert_eq!(
+            resolve_mission_workspace_root_with(Some(&target), &fallback, |_| false),
+            fallback,
+            "an unwritable configured root must fail back even when tests run as root"
+        );
+    }
+
+    #[test]
+    fn existing_mission_directory_keeps_legacy_placement() {
+        let temp = tempfile::tempdir().unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        let legacy = mission_workspace_dir_for_root(&workspace.path, mission);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(
+            mission_workspace_dir_for_workspace(&workspace, mission),
+            legacy
+        );
+    }
+
+    #[test]
+    fn persisted_mission_root_survives_restart_and_config_drift() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("separate-filesystem");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+
+        persist_mission_workspace_root(&workspace, mission, &storage).unwrap();
+
+        // A fresh workspace value models a process restart; the resolver must
+        // use the recorded selection rather than today's configuration.
+        let after_restart = Workspace::default_host(temp.path().to_path_buf());
+        assert_eq!(
+            mission_workspace_dir_for_workspace(&after_restart, mission),
+            mission_workspace_dir_for_root(&storage.canonicalize().unwrap(), mission)
+        );
+        assert!(mission_workspace_roots_for_workspace(&after_restart)
+            .contains(&storage.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn explicit_ancestor_worktree_requires_the_ancestors_verified_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_root = temp.path().join("boss-old-filesystem");
+        let new_root = temp.path().join("worker-new-filesystem");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        let boss = Uuid::new_v4();
+        let worker = Uuid::new_v4();
+        persist_mission_workspace_root(&workspace, boss, &old_root).unwrap();
+        persist_mission_workspace_root(&workspace, worker, &new_root).unwrap();
+        // This test changes the simulated mount authority itself.  Production
+        // writes deliberately refuse to replace a mismatched record, so write
+        // the restored fixture directly before verifying the recovered mount.
+        let mut restored = read_mission_workspace_roots(&workspace).unwrap();
+        restored.insert(
+            boss.to_string(),
+            MissionWorkspaceRootRecord {
+                path: old_root.canonicalize().unwrap().display().to_string(),
+                filesystem_identity: Some(filesystem_identity(&old_root).unwrap()),
+            },
+        );
+        atomic_write_mission_workspace_roots(&mission_workspace_roots_path(&workspace), &restored)
+            .unwrap();
+        let boss_worktree = mission_workspace_dir_for_root(&old_root, boss).join("wk-1");
+        std::fs::create_dir_all(&boss_worktree).unwrap();
+
+        assert_eq!(
+            verify_explicit_mission_working_directory_owner(&workspace, &boss_worktree).unwrap(),
+            boss
+        );
+
+        // Model an unmount that leaves a different filesystem at the same
+        // path. The worker's new root remains valid, but it must not authorize
+        // a turn or offload in the boss's stale worktree.
+        let mut roots = read_mission_workspace_roots(&workspace).unwrap();
+        roots
+            .get_mut(&boss.to_string())
+            .unwrap()
+            .filesystem_identity = Some("dev:replaced:ino:root".to_string());
+        atomic_write_mission_workspace_roots(&mission_workspace_roots_path(&workspace), &roots)
+            .unwrap();
+        assert!(
+            verify_explicit_mission_working_directory_owner(&workspace, &boss_worktree).is_err()
+        );
+
+        // Restoring the selected filesystem identity makes the same worktree
+        // usable again; no fallback to the worker's selected root occurred.
+        let mut restored = read_mission_workspace_roots(&workspace).unwrap();
+        restored.insert(
+            boss.to_string(),
+            MissionWorkspaceRootRecord {
+                path: old_root.canonicalize().unwrap().display().to_string(),
+                filesystem_identity: Some(filesystem_identity(&old_root).unwrap()),
+            },
+        );
+        atomic_write_mission_workspace_roots(&mission_workspace_roots_path(&workspace), &restored)
+            .unwrap();
+        assert_eq!(
+            verify_explicit_mission_working_directory_owner(&workspace, &boss_worktree).unwrap(),
+            boss
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_initial_mission_directory_creation_can_be_retried() {
+        for container in [false, true] {
+            for with_skills in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("workspace");
+                std::fs::create_dir_all(&root).unwrap();
+                let mut workspace = if container {
+                    Workspace::new_container("test-container".into(), root)
+                } else {
+                    Workspace::default_host(root)
+                };
+                if container {
+                    stamp_custom_workspace_control_registry(&mut workspace, temp.path());
+                    ensure_workspace_root_identity_recorded(&workspace);
+                }
+                let mission = Uuid::new_v4();
+                let dir = mission_workspace_dir_for_workspace(&workspace, mission);
+                std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+                // A filesystem obstacle prevents the first directory creation.
+                // It is removed before retry, as with a repaired transient error.
+                std::fs::write(&dir, "obstacle").unwrap();
+                let mcp = McpRegistry::new(temp.path()).await;
+                let result = if with_skills {
+                    prepare_mission_workspace_with_skills_backend(
+                        &mut workspace,
+                        &mcp,
+                        None,
+                        mission,
+                        "opencode",
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
+                    )
+                    .await
+                } else {
+                    prepare_mission_workspace_in(&workspace, &mcp, mission).await
+                };
+                assert!(result.is_err());
+                std::fs::remove_file(&dir).unwrap();
+                verify_mission_directory_before_preparation(&workspace, mission, None)
+                    .expect("failed first creation must not be recorded as lost source");
+                let prepared = prepare_mission_workspace_in(&workspace, &mcp, mission)
+                    .await
+                    .unwrap();
+                assert_eq!(prepared, dir);
+                assert!(prepared.join("output").is_dir());
+                assert!(prepared.join("temp").is_dir());
+                assert!(read_mission_workspace_roots(&workspace)
+                    .unwrap()
+                    .contains_key(&mission.to_string()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_auxiliary_directory_requires_an_intact_verified_explicit_worktree() {
+        for container in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("workspace");
+            std::fs::create_dir_all(&root).unwrap();
+            let mut workspace = if container {
+                Workspace::new_container("test-container".into(), root)
+            } else {
+                Workspace::default_host(root)
+            };
+            if container {
+                stamp_custom_workspace_control_registry(&mut workspace, temp.path());
+                ensure_workspace_root_identity_recorded(&workspace);
+            }
+            let boss = Uuid::new_v4();
+            let worker = Uuid::new_v4();
+            let mcp = McpRegistry::new(temp.path()).await;
+            let boss_dir = prepare_mission_workspace_in(&workspace, &mcp, boss)
+                .await
+                .unwrap();
+            let worktree = boss_dir.join("wk-1");
+            std::fs::create_dir(&worktree).unwrap();
+            std::fs::write(worktree.join("source.lean"), "preserved source").unwrap();
+            let auxiliary = prepare_mission_workspace_in(&workspace, &mcp, worker)
+                .await
+                .unwrap();
+            std::fs::remove_dir_all(&auxiliary).unwrap();
+            let restored = prepare_mission_workspace_with_skills_backend_at(
+                &mut workspace,
+                &mcp,
+                None,
+                worker,
+                "opencode",
+                None,
+                None,
+                None,
+                None,
+                true,
+                Some(&worktree),
+            )
+            .await
+            .unwrap();
+            assert_eq!(restored, auxiliary);
+            assert!(restored.join("output").is_dir());
+            assert_eq!(
+                std::fs::read_to_string(worktree.join("source.lean")).unwrap(),
+                "preserved source"
+            );
+            std::fs::remove_dir_all(&auxiliary).unwrap();
+            let arbitrary = temp.path().join("unregistered");
+            std::fs::create_dir(&arbitrary).unwrap();
+            assert!(prepare_mission_workspace_with_skills_backend_at(
+                &mut workspace,
+                &mcp,
+                None,
+                worker,
+                "opencode",
+                None,
+                None,
+                None,
+                None,
+                true,
+                Some(&arbitrary),
+            )
+            .await
+            .is_err());
+            assert!(!auxiliary.exists());
+            std::fs::remove_dir_all(&worktree).unwrap();
+            assert!(prepare_mission_workspace_with_skills_backend_at(
+                &mut workspace,
+                &mcp,
+                None,
+                worker,
+                "opencode",
+                None,
+                None,
+                None,
+                None,
+                true,
+                Some(&worktree),
+            )
+            .await
+            .is_err());
+            assert!(!auxiliary.exists());
+            assert!(!worktree.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_host_and_container_mission_directories_are_not_recreated_as_config_only() {
+        for container in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("workspace");
+            std::fs::create_dir_all(&root).unwrap();
+            let mut workspace = if container {
+                Workspace::new_container("test-container".into(), root)
+            } else {
+                Workspace::default_host(root)
+            };
+            if container {
+                stamp_custom_workspace_control_registry(&mut workspace, temp.path());
+                ensure_workspace_root_identity_recorded(&workspace);
+            }
+            let mission = Uuid::new_v4();
+            let mcp = McpRegistry::new(temp.path()).await;
+            let prepared = prepare_mission_workspace_in(&workspace, &mcp, mission)
+                .await
+                .unwrap();
+            std::fs::create_dir(prepared.join("verity")).unwrap();
+            std::fs::write(prepared.join("verity/source.lean"), "original source").unwrap();
+            std::fs::remove_dir_all(&prepared).unwrap();
+            let error = prepare_mission_workspace_in(&workspace, &mcp, mission)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("recorded mission directory is unavailable"));
+            assert!(
+                !prepared.exists(),
+                "missing source must not become a config-only tree"
+            );
+            assert!(workspace.path.is_dir());
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_persisted_mission_root_fails_closed_before_configured_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("temporarily-unmounted-storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+
+        persist_mission_workspace_root(&workspace, mission, &storage).unwrap();
+        // Model an unavailable mount after a restart. Preparation checks this
+        // persisted selection before resolving MISSION_WORKSPACE_ROOT, so it
+        // must surface an error rather than creating a new mission directory
+        // under today's configured root.
+        std::fs::remove_dir(&storage).unwrap();
+        let mcp = McpRegistry::new(temp.path()).await;
+        let result = require_verified_mission_workspace(
+            prepare_mission_workspace_in(&workspace, &mcp, mission).await,
+        );
+
+        assert!(result.is_err());
+        assert!(!mission_workspace_dir_for_root(temp.path(), mission).exists());
+
+        // Model the execution boundary with a launch sentinel. A failed
+        // persisted-placement preparation must return before a harness or a
+        // continuation process receives a working directory.
+        let mut launches = 0;
+        if let Ok(dir) = result {
+            launches += 1;
+            std::fs::write(dir.join("launch-sentinel"), "launched").unwrap();
+        }
+        assert_eq!(launches, 0, "no process may launch on an unverified root");
+
+        // Recreating the mountpoint is *not* restoration of the selected
+        // filesystem: it has a different root inode and must remain blocked.
+        // A real remount retains the mounted filesystem's root identity; that
+        // normal restart path is covered by
+        // `persisted_mission_root_survives_restart_and_config_drift`.
+        std::fs::create_dir(&storage).unwrap();
+        assert!(require_verified_mission_workspace(
+            prepare_mission_workspace_in(&workspace, &mcp, mission).await,
+        )
+        .is_err());
+        assert_eq!(launches, 0);
+        assert!(!mission_workspace_dir_for_root(temp.path(), mission)
+            .join("launch-sentinel")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_root_identity_mismatch_fails_closed_without_recreating_on_mountpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("mountpoint-left-after-unmount");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        let registry_dir = config_root(&workspace.path);
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        // This models the same path after its volume was unmounted: it is
+        // still a directory, but `st_dev` no longer matches the identity that
+        // was recorded when the mission was placed there.
+        std::fs::write(
+            mission_workspace_roots_path(&workspace),
+            serde_json::json!({mission.to_string(): {
+                "path": storage,
+                "filesystem_identity": "dev:identity-before-unmount"
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let mcp = McpRegistry::new(temp.path()).await;
+        let result = prepare_mission_workspace_in(&workspace, &mcp, mission).await;
+        assert!(result.is_err());
+        assert!(!mission_workspace_dir_for_root(temp.path(), mission).exists());
+        assert!(ensure_persisted_mission_root_is_available(&workspace, mission).is_err());
+    }
+
+    #[test]
+    fn legacy_path_only_record_is_migrated_only_after_the_root_is_reachable() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("legacy-storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        std::fs::create_dir_all(config_root(&workspace.path)).unwrap();
+        std::fs::write(
+            mission_workspace_roots_path(&workspace),
+            serde_json::json!({mission.to_string(): storage}).to_string(),
+        )
+        .unwrap();
+
+        ensure_persisted_mission_root_is_available(&workspace, mission).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(mission_workspace_roots_path(&workspace)).unwrap(),
+        )
+        .unwrap();
+        assert!(saved[mission.to_string()]["filesystem_identity"].is_string());
+        // A fresh workspace models restart: the migrated entry still resolves
+        // to the selected root rather than today's configured placement.
+        assert_eq!(
+            mission_workspace_root_for_workspace(
+                &Workspace::default_host(temp.path().to_path_buf()),
+                mission
+            ),
+            storage.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_mount_identity_is_upgraded_after_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("legacy-device-storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        std::fs::create_dir_all(config_root(&workspace.path)).unwrap();
+        let current = filesystem_identity(&storage).unwrap();
+        let mount_formatted = format!("mount:12345:{current}");
+        std::fs::write(
+            mission_workspace_roots_path(&workspace),
+            serde_json::json!({mission.to_string(): {
+                "path": storage,
+                "filesystem_identity": mount_formatted,
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        ensure_persisted_mission_root_is_available(&workspace, mission).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(mission_workspace_roots_path(&workspace)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved[mission.to_string()]["filesystem_identity"],
+            serde_json::Value::String(current)
+        );
+    }
+
+    #[test]
+    fn device_only_identity_fails_closed_instead_of_accepting_bind_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("legacy-device-storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let mission = Uuid::new_v4();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        std::fs::create_dir_all(config_root(&workspace.path)).unwrap();
+        // A device-only predecessor record has no directory binding and must
+        // never be promoted on a bind-mount/unmount look-alike.
+        let device_only = "dev:legacy-device-only".to_string();
+        std::fs::write(
+            mission_workspace_roots_path(&workspace),
+            serde_json::json!({mission.to_string(): {
+                "path": storage,
+                "filesystem_identity": device_only,
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(ensure_persisted_mission_root_is_available(&workspace, mission).is_err());
+    }
+
+    #[test]
+    fn legacy_device_inode_identity_migrates_to_reboot_stable_mount_identity() {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let temp = tempfile::tempdir().unwrap();
+            let storage = temp.path().join("legacy-device-inode-storage");
+            std::fs::create_dir_all(&storage).unwrap();
+            let mission = Uuid::new_v4();
+            let workspace = Workspace::default_host(temp.path().to_path_buf());
+            std::fs::create_dir_all(config_root(&workspace.path)).unwrap();
+            let inode = std::fs::metadata(&storage).unwrap().ino();
+            std::fs::write(
+                mission_workspace_roots_path(&workspace),
+                serde_json::json!({mission.to_string(): {
+                    "path": storage,
+                    "filesystem_identity": format!("dev:renumbered-after-reboot:ino:{inode}")
+                }})
+                .to_string(),
+            )
+            .unwrap();
+
+            ensure_persisted_mission_root_is_available(&workspace, mission).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(mission_workspace_roots_path(&workspace)).unwrap(),
+            )
+            .unwrap();
+            let identity = saved[mission.to_string()]["filesystem_identity"]
+                .as_str()
+                .unwrap();
+            assert!(identity.starts_with("linux-v2:"));
+            assert!(!identity.contains("dev:renumbered-after-reboot"));
+        }
+    }
+
+    #[test]
+    fn mission_root_registry_serializes_concurrent_writers_and_readers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("separate-filesystem");
+        std::fs::create_dir_all(&storage).unwrap();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        let missions: Vec<_> = (0..24).map(|_| Uuid::new_v4()).collect();
+        let start = Arc::new(Barrier::new(missions.len() + 2));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let reader_workspace = workspace.clone();
+        let reader_start = Arc::clone(&start);
+        let reader_finished = Arc::clone(&finished);
+        let reader = std::thread::spawn(move || {
+            reader_start.wait();
+            while !reader_finished.load(Ordering::Acquire) {
+                let path = mission_workspace_roots_path(&reader_workspace);
+                if let Ok(contents) = std::fs::read_to_string(path) {
+                    let _: HashMap<String, MissionWorkspaceRootRecordOnDisk> =
+                        serde_json::from_str(&contents)
+                            .expect("readers must never observe partial registry JSON");
+                }
+            }
+        });
+
+        let writers: Vec<_> = missions
+            .iter()
+            .copied()
+            .map(|mission| {
+                let workspace = workspace.clone();
+                let storage = storage.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    persist_mission_workspace_root(&workspace, mission, &storage).unwrap();
+                })
+            })
+            .collect();
+        start.wait();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        finished.store(true, Ordering::Release);
+        reader.join().unwrap();
+
+        let after_restart = Workspace::default_host(temp.path().to_path_buf());
+        let contents =
+            std::fs::read_to_string(mission_workspace_roots_path(&after_restart)).unwrap();
+        let roots: HashMap<String, MissionWorkspaceRootRecordOnDisk> =
+            serde_json::from_str(&contents).unwrap();
+        assert_eq!(
+            roots.len(),
+            missions.len(),
+            "no concurrent update may be lost"
+        );
+        for mission in missions {
+            // A new workspace value models restart/config drift: every entry
+            // remains independently recoverable from the durable registry.
+            assert_eq!(
+                mission_workspace_root_for_workspace(&after_restart, mission),
+                storage.canonicalize().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn mission_root_registry_persistence_failure_is_returned() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        std::fs::write(config_root(&workspace.path), "not a directory").unwrap();
+
+        assert!(persist_mission_workspace_root(&workspace, Uuid::new_v4(), temp.path()).is_err());
+    }
+
+    #[test]
+    fn mission_workspace_root_defaults_to_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_mission_workspace_root(None, temp.path()),
+            temp.path()
+        );
+    }
+
+    #[test]
+    fn global_mcp_sync_provider_source_includes_workspace_custom_and_kimi() {
+        let temp = tempfile::tempdir().unwrap();
+        let providers_dir = temp.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+
+        let mut custom = AIProvider::new(ProviderType::Custom, "Local Relay".into());
+        custom.base_url = Some("https://relay.invalid/v1".into());
+        let mut kimi = AIProvider::new(ProviderType::Kimi, "Kimi".into());
+        kimi.base_url = Some("https://kimi.invalid/v1".into());
+        std::fs::write(
+            providers_dir.join("ai_providers.json"),
+            serde_json::to_vec(&vec![custom, kimi]).unwrap(),
+        )
+        .unwrap();
+
+        let providers = read_custom_providers_from_file(temp.path());
+        assert_eq!(providers.len(), 2);
+        assert!(providers
+            .iter()
+            .any(|p| p.provider_type == ProviderType::Custom));
+        assert!(providers
+            .iter()
+            .any(|p| p.provider_type == ProviderType::Kimi));
+    }
+
+    #[test]
+    fn adding_a_custom_workspace_initializes_an_empty_control_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workspace = Workspace::new_container("custom".into(), temp.path().join("mount"));
+        std::fs::create_dir_all(&workspace.path).unwrap();
+        stamp_custom_workspace_control_registry(&mut workspace, temp.path());
+        assert!(workspace.config[CONTROL_REGISTRY_CONFIG_KEY].is_string());
+        let registry = mission_workspace_roots_path(&workspace);
+        assert!(
+            registry.exists(),
+            "first-use custom workspace needs a control registry"
+        );
+        let contents = std::fs::read_to_string(&registry).unwrap();
+        let parsed: HashMap<String, MissionWorkspaceRootRecordOnDisk> =
+            serde_json::from_str(&contents).unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(parsed.contains_key(WORKSPACE_ROOT_REGISTRY_KEY));
+        } else {
+            assert!(!parsed.keys().any(|key| key != WORKSPACE_ROOT_REGISTRY_KEY));
+        }
+        if filesystem_identity(&workspace.path).is_ok() {
+            assert!(ensure_persisted_mission_root_is_available(&workspace, Uuid::new_v4()).is_ok());
+        }
+    }
+
+    #[test]
+    fn custom_workspace_volume_identity_mismatch_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workspace = Workspace::new_container("custom".into(), temp.path().join("mount"));
+        std::fs::create_dir_all(&workspace.path).unwrap();
+        stamp_custom_workspace_control_registry(&mut workspace, temp.path());
+        let registry = mission_workspace_roots_path(&workspace);
+        let mut roots: HashMap<String, MissionWorkspaceRootRecord> = HashMap::new();
+        roots.insert(
+            WORKSPACE_ROOT_REGISTRY_KEY.to_string(),
+            MissionWorkspaceRootRecord {
+                path: workspace.path.to_string_lossy().into_owned(),
+                filesystem_identity: Some("linux-v2:replaced-volume:root-ino:1".into()),
+            },
+        );
+        atomic_write_mission_workspace_roots(&registry, &roots).unwrap();
+        assert!(ensure_persisted_mission_root_is_available(&workspace, Uuid::new_v4()).is_err());
+    }
+
+    #[tokio::test]
+    async fn update_preserves_control_registry_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(temp.path().to_path_buf()).await;
+        let workspace = Workspace::new_container("custom".into(), temp.path().join("mount"));
+        std::fs::create_dir_all(&workspace.path).unwrap();
+        let id = store.add(workspace).await;
+        let original = store.get(id).await.unwrap();
+        let original_root = original.config[CONTROL_REGISTRY_CONFIG_KEY]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut overwritten = original.clone();
+        overwritten.config = serde_json::json!({
+            "mission_workspace_registry_control_root": "/tmp/attacker-control-root",
+            "unrelated": true
+        });
+        assert!(store.update(overwritten).await);
+        let after = store.get(id).await.unwrap();
+        assert_eq!(
+            after.config[CONTROL_REGISTRY_CONFIG_KEY].as_str(),
+            Some(original_root.as_str())
+        );
+        assert_eq!(after.config["unrelated"], true);
+
+        let mut replaced = after.clone();
+        replaced.config = serde_json::Value::String("not-an-object".into());
+        assert!(store.update(replaced).await);
+        let restored = store.get(id).await.unwrap();
+        assert_eq!(
+            restored.config[CONTROL_REGISTRY_CONFIG_KEY].as_str(),
+            Some(original_root.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_custom_workspace_removes_its_control_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(temp.path().to_path_buf()).await;
+        let mut workspace = Workspace::new_container("doomed".into(), temp.path().join("mount"));
+        std::fs::create_dir_all(&workspace.path).unwrap();
+        let id = store.add(workspace.clone()).await;
+        workspace = store.get(id).await.unwrap();
+        let registry = mission_workspace_roots_path(&workspace);
+        assert!(registry.exists());
+        assert!(store.delete(id).await);
+        assert!(!registry.exists());
+    }
+
+    #[test]
+    fn legacy_explicit_generated_directory_can_be_adopted() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::default_host(temp.path().to_path_buf());
+        let mission = Uuid::parse_str("abcd0000-0000-4000-8000-000000000000").unwrap();
+        let worktree = mission_workspace_dir_for_root(temp.path(), mission).join("wk");
+        std::fs::create_dir_all(&worktree).unwrap();
+        assert!(verify_explicit_mission_working_directory_owner(&workspace, &worktree).is_err());
+        assert!(is_generated_mission_directory_under_known_root(
+            &workspace, &worktree
+        ));
+        match adopt_legacy_explicit_working_directory(&workspace, &worktree, &[mission]) {
+            Ok(Some(id)) => {
+                assert_eq!(id, mission);
+                assert_eq!(
+                    verify_explicit_mission_working_directory_owner(&workspace, &worktree).unwrap(),
+                    mission
+                );
+            }
+            Ok(None) | Err(_) => {
+                // Persisting a registry identity requires Linux mountinfo.
+                assert!(
+                    !cfg!(target_os = "linux"),
+                    "legacy adoption must persist on Linux"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strip_workspace_prefix_follows_a_symlink_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("srv/containers/dumbcontracts");
+        std::fs::create_dir_all(
+            real.join("workspaces/mission-bf2b79ee/.sandboxed-sh/mcp-launchers"),
+        )
+        .unwrap();
+        let link_parent = temp.path().join("root/.sandboxed-sh/containers");
+        std::fs::create_dir_all(&link_parent).unwrap();
+        let link = link_parent.join("dumbcontracts");
+        symlink(&real, &link).unwrap();
+
+        let child = real.join("workspaces/mission-bf2b79ee/.sandboxed-sh/mcp-launchers/x.sh");
+        std::fs::write(&child, "#!/bin/bash\n").unwrap();
+
+        let relative = strip_workspace_prefix(&child, &link).expect("same directory via symlink");
+        assert_eq!(
+            relative,
+            PathBuf::from("workspaces/mission-bf2b79ee/.sandboxed-sh/mcp-launchers/x.sh")
+        );
     }
 }

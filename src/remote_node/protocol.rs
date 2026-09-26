@@ -15,9 +15,13 @@ use super::RemoteNodeError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Current node protocol version reported by heartbeats.
-pub const NODE_PROTOCOL_VERSION: u32 = 3;
+pub const NODE_PROTOCOL_VERSION: u32 = 4;
 /// First protocol that reports `active_jobs` and `queued_jobs` in heartbeats.
 pub const NODE_JOB_COUNTER_PROTOCOL_VERSION: u32 = 2;
+
+/// HTTP body ceiling for source submissions: gzip on core ingress, plain JSON
+/// on node ingress. Keep independent from the decoded-source and gzip expansion caps.
+pub const MAX_SOURCE_REQUEST_BODY_BYTES: usize = 50 * 1024 * 1024;
 
 /// Lease scope for the synchronous `/execute` path.
 pub const SCOPE_MISSION_EXECUTE: &str = "mission:execute";
@@ -30,13 +34,15 @@ fn default_protocol_version() -> u32 {
     1
 }
 
-/// Node heartbeat payload (v2).
+/// Node heartbeat payload (v4 with additive capacity reporting).
 ///
 /// All fields beyond the original v1 set are `#[serde(default)]`-tolerant so
 /// core can parse heartbeats from nodes that were not yet upgraded, and old
 /// cores simply ignore the extra fields of new nodes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeHeartbeat {
+    #[serde(default)]
+    pub resource_history: Vec<crate::node::resource_history::Sample>,
     pub node_id: String,
     pub online: bool,
     pub capacity_total: u32,
@@ -74,6 +80,79 @@ pub struct NodeHeartbeat {
     /// older node that predates readiness reporting.
     #[serde(default)]
     pub lean_runtime_ready: Option<bool>,
+    /// Effective decoded file-byte ceilings, including positive operator overrides.
+    /// Absent on legacy receivers; additive to v4, not a new payload protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bundle_capacity: Option<SourceBundleCapacity>,
+    /// Managed-auth profiles this node can inject into raw jobs (see
+    /// `JobPayload::RawCommand::managed_auth`), e.g. `["grok"]` when
+    /// `SANDBOXED_NODE_GROK_HOME` holds a readable `auth.json`. Empty on nodes
+    /// that predate managed auth or have none configured.
+    #[serde(default)]
+    pub managed_auth: Vec<String>,
+}
+
+/// Decoded file-byte limits enforced by the receiver for each bundle mode.
+/// Core separately gates the exact serialized job against the HTTP body limit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceBundleCapacity {
+    pub overlay_bytes: u64,
+    pub complete_bytes: u64,
+}
+
+/// Placement input derived from actual base64 contents, never a caller estimate.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceBundleRequirement {
+    pub complete: bool,
+    pub bytes: u64,
+}
+
+impl SourceBundleRequirement {
+    pub fn from_bundle(bundle: &SourceBundle) -> Result<Self, String> {
+        let mut bytes = 0u64;
+        for file in &bundle.files {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&file.data_base64)
+                .map_err(|_| format!("invalid source bundle base64 for '{}'", file.path))?;
+            bytes = bytes
+                .checked_add(decoded.len() as u64)
+                .ok_or_else(|| "source bundle size overflow".to_string())?;
+        }
+        Ok(Self {
+            complete: bundle.complete,
+            bytes,
+        })
+    }
+
+    /// Legacy compatibility assumes the historical default ceilings. A legacy
+    /// heartbeat cannot reveal private overrides; larger payloads require an
+    /// explicit advertisement. Updated nodes always advertise their overrides.
+    pub fn check(self, heartbeat: &NodeHeartbeat) -> Result<(), String> {
+        let capacity = heartbeat
+            .source_bundle_capacity
+            .unwrap_or(SourceBundleCapacity {
+                overlay_bytes: 1 << 20,
+                complete_bytes: 16 << 20,
+            });
+        let limit = if self.complete {
+            capacity.complete_bytes
+        } else {
+            capacity.overlay_bytes
+        };
+        if self.bytes > limit {
+            return Err(format!(
+                "source bundle requires {} decoded bytes; receiver capacity is {}{}",
+                self.bytes,
+                limit,
+                if heartbeat.source_bundle_capacity.is_none() {
+                    " (legacy, unadvertised)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Legacy per-node status shape (kept for API compatibility).
@@ -118,20 +197,37 @@ pub struct ExecuteResponse {
     pub stderr: String,
 }
 
-/// Git source of a declarative build job: the node fetches exactly this
-/// commit itself, so no workspace sync between core and node is needed.
+/// Git source of a declarative build job. New clients attach a complete,
+/// commit-bound archive; legacy public builds may still let the node fetch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobSource {
-    /// Clone/fetch URL (https or ssh).
+    /// Credential-free repository identity and legacy clone/fetch URL.
     pub repo: String,
     /// Full 40-char lowercase hex commit SHA. Branch names are rejected so a
     /// job always builds a pinned, reproducible tree.
     pub commit: String,
+    /// Optional complete Git object pack for `commit`. When present, the node
+    /// materializes the checkout without contacting `repo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<Box<SourceArchive>>,
     /// Optional bounded overlay applied after resetting the pinned checkout.
     /// This lets a local-only proof source run remotely without creating or
     /// pushing a Git commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<SourceBundle>,
+    /// Root tree of `commit` as the submitter saw it. The node verifies the
+    /// checked-out `HEAD^{tree}` against it before building, so content
+    /// identity (tree, not commit) is what a receipt proves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_tree_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceArchive {
+    /// SHA-256 over `sandboxed-source-archive-v1\0<commit>\0<pack bytes>`.
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub data_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,12 +235,28 @@ pub struct SourceBundleFile {
     pub path: String,
     pub sha256: String,
     pub data_base64: String,
+    /// Preserve the executable bit for local-only scripts. Absent on v1-v3
+    /// bundles, where files retain the checkout/default mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceBundle {
     pub manifest_sha256: String,
     pub files: Vec<SourceBundleFile>,
+    /// Complete source tree that can be materialized without fetching the
+    /// repository. Private-repository runners therefore need no Git secret.
+    #[serde(default)]
+    pub complete: bool,
+    /// Tracked files removed by the local candidate. Renames are represented
+    /// as one deletion plus one regular file entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_paths: Vec<String>,
+    /// Digest covering deletions and executable-mode metadata. Required when
+    /// either feature is present so an intermediary cannot strip operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations_sha256: Option<String>,
 }
 
 /// One artifact produced by a build job, relative to the checkout root.
@@ -170,13 +282,23 @@ pub enum JobPayload {
         timeout_secs: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         env: Option<std::collections::HashMap<String, String>>,
+        /// Node-managed credential profiles to inject, by name only (today:
+        /// `grok`). The node resolves each name to its own operator-configured
+        /// trusted directory (`SANDBOXED_NODE_GROK_HOME`) and exports the
+        /// CLI's home override, so no credential and no path ever travels in
+        /// the payload or lands in the node's job database/logs. Unknown or
+        /// unconfigured profiles are rejected at submission. Nodes that
+        /// predate managed auth ignore the field, so commands must fail closed
+        /// when the expected environment is missing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        managed_auth: Vec<String>,
     },
     /// Declarative Lean build: the node checks out `source` into a
     /// content-addressed checkout, restores shared elan/lake caches, runs a
     /// constrained `lake`/`lean`/`elan` argv, and reports artifact digests.
     /// See `src/node/lean.rs` for validation and execution.
     LeanBuild {
-        source: JobSource,
+        source: Box<JobSource>,
         /// Build cwd relative to the checkout root (validated: no traversal,
         /// no shell metacharacters). `None`/empty = checkout root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +365,28 @@ pub struct NodeJobStatus {
     /// commands and for pre-artifact nodes).
     #[serde(default)]
     pub artifacts: Vec<ArtifactEntry>,
+}
+
+/// Body of `GET /jobs/:id/log?offset=N`: a bounded byte range of the job's
+/// combined stdout+stderr log starting at `offset`. A chunk that does not
+/// reach the current end of the log ends on a newline boundary, so
+/// line-oriented consumers can parse every chunk after carrying over at most
+/// one partial trailing line. Nodes that predate this route answer 404;
+/// consumers fall back to the terminal `log_tail`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobLogChunk {
+    pub job_id: Uuid,
+    /// Offset the chunk starts at (clamped to the log length).
+    pub offset: u64,
+    /// Offset to request next; equals `log_len` when the chunk reached the
+    /// current end of the log.
+    pub next_offset: u64,
+    /// Total log bytes at the time of the read.
+    pub log_len: u64,
+    /// Chunk bytes, lossily decoded as UTF-8.
+    pub data: String,
+    /// Job state at the time of the read (`queued | running | succeeded | ...`).
+    pub state: String,
 }
 
 /// Body of `POST /jobs/:id/cancel`.
@@ -335,6 +479,56 @@ pub fn parse_labels(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_capacity_wire_and_actual_payload_size() {
+        let legacy = serde_json::json!({"node_id":"old", "online":true,
+            "capacity_total":1, "capacity_available":1, "active_leases":0,
+            "version":"old", "protocol_version":4});
+        let old: NodeHeartbeat = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(old.source_bundle_capacity, None);
+        let mut updated = legacy;
+        updated["source_bundle_capacity"] =
+            serde_json::json!({"overlay_bytes":2,"complete_bytes":3});
+        let hb: NodeHeartbeat = serde_json::from_value(updated.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hb).unwrap()["source_bundle_capacity"],
+            updated["source_bundle_capacity"]
+        );
+        let mut bundle = SourceBundle {
+            manifest_sha256: String::new(),
+            complete: true,
+            deleted_paths: vec!["deleted".into()],
+            operations_sha256: None,
+            files: vec![
+                SourceBundleFile {
+                    path: "binary".into(),
+                    sha256: String::new(),
+                    data_base64: "AP8=".into(),
+                    executable: None,
+                },
+                SourceBundleFile {
+                    path: "text".into(),
+                    sha256: String::new(),
+                    data_base64: "YQ==".into(),
+                    executable: Some(true),
+                },
+            ],
+        };
+        let source = SourceBundleRequirement::from_bundle(&bundle).unwrap();
+        assert_eq!(source.bytes, 3); // decoded bytes, not base64 length or deletion metadata
+        assert!(source.check(&hb).is_ok());
+        bundle.complete = false;
+        assert!(SourceBundleRequirement::from_bundle(&bundle)
+            .unwrap()
+            .check(&hb)
+            .is_err());
+        bundle.files[0].data_base64 = "!bad".into();
+        assert!(SourceBundleRequirement::from_bundle(&bundle).is_err());
+        let mut zero = hb;
+        zero.source_bundle_capacity.as_mut().unwrap().complete_bytes = 0;
+        assert!(source.check(&zero).is_err()); // zero is not a missing capability
+    }
 
     #[test]
     fn validates_scoped_lease_token() {
@@ -445,6 +639,7 @@ mod tests {
     #[test]
     fn job_payload_round_trips_with_kind_tag() {
         let payload = JobPayload::RawCommand {
+            managed_auth: Vec::new(),
             command: "cargo test".to_string(),
             timeout_secs: Some(600),
             env: Some(
@@ -468,6 +663,7 @@ mod tests {
         assert_eq!(
             minimal,
             JobPayload::RawCommand {
+                managed_auth: Vec::new(),
                 command: "true".to_string(),
                 timeout_secs: None,
                 env: None,
@@ -485,11 +681,13 @@ mod tests {
     #[test]
     fn lean_build_payload_round_trips_with_defaults() {
         let payload = JobPayload::LeanBuild {
-            source: JobSource {
+            source: Box::new(JobSource {
+                base_tree_sha: None,
                 repo: "https://github.com/example/verity.git".to_string(),
                 commit: "a".repeat(40),
+                archive: None,
                 bundle: None,
-            },
+            }),
             cwd_rel: Some("morpho-verity".to_string()),
             command: vec!["lake".to_string(), "build".to_string()],
             timeout_secs: Some(3600),
@@ -602,6 +800,7 @@ mod tests {
     #[test]
     fn heartbeat_v2_round_trips() {
         let heartbeat = NodeHeartbeat {
+            resource_history: Vec::new(),
             node_id: "babylon".to_string(),
             online: true,
             capacity_total: 4,
@@ -618,7 +817,9 @@ mod tests {
             active_jobs: 1,
             queued_jobs: 2,
             cached_toolchains: vec![],
+            source_bundle_capacity: None,
             lean_runtime_ready: Some(true),
+            managed_auth: Vec::new(),
         };
         let json = serde_json::to_string(&heartbeat).unwrap();
         let parsed: NodeHeartbeat = serde_json::from_str(&json).unwrap();
@@ -629,5 +830,29 @@ mod tests {
     fn parses_label_lists() {
         assert_eq!(parse_labels("gpu, lean ,,x"), vec!["gpu", "lean", "x"]);
         assert!(parse_labels("  ").is_empty());
+    }
+}
+
+/// A node-reported lost job is an observation failure (including node restart),
+/// not evidence that its old process ended. Only execution terminal responses
+/// authorize retiring an accepted/tentative ownership fence.
+pub fn job_state_confirms_termination(state: &str) -> bool {
+    matches!(state, "succeeded" | "failed" | "cancelled")
+}
+
+/// Status used when the node answers 404 for a job we were still fencing.
+/// The process is already gone; looping on cancel would never terminate.
+pub fn missing_job_cancelled(mission_id: Uuid, job_id: Uuid) -> NodeJobStatus {
+    NodeJobStatus {
+        job_id,
+        mission_id,
+        state: "cancelled".to_string(),
+        exit_code: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        error: Some("job not found on node".to_string()),
+        log_tail: None,
+        artifacts: Vec::new(),
     }
 }

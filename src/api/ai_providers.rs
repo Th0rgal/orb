@@ -288,6 +288,12 @@ pub async fn ensure_openai_api_key_for_codex(working_dir: &Path) -> Result<(), S
     if get_openai_api_key_for_codex_default(working_dir).is_some() {
         return Ok(());
     }
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::OpenAI,
+        "ensure_openai_api_key_for_codex",
+    ) {
+        return Ok(());
+    }
 
     let Some(entry) = read_oauth_token_entry(ProviderType::OpenAI) else {
         return Ok(());
@@ -373,6 +379,204 @@ fn grok_auth_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Newest host `~/.grok/auth.json` that the Grok CLI will actually accept.
+///
+/// Skips the legacy `auth_mode: "oauth"` shape older Sandboxed.sh releases
+/// wrote — Grok CLI 0.2.93 rejects it.
+fn newest_usable_grok_auth_file(candidates: &[PathBuf]) -> Option<(PathBuf, Vec<u8>)> {
+    let mut best: Option<(std::time::SystemTime, PathBuf, Vec<u8>)> = None;
+    for path in candidates {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let Ok(auth) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(entry) = auth.get(GROK_OAUTH_CLIENT_KEY) else {
+            continue;
+        };
+        if entry.get("auth_mode").and_then(|value| value.as_str()) == Some("oauth") {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let replace = best
+            .as_ref()
+            .map(|(prev, _, _)| mtime > *prev)
+            .unwrap_or(true);
+        if replace {
+            best = Some((mtime, path.clone(), bytes));
+        }
+    }
+    best.map(|(_, path, bytes)| (path, bytes))
+}
+
+fn workspace_grok_auth_path(workspace: &crate::workspace::Workspace) -> Result<PathBuf, String> {
+    grok_auth_path_for_execution(
+        workspace,
+        crate::workspace::use_nspawn_for_workspace(workspace),
+    )
+}
+
+fn grok_auth_path_for_execution(
+    workspace: &crate::workspace::Workspace,
+    use_nspawn: bool,
+) -> Result<PathBuf, String> {
+    let home = match workspace.env_vars.get("HOME") {
+        None if use_nspawn => workspace.path.join("root"),
+        None if workspace.workspace_type == crate::workspace::WorkspaceType::Container => {
+            return Err("Grok container fallback requires an explicit host HOME; refusing an implicit /root credential destination".into());
+        }
+        None => PathBuf::from(home_dir()),
+        Some(home) => {
+            let home = Path::new(home);
+            if !home.is_absolute()
+                || home
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                return Err("Grok HOME must be an absolute path without parent traversal".into());
+            }
+            if use_nspawn {
+                let resolved = workspace
+                    .path
+                    .join(home.strip_prefix("/").map_err(|error| error.to_string())?);
+                let canonical_home = resolved
+                    .canonicalize()
+                    .map_err(|error| format!("Grok HOME is unavailable: {error}"))?;
+                let canonical_root = workspace
+                    .path
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if !canonical_home.starts_with(canonical_root) {
+                    return Err("Grok HOME escapes its container root".into());
+                }
+                resolved
+            } else {
+                if !home.is_dir() {
+                    return Err("Grok HOME is unavailable".into());
+                }
+                home.to_path_buf()
+            }
+        }
+    };
+    if use_nspawn {
+        let root = workspace
+            .path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let target = home
+            .canonicalize()
+            .map_err(|error| format!("Grok HOME is unavailable: {error}"))?;
+        if !target.starts_with(root) {
+            return Err("Grok HOME escapes its container root".into());
+        }
+    }
+    let parent = home.join(".grok");
+    if use_nspawn && parent.exists() {
+        let root = workspace
+            .path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let target = parent.canonicalize().map_err(|error| error.to_string())?;
+        if !target.starts_with(root) {
+            return Err("Grok auth directory escapes its container root".into());
+        }
+    }
+    Ok(parent.join("auth.json"))
+}
+
+/// Copy `bytes` onto `dest` atomically (mode 0600).
+fn install_grok_auth_bytes(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+    }
+    use std::io::Write;
+    let parent = dest.parent().ok_or("Grok auth destination has no parent")?;
+    let tmp = parent.join(format!(".grok-auth-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|error| format!("Failed to create private Grok auth file: {error}"))?;
+    let installed = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, dest)
+    })();
+    if let Err(error) = installed {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to install Grok auth: {error}"));
+    }
+    Ok(())
+}
+
+pub(crate) fn sync_grok_auth_files(
+    sources: &[PathBuf],
+    dest: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some((source, bytes)) = newest_usable_grok_auth_file(sources) else {
+        // An absent host cache is not evidence that a workspace's native
+        // credential is stale. Keep its native state for the owning CLI.
+        return Ok(dest.is_file().then(|| dest.to_path_buf()));
+    };
+
+    if source == dest {
+        return Ok(Some(dest.to_path_buf()));
+    }
+
+    install_grok_auth_bytes(dest, &bytes)?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+/// Sync the host Grok CLI auth file into a workspace HOME.
+///
+/// Container missions read `/root/.grok/auth.json` inside nspawn. Reconnecting
+/// Grok in Hermes / Settings updates the host file (`/var/lib/opencode/.grok`
+/// or `$HOME/.grok`) but leaves a stale guest copy (the 2026-05-16 401). Copy
+/// the newest host file when native-file authentication is selected. If the
+/// host has no usable file, preserve the workspace's native credential.
+/// An explicit host HOME owns its credentials and never imports a global cache.
+pub fn sync_host_grok_auth_into_workspace(
+    workspace: &crate::workspace::Workspace,
+) -> Result<Option<PathBuf>, String> {
+    sync_workspace_grok_auth_from_sources(workspace, &grok_auth_paths())
+}
+
+fn sync_workspace_grok_auth_from_sources(
+    workspace: &crate::workspace::Workspace,
+    sources: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    let dest = workspace_grok_auth_path(workspace)?;
+    if !crate::workspace::use_nspawn_for_workspace(workspace)
+        && workspace.env_vars.contains_key("HOME")
+    {
+        // This includes container fallback: an explicit host HOME is an
+        // account boundary, even if its cache is missing or unreadable. Let
+        // the native CLI handle authentication rather than switch accounts.
+        return Ok(dest.is_file().then_some(dest));
+    }
+    let installed = sync_grok_auth_files(sources, &dest)?;
+    if installed.is_some() {
+        tracing::info!(
+            workspace_id = %workspace.id,
+            dest = %dest.display(),
+            "Synced host Grok auth.json into workspace HOME"
+        );
+    }
+    Ok(installed)
+}
+
 fn read_grok_auth_entry() -> Option<serde_json::Value> {
     // Try every candidate path (home-based AND the service path
     // `/var/lib/opencode/.grok/auth.json`) — `home_dir()` for the service
@@ -412,6 +616,25 @@ fn grok_auth_email(entry: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
+}
+
+fn xai_oauth_display_name(email: Option<&str>) -> String {
+    match email.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(email) => format!("xAI SuperGrok ({email})"),
+        None => "xAI SuperGrok".to_string(),
+    }
+}
+
+fn xai_supergrok_reconnect_reason(refresh_rejected: bool) -> String {
+    if refresh_rejected {
+        "xAI SuperGrok OAuth refresh was rejected; reconnect xAI. OpenCode xai/* and the grok CLI share this login — Grok Build is a harness, not a second account.".to_string()
+    } else {
+        "xAI SuperGrok OAuth is unusable; reconnect xAI. OpenCode xai/* and the grok CLI share this login — Grok Build is a harness, not a second account.".to_string()
+    }
+}
+
+fn is_legacy_grok_build_oauth_label(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("grok build")
 }
 
 fn grok_auth_expires_at_millis(entry: &serde_json::Value) -> i64 {
@@ -542,6 +765,52 @@ mod oauth_deadletter_tests {
     }
 
     #[test]
+    fn shared_codex_recovery_requires_matching_identity_and_fresh_jwt() {
+        use base64::Engine;
+        let now = chrono::Utc::now().timestamp_millis();
+        let token = |id: &str, expires: i64| {
+            format!("header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                "exp": expires / 1000, "https://api.openai.com/auth": {"chatgpt_account_id": id}
+            })).unwrap()))
+        };
+        let stored = OAuthCredentials {
+            access_token: token("ben", now - 60_000),
+            refresh_token: "old".into(),
+            expires_at: now - 60_000,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        for (identity, expires, refresh, expected) in [
+            ("ben", now + 3_600_000, "new", true),
+            ("thomas", now + 3_600_000, "new", false),
+            ("ben", now - 120_000, "new", false),
+            ("ben", now + 3_600_000, "", false),
+        ] {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"tokens": {
+                    "access_token": token(identity, expires), "refresh_token": refresh
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            let recovered = super::newer_shared_codex_credentials(&stored, &path);
+            assert_eq!(
+                recovered.is_some(),
+                expected,
+                "{identity}, {expires}, refresh_present={}",
+                !refresh.is_empty()
+            );
+            if let Some(recovered) = recovered {
+                assert_eq!(recovered.refresh_token, "new");
+            }
+        }
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(super::newer_shared_codex_credentials(&stored, &path).is_none());
+    }
+
+    #[test]
     fn openai_tier_adoption_requires_same_account_and_newer_live_token() {
         let now = chrono::Utc::now().timestamp_millis();
         let store = OAuthCredentials {
@@ -577,11 +846,12 @@ mod oauth_deadletter_tests {
 #[cfg(test)]
 mod grok_oauth_tests {
     use super::{
-        build_response_from_store, get_xai_api_key_for_grok, grok_auth_expires_at_millis,
-        grok_cli_reconcile_due, has_refreshable_cli_proxy_account_in_dirs,
+        build_response_from_store, collapse_duplicate_xai_oauth_accounts, get_xai_api_key_for_grok,
+        grok_auth_expires_at_millis, grok_cli_reconcile_due, has_live_cli_proxy_account_in_dirs,
+        has_refreshable_cli_proxy_account_in_dirs, is_legacy_grok_build_oauth_label,
         oauth_refresh_clear_dead, oauth_refresh_mark_token_dead, oauth_refresh_token_fingerprint,
-        parse_grok_device_auth_line, remove_legacy_grok_oauth_entry, ProviderStatusResponse,
-        GROK_CLI_RECONCILE_INTERVAL, GROK_OAUTH_CLIENT_KEY,
+        parse_grok_device_auth_line, remove_legacy_grok_oauth_entry, sync_grok_auth_files,
+        ProviderStatusResponse, GROK_CLI_RECONCILE_INTERVAL, GROK_OAUTH_CLIENT_KEY,
     };
     use crate::ai_providers::{AIProvider, OAuthCredentials, ProviderType};
     use std::time::{Duration as StdDuration, Instant};
@@ -670,6 +940,104 @@ mod grok_oauth_tests {
     }
 
     #[test]
+    fn syncs_newer_host_grok_auth_over_stale_workspace_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = temp.path().join("host-auth.json");
+        let dest = temp.path().join("guest").join(".grok").join("auth.json");
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("guest dir");
+        std::fs::write(
+            &dest,
+            serde_json::json!({
+                GROK_OAUTH_CLIENT_KEY: {
+                    "auth_mode": "oidc",
+                    "key": "stale-may"
+                }
+            })
+            .to_string(),
+        )
+        .expect("stale dest");
+        std::fs::write(
+            &host,
+            serde_json::json!({
+                GROK_OAUTH_CLIENT_KEY: {
+                    "auth_mode": "oidc",
+                    "key": "fresh-host"
+                }
+            })
+            .to_string(),
+        )
+        .expect("host auth");
+        let installed = sync_grok_auth_files(&[host], &dest).expect("sync");
+        assert_eq!(installed.as_deref(), Some(dest.as_path()));
+        let copied: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).expect("read dest"))
+                .expect("json");
+        assert_eq!(
+            copied[GROK_OAUTH_CLIENT_KEY]["key"].as_str(),
+            Some("fresh-host")
+        );
+    }
+
+    #[test]
+    fn preserves_workspace_grok_auth_when_host_has_none() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dest = temp.path().join("guest-auth.json");
+        std::fs::write(&dest, "{}").expect("stale dest");
+        let missing = temp.path().join("no-such-host-auth.json");
+        let installed = sync_grok_auth_files(&[missing], &dest).expect("sync");
+        assert_eq!(installed, Some(dest.clone()));
+        assert_eq!(std::fs::read_to_string(dest).unwrap(), "{}");
+    }
+
+    #[test]
+    fn grok_auth_explicit_host_home_never_imports_another_account() {
+        for fallback in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("account-home");
+            let dest = home.join(".grok/auth.json");
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            let own = serde_json::json!({
+                GROK_OAUTH_CLIENT_KEY: {"auth_mode": "oidc", "key": "workspace-account"}
+            })
+            .to_string();
+            std::fs::write(&dest, &own).unwrap();
+            let source = temp.path().join("global-auth.json");
+            std::fs::write(
+                &source,
+                serde_json::json!({
+                    GROK_OAUTH_CLIENT_KEY: {"auth_mode": "oidc", "key": "unrelated-global-account"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut workspace = if fallback {
+                crate::workspace::Workspace::new_container("fallback".into(), temp.path().into())
+            } else {
+                crate::workspace::Workspace::default_host(temp.path().into())
+            };
+            if fallback {
+                workspace.config = serde_json::json!({"container_fallback": true});
+            }
+            workspace
+                .env_vars
+                .insert("HOME".into(), home.display().to_string());
+            let sources = [source];
+            assert_eq!(
+                super::sync_workspace_grok_auth_from_sources(&workspace, &sources).unwrap(),
+                Some(dest.clone())
+            );
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), own);
+            // Absence also cannot authorize importing another account.
+            std::fs::remove_file(&dest).unwrap();
+            assert_eq!(
+                super::sync_workspace_grok_auth_from_sources(&workspace, &sources).unwrap(),
+                None
+            );
+            assert!(!dest.exists());
+        }
+    }
+
+    #[test]
     fn grok_cli_reconcile_throttles_recent_checks() {
         let now = Instant::now();
 
@@ -683,6 +1051,129 @@ mod grok_oauth_tests {
             Some(now - GROK_CLI_RECONCILE_INTERVAL),
             now,
         ));
+    }
+
+    #[test]
+    fn grok_auth_fallback_uses_execution_mode_and_requires_explicit_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workspace = crate::workspace::Workspace::new_container(
+            "fallback".into(),
+            temp.path().to_path_buf(),
+        );
+        workspace.config = serde_json::json!({"container_fallback": true});
+        assert!(super::workspace_grok_auth_path(&workspace)
+            .unwrap_err()
+            .contains("explicit host HOME"));
+        let home = temp.path().join("host-home");
+        std::fs::create_dir(&home).unwrap();
+        workspace
+            .env_vars
+            .insert("HOME".into(), home.display().to_string());
+        // The execution config selects host fallback, even without the env flag.
+        assert_eq!(
+            super::workspace_grok_auth_path(&workspace).unwrap(),
+            home.join(".grok/auth.json")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_auth_refuses_container_auth_directory_symlink_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace =
+            crate::workspace::Workspace::new_container("guest".into(), root.path().to_path_buf());
+        std::fs::create_dir(root.path().join("root")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("root/.grok")).unwrap();
+        assert!(super::grok_auth_path_for_execution(&workspace, true)
+            .unwrap_err()
+            .contains("auth directory escapes"));
+        assert!(!outside.path().join("auth.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_auth_install_is_private_and_ignores_predictable_temp_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("auth.json");
+        let victim = root.path().join("unrelated");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dest.with_extension("json.tmp")).unwrap();
+        let workers: Vec<_> = [b"credential-a", b"credential-b"]
+            .into_iter()
+            .map(|bytes| {
+                let dest = dest.clone();
+                std::thread::spawn(move || super::install_grok_auth_bytes(&dest, bytes).unwrap())
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep");
+        assert!(matches!(
+            std::fs::read_to_string(&dest).unwrap().as_str(),
+            "credential-a" | "credential-b"
+        ));
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".grok-auth-")));
+    }
+
+    #[test]
+    fn grok_auth_destination_tracks_explicit_host_and_container_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("native-home");
+        std::fs::create_dir(&home).unwrap();
+        let mut workspace = crate::workspace::Workspace::default_host(temp.path().to_path_buf());
+        workspace
+            .env_vars
+            .insert("HOME".into(), home.display().to_string());
+        assert_eq!(
+            super::grok_auth_path_for_execution(
+                &workspace,
+                workspace.workspace_type == crate::workspace::WorkspaceType::Container
+            )
+            .unwrap(),
+            home.join(".grok/auth.json")
+        );
+        workspace.workspace_type = crate::workspace::WorkspaceType::Container;
+        workspace
+            .env_vars
+            .insert("HOME".into(), "/native-home".into());
+        assert_eq!(
+            super::grok_auth_path_for_execution(
+                &workspace,
+                workspace.workspace_type == crate::workspace::WorkspaceType::Container
+            )
+            .unwrap(),
+            home.join(".grok/auth.json")
+        );
+        for invalid in ["relative", "/../escape", "/missing-home"] {
+            workspace.env_vars.insert("HOME".into(), invalid.into());
+            assert!(super::grok_auth_path_for_execution(
+                &workspace,
+                workspace.workspace_type == crate::workspace::WorkspaceType::Container
+            )
+            .is_err());
+        }
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), temp.path().join("escape")).unwrap();
+            workspace.env_vars.insert("HOME".into(), "/escape".into());
+            assert!(super::grok_auth_path_for_execution(
+                &workspace,
+                workspace.workspace_type == crate::workspace::WorkspaceType::Container
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -724,6 +1215,62 @@ mod grok_oauth_tests {
         .expect("write providers");
 
         assert_eq!(get_xai_api_key_for_grok(temp.path()), None);
+    }
+
+    #[test]
+    fn cli_proxy_ownership_requires_a_live_auth_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("auth");
+        std::fs::create_dir_all(&dir).expect("auth dir");
+        let now = chrono::Utc::now();
+        let grace = chrono::Duration::hours(24);
+        let write = |name: &str, expired: chrono::DateTime<chrono::Utc>, disabled: bool| {
+            std::fs::write(
+                dir.join(name),
+                serde_json::json!({
+                    "type": "claude",
+                    "access_token": "a",
+                    "refresh_token": "r",
+                    "expired": expired.to_rfc3339(),
+                    "disabled": disabled,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let dirs = vec![dir.clone()];
+
+        // Dead for 17 days: the proxy could not refresh it → no ownership.
+        write("claude-dead.json", now - chrono::Duration::days(17), false);
+        assert!(!has_live_cli_proxy_account_in_dirs(
+            &dirs, "claude-", "claude", now, grace
+        ));
+
+        // Expired an hour ago: still the proxy's to refresh → ownership.
+        write(
+            "claude-recent.json",
+            now - chrono::Duration::hours(1),
+            false,
+        );
+        assert!(has_live_cli_proxy_account_in_dirs(
+            &dirs, "claude-", "claude", now, grace
+        ));
+        std::fs::remove_file(dir.join("claude-recent.json")).unwrap();
+
+        // Fresh but disabled → no ownership.
+        write("claude-off.json", now + chrono::Duration::hours(5), true);
+        assert!(!has_live_cli_proxy_account_in_dirs(
+            &dirs, "claude-", "claude", now, grace
+        ));
+
+        // Fresh and enabled → ownership; type tag must match.
+        write("claude-live.json", now + chrono::Duration::hours(5), false);
+        assert!(has_live_cli_proxy_account_in_dirs(
+            &dirs, "claude-", "claude", now, grace
+        ));
+        assert!(!has_live_cli_proxy_account_in_dirs(
+            &dirs, "claude-", "codex", now, grace
+        ));
     }
 
     #[test]
@@ -798,6 +1345,70 @@ mod grok_oauth_tests {
         let response = build_response_from_store(&provider);
 
         assert!(matches!(response.status, ProviderStatusResponse::Connected));
+    }
+
+    #[test]
+    fn expired_grok_oauth_with_refresh_token_stays_connected() {
+        let mut provider = AIProvider::new(ProviderType::Xai, "xAI (Grok Build OAuth)".to_string());
+        provider.oauth = Some(OAuthCredentials {
+            access_token: "stale-access".to_string(),
+            refresh_token: "still-valid-refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() - 60_000,
+        });
+
+        let response = build_response_from_store(&provider);
+
+        assert!(
+            matches!(response.status, ProviderStatusResponse::Connected),
+            "stale grok CLI expires_at must not look like a second dead SuperGrok login: {:?}",
+            response.status
+        );
+    }
+
+    #[tokio::test]
+    async fn collapse_duplicate_xai_oauth_merges_grok_build_label_into_supergrok() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::ai_providers::AIProviderStore::new(tmp.path().join("ai_providers.json")).await;
+
+        let mut grok_build =
+            AIProvider::new(ProviderType::Xai, "xAI (Grok Build OAuth)".to_string());
+        grok_build.oauth = Some(OAuthCredentials {
+            access_token: "old-cli".to_string(),
+            refresh_token: "shared-refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() - 60_000,
+        });
+        grok_build.use_for_backends = Some(vec!["grok".to_string()]);
+        grok_build.account_email = Some("me@x.ai".to_string());
+
+        let mut opencode = AIProvider::new(ProviderType::Xai, "xAI SuperGrok".to_string());
+        opencode.oauth = Some(OAuthCredentials {
+            access_token: "live-opencode".to_string(),
+            refresh_token: "shared-refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000,
+        });
+        opencode.use_for_backends = Some(vec!["opencode".to_string()]);
+        opencode.account_email = Some("me@x.ai".to_string());
+
+        store.add(grok_build).await;
+        store.add(opencode).await;
+
+        let disabled = collapse_duplicate_xai_oauth_accounts(&store).await;
+        assert_eq!(disabled, 1);
+
+        let remaining: Vec<_> = store
+            .get_all_by_type(ProviderType::Xai)
+            .await
+            .into_iter()
+            .filter(|account| account.enabled)
+            .collect();
+        assert_eq!(remaining.len(), 1);
+        let keeper = &remaining[0];
+        assert!(!is_legacy_grok_build_oauth_label(&keeper.name));
+        let backends = keeper.use_for_backends.clone().unwrap_or_default();
+        assert!(backends.iter().any(|b| b == "opencode"));
+        assert!(backends.iter().any(|b| b == "grok"));
+        std::mem::forget(tmp);
     }
 
     #[test]
@@ -1068,7 +1679,8 @@ async fn upsert_grok_oauth_provider(
             )
         })?;
     let account_email = grok_auth_email(entry);
-    let backends = use_for_backends.unwrap_or_else(|| vec!["grok".to_string()]);
+    let backends =
+        use_for_backends.unwrap_or_else(|| default_backends_for_provider(ProviderType::Xai));
 
     // When reconnect targets a specific row (UUID), update *that* row so the
     // health probe checks the same id the user clicked. Otherwise fall back to
@@ -1080,14 +1692,11 @@ async fn upsert_grok_oauth_provider(
         .unwrap_or_else(|| {
             crate::ai_providers::AIProvider::new(
                 ProviderType::Xai,
-                "xAI (Grok Build OAuth)".to_string(),
+                xai_oauth_display_name(account_email.as_deref()),
             )
         });
 
-    provider.name = account_email
-        .as_ref()
-        .map(|email| format!("xAI ({email})"))
-        .unwrap_or_else(|| "xAI (Grok Build OAuth)".to_string());
+    provider.name = xai_oauth_display_name(account_email.as_deref());
     provider.account_email = account_email;
     provider.api_key = None;
     provider.oauth = Some(crate::ai_providers::OAuthCredentials {
@@ -1260,8 +1869,17 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
             // or the chain resolver will route to an endpoint that can never
             // succeed; leave OpenAI OAuth accounts without an `api_key` so
             // `has_routable_credentials` excludes them from the pool.
+            //
+            // When CLIProxyAPI owns the Anthropic credential the access token
+            // is never forwarded: the record is left keyless (and therefore
+            // unroutable here) so the synthetic `anthropic-cli-proxy` account
+            // below carries all Anthropic traffic through the proxy.
             let mut oauth_expires_at: Option<i64> = None;
-            if api_key.is_none() && account_has_oauth && provider_type == ProviderType::Anthropic {
+            if api_key.is_none()
+                && account_has_oauth
+                && provider_type == ProviderType::Anthropic
+                && !crate::api::oauth_owner::cli_proxy_owns(ProviderType::Anthropic)
+            {
                 api_key = value
                     .get("access")
                     .or_else(|| value.get("access_token"))
@@ -1417,6 +2035,115 @@ fn has_fresh_cli_proxy_claude_account() -> bool {
     has_fresh_cli_proxy_account_of_type("claude-", "claude")
 }
 
+/// How long past its access-token expiry a CLIProxyAPI auth file still counts
+/// as *live* for the credential-owner policy. CLIProxyAPI refreshes a file
+/// when it serves a request, so a file that has sat expired for longer than
+/// this is one the proxy could not refresh (dead refresh token, revoked
+/// login). Such a file must not seize ownership from sandboxed.sh's own
+/// working credentials.
+pub(crate) const CLI_PROXY_OWNERSHIP_GRACE: chrono::Duration = chrono::Duration::hours(24);
+
+/// True when CLIProxyAPI holds a *live* Claude credential: not disabled,
+/// access + refresh token present, and expired no longer than
+/// [`CLI_PROXY_OWNERSHIP_GRACE`] ago. Used by the credential-owner policy.
+pub(crate) fn has_live_cli_proxy_claude_account() -> bool {
+    has_live_cli_proxy_account_of_type("claude-", "claude")
+}
+
+/// Codex counterpart of [`has_live_cli_proxy_claude_account`].
+pub(crate) fn has_live_cli_proxy_codex_account() -> bool {
+    has_live_cli_proxy_account_of_type("codex-", "codex")
+}
+
+/// xAI counterpart of [`has_live_cli_proxy_claude_account`].
+pub(crate) fn has_live_cli_proxy_xai_account() -> bool {
+    has_live_cli_proxy_account_of_type("xai-", "xai")
+}
+
+fn cli_proxy_auth_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("CLI_PROXY_AUTH_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            dirs.push(std::path::PathBuf::from(trimmed));
+        }
+    }
+    dirs.push(std::path::PathBuf::from("/root/.cli-proxy-api"));
+    dirs
+}
+
+fn has_live_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
+    has_live_cli_proxy_account_in_dirs(
+        &cli_proxy_auth_dirs(),
+        file_prefix,
+        type_tag,
+        chrono::Utc::now(),
+        CLI_PROXY_OWNERSHIP_GRACE,
+    )
+}
+
+pub(crate) fn has_live_cli_proxy_account_in_dirs(
+    dirs: &[std::path::PathBuf],
+    file_prefix: &str,
+    type_tag: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    grace: chrono::Duration,
+) -> bool {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !(name.starts_with(file_prefix) && name.ends_with(".json")) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                continue;
+            };
+            if value
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || value.get("type").and_then(|v| v.as_str()) != Some(type_tag)
+            {
+                continue;
+            }
+            let has = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty())
+            };
+            if !(has("access_token") && has("refresh_token")) {
+                continue;
+            }
+            let expiry = value
+                .get("expired")
+                .or_else(|| value.get("expires"))
+                .or_else(|| value.get("expires_at"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            // Unparseable expiry: we cannot tell whether the proxy can refresh
+            // this file, so it does not grant ownership.
+            let Some(expires_at) = expiry else {
+                continue;
+            };
+            if expires_at + grace > now {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// True when the CLI Proxy API has at least one fresh Codex (ChatGPT
 /// Plus/Pro OAuth) credential on disk. Used to decide whether the
 /// `openai-cli-proxy` synthetic standard account is worth adding to
@@ -1424,6 +2151,73 @@ fn has_fresh_cli_proxy_claude_account() -> bool {
 /// every request, so keeping it out of the chain avoids wasted attempts.
 pub(crate) fn has_fresh_cli_proxy_codex_account() -> bool {
     has_fresh_cli_proxy_account_of_type("codex-", "codex")
+}
+
+/// The freshest usable access token from the CLI proxy's auth directory for
+/// the given provider (e.g. `claude-*.json`). Under CLI-proxy ownership the
+/// proxy's file is the only credential that stays fresh, so the usage probe
+/// must read it instead of sandboxed.sh's own (deliberately stale) record.
+pub(crate) fn cli_proxy_access_token(file_prefix: &str, type_tag: &str) -> Option<String> {
+    let now = chrono::Utc::now();
+    let mut best: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+    for dir in cli_proxy_auth_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !(name.starts_with(file_prefix) && name.ends_with(".json")) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                continue;
+            };
+            if value
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || value.get("type").and_then(|v| v.as_str()) != Some(type_tag)
+            {
+                continue;
+            }
+            let Some(access) = value
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let expiry = value
+                .get("expired")
+                .or_else(|| value.get("expires"))
+                .or_else(|| value.get("expires_at"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            // Prefer a token that is still valid; among valid ones take the
+            // longest-lived. Expired tokens are skipped: the proxy refreshes
+            // its files proactively, so an expired file means the account is
+            // dead anyway and probing with it would just 401.
+            let Some(expires_at) = expiry else {
+                continue;
+            };
+            if expires_at <= now {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(e, _)| expires_at > *e) {
+                best = Some((expires_at, access));
+            }
+        }
+    }
+    best.map(|(_, token)| token)
 }
 
 /// Scan the CLI proxy's auth directory for entries with
@@ -1614,6 +2408,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/default", post(set_default))
         .route("/:id/health", post(check_provider_health))
         .route("/:id/usage", get(get_provider_usage_cached))
+        // UI-drivable OAuth login for CLIProxyAPI-owned providers (claude /
+        // codex / grok / kimi): spawn the CLI login, hand the auth URL to the
+        // UI, replay the pasted localhost callback against the process.
+        .merge(super::cli_proxy_login::routes())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1924,6 +2722,12 @@ pub fn get_anthropic_auth_from_host_with_expiry() -> Option<ClaudeCodeAuthWithEx
 pub async fn refresh_workspace_anthropic_auth(
     workspace_root: &std::path::Path,
 ) -> Result<ClaudeCodeAuthWithExpiry, String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::Anthropic,
+        "refresh_workspace_anthropic_auth",
+    ) {
+        return Err("Anthropic OAuth is owned by CLIProxyAPI; workspace auth not refreshed".into());
+    }
     let auth_path = get_workspace_auth_path(workspace_root);
     if !auth_path.exists() {
         return Err("No workspace auth file found".to_string());
@@ -2996,6 +3800,12 @@ pub struct CodexOAuthAccount {
 static CODEX_OAUTH_REFRESH_LOCKS: LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+const CODEX_OAUTH_MIN_ACCESS_TOKEN_TTL_MS: i64 = 10 * 60 * 1000;
+
+fn codex_oauth_access_token_needs_refresh(expires_at: i64, now: i64) -> bool {
+    expires_at <= now + CODEX_OAUTH_MIN_ACCESS_TOKEN_TTL_MS
+}
+
 fn codex_oauth_refresh_lock(account_id: &str) -> Arc<AsyncMutex<()>> {
     let mut locks = CODEX_OAUTH_REFRESH_LOCKS
         .lock()
@@ -3004,6 +3814,65 @@ fn codex_oauth_refresh_lock(account_id: &str) -> Arc<AsyncMutex<()>> {
         .entry(account_id.to_string())
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone()
+}
+
+/// Serialize rotating OpenAI refresh tokens across prod, dev, and any helper
+/// process sharing the canonical credential store. The account mutex above is
+/// intentionally fast but process-local; by itself it cannot prevent the
+/// second service from consuming an already-rotated token.
+async fn acquire_codex_oauth_cross_process_lock() -> Result<std::fs::File, String> {
+    let mut last_error = None;
+    for _ in 0..120 {
+        match acquire_oauth_refresh_lock(ProviderType::OpenAI) {
+            Ok(lock) => return Ok(lock),
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "timed out waiting for the shared Codex OAuth refresh lock: {}",
+        last_error.unwrap_or_else(|| "unknown lock error".to_string())
+    ))
+}
+
+fn refresh_token_reused_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("refresh_token_reused")
+        || lower.contains("refresh token has already been used")
+        || lower.contains("refresh token was already used")
+}
+
+#[cfg(test)]
+mod codex_oauth_error_tests {
+    use super::{
+        codex_oauth_access_token_needs_refresh, refresh_token_reused_error,
+        CODEX_OAUTH_MIN_ACCESS_TOKEN_TTL_MS,
+    };
+
+    #[test]
+    fn recognizes_rotating_refresh_token_reuse() {
+        assert!(refresh_token_reused_error(
+            "OAuth error: refresh_token_reused"
+        ));
+        assert!(refresh_token_reused_error(
+            "The refresh token has already been used"
+        ));
+        assert!(!refresh_token_reused_error("access token expired"));
+    }
+
+    #[test]
+    fn refreshes_only_inside_the_access_token_safety_window() {
+        let now = 1_000_000;
+        assert!(!codex_oauth_access_token_needs_refresh(
+            now + CODEX_OAUTH_MIN_ACCESS_TOKEN_TTL_MS + 1,
+            now
+        ));
+        assert!(codex_oauth_access_token_needs_refresh(
+            now + CODEX_OAUTH_MIN_ACCESS_TOKEN_TTL_MS,
+            now
+        ));
+        assert!(codex_oauth_access_token_needs_refresh(now - 1, now));
+    }
 }
 
 fn sanitize_codex_oauth_account_id(account_id: &str) -> String {
@@ -3112,10 +3981,15 @@ pub async fn prepare_codex_oauth_account_for_launch(
     working_dir: &Path,
     selected: &CodexOAuthAccount,
 ) -> Result<CodexOAuthAccount, String> {
-    const MIN_ACCESS_TOKEN_TTL_MS: i64 = 10 * 60 * 1000;
-
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::OpenAI,
+        "prepare_codex_oauth_account_for_launch",
+    ) {
+        return Ok(selected.clone());
+    }
     let lock = codex_oauth_refresh_lock(&selected.chatgpt_account_id);
     let _guard = lock.lock().await;
+    let _process_guard = acquire_codex_oauth_cross_process_lock().await?;
 
     let current = get_all_openai_oauth_accounts(working_dir)
         .into_iter()
@@ -3123,14 +3997,33 @@ pub async fn prepare_codex_oauth_account_for_launch(
         .unwrap_or_else(|| selected.clone());
 
     let now = chrono::Utc::now().timestamp_millis();
-    if current.expires_at > now + MIN_ACCESS_TOKEN_TTL_MS {
+    if !codex_oauth_access_token_needs_refresh(current.expires_at, now) {
         let _ = sync_shared_codex_oauth_auth(&current);
         return Ok(current);
     }
 
     let client = reqwest::Client::new();
-    let (access, refresh, expires_at, _id_token) =
-        refresh_openai_oauth_tokens(&client, &current.refresh_token).await?;
+    let refreshed_tokens = refresh_openai_oauth_tokens(&client, &current.refresh_token).await;
+    let (access, refresh, expires_at, _id_token) = match refreshed_tokens {
+        Ok(tokens) => tokens,
+        Err(error) if refresh_token_reused_error(&error.to_string()) => {
+            // A legacy Codex process may have rotated the token just before it
+            // was brought under the shared lock. Re-read once and accept the
+            // new canonical pair instead of declaring the whole provider dead.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Some(updated) = find_openai_oauth_account_by_chatgpt_account_id(
+                working_dir,
+                &current.chatgpt_account_id,
+            ) {
+                if updated.refresh_token != current.refresh_token {
+                    let _ = sync_shared_codex_oauth_auth(&updated);
+                    return Ok(updated);
+                }
+            }
+            return Err(error.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let refreshed_account_id =
         extract_chatgpt_account_id(&access).unwrap_or_else(|| current.chatgpt_account_id.clone());
 
@@ -3176,9 +4069,29 @@ pub async fn refresh_codex_oauth_account_for_app_server(
         .or(fallback_account_id)
         .ok_or_else(|| "Codex requested OAuth refresh without an account id".to_string())?;
 
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::OpenAI,
+        "refresh_codex_oauth_account_for_app_server",
+    ) {
+        return find_openai_oauth_account_by_chatgpt_account_id(working_dir, account_id)
+            .ok_or_else(|| {
+                format!(
+                    "No OpenAI OAuth account found for ChatGPT account {} (owned by CLIProxyAPI)",
+                    account_id
+                )
+            });
+    }
+
     let lock = codex_oauth_refresh_lock(account_id);
     let _guard = lock.lock().await;
-
+    let before = find_openai_oauth_account_by_chatgpt_account_id(working_dir, account_id)
+        .ok_or_else(|| {
+            format!(
+                "No OpenAI OAuth account found for ChatGPT account {}",
+                account_id
+            )
+        })?;
+    let _process_guard = acquire_codex_oauth_cross_process_lock().await?;
     let current = find_openai_oauth_account_by_chatgpt_account_id(working_dir, account_id)
         .ok_or_else(|| {
             format!(
@@ -3186,10 +4099,47 @@ pub async fn refresh_codex_oauth_account_for_app_server(
                 account_id
             )
         })?;
+    if current.refresh_token != before.refresh_token || current.access_token != before.access_token
+    {
+        let _ = sync_shared_codex_oauth_auth(&current);
+        return Ok(current);
+    }
+
+    // Codex can request an external refresh immediately after startup even
+    // when the access token is still valid. Refresh tokens rotate on use, so
+    // honoring that eager request needlessly races other Codex processes and
+    // independent OAuth consumers, producing `refresh_token_reused`. The
+    // backend is the refresh owner: return the current canonical access token
+    // until it is close to expiry, then rotate once under both locks above.
+    let now = chrono::Utc::now().timestamp_millis();
+    if !codex_oauth_access_token_needs_refresh(current.expires_at, now) {
+        let _ = sync_shared_codex_oauth_auth(&current);
+        tracing::debug!(
+            account_id,
+            expires_at = current.expires_at,
+            "Satisfied eager Codex OAuth refresh request from canonical access token"
+        );
+        return Ok(current);
+    }
 
     let client = reqwest::Client::new();
-    let (access, refresh, expires_at, _id_token) =
-        refresh_openai_oauth_tokens(&client, &current.refresh_token).await?;
+    let refreshed_tokens = refresh_openai_oauth_tokens(&client, &current.refresh_token).await;
+    let (access, refresh, expires_at, _id_token) = match refreshed_tokens {
+        Ok(tokens) => tokens,
+        Err(error) if refresh_token_reused_error(&error.to_string()) => {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Some(updated) =
+                find_openai_oauth_account_by_chatgpt_account_id(working_dir, account_id)
+            {
+                if updated.refresh_token != current.refresh_token {
+                    let _ = sync_shared_codex_oauth_auth(&updated);
+                    return Ok(updated);
+                }
+            }
+            return Err(error.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let refreshed_account_id =
         extract_chatgpt_account_id(&access).unwrap_or_else(|| current.chatgpt_account_id.clone());
 
@@ -3232,6 +4182,9 @@ pub async fn refresh_codex_oauth_account_for_app_server(
 pub enum CodexCredentialOverride<'a> {
     ApiKey(&'a str),
     OAuth(&'a CodexOAuthAccount),
+    /// Authenticate to CLIProxyAPI with its key; the proxy owns the ChatGPT
+    /// OAuth credential and speaks Codex `/v1/responses` upstream.
+    CliProxy(&'a crate::api::oauth_owner::CliProxyEndpoint),
 }
 
 /// Enumerate all enabled OpenAI ChatGPT-OAuth accounts in `ai_providers.json`,
@@ -3264,15 +4217,32 @@ pub fn get_all_openai_oauth_accounts(working_dir: &Path) -> Vec<CodexOAuthAccoun
             Some(o) => o,
             None => continue,
         };
-        let refresh = oauth
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let access = oauth
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let stored_expires_at = oauth.get("expires_at").and_then(|v| v.as_i64());
+        let stored = crate::ai_providers::OAuthCredentials {
+            access_token: oauth
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            refresh_token: oauth
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            expires_at: oauth
+                .get("expires_at")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+        };
+        let recovered = extract_chatgpt_account_id(&stored.access_token).and_then(|identity| {
+            newer_shared_codex_credentials(
+                &stored,
+                &shared_codex_oauth_home_for_account(&identity).join("auth.json"),
+            )
+        });
+        let effective = recovered.as_ref().unwrap_or(&stored);
+        let refresh = effective.refresh_token.as_str();
+        let access = effective.access_token.as_str();
+        let stored_expires_at = Some(effective.expires_at);
         if refresh.is_empty() || access.is_empty() {
             continue;
         }
@@ -3370,14 +4340,41 @@ pub fn write_codex_credentials_for_workspace(
         }
     };
 
+    let proxy_owned = crate::api::oauth_owner::codex_via_cli_proxy();
+
     // Pull any locally-rotated tokens back into the central store before we
     // overwrite this workspace's auth.json. Codex CLIs refresh in-place inside
     // their container; without this back-sync the host store keeps the stale
     // refresh_token forever and the next mission hits `refresh_token_reused`.
-    back_propagate_codex_workspace_auth(&codex_dir, working_dir);
+    // Not when CLIProxyAPI owns the credential: no OAuth file is ever written
+    // for Codex then, so there is nothing to pull back.
+    if proxy_owned.is_none() {
+        back_propagate_codex_workspace_auth(&codex_dir, working_dir);
+    }
+
+    // Priority 0: CLIProxyAPI owns the credential. Codex authenticates to the
+    // proxy with the proxy key (apikey mode) and `config.toml` points its
+    // model provider at the proxy's `/v1` (see `write_codex_config`).
+    let proxy_endpoint = match (override_credential, proxy_owned.as_ref()) {
+        (Some(CodexCredentialOverride::CliProxy(endpoint)), _) => Some(*endpoint),
+        (None, Some(endpoint)) => Some(endpoint),
+        _ => None,
+    };
+    if let Some(endpoint) = proxy_endpoint {
+        write_codex_auth_json_apikey(&codex_dir, &endpoint.api_key)?;
+        log_codex_auth_status(workspace, &codex_dir, "cli_proxy");
+        tracing::info!(
+            workspace_id = %workspace.id,
+            workspace_type = ?workspace.workspace_type,
+            base_url = %endpoint.base_url,
+            "Wrote Codex auth.json for workspace (CLIProxyAPI key)"
+        );
+        return Ok(());
+    }
 
     // Priority 0a: Explicit override (rotation path).
     match override_credential {
+        Some(CodexCredentialOverride::CliProxy(_)) => unreachable!("handled above"),
         Some(CodexCredentialOverride::ApiKey(key)) => {
             write_codex_auth_json_apikey(&codex_dir, key)?;
             log_codex_auth_status(workspace, &codex_dir, "api_key_override");
@@ -3584,6 +4581,11 @@ pub struct ProviderResponse {
     pub openai_auth: Option<OpenAIAuthStatusResponse>,
     /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
     pub use_for_backends: Vec<String>,
+    /// Who owns (and refreshes) this provider's OAuth credential. When
+    /// `cli_proxy`, the reconnect flow must go through CLIProxyAPI's login
+    /// CLI — sandboxed.sh's own OAuth endpoints would write to the wrong
+    /// store. `sandboxed_sh` for API-key-only providers and legacy mode.
+    pub credential_owner: &'static str,
     /// Account identifier (email or username) from the connected OAuth account
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_email: Option<String>,
@@ -3671,6 +4673,16 @@ struct ProviderConfigEntry {
     google_project_id: Option<String>,
 }
 
+/// Who the UI must send the reconnect flow to for this provider's OAuth
+/// credential: CLIProxyAPI when the proxy owns it, sandboxed.sh otherwise.
+pub(crate) fn credential_owner_for(provider_type: ProviderType, has_oauth: bool) -> &'static str {
+    if has_oauth && crate::api::oauth_owner::cli_proxy_owns(provider_type) {
+        "cli_proxy"
+    } else {
+        "sandboxed_sh"
+    }
+}
+
 fn build_provider_response(
     provider_type: ProviderType,
     config: Option<ProviderConfigEntry>,
@@ -3727,6 +4739,10 @@ fn build_provider_response(
         status,
         openai_auth,
         use_for_backends,
+        credential_owner: credential_owner_for(
+            provider_type,
+            matches!(auth, Some(AuthKind::OAuth)),
+        ),
         account_email,
         created_at: now,
         updated_at: now,
@@ -3753,20 +4769,23 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
             .oauth
             .as_ref()
             .is_some_and(|oauth| oauth_refresh_token_is_dead(provider.id, &oauth.refresh_token));
+    let _ = oauth_expired;
     let status = if has_oauth && !has_api_key && oauth_refresh_rejected {
         ProviderStatusResponse::NeedsReauth {
-            reason: format!(
-                "{} OAuth refresh token was rejected; reconnect the provider",
-                pt.display_name()
-            ),
-            auth_url: None,
-        }
-    } else if pt == ProviderType::Xai && has_oauth && !has_api_key && oauth_expired {
-        ProviderStatusResponse::NeedsReauth {
-            reason: "xAI OAuth token expired; reconnect Grok Build".to_string(),
+            reason: if pt == ProviderType::Xai {
+                xai_supergrok_reconnect_reason(true)
+            } else {
+                format!(
+                    "{} OAuth refresh token was rejected; reconnect the provider",
+                    pt.display_name()
+                )
+            },
             auth_url: None,
         }
     } else if has_api_key || has_oauth || provider.base_url.is_some() {
+        // An expired access token is not a second dead login. SuperGrok is one
+        // OAuth account shared by OpenCode `xai/*` and the grok CLI; CLIProxyAPI
+        // refreshes it. Only a rejected refresh token is NeedsReauth.
         ProviderStatusResponse::Connected
     } else {
         ProviderStatusResponse::NeedsAuth { auth_url: None }
@@ -3798,6 +4817,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         status,
         openai_auth,
         use_for_backends,
+        credential_owner: credential_owner_for(pt, has_oauth),
         account_email: provider.account_email.clone(),
         created_at: provider.created_at,
         updated_at: provider.updated_at,
@@ -3873,8 +4893,18 @@ async fn sync_store_to_opencode(
                 tracing::error!("Failed to sync API key to OpenCode during sync: {}", e);
             }
         }
+        // Never write OAuth tokens for a CLIProxyAPI-owned provider into
+        // OpenCode's auth.json: that would arm a second refresher on the same
+        // rotating token family. Missions get a proxy-key overlay at launch
+        // instead (see `cli_proxy_opencode_auth_overlay`).
+        let oauth_owned_by_cli_proxy = crate::api::oauth_owner::cli_proxy_owns(provider_type);
         if let Some(ref oauth) = provider.oauth {
-            if let Err(e) = sync_to_opencode_auth(
+            if oauth_owned_by_cli_proxy {
+                tracing::debug!(
+                    provider = provider_type.id(),
+                    "Skipping OAuth sync to OpenCode auth.json: owned by CLIProxyAPI"
+                );
+            } else if let Err(e) = sync_to_opencode_auth(
                 provider_type,
                 &oauth.refresh_token,
                 &oauth.access_token,
@@ -4841,6 +5871,12 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
 }
 
 async fn refresh_anthropic_oauth_token_inner(force: bool) -> Result<(), String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::Anthropic,
+        "refresh_anthropic_oauth_token",
+    ) {
+        return Ok(());
+    }
     // Acquire exclusive lock to prevent race conditions
     let _lock = match acquire_oauth_refresh_lock(ProviderType::Anthropic) {
         Ok(lock) => lock,
@@ -5057,6 +6093,12 @@ pub async fn exchange_anthropic_refresh_token(
 /// Ensure the Anthropic OAuth token is valid, refreshing if needed.
 /// This should be called before starting a mission that uses Claude Code.
 pub async fn ensure_anthropic_oauth_token_valid() -> Result<(), String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::Anthropic,
+        "ensure_anthropic_oauth_token_valid",
+    ) {
+        return Ok(());
+    }
     if !is_anthropic_oauth_token_expired() {
         return Ok(());
     }
@@ -5069,6 +6111,12 @@ pub async fn ensure_anthropic_oauth_token_valid() -> Result<(), String> {
 /// Used when the API rejects a token that hasn't locally expired yet
 /// (e.g., token was revoked server-side or rotated by another process).
 pub async fn force_refresh_anthropic_oauth_token() -> Result<(), String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::Anthropic,
+        "force_refresh_anthropic_oauth_token",
+    ) {
+        return Ok(());
+    }
     tracing::info!("Force-refreshing Anthropic OAuth token (server-side revocation suspected)");
     refresh_anthropic_oauth_token_inner(true).await
 }
@@ -5077,6 +6125,12 @@ pub async fn force_refresh_anthropic_oauth_token() -> Result<(), String> {
 /// Updates auth.json with the new access token and expiry.
 /// Uses file-based locking to prevent concurrent refresh attempts.
 pub async fn refresh_openai_oauth_token() -> Result<(), String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::OpenAI,
+        "refresh_openai_oauth_token",
+    ) {
+        return Ok(());
+    }
     // Acquire exclusive lock to prevent race conditions
     let _lock = match acquire_oauth_refresh_lock(ProviderType::OpenAI) {
         Ok(lock) => lock,
@@ -5216,6 +6270,12 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
 
 /// Ensure the OpenAI OAuth token is valid, refreshing if needed.
 pub async fn ensure_openai_oauth_token_valid() -> Result<(), String> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        ProviderType::OpenAI,
+        "ensure_openai_oauth_token_valid",
+    ) {
+        return Ok(());
+    }
     if !is_oauth_token_expired(ProviderType::OpenAI) {
         return Ok(());
     }
@@ -6471,6 +7531,12 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
             env_var: Some("MINIMAX_API_KEY".to_string()),
         },
         ProviderTypeInfo {
+            id: "muse".to_string(),
+            name: "Meta Muse".to_string(),
+            uses_oauth: false,
+            env_var: Some("META_MODEL_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
             id: "deep-infra".to_string(),
             name: "DeepInfra".to_string(),
             uses_oauth: false,
@@ -6555,14 +7621,158 @@ pub async fn reconcile_xai_store_from_grok_cli(
                 refresh_token: refresh.to_string(),
                 expires_at: cli_expires_at,
             });
+            if is_legacy_grok_build_oauth_label(&updated.name) {
+                updated.name = xai_oauth_display_name(updated.account_email.as_deref());
+            }
+            let mut backends = updated
+                .use_for_backends
+                .take()
+                .unwrap_or_else(|| default_backends_for_provider(ProviderType::Xai));
+            for backend in default_backends_for_provider(ProviderType::Xai) {
+                if !backends.iter().any(|existing| existing == &backend) {
+                    backends.push(backend);
+                }
+            }
+            updated.use_for_backends = Some(backends);
             ai_providers.update(account.id, updated).await;
             tracing::info!(
                 account_id = %account.id,
                 cli_expires_at,
-                "Reconciled xAI OAuth token from Grok CLI auth file"
+                "Reconciled xAI SuperGrok OAuth token from Grok CLI auth file"
             );
         }
     }
+    collapse_duplicate_xai_oauth_accounts(ai_providers).await;
+}
+
+fn xai_oauth_identity(account: &crate::ai_providers::AIProvider) -> Option<String> {
+    if let Some(email) = account
+        .account_email
+        .as_ref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(format!("email:{email}"));
+    }
+    account.oauth.as_ref().and_then(|oauth| {
+        let refresh = oauth.refresh_token.trim();
+        if refresh.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "refresh:{}",
+                oauth_refresh_token_fingerprint(refresh)
+            ))
+        }
+    })
+}
+
+/// One SuperGrok login must not appear as two providers (CLI "Grok Build" row
+/// plus OpenCode xAI row). Keep the freshest OAuth row, merge backends, disable
+/// the extras.
+pub async fn collapse_duplicate_xai_oauth_accounts(
+    ai_providers: &crate::ai_providers::AIProviderStore,
+) -> u32 {
+    let accounts: Vec<_> = ai_providers
+        .get_all_by_type(ProviderType::Xai)
+        .await
+        .into_iter()
+        .filter(|account| {
+            account.enabled
+                && account.has_oauth()
+                && account
+                    .api_key
+                    .as_ref()
+                    .map(|key| key.trim().is_empty())
+                    .unwrap_or(true)
+        })
+        .collect();
+    if accounts.len() < 2 {
+        return 0;
+    }
+
+    let mut groups: HashMap<String, Vec<crate::ai_providers::AIProvider>> = HashMap::new();
+    let mut unlabeled = Vec::new();
+    for account in accounts {
+        if let Some(identity) = xai_oauth_identity(&account) {
+            groups.entry(identity).or_default().push(account);
+        } else {
+            unlabeled.push(account);
+        }
+    }
+    if unlabeled.len() >= 2 {
+        let grok_build: Vec<_> = unlabeled
+            .iter()
+            .filter(|account| is_legacy_grok_build_oauth_label(&account.name))
+            .cloned()
+            .collect();
+        let others: Vec<_> = unlabeled
+            .iter()
+            .filter(|account| !is_legacy_grok_build_oauth_label(&account.name))
+            .cloned()
+            .collect();
+        if grok_build.len() == 1 && others.len() == 1 {
+            groups
+                .entry("legacy-grok-build-pair".to_string())
+                .or_default()
+                .extend(grok_build.into_iter().chain(others));
+        }
+    }
+
+    let mut disabled = 0u32;
+    for members in groups.into_values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut ranked = members;
+        ranked.sort_by(|left, right| {
+            let left_exp = left.oauth.as_ref().map(|o| o.expires_at).unwrap_or(0);
+            let right_exp = right.oauth.as_ref().map(|o| o.expires_at).unwrap_or(0);
+            right_exp
+                .cmp(&left_exp)
+                .then_with(|| {
+                    is_legacy_grok_build_oauth_label(&left.name)
+                        .cmp(&is_legacy_grok_build_oauth_label(&right.name))
+                })
+                .then_with(|| left.created_at.cmp(&right.created_at))
+        });
+        let mut keeper = ranked.remove(0);
+        let mut backends = keeper
+            .use_for_backends
+            .clone()
+            .unwrap_or_else(|| default_backends_for_provider(ProviderType::Xai));
+        for extra in &ranked {
+            if let Some(extra_backends) = extra.use_for_backends.as_ref() {
+                for backend in extra_backends {
+                    if !backends.iter().any(|existing| existing == backend) {
+                        backends.push(backend.clone());
+                    }
+                }
+            }
+            if keeper.account_email.is_none() {
+                keeper.account_email = extra.account_email.clone();
+            }
+        }
+        for backend in default_backends_for_provider(ProviderType::Xai) {
+            if !backends.iter().any(|existing| existing == &backend) {
+                backends.push(backend);
+            }
+        }
+        keeper.use_for_backends = Some(backends);
+        if is_legacy_grok_build_oauth_label(&keeper.name) {
+            keeper.name = xai_oauth_display_name(keeper.account_email.as_deref());
+        }
+        ai_providers.update(keeper.id, keeper).await;
+        for extra in ranked {
+            let mut disabled_account = extra;
+            disabled_account.enabled = false;
+            ai_providers
+                .update(disabled_account.id, disabled_account)
+                .await;
+            disabled += 1;
+        }
+    }
+    disabled
 }
 
 fn grok_cli_reconcile_due(last_check: Option<Instant>, now: Instant) -> bool {
@@ -6597,11 +7807,13 @@ async fn list_providers(
     // Keep the xAI provider's stored token in sync with the Grok CLI's own
     // refreshed auth file so it doesn't show a false "needs reauth".
     maybe_reconcile_xai_store_from_grok_cli(&state.ai_providers).await;
+    collapse_duplicate_xai_oauth_accounts(&state.ai_providers).await;
 
     // Claude Code may have rotated Anthropic's single-use refresh token in the
     // shared tiers since the last background cycle. Reconcile before deriving
     // UI health so a live harness credential is never shown as disconnected.
     reconcile_anthropic_store_from_tiers(&state.ai_providers).await;
+    reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
 
     // All providers live in AIProviderStore now
     let store_providers = state.ai_providers.list().await;
@@ -6840,6 +8052,20 @@ async fn check_provider_health(
                 format!("Bearer {}", key),
             )
         }
+        ProviderType::Muse => {
+            let key = api_key_opt
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.meta.ai/v1/chat/completions",
+                serde_json::json!({
+                    "model": "muse-spark-1.2",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", key),
+            )
+        }
         ProviderType::DeepInfra => {
             let key = api_key_opt
                 .as_ref()
@@ -6933,6 +8159,10 @@ async fn get_provider_usage(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    maybe_reconcile_xai_store_from_grok_cli(&state.ai_providers).await;
+    reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
+    collapse_duplicate_xai_oauth_accounts(&state.ai_providers).await;
+
     // Resolve provider credentials: check AIProviderStore first, then OpenCode auth.
     // `provider_uuid` is `Some` when the credentials live in AIProviderStore and we
     // can persist a refreshed OAuth back into that specific record.
@@ -7097,7 +8327,7 @@ async fn get_provider_usage(
             // — sending them as `x-api-key` gets rejected with 401, which
             // is what users on a Claude subscription (no api_key, OAuth only)
             // were seeing while their missions still worked via Claude Code.
-            let (auth, is_oauth) = if let Some(ref key) = api_key_opt {
+            let (mut auth, mut is_oauth) = if let Some(ref key) = api_key_opt {
                 (key.clone(), false)
             } else if let Some(ref o) = oauth {
                 // Refresh the token if expired before using it.
@@ -7202,6 +8432,17 @@ async fn get_provider_usage(
                     "error": "No credentials configured"
                 })));
             };
+
+            // Under CLI-proxy ownership, sandboxed.sh's own Anthropic OAuth
+            // record is deliberately stale (the proxy owns refresh). Probe
+            // with the proxy's live access token instead so the usage window
+            // data (5h / 7d) reflects the credential missions actually use.
+            if crate::api::oauth_owner::cli_proxy_owns(ProviderType::Anthropic) {
+                if let Some(token) = cli_proxy_access_token("claude-", "claude") {
+                    auth = token;
+                    is_oauth = true;
+                }
+            }
 
             // Minimal messages API call to get rate limit headers
             let mut req_builder = client
@@ -7939,6 +9180,107 @@ async fn get_provider_usage(
             }
             info
         }
+        ProviderType::Kimi => {
+            let mut token = oauth
+                .as_ref()
+                .map(|o| o.access_token.clone())
+                .or_else(|| api_key_opt.clone());
+            if token.is_none() {
+                return Ok(Json(serde_json::json!({
+                    "provider_type": "kimi",
+                    "provider_name": provider_name,
+                    "account_email": account_email,
+                    "error": "No credentials configured"
+                })));
+            }
+            if let (Some(o), Some(uuid)) = (oauth.as_ref(), provider_uuid) {
+                if oauth_token_expired(o.expires_at) && !o.refresh_token.trim().is_empty() {
+                    match refresh_oauth_token_internal(&ProviderType::Kimi, &o.refresh_token).await
+                    {
+                        Ok((access, refresh, expires_at)) => {
+                            let creds = crate::ai_providers::OAuthCredentials {
+                                access_token: access.clone(),
+                                refresh_token: refresh,
+                                expires_at,
+                            };
+                            let _ = state.ai_providers.set_oauth_credentials(uuid, creds).await;
+                            token = Some(access);
+                        }
+                        Err(e) => {
+                            tracing::debug!("Kimi usage token refresh failed: {e}");
+                        }
+                    }
+                }
+            }
+            let token = token.expect("checked above");
+            let mut info = serde_json::json!({
+                "provider_type": "kimi",
+                "provider_name": provider_name,
+                "account_email": account_email,
+            });
+
+            let usages = client
+                .get(crate::api::kimi_usage::CODING_USAGES_URL)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("User-Agent", crate::api::kimi_usage::KIMI_USAGE_USER_AGENT)
+                .header("Accept", "application/json")
+                .send()
+                .await;
+            let mut coding = crate::api::kimi_usage::KimiUsageSnapshot::default();
+            match usages {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(payload) = r.json::<serde_json::Value>().await {
+                        coding = crate::api::kimi_usage::parse_coding_usages(&payload);
+                    }
+                    info["status"] = serde_json::json!("connected");
+                }
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    if status == 401 || status == 403 {
+                        info["status"] = serde_json::json!("needs_reauth");
+                        info["error"] = serde_json::json!(format!(
+                            "Kimi Code usage endpoint returned HTTP {status}"
+                        ));
+                    } else {
+                        info["status"] = serde_json::json!("connected");
+                    }
+                }
+                Err(e) => {
+                    info["error"] =
+                        serde_json::json!(format!("Failed to reach Kimi usage API: {e}"));
+                }
+            }
+
+            let mut balance = crate::api::kimi_usage::KimiUsageSnapshot::default();
+            if let Some(key) = api_key_opt.as_ref() {
+                if let Ok(r) = client
+                    .get(crate::api::kimi_usage::OPEN_PLATFORM_BALANCE_URL)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Accept", "application/json")
+                    .send()
+                    .await
+                {
+                    if r.status().is_success() {
+                        if let Ok(payload) = r.json::<serde_json::Value>().await {
+                            balance = crate::api::kimi_usage::parse_open_platform_balance(&payload);
+                        }
+                    }
+                }
+            }
+
+            let snap = crate::api::kimi_usage::merge_snapshots(coding, balance);
+            if snap.has_displayable_quota() {
+                info["status"] = serde_json::json!("connected");
+                if let Some(obj) = info.as_object_mut() {
+                    if let serde_json::Value::Object(fields) = snap.to_provider_fields() {
+                        obj.extend(fields);
+                    }
+                }
+            } else if info.get("error").is_none() {
+                info["status"] = serde_json::json!("connected");
+            }
+            info
+        }
         ProviderType::Xai => {
             let mut info = serde_json::json!({
                 "provider_type": "xai",
@@ -7946,38 +9288,192 @@ async fn get_provider_usage(
                 "account_email": account_email,
             });
 
-            if api_key_opt.is_some() {
-                info.as_object_mut()
-                    .unwrap()
-                    .insert("status".to_string(), serde_json::json!("connected"));
-            } else if let Some(ref o) = oauth {
-                let refresh_rejected = provider_refresh_rejected
+            let refresh_rejected = oauth.as_ref().is_some_and(|o| {
+                provider_refresh_rejected
                     || provider_uuid
-                        .is_some_and(|uuid| oauth_refresh_token_is_dead(uuid, &o.refresh_token));
-                if refresh_rejected || oauth_token_expired(o.expires_at) {
-                    info.as_object_mut()
-                        .unwrap()
-                        .insert("status".to_string(), serde_json::json!("needs_reauth"));
-                    info.as_object_mut().unwrap().insert(
-                        "error".to_string(),
-                        serde_json::json!(if refresh_rejected {
-                            "xAI OAuth refresh token was rejected; reconnect Grok Build"
-                        } else {
-                            "xAI OAuth token expired; reconnect Grok Build"
-                        }),
-                    );
-                } else {
-                    info.as_object_mut()
-                        .unwrap()
-                        .insert("status".to_string(), serde_json::json!("connected"));
+                        .is_some_and(|uuid| oauth_refresh_token_is_dead(uuid, &o.refresh_token))
+            });
+
+            let mut oauth_token = oauth.as_ref().map(|o| o.access_token.clone());
+            if let (Some(o), Some(uuid)) = (oauth.as_ref(), provider_uuid) {
+                if !refresh_rejected
+                    && oauth_token_expired(o.expires_at)
+                    && !o.refresh_token.trim().is_empty()
+                {
+                    match refresh_oauth_token_internal(&ProviderType::Xai, &o.refresh_token).await {
+                        Ok((access, refresh, expires_at)) => {
+                            let creds = crate::ai_providers::OAuthCredentials {
+                                access_token: access.clone(),
+                                refresh_token: refresh,
+                                expires_at,
+                            };
+                            let _ = state.ai_providers.set_oauth_credentials(uuid, creds).await;
+                            oauth_token = Some(access);
+                        }
+                        Err(e) => {
+                            tracing::debug!("xAI usage token refresh failed: {e}");
+                        }
+                    }
                 }
-            } else {
-                info.as_object_mut().unwrap().insert(
-                    "error".to_string(),
-                    serde_json::json!("No credentials configured"),
-                );
             }
 
+            let mut snap = crate::api::xai_usage::XaiUsageSnapshot::default();
+
+            let store_token_still_stale = oauth.as_ref().is_some_and(|o| {
+                oauth_token_expired(o.expires_at)
+                    && oauth_token.as_deref() == Some(o.access_token.as_str())
+            });
+            let supergrok_live_via_cli_proxy = xai_cli_proxy_account_available();
+
+            if let Some(token) = oauth_token.as_ref() {
+                if refresh_rejected {
+                    info["status"] = serde_json::json!("needs_reauth");
+                    info["error"] = serde_json::json!(xai_supergrok_reconnect_reason(true));
+                } else if store_token_still_stale && !supergrok_live_via_cli_proxy {
+                    info["status"] = serde_json::json!("needs_reauth");
+                    info["error"] = serde_json::json!(xai_supergrok_reconnect_reason(false));
+                } else {
+                    let billing = client
+                        .get(crate::api::xai_usage::BILLING_URL)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("x-xai-token-auth", crate::api::xai_usage::TOKEN_AUTH_HEADER)
+                        .header("Accept", "application/json")
+                        .send()
+                        .await;
+                    match billing {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(payload) = r.json::<serde_json::Value>().await {
+                                snap = crate::api::xai_usage::parse_cli_billing(&payload);
+                            }
+                            info["status"] = serde_json::json!("connected");
+                        }
+                        Ok(r) => {
+                            let status = r.status().as_u16();
+                            if status == 401 || status == 403 {
+                                if supergrok_live_via_cli_proxy {
+                                    // Store copy of the grok CLI token can be stale while
+                                    // CLIProxyAPI still has a refreshable SuperGrok login
+                                    // used by OpenCode `xai/*`.
+                                    info["status"] = serde_json::json!("connected");
+                                } else {
+                                    info["status"] = serde_json::json!("needs_reauth");
+                                    info["error"] = serde_json::json!(format!(
+                                        "Grok billing endpoint returned HTTP {status}"
+                                    ));
+                                }
+                            } else {
+                                info["status"] = serde_json::json!("connected");
+                            }
+                        }
+                        Err(e) => {
+                            info["error"] =
+                                serde_json::json!(format!("Failed to reach Grok billing API: {e}"));
+                        }
+                    }
+
+                    if info.get("status").and_then(|v| v.as_str()) == Some("connected") {
+                        if let Ok(r) = client
+                            .get(crate::api::xai_usage::SETTINGS_URL)
+                            .header("Authorization", format!("Bearer {token}"))
+                            .header("x-xai-token-auth", crate::api::xai_usage::TOKEN_AUTH_HEADER)
+                            .header("Accept", "application/json")
+                            .send()
+                            .await
+                        {
+                            if r.status().is_success() {
+                                if let Ok(payload) = r.json::<serde_json::Value>().await {
+                                    if let Some(plan) =
+                                        crate::api::xai_usage::parse_cli_settings(&payload)
+                                    {
+                                        snap.plan = Some(plan);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if api_key_opt.is_none() {
+                info["error"] = serde_json::json!("No credentials configured");
+            }
+
+            if let Some(key) = api_key_opt.as_ref() {
+                match client
+                    .get(crate::api::xai_usage::API_KEY_INFO_URL)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Accept", "application/json")
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(payload) = r.json::<serde_json::Value>().await {
+                            snap = crate::api::xai_usage::merge_snapshots(
+                                snap,
+                                crate::api::xai_usage::parse_api_key_info(&payload),
+                            );
+                        }
+                        if info.get("status").is_none() {
+                            info["status"] = serde_json::json!("connected");
+                        }
+                    }
+                    Ok(r) => {
+                        let status = r.status().as_u16();
+                        if info.get("status").is_none() {
+                            if status == 401 || status == 403 {
+                                info["status"] = serde_json::json!("needs_reauth");
+                                info["error"] = serde_json::json!(format!(
+                                    "xAI API key endpoint returned HTTP {status}"
+                                ));
+                            } else {
+                                info["status"] = serde_json::json!("connected");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if info.get("error").is_none() && info.get("status").is_none() {
+                            info["error"] =
+                                serde_json::json!(format!("Failed to reach xAI API: {e}"));
+                        }
+                    }
+                }
+
+                if let (Some(team_id), Some(mgmt)) = (
+                    snap.team_id.as_deref(),
+                    std::env::var("XAI_MANAGEMENT_API_KEY")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty()),
+                ) {
+                    if let Ok(r) = client
+                        .get(crate::api::xai_usage::prepaid_balance_url(team_id))
+                        .header("Authorization", format!("Bearer {mgmt}"))
+                        .header("Accept", "application/json")
+                        .send()
+                        .await
+                    {
+                        if r.status().is_success() {
+                            if let Ok(payload) = r.json::<serde_json::Value>().await {
+                                if let Some(usd) =
+                                    crate::api::xai_usage::parse_prepaid_balance(&payload)
+                                {
+                                    snap.prepaid_usd = Some(usd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if snap.has_displayable_quota() || snap.key_name.is_some() || snap.team_id.is_some() {
+                if info.get("status").and_then(|v| v.as_str()) != Some("needs_reauth") {
+                    info["status"] = serde_json::json!("connected");
+                }
+                if let Some(obj) = info.as_object_mut() {
+                    if let serde_json::Value::Object(fields) = snap.to_provider_fields() {
+                        obj.extend(fields);
+                    }
+                }
+            } else if info.get("error").is_none() && info.get("status").is_none() {
+                info["status"] = serde_json::json!("connected");
+            }
             info
         }
         _ => {
@@ -8428,6 +9924,7 @@ async fn delete_provider(
     if !state.ai_providers.delete(uuid).await {
         return Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)));
     }
+    state.health_tracker.remove_account(uuid).await;
 
     // Re-sync opencode.json for this provider type (will remove if no more of this type)
     if provider_type != ProviderType::Custom {
@@ -9036,15 +10533,19 @@ async fn upsert_kimi_oauth_provider(
 pub fn spawn_kimi_oauth_refresh_loop(state: Arc<super::routes::AppState>) {
     tokio::spawn(async move {
         loop {
-            // Run immediately at startup, then every five minutes. Reuse the
-            // same serialized store refresh path as catalog discovery so
-            // rotating refresh tokens cannot race.
+            // Run immediately at startup, then every four minutes. Kimi
+            // access tokens only live 300s, so a 300s sleep left a ~1s hole
+            // between expiry and the next refresh each cycle — requests
+            // landing in it got upstream 403s (about one per hour under
+            // steady builtin/smart traffic). A 240s cadence keeps a 60s
+            // validity margin. Reuse the same serialized store refresh path
+            // as catalog discovery so rotating refresh tokens cannot race.
             let (_, refreshed) =
                 refresh_due_store_oauth(&state.ai_providers, ProviderType::Kimi, 600_000).await;
             if refreshed > 0 {
                 tracing::info!(refreshed, "Refreshed Kimi OAuth credentials");
             }
-            tokio::time::sleep(Duration::from_secs(300)).await;
+            tokio::time::sleep(Duration::from_secs(240)).await;
         }
     });
 }
@@ -10196,6 +11697,8 @@ pub enum OAuthRefreshError {
     InvalidGrant(String),
     /// Other refresh errors (network, server errors, etc.)
     Other(String),
+    /// The credential is owned by CLIProxyAPI; sandboxed.sh must not refresh it.
+    OwnedByCliProxy,
 }
 
 impl std::fmt::Display for OAuthRefreshError {
@@ -10203,6 +11706,9 @@ impl std::fmt::Display for OAuthRefreshError {
         match self {
             OAuthRefreshError::InvalidGrant(msg) => write!(f, "Invalid grant: {}", msg),
             OAuthRefreshError::Other(msg) => write!(f, "{}", msg),
+            OAuthRefreshError::OwnedByCliProxy => {
+                write!(f, "OAuth credential is owned by CLIProxyAPI; not refreshed")
+            }
         }
     }
 }
@@ -10511,6 +12017,12 @@ pub async fn refresh_oauth_token_with_lock(
     provider_type: ProviderType,
     known_expires_at: i64,
 ) -> Result<(String, String, i64), OAuthRefreshError> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        provider_type,
+        "refresh_oauth_token_with_lock",
+    ) {
+        return Err(OAuthRefreshError::OwnedByCliProxy);
+    }
     // Acquire exclusive lock — prevents concurrent refreshes from racing on
     // the same rotating refresh token.
     let _lock = match acquire_oauth_refresh_lock(provider_type) {
@@ -10612,6 +12124,63 @@ fn should_adopt_anthropic_tier(
 /// The shared Codex tier represents one selected account while the provider
 /// store may contain several logins. Account identity must therefore match
 /// before adopting a token; expiry alone is not sufficient.
+fn newer_shared_codex_credentials(
+    stored: &crate::ai_providers::OAuthCredentials,
+    auth_path: &Path,
+) -> Option<crate::ai_providers::OAuthCredentials> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(auth_path).ok()?).ok()?;
+    let tokens = value.get("tokens")?;
+    let access = tokens.get("access_token")?.as_str()?;
+    let tier = OAuthTokenEntry {
+        access_token: access.to_string(),
+        refresh_token: tokens.get("refresh_token")?.as_str()?.to_string(),
+        expires_at: extract_jwt_exp_ms(access)?,
+    };
+    newer_matching_openai_tier_credentials(stored, &tier)
+}
+
+/// Adopt a newer token from the same account's shared Codex home. Never rotate
+/// an old token first or copy credentials between distinct ChatGPT identities.
+pub async fn reconcile_openai_store_from_codex_homes(
+    store: &crate::ai_providers::AIProviderStore,
+) -> u32 {
+    if crate::api::oauth_owner::cli_proxy_owns(ProviderType::OpenAI) {
+        return 0;
+    }
+    let mut adopted = 0;
+    for account in store.get_all_by_type(ProviderType::OpenAI).await {
+        let Some(oauth) = account.oauth.as_ref() else {
+            continue;
+        };
+        let Some(identity) = extract_chatgpt_account_id(&oauth.access_token) else {
+            continue;
+        };
+        let lock = codex_oauth_refresh_lock(&identity);
+        let _guard = lock.lock().await;
+        let Ok(_process_guard) = acquire_codex_oauth_cross_process_lock().await else {
+            continue;
+        };
+        let Some(current) = store.get(account.id).await else {
+            continue;
+        };
+        let Some(current_oauth) = current.oauth.as_ref() else {
+            continue;
+        };
+        let path = shared_codex_oauth_home_for_account(&identity).join("auth.json");
+        if let Some(fresh) = newer_shared_codex_credentials(current_oauth, &path) {
+            if store
+                .set_oauth_credentials(account.id, fresh)
+                .await
+                .is_some()
+            {
+                oauth_refresh_clear_dead(account.id);
+                adopted += 1;
+            }
+        }
+    }
+    adopted
+}
+
 fn newer_matching_openai_tier_credentials(
     store: &crate::ai_providers::OAuthCredentials,
     tier: &OAuthTokenEntry,
@@ -10705,6 +12274,9 @@ pub async fn refresh_due_store_oauth(
     provider_type: ProviderType,
     refresh_threshold_ms: i64,
 ) -> (u32, u32) {
+    if crate::api::oauth_owner::skip_refresh_if_owned(provider_type, "refresh_due_store_oauth") {
+        return (0, 0);
+    }
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut found = 0u32;
     let mut refreshed = if provider_type == ProviderType::Anthropic {
@@ -10779,6 +12351,12 @@ pub async fn refresh_store_account_oauth_locked(
     provider_type: ProviderType,
     fallback_refresh_token: &str,
 ) -> Result<(String, String, i64), OAuthRefreshError> {
+    if crate::api::oauth_owner::skip_refresh_if_owned(
+        provider_type,
+        "refresh_store_account_oauth_locked",
+    ) {
+        return Err(OAuthRefreshError::OwnedByCliProxy);
+    }
     // Serialize in-process refreshes for this provider type FIRST. The file
     // lock below is a non-blocking `try_lock` (cross-process only), so without
     // this async gate concurrent in-process refreshes race and each consumes the

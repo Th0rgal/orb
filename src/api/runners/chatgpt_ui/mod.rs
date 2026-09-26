@@ -206,7 +206,12 @@ fn safe_driver_diagnostic(message: &str) -> Option<&str> {
         | "compatibility=chatgpt-ui-v2; browser=firefox"
         | "compatibility=chatgpt-ui-v2; browser=webkit"
         | "stage=page_loaded"
+        | "stage=cloudflare_wait"
+        | "stage=cloudflare_cleared"
+        | "stage=account_picker"
+        | "stage=account_picker_selected"
         | "stage=account_confirmed"
+        | "stage=account_confirmed_via_nav"
         | "stage=blank_route"
         | "stage=composer_ready"
         | "stage=send_button_fallback"
@@ -375,6 +380,7 @@ fn validated_settings(app_working_dir: &Path) -> Result<Settings, String> {
 
 const RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[allow(clippy::result_large_err)] // AgentResult carries the terminal mission record.
 async fn wait_for_available_launch_turn(
     settings: &Settings,
     mission_id: Uuid,
@@ -764,6 +770,7 @@ fn unresolved_resume_result(code: &str) -> AgentResult {
 /// the durable record names the account that holds the conversation, so pool
 /// health routing does not apply — either this slot frees up or the caller
 /// gives up via cancellation.
+#[allow(clippy::result_large_err)] // AgentResult carries the terminal mission record.
 async fn acquire_pinned_profile(
     profile_dirs: &[PathBuf],
     profile_dir: &Path,
@@ -771,6 +778,18 @@ async fn acquire_pinned_profile(
     events_tx: &broadcast::Sender<AgentEvent>,
     cancel: &CancellationToken,
 ) -> Result<profile_pool::ProfileLock, AgentResult> {
+    if !profile_pool::profile_is_auth_ready(profile_dir) {
+        return Err(AgentResult::failure(
+            "The ChatGPT UI profile that owns this conversation requires a verified login.",
+            0,
+        )
+        .with_terminal_reason(TerminalReason::AuthError)
+        .with_data(serde_json::json!({
+            "provider_error_source": "chatgpt_ui_profile_pool",
+            "failure_class": FailureClass::AuthError,
+            "classification_source": "durable_profile_health",
+        })));
+    }
     let mut announced_wait = false;
     loop {
         availability::wait_until_available(profile_dirs, mission_id, events_tx, cancel).await?;
@@ -1406,6 +1425,18 @@ mod tests {
         assert_eq!(
             safe_driver_diagnostic("stage=stop_button_fallback"),
             Some("stage=stop_button_fallback")
+        );
+        assert_eq!(
+            safe_driver_diagnostic("stage=cloudflare_wait"),
+            Some("stage=cloudflare_wait")
+        );
+        assert_eq!(
+            safe_driver_diagnostic("stage=account_picker_selected"),
+            Some("stage=account_picker_selected")
+        );
+        assert_eq!(
+            safe_driver_diagnostic("stage=account_confirmed_via_nav"),
+            Some("stage=account_confirmed_via_nav")
         );
         assert_eq!(
             safe_driver_diagnostic("stage=page_loaded account=user@example.com"),

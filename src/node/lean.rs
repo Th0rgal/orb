@@ -1,8 +1,10 @@
 //! Declarative `lean_build` job execution for the `sandboxed-node` runner.
 //!
-//! A lean-build job carries only a git source (repo + pinned commit), a
+//! A lean-build job carries a git source (credential-free repo identity,
+//! pinned commit, and normally a complete commit-bound object pack), a
 //! constrained argv (`lake build`/`lean`), and artifact patterns. The node
-//! materializes a content-addressed checkout, restores trusted shared runtime
+//! materializes a content-addressed checkout without network access when the
+//! archive is present, restores trusted shared runtime
 //! caches, runs the build, and records artifact digests. Lake dependency-cache
 //! plumbing fails closed until the evaluated package layout can be attested.
 //! No workspace sync with core, no shell interpretation of the payload.
@@ -27,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::job_store::JobState;
 use super::runner::{clamp_timeout, run_logged_command, CommandEnvironment};
-use crate::remote_node::{ArtifactEntry, JobPayload, JobSource, SourceBundle};
+use crate::remote_node::{ArtifactEntry, JobPayload, JobSource, SourceArchive, SourceBundle};
 
 /// Default allowlist for lean-build env keys
 /// (`SANDBOXED_NODE_ENV_ALLOWLIST` overrides, comma-separated).
@@ -40,7 +42,12 @@ pub const ALLOWED_COMMANDS: [&str; 2] = ["lake", "lean"];
 /// filesystem backing the work dir (`SANDBOXED_NODE_MIN_FREE_GB` overrides).
 const DEFAULT_MIN_FREE_GB: u64 = 10;
 const DEFAULT_MAX_SOURCE_BUNDLE_BYTES: u64 = 1 << 20;
+const DEFAULT_MAX_COMPLETE_SOURCE_BUNDLE_BYTES: u64 = 32 << 20;
 const MAX_SOURCE_BUNDLE_FILES: usize = 256;
+const DEFAULT_MAX_SOURCE_ARCHIVE_BYTES: u64 = 32 << 20;
+const DEFAULT_MAX_SOURCE_ARCHIVE_EXPANDED_BYTES: u64 = 2 << 30;
+const MAX_SOURCE_ARCHIVE_OBJECTS: usize = 100_000;
+const MAX_COMPLETE_SOURCE_BUNDLE_FILES: usize = 4096;
 
 /// Interval between node-side cache GC passes.
 const GC_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -104,25 +111,122 @@ pub fn rel_path_is_safe(rel_clean: &str) -> bool {
         })
 }
 
-fn source_bundle_max_bytes() -> u64 {
-    std::env::var("SANDBOXED_NODE_MAX_SOURCE_BUNDLE_BYTES")
+pub fn source_bundle_capacity() -> crate::remote_node::protocol::SourceBundleCapacity {
+    crate::remote_node::protocol::SourceBundleCapacity {
+        overlay_bytes: source_bundle_mode_max_bytes(false),
+        complete_bytes: source_bundle_mode_max_bytes(true),
+    }
+}
+
+fn source_bundle_max_bytes(bundle: &SourceBundle) -> u64 {
+    source_bundle_mode_max_bytes(bundle.complete)
+}
+
+fn source_bundle_mode_max_bytes(complete: bool) -> u64 {
+    configured_source_bundle_max_bytes(
+        complete,
+        std::env::var("SANDBOXED_NODE_MAX_SOURCE_BUNDLE_BYTES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn configured_source_bundle_max_bytes(complete: bool, configured: Option<&str>) -> u64 {
+    configured
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(if complete {
+            DEFAULT_MAX_COMPLETE_SOURCE_BUNDLE_BYTES
+        } else {
+            DEFAULT_MAX_SOURCE_BUNDLE_BYTES
+        })
+}
+
+fn source_archive_max_bytes() -> u64 {
+    std::env::var("SANDBOXED_NODE_MAX_SOURCE_ARCHIVE_BYTES")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|bytes| *bytes > 0)
-        .unwrap_or(DEFAULT_MAX_SOURCE_BUNDLE_BYTES)
+        .unwrap_or(DEFAULT_MAX_SOURCE_ARCHIVE_BYTES)
 }
 
+fn source_archive_expanded_max_bytes() -> u64 {
+    std::env::var("SANDBOXED_NODE_MAX_SOURCE_ARCHIVE_EXPANDED_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(DEFAULT_MAX_SOURCE_ARCHIVE_EXPANDED_BYTES)
+}
+
+pub(crate) fn source_archive_sha256(commit: &str, bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sandboxed-source-archive-v1\0");
+    hasher.update(commit.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn decode_source_archive(source: &JobSource, archive: &SourceArchive) -> Result<Vec<u8>, String> {
+    if archive.sha256.len() != 64
+        || !archive
+            .sha256
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    {
+        return Err("invalid source archive sha256".to_string());
+    }
+    if archive.size_bytes == 0 || archive.size_bytes > source_archive_max_bytes() {
+        return Err(format!(
+            "source archive size must be between 1 and {} bytes",
+            source_archive_max_bytes()
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&archive.data_base64)
+        .map_err(|_| "invalid source archive base64".to_string())?;
+    if bytes.len() as u64 != archive.size_bytes {
+        return Err("source archive decoded size mismatch".to_string());
+    }
+    let computed = source_archive_sha256(&source.commit, &bytes);
+    if !crate::remote_node::protocol::constant_time_eq(
+        computed.as_bytes(),
+        archive.sha256.as_bytes(),
+    ) {
+        return Err("source archive commit-bound hash mismatch".to_string());
+    }
+    if bytes.len() < 12 || &bytes[..4] != b"PACK" {
+        return Err("source archive is not a Git pack".to_string());
+    }
+    let object_count = u32::from_be_bytes(bytes[8..12].try_into().expect("fixed pack header"));
+    if object_count as usize > MAX_SOURCE_ARCHIVE_OBJECTS {
+        return Err(format!(
+            "source archive contains more than {MAX_SOURCE_ARCHIVE_OBJECTS} objects"
+        ));
+    }
+    Ok(bytes)
+}
+
+// Bundle paths are literal manifest identities: never normalize aliases before
+// writing. Validate every entry and deletion before any filesystem mutation.
 fn bundle_path_is_safe(path: &str) -> bool {
     rel_path_is_safe(path)
         && !path.is_empty()
         && !path
             .split('/')
-            .any(|component| matches!(component, ".git" | ".lake"))
+            .any(|component| matches!(component, "." | ".git" | ".lake"))
 }
 
-pub(crate) fn bundle_manifest_sha256(files: &[(String, String)]) -> String {
+pub(crate) fn bundle_manifest_sha256_for_mode(
+    files: &[(String, String)],
+    complete: bool,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"sandboxed-source-bundle-v1\n");
+    if complete {
+        hasher.update(b"sandboxed-source-bundle-v2-complete\n");
+    } else {
+        hasher.update(b"sandboxed-source-bundle-v1\n");
+    }
     for (path, sha256) in files {
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
@@ -132,14 +236,46 @@ pub(crate) fn bundle_manifest_sha256(files: &[(String, String)]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn validate_source_bundle(bundle: &SourceBundle) -> Result<u64, String> {
-    if bundle.files.is_empty() {
-        return Err("source.bundle.files must not be empty".to_string());
+pub(crate) fn bundle_operations_sha256(bundle: &SourceBundle) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sandboxed-source-bundle-ops-v1\n");
+    for file in &bundle.files {
+        hasher.update(b"file\0");
+        hasher.update(file.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(if file.executable == Some(true) {
+            b"x"
+        } else {
+            b"-"
+        });
+        hasher.update(b"\n");
     }
-    if bundle.files.len() > MAX_SOURCE_BUNDLE_FILES {
+    for path in &bundle.deleted_paths {
+        hasher.update(b"delete\0");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn validate_source_bundle(bundle: &SourceBundle) -> Result<u64, String> {
+    if bundle.files.is_empty() && bundle.deleted_paths.is_empty() {
+        return Err("source bundle must contain files or deletions".to_string());
+    }
+    let max_files = if bundle.complete {
+        MAX_COMPLETE_SOURCE_BUNDLE_FILES
+    } else {
+        MAX_SOURCE_BUNDLE_FILES
+    };
+    if bundle
+        .files
+        .len()
+        .saturating_add(bundle.deleted_paths.len())
+        > max_files
+    {
         return Err(format!(
-            "source bundle has {} files; maximum is {MAX_SOURCE_BUNDLE_FILES}",
-            bundle.files.len()
+            "source bundle has {} operations; maximum is {max_files}",
+            bundle.files.len() + bundle.deleted_paths.len()
         ));
     }
     let mut manifest_files = Vec::with_capacity(bundle.files.len());
@@ -165,10 +301,10 @@ fn validate_source_bundle(bundle: &SourceBundle) -> Result<u64, String> {
             .decode(&file.data_base64)
             .map_err(|_| format!("invalid source bundle base64 for '{}'", file.path))?;
         total = total.saturating_add(bytes.len() as u64);
-        if total > source_bundle_max_bytes() {
+        if total > source_bundle_max_bytes(bundle) {
             return Err(format!(
                 "source bundle is {total} bytes; maximum is {}",
-                source_bundle_max_bytes()
+                source_bundle_max_bytes(bundle)
             ));
         }
         if hex::encode(Sha256::digest(&bytes)) != file.sha256 {
@@ -179,9 +315,38 @@ fn validate_source_bundle(bundle: &SourceBundle) -> Result<u64, String> {
         }
         manifest_files.push((file.path.clone(), file.sha256.clone()));
     }
-    let expected = bundle_manifest_sha256(&manifest_files);
+    let expected = bundle_manifest_sha256_for_mode(&manifest_files, bundle.complete);
     if expected != bundle.manifest_sha256 {
         return Err("source bundle manifest hash mismatch".to_string());
+    }
+    let has_extended_operations = !bundle.deleted_paths.is_empty()
+        || bundle.files.iter().any(|file| file.executable.is_some());
+    if has_extended_operations {
+        let Some(digest) = bundle.operations_sha256.as_deref() else {
+            return Err("source bundle operations_sha256 is required".to_string());
+        };
+        if digest != bundle_operations_sha256(bundle) {
+            return Err("source bundle operations hash mismatch".to_string());
+        }
+        let mut prior = None;
+        let file_paths = bundle
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for path in &bundle.deleted_paths {
+            if !bundle_path_is_safe(path) || file_paths.contains(path.as_str()) {
+                return Err(format!(
+                    "unsafe or conflicting source bundle deletion '{path}'"
+                ));
+            }
+            if prior.is_some_and(|value| value >= path.as_str()) {
+                return Err("source bundle deleted paths must be unique and sorted".to_string());
+            }
+            prior = Some(path.as_str());
+        }
+    } else if bundle.operations_sha256.is_some() {
+        return Err("source bundle operations_sha256 has no operations".to_string());
     }
     Ok(total)
 }
@@ -206,6 +371,16 @@ fn repo_url_is_remote(repo: &str) -> bool {
     false
 }
 
+fn repo_url_has_credentials(repo: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(repo) else {
+        return false;
+    };
+    parsed.password().is_some()
+        || (matches!(parsed.scheme(), "http" | "https") && !parsed.username().is_empty())
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+}
+
 /// Validate a lean-build payload before touching the filesystem or network.
 pub fn validate_lean_build(
     source: &JobSource,
@@ -216,6 +391,12 @@ pub fn validate_lean_build(
 ) -> Result<(), String> {
     if source.repo.trim().is_empty() {
         return Err("source.repo is required".to_string());
+    }
+    if repo_url_has_credentials(&source.repo) {
+        return Err(
+            "source.repo URL must not contain credentials, query parameters, or a fragment"
+                .to_string(),
+        );
     }
     if !repo_url_is_remote(&source.repo) {
         return Err(format!(
@@ -229,6 +410,9 @@ pub fn validate_lean_build(
             "source.commit must be a full 40-char lowercase hex SHA (got '{}')",
             source.commit
         ));
+    }
+    if let Some(archive) = &source.archive {
+        decode_source_archive(source, archive)?;
     }
     if let Some(bundle) = &source.bundle {
         validate_source_bundle(bundle)?;
@@ -313,6 +497,38 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Content-addressed checkout directory for `(repo, commit)`.
+/// The submitter pinned a root tree; the checkout must have exactly that
+/// tree or the receipt would prove something about different content.
+/// Legacy submissions carry no tree and skip the check.
+async fn verify_base_tree(source: &JobSource, checkout: &Path) -> anyhow::Result<()> {
+    let Some(expected) = source
+        .base_tree_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD^{tree}"])
+        .current_dir(checkout)
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!("could not resolve the checked-out tree for base tree verification");
+    }
+    let actual = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if actual != expected.to_ascii_lowercase() {
+        anyhow::bail!(
+            "BASE_TREE_MISMATCH: submitter pinned tree {expected} but commit {} checks out tree {actual}",
+            source.commit
+        );
+    }
+    Ok(())
+}
+
 pub fn checkout_dir(work_root: &Path, repo: &str, commit: &str) -> PathBuf {
     let repo_hash = sha256_hex(repo.as_bytes());
     work_root
@@ -760,6 +976,208 @@ async fn run_git_step(
     Ok(())
 }
 
+fn validate_archive_tree_output(output: &[u8]) -> Result<(), String> {
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| "malformed source archive tree entry".to_string())?;
+        let (metadata, path_with_separator) = record.split_at(separator);
+        let path = &path_with_separator[1..];
+        let mode = metadata
+            .split(|byte| *byte == b' ')
+            .next()
+            .ok_or_else(|| "malformed source archive tree mode".to_string())?;
+        if !matches!(mode, b"040000" | b"100644" | b"100755") {
+            return Err(format!(
+                "source archive contains unsupported tree mode {}",
+                String::from_utf8_lossy(mode)
+            ));
+        }
+        let fields = metadata.split(|byte| *byte == b' ').collect::<Vec<_>>();
+        if fields.len() != 3
+            || !matches!(
+                (fields[0], fields[1]),
+                (b"040000", b"tree") | (b"100644" | b"100755", b"blob")
+            )
+            || fields[2].len() != 40
+            || !fields[2].iter().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("malformed source archive tree metadata".to_string());
+        }
+        let path = std::str::from_utf8(path)
+            .map_err(|_| "source archive paths must be UTF-8".to_string())?;
+        if path.starts_with('/')
+            || path.contains('\\')
+            || path.chars().any(char::is_control)
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".." | ".git"))
+        {
+            return Err(format!("unsafe source archive path '{path}'"));
+        }
+    }
+    Ok(())
+}
+
+async fn import_source_archive(
+    tmp: &Path,
+    source: &JobSource,
+    archive: &SourceArchive,
+    log_path: &Path,
+    token: &CancellationToken,
+) -> anyhow::Result<()> {
+    let bytes = decode_source_archive(source, archive).map_err(|error| anyhow::anyhow!(error))?;
+    run_git_step(&["init", "--quiet"], tmp, log_path, token).await?;
+
+    let mut child = tokio::process::Command::new("git")
+        // The transport deliberately contains the requested commit and its
+        // complete snapshot, not historical parent commits. `index-pack`
+        // still verifies pack/object integrity; `--strict` cannot be used
+        // because it requires every referenced parent object.
+        .args(["index-pack", "--stdin"])
+        .current_dir(tmp)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("git index-pack stdin unavailable"))?
+        .write_all(&bytes)
+        .await?;
+    if token.is_cancelled() {
+        anyhow::bail!("source archive import cancelled");
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(GIT_STEP_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("source archive import timed out"))??;
+    if !output.status.success() {
+        anyhow::bail!(
+            "source archive is not a valid Git object pack: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let pack_hash_output = std::str::from_utf8(&output.stdout)
+        .map_err(|_| anyhow::anyhow!("git index-pack returned a non-UTF-8 pack id"))?
+        .trim();
+    let pack_hash = pack_hash_output
+        .strip_prefix("pack\t")
+        .unwrap_or(pack_hash_output);
+    if pack_hash.len() != 40 || !pack_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("git index-pack returned an invalid pack id");
+    }
+    let index_path = tmp.join(format!(".git/objects/pack/pack-{pack_hash}.idx"));
+    let verified = tokio::process::Command::new("git")
+        .args(["verify-pack", "-v"])
+        .arg(&index_path)
+        .current_dir(tmp)
+        .output()
+        .await?;
+    if !verified.status.success() {
+        anyhow::bail!("source archive pack verification failed");
+    }
+    let expanded_limit = source_archive_expanded_max_bytes();
+    let mut expanded_bytes = 0_u64;
+    let mut object_count = 0_usize;
+    for line in verified.stdout.split(|byte| *byte == b'\n') {
+        let mut fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let Some(object_id) = fields.next() else {
+            continue;
+        };
+        if object_id.len() != 40 || !object_id.iter().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let _kind = fields.next();
+        let size = fields
+            .next()
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("malformed source archive object size"))?;
+        object_count = object_count.saturating_add(1);
+        if object_count > MAX_SOURCE_ARCHIVE_OBJECTS {
+            anyhow::bail!("source archive contains more than {MAX_SOURCE_ARCHIVE_OBJECTS} objects");
+        }
+        expanded_bytes = expanded_bytes.saturating_add(size);
+        if expanded_bytes > expanded_limit {
+            anyhow::bail!("source archive expands to more than {expanded_limit} bytes");
+        }
+    }
+    tokio::fs::write(tmp.join(".git/shallow"), format!("{}\n", source.commit)).await?;
+
+    let commit_object = format!("{}^{{commit}}", source.commit);
+    run_git_step(
+        &["cat-file", "-e", commit_object.as_str()],
+        tmp,
+        log_path,
+        token,
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "source archive does not contain requested commit {}",
+            source.commit
+        )
+    })?;
+    let tree = tokio::process::Command::new("git")
+        .args([
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            source.commit.as_str(),
+        ])
+        .current_dir(tmp)
+        .output()
+        .await?;
+    if !tree.status.success() {
+        anyhow::bail!(
+            "source archive does not contain the complete tree for commit {}",
+            source.commit
+        );
+    }
+    validate_archive_tree_output(&tree.stdout).map_err(|error| anyhow::anyhow!(error))?;
+    run_git_step(
+        &["checkout", "--quiet", "--detach", source.commit.as_str()],
+        tmp,
+        log_path,
+        token,
+    )
+    .await?;
+    verify_base_tree(source, tmp).await?;
+    tokio::fs::write(
+        tmp.join(".git/sandboxed-source-archive"),
+        format!("{}\n", archive.sha256),
+    )
+    .await?;
+
+    let mut log = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .await?;
+    log.write_all(
+        format!(
+            "source archive verified sha256={} commit={} bytes={}\n",
+            archive.sha256, source.commit, archive.size_bytes
+        )
+        .as_bytes(),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Ensure `<workdir>/checkouts/<repo-hash>/<commit>/` exists, fetching it if
 /// needed. Builds into a temp sibling and atomically renames so a partially
 /// fetched tree is never observed at the final path. Callers must hold the
@@ -770,9 +1188,48 @@ async fn ensure_checkout(
     log_path: &Path,
     token: &CancellationToken,
 ) -> anyhow::Result<PathBuf> {
-    let dest = checkout_dir(work_root, &source.repo, &source.commit);
-    if dest.is_dir() {
-        return Ok(dest);
+    let base = checkout_dir(work_root, &source.repo, &source.commit);
+    let complete_bundle = source.bundle.as_ref().filter(|bundle| bundle.complete);
+    let dest = complete_bundle.map_or(base.clone(), |bundle| {
+        base.with_file_name(format!(
+            "{}-source-{}",
+            source.commit, bundle.manifest_sha256
+        ))
+    });
+    if complete_bundle.is_some() {
+        match tokio::fs::symlink_metadata(&dest).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => anyhow::bail!(
+                "complete source checkout must not be a symlink: {}",
+                dest.display()
+            ),
+            Ok(metadata) if metadata.is_dir() => {
+                // Complete snapshots have no Git metadata to reset. Recreate
+                // their source before each build so stale `.lake` output can
+                // never turn into validation evidence.
+                tokio::fs::remove_dir_all(&dest).await?;
+            }
+            Ok(_) => anyhow::bail!(
+                "complete source checkout is not a directory: {}",
+                dest.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else if dest.is_dir() {
+        match &source.archive {
+            None => return Ok(dest),
+            Some(archive)
+                if tokio::fs::read_to_string(dest.join(".git/sandboxed-source-archive"))
+                    .await
+                    .is_ok_and(|digest| digest.trim() == archive.sha256) =>
+            {
+                return Ok(dest);
+            }
+            // A legacy/network checkout or a different archive digest cannot
+            // attest this request. Validate the supplied pack in a temporary
+            // repository before reusing the already materialized commit.
+            Some(_) => {}
+        }
     }
     let parent = dest
         .parent()
@@ -781,7 +1238,15 @@ async fn ensure_checkout(
     let tmp = parent.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&tmp).await?;
 
-    let fetch = async {
+    let materialize = async {
+        if let Some(bundle) = complete_bundle {
+            apply_source_bundle(&tmp, bundle, log_path).await?;
+            return anyhow::Ok(());
+        }
+        if let Some(archive) = &source.archive {
+            import_source_archive(&tmp, source, archive, log_path, token).await?;
+            return anyhow::Ok(());
+        }
         run_git_step(&["init", "--quiet"], &tmp, log_path, token).await?;
         run_git_step(
             &[
@@ -804,6 +1269,7 @@ async fn ensure_checkout(
             token,
         )
         .await?;
+        verify_base_tree(source, &tmp).await?;
         // Best-effort: many Lean repos have no submodules and lakefile deps
         // are fetched by lake itself.
         let _ = run_git_step(
@@ -817,19 +1283,43 @@ async fn ensure_checkout(
     }
     .await;
 
-    if let Err(err) = fetch {
+    if let Err(err) = materialize {
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         return Err(err);
     }
+    let stale = if dest.is_dir() {
+        let stale = parent.join(format!(".stale-{}", uuid::Uuid::new_v4()));
+        tokio::fs::rename(&dest, &stale).await?;
+        Some(stale)
+    } else {
+        None
+    };
     match tokio::fs::rename(&tmp, &dest).await {
-        Ok(()) => Ok(dest),
+        Ok(()) => {
+            if let Some(stale) = stale {
+                let _ = tokio::fs::remove_dir_all(stale).await;
+            }
+            Ok(dest)
+        }
         // A concurrent build (other lock domain) won the rename; reuse theirs.
-        Err(_) if dest.is_dir() => {
+        Err(_)
+            if dest.is_dir()
+                && source.archive.as_ref().is_none_or(|archive| {
+                    std::fs::read_to_string(dest.join(".git/sandboxed-source-archive"))
+                        .is_ok_and(|digest| digest.trim() == archive.sha256)
+                }) =>
+        {
             let _ = tokio::fs::remove_dir_all(&tmp).await;
+            if let Some(stale) = stale {
+                let _ = tokio::fs::remove_dir_all(stale).await;
+            }
             Ok(dest)
         }
         Err(err) => {
             let _ = tokio::fs::remove_dir_all(&tmp).await;
+            if let Some(stale) = stale {
+                let _ = tokio::fs::rename(stale, &dest).await;
+            }
             Err(err.into())
         }
     }
@@ -906,9 +1396,10 @@ async fn require_real_directory_tree(
     Ok(true)
 }
 
-/// Before creating a cache destination, require every existing ancestor below
-/// the checkout root to be a real directory. Once a component is absent, all
-/// deeper components are necessarily absent too and may be created safely.
+/// Before creating or deleting a bundle destination, require every existing
+/// ancestor below the checkout root to be a real directory. Once a component is
+/// absent, all deeper components are necessarily absent too and may be created
+/// safely (or, for deletions, the target cannot exist).
 async fn require_safe_directory_creation_path(
     root: &Path,
     path: &Path,
@@ -948,6 +1439,30 @@ async fn apply_source_bundle(
     log_path: &Path,
 ) -> anyhow::Result<()> {
     let total_bytes = validate_source_bundle(bundle).map_err(|error| anyhow::anyhow!("{error}"))?;
+    for relative in &bundle.deleted_paths {
+        let destination = checkout.join(relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("bundle deletion path '{relative}' has no parent"))?;
+        if parent != checkout {
+            // A tracked symlink such as `escape -> /outside` would let
+            // `remove_file` on `escape/victim` delete outside the checkout:
+            // `symlink_metadata` refuses to follow only the final component.
+            require_safe_directory_creation_path(checkout, parent, "source bundle deletion")
+                .await?;
+        }
+        match tokio::fs::symlink_metadata(&destination).await {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+                tokio::fs::remove_file(&destination).await?;
+            }
+            Ok(_) => anyhow::bail!(
+                "source bundle deletion must target a file: {}",
+                destination.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     for file in &bundle.files {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&file.data_base64)
@@ -984,6 +1499,18 @@ async fn apply_source_bundle(
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(error.into());
         }
+        #[cfg(unix)]
+        if let Some(executable) = file.executable {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = tokio::fs::metadata(&destination).await?.permissions();
+            let mode = permissions.mode();
+            permissions.set_mode(if executable {
+                mode | 0o111
+            } else {
+                mode & !0o111
+            });
+            tokio::fs::set_permissions(&destination, permissions).await?;
+        }
     }
     let mut log = tokio::fs::OpenOptions::new()
         .create(true)
@@ -992,9 +1519,11 @@ async fn apply_source_bundle(
         .await?;
     log.write_all(
         format!(
-            "source bundle verified sha256={} files={} bytes={}\n",
+            "source bundle verified sha256={} operations_sha256={} files={} deletions={} bytes={}\n",
             bundle.manifest_sha256,
+            bundle.operations_sha256.as_deref().unwrap_or("none"),
             bundle.files.len(),
+            bundle.deleted_paths.len(),
             total_bytes
         )
         .as_bytes(),
@@ -1089,15 +1618,17 @@ pub async fn execute_lean_build(
     // Reset it before every invocation so a cancelled/different-target build
     // cannot leave `.lake` files or artifacts that a later job mistakes for
     // its own output.
-    run_git_step(
-        &["reset", "--hard", source.commit.as_str()],
-        &checkout,
-        log_path,
-        token,
-    )
-    .await?;
-    run_git_step(&["clean", "-ffdx"], &checkout, log_path, token).await?;
-    if let Some(bundle) = &source.bundle {
+    if source.bundle.as_ref().is_none_or(|bundle| !bundle.complete) {
+        run_git_step(
+            &["reset", "--hard", source.commit.as_str()],
+            &checkout,
+            log_path,
+            token,
+        )
+        .await?;
+        run_git_step(&["clean", "-ffdx"], &checkout, log_path, token).await?;
+    }
+    if let Some(bundle) = source.bundle.as_ref().filter(|bundle| !bundle.complete) {
         apply_source_bundle(&checkout, bundle, log_path).await?;
     }
 
@@ -1379,12 +1910,15 @@ fn gc_once(work_root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn source(commit: &str) -> JobSource {
         JobSource {
             repo: "https://github.com/example/verity.git".to_string(),
             commit: commit.to_string(),
+            archive: None,
             bundle: None,
+            base_tree_sha: None,
         }
     }
 
@@ -1395,13 +1929,292 @@ mod tests {
     fn source_bundle(path: &str, contents: &[u8]) -> SourceBundle {
         let sha256 = hex::encode(Sha256::digest(contents));
         SourceBundle {
-            manifest_sha256: bundle_manifest_sha256(&[(path.to_string(), sha256.clone())]),
+            manifest_sha256: bundle_manifest_sha256_for_mode(
+                &[(path.to_string(), sha256.clone())],
+                false,
+            ),
             files: vec![crate::remote_node::SourceBundleFile {
                 path: path.to_string(),
                 sha256,
                 data_base64: base64::engine::general_purpose::STANDARD.encode(contents),
+                executable: None,
             }],
+            complete: false,
+            deleted_paths: Vec::new(),
+            operations_sha256: None,
         }
+    }
+
+    fn committed_archive() -> (tempfile::TempDir, String, SourceArchive) {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.name", "Archive Test"]);
+        git(&["config", "user.email", "archive@example.invalid"]);
+        std::fs::create_dir(repo.path().join("Proof")).unwrap();
+        std::fs::write(repo.path().join("Proof/Main.lean"), "baseline\n").unwrap();
+        git(&["add", "Proof/Main.lean"]);
+        git(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "parent",
+        ]);
+        std::fs::write(
+            repo.path().join("Proof/Main.lean"),
+            "theorem ok : True := by trivial\n",
+        )
+        .unwrap();
+        git(&["add", "Proof/Main.lean"]);
+        git(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "source",
+        ]);
+        let commit = String::from_utf8(git(&["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_string();
+        let tree = git(&["ls-tree", "-r", "-t", "-z", "--full-tree", &commit]);
+        let root_tree = String::from_utf8(git(&["rev-parse", &format!("{commit}^{{tree}}")]))
+            .unwrap()
+            .trim()
+            .to_string();
+        let mut objects = vec![commit.clone(), root_tree];
+        for record in tree
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let metadata = record.split(|byte| *byte == b'\t').next().unwrap();
+            objects.push(
+                String::from_utf8(
+                    metadata
+                        .split(|byte| *byte == b' ')
+                        .nth(2)
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap(),
+            );
+        }
+        let mut child = Command::new("git")
+            .args(["pack-objects", "--stdout", "--no-reuse-delta"])
+            .current_dir(repo.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{}\n", objects.join("\n")).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let archive = SourceArchive {
+            sha256: source_archive_sha256(&commit, &output.stdout),
+            size_bytes: output.stdout.len() as u64,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(output.stdout),
+        };
+        (repo, commit, archive)
+    }
+
+    #[tokio::test]
+    async fn private_equivalent_archive_materializes_without_runner_git_credentials() {
+        let (_source_repo, commit, archive) = committed_archive();
+        let work_root = tempfile::tempdir().unwrap();
+        let log = work_root.path().join("job.log");
+        let mut source = JobSource {
+            base_tree_sha: None,
+            repo: "https://127.0.0.1:9/private/repository.git".to_string(),
+            commit: commit.clone(),
+            archive: Some(Box::new(archive)),
+            bundle: None,
+        };
+
+        let checkout = ensure_checkout(work_root.path(), &source, &log, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("Proof/Main.lean")).unwrap(),
+            "theorem ok : True := by trivial\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&checkout)
+                    .output()
+                    .unwrap()
+                    .stdout
+            )
+            .unwrap()
+            .trim(),
+            commit
+        );
+        assert!(std::fs::read_to_string(log)
+            .unwrap()
+            .contains("source archive verified"));
+        let log_history = Command::new("git")
+            .args(["log", "--format=%H", "-1"])
+            .current_dir(&checkout)
+            .output()
+            .unwrap();
+        assert!(
+            log_history.status.success(),
+            "the archived commit must be a valid shallow history boundary"
+        );
+
+        // A legacy or differently attested cached checkout must be replaced by
+        // the verified archive, never returned after the temporary validation.
+        std::fs::write(checkout.join("Proof/Main.lean"), "stale checkout\n").unwrap();
+        std::fs::write(
+            checkout.join(".git/sandboxed-source-archive"),
+            format!("{}\n", "0".repeat(64)),
+        )
+        .unwrap();
+        let replaced = ensure_checkout(
+            work_root.path(),
+            &source,
+            &work_root.path().join("replace.log"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replaced.join("Proof/Main.lean")).unwrap(),
+            "theorem ok : True := by trivial\n"
+        );
+
+        let invalid_pack = b"not a git pack";
+        source.archive = Some(Box::new(SourceArchive {
+            sha256: source_archive_sha256(&commit, invalid_pack),
+            size_bytes: invalid_pack.len() as u64,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(invalid_pack),
+        }));
+        assert!(
+            ensure_checkout(
+                work_root.path(),
+                &source,
+                &work_root.path().join("retry.log"),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not a Git pack"),
+            "a cached checkout must not bypass validation of a different archive"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_archive_is_commit_bound_and_missing_commit_fails_closed() {
+        let (_source_repo, commit, archive) = committed_archive();
+        let other_commit = "b".repeat(40);
+        let mut source = JobSource {
+            base_tree_sha: None,
+            repo: "https://127.0.0.1:9/private/repository.git".to_string(),
+            commit: other_commit.clone(),
+            archive: Some(Box::new(archive.clone())),
+            bundle: None,
+        };
+        assert!(validate_lean_build(
+            &source,
+            None,
+            &["lake".to_string(), "build".to_string()],
+            &HashMap::new(),
+            &allowlist(),
+        )
+        .unwrap_err()
+        .contains("commit-bound hash mismatch"));
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&archive.data_base64)
+            .unwrap();
+        source.archive.as_mut().unwrap().sha256 = source_archive_sha256(&other_commit, &bytes);
+        let work_root = tempfile::tempdir().unwrap();
+        let error = ensure_checkout(
+            work_root.path(),
+            &source,
+            &work_root.path().join("job.log"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("does not contain requested commit"),
+            "{error}; original commit was {commit}"
+        );
+    }
+
+    #[test]
+    fn source_capacity_preserves_operator_ceilings() {
+        for (configured, overlay, complete) in [
+            (None, 1 << 20, 32 << 20),
+            (Some("8388608"), 8 << 20, 8 << 20),
+            (Some(" 17 "), 17, 17),
+            (Some("0"), 1 << 20, 32 << 20),
+            (Some("invalid"), 1 << 20, 32 << 20),
+        ] {
+            assert_eq!(
+                configured_source_bundle_max_bytes(false, configured),
+                overlay
+            );
+            assert_eq!(
+                configured_source_bundle_max_bytes(true, configured),
+                complete
+            );
+        }
+        let capacity = source_bundle_capacity();
+        assert_eq!(capacity.overlay_bytes, source_bundle_mode_max_bytes(false));
+        assert_eq!(capacity.complete_bytes, source_bundle_mode_max_bytes(true));
+    }
+
+    #[test]
+    fn source_archive_tree_validation_rejects_unsafe_paths_and_special_entries() {
+        assert!(validate_archive_tree_output(
+            b"100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t../escape\0"
+        )
+        .unwrap_err()
+        .contains("unsafe"));
+        assert!(validate_archive_tree_output(
+            b"120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tlink\0"
+        )
+        .unwrap_err()
+        .contains("unsupported tree mode"));
+    }
+
+    #[test]
+    fn legacy_public_source_without_archive_remains_valid() {
+        assert!(validate_lean_build(
+            &source(&"a".repeat(40)),
+            None,
+            &["lake".to_string(), "build".to_string()],
+            &HashMap::new(),
+            &allowlist(),
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1579,6 +2392,187 @@ mod tests {
         .contains("unsafe source bundle path"));
     }
 
+    // Re-sign every crafted request so rejection proves path validation, not
+    // stale content/manifest/operation hashes. Exercise the actual API decoder.
+    fn decode_path_fixture(mut bundle: SourceBundle, gzip: bool) -> JobSource {
+        use std::io::Write;
+        bundle.files.sort_by(|a, b| a.path.cmp(&b.path));
+        bundle.deleted_paths.sort();
+        bundle.manifest_sha256 = bundle_manifest_sha256_for_mode(
+            &bundle
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), f.sha256.clone()))
+                .collect::<Vec<_>>(),
+            bundle.complete,
+        );
+        bundle.operations_sha256 = Some(bundle_operations_sha256(&bundle));
+        let mut body = serde_json::to_vec(&serde_json::json!({
+            "mission_id": uuid::Uuid::new_v4(),
+            "token": "fixture-capability",
+            "repo": "https://example.invalid/no-fetch.git",
+            "commit": "a".repeat(40),
+            "base_tree_sha": "b".repeat(40),
+            "command": ["lake", "build"],
+            "source_bundle": bundle,
+        }))
+        .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        if gzip {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&body).unwrap();
+            body = encoder.finish().unwrap();
+            headers.insert(
+                axum::http::header::CONTENT_ENCODING,
+                "gzip".parse().unwrap(),
+            );
+        }
+        let request =
+            crate::api::remote_build::parse_remote_build_request(&headers, &body).unwrap();
+        JobSource {
+            repo: request.repo,
+            commit: request.commit,
+            base_tree_sha: request.base_tree_sha,
+            archive: None,
+            bundle: request.source_bundle,
+        }
+    }
+
+    #[tokio::test]
+    async fn source_bundle_path_aliases_fail_before_any_mutation() {
+        for complete in [false, true] {
+            for gzip in [false, true] {
+                for alias in [
+                    "./Root.lean",
+                    "nested/./Root.lean",
+                    "nested//Root.lean",
+                    "nested/Root.lean/.",
+                    "nested/Root.lean/",
+                    ".",
+                    "nested/../Root.lean",
+                    "/Root.lean",
+                    ".git/config",
+                    ".lake/build/Root.lean",
+                ] {
+                    // Cover aliases in entries, deletions, and between an entry
+                    // and a deletion, as well as the original two-file overwrite.
+                    for deletion in [false, true] {
+                        let temp = tempfile::tempdir().unwrap();
+                        let checkout = temp.path().join("checkout");
+                        std::fs::create_dir_all(checkout.join("nested")).unwrap();
+                        for path in ["A.keep", "Root.lean", "nested/Root.lean"] {
+                            std::fs::write(checkout.join(path), b"original\0bytes").unwrap();
+                        }
+                        let log = temp.path().join("job.log");
+                        let mut bundle = source_bundle("Root.lean", b"second\n");
+                        bundle.complete = complete;
+                        bundle.files[0].executable = Some(true);
+                        bundle.files.push(
+                            source_bundle("B.new", b"must not be created")
+                                .files
+                                .remove(0),
+                        );
+                        bundle.deleted_paths = vec!["A.keep".into()];
+                        if deletion {
+                            bundle.deleted_paths.push(alias.into());
+                        } else {
+                            bundle
+                                .files
+                                .push(source_bundle(alias, b"first\n").files.remove(0));
+                        }
+                        let source = decode_path_fixture(bundle, gzip);
+                        let error = validate_lean_build(
+                            &source,
+                            None,
+                            &["lake".into(), "build".into()],
+                            &HashMap::new(),
+                            &allowlist(),
+                        )
+                        .unwrap_err();
+                        assert!(error.contains("unsafe"), "{alias}: {error}");
+                        let error =
+                            apply_source_bundle(&checkout, source.bundle.as_ref().unwrap(), &log)
+                                .await
+                                .unwrap_err()
+                                .to_string();
+                        assert!(error.contains("unsafe"), "{alias}: {error}");
+                        for path in ["A.keep", "Root.lean", "nested/Root.lean"] {
+                            assert_eq!(
+                                std::fs::read(checkout.join(path)).unwrap(),
+                                b"original\0bytes"
+                            );
+                        }
+                        assert!(!checkout.join("B.new").exists());
+                        assert!(!log.exists());
+                        assert_eq!(std::fs::read_dir(&checkout).unwrap().count(), 3);
+                        assert_eq!(
+                            std::fs::read_dir(checkout.join("nested")).unwrap().count(),
+                            1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canonical_source_bundle_paths_preserve_exact_bytes_and_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        for complete in [false, true] {
+            for gzip in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let checkout = temp.path().join("checkout");
+                std::fs::create_dir_all(checkout.join("nested/deeper")).unwrap();
+                std::fs::write(checkout.join("nested/deeper/obsolete"), b"delete").unwrap();
+                let mut bundle = source_bundle("Root.lean", b"first\n");
+                bundle.complete = complete;
+                bundle.files[0].executable = Some(false);
+                for (path, bytes, executable) in [
+                    ("nested/Root.lean", b"second\0\xff\n".as_slice(), true),
+                    ("nested/deeper/.hidden-file_v2", b"third".as_slice(), false),
+                ] {
+                    let mut file = source_bundle(path, bytes).files.remove(0);
+                    file.executable = Some(executable);
+                    bundle.files.push(file);
+                }
+                bundle.deleted_paths = vec!["nested/deeper/obsolete".into()];
+                let source = decode_path_fixture(bundle, gzip);
+                validate_lean_build(
+                    &source,
+                    None,
+                    &["lake".into(), "build".into()],
+                    &HashMap::new(),
+                    &allowlist(),
+                )
+                .unwrap();
+                let bundle = source.bundle.unwrap();
+                apply_source_bundle(&checkout, &bundle, &temp.path().join("job.log"))
+                    .await
+                    .unwrap();
+                assert!(!checkout.join("nested/deeper/obsolete").exists());
+                for file in &bundle.files {
+                    let path = checkout.join(&file.path);
+                    assert_eq!(
+                        std::fs::read(&path).unwrap(),
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&file.data_base64)
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap().permissions().mode() & 0o111,
+                        if file.executable == Some(true) {
+                            0o111
+                        } else {
+                            0
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn source_bundle_application_is_atomic_and_emits_a_receipt() {
         let temp = tempfile::tempdir().unwrap();
@@ -1590,7 +2584,13 @@ mod tests {
         tokio::fs::write(checkout.join("Beal/Proof.lean"), b"old")
             .await
             .unwrap();
-        let bundle = source_bundle("Beal/Proof.lean", b"new proof\n");
+        tokio::fs::write(checkout.join("Beal/Obsolete.lean"), b"remove")
+            .await
+            .unwrap();
+        let mut bundle = source_bundle("Beal/Proof.lean", b"new proof\n");
+        bundle.files[0].executable = Some(true);
+        bundle.deleted_paths = vec!["Beal/Obsolete.lean".to_string()];
+        bundle.operations_sha256 = Some(bundle_operations_sha256(&bundle));
 
         apply_source_bundle(&checkout, &bundle, &log).await.unwrap();
 
@@ -1600,9 +2600,240 @@ mod tests {
                 .unwrap(),
             b"new proof\n"
         );
+        assert!(!checkout.join("Beal/Obsolete.lean").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(checkout.join("Beal/Proof.lean"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
+        }
         let receipt = tokio::fs::read_to_string(log).await.unwrap();
         assert!(receipt.contains(&bundle.manifest_sha256));
-        assert!(receipt.contains("files=1 bytes=10"));
+        assert!(receipt.contains("files=1 deletions=1 bytes=10"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_bundle_deletion_rejects_symlinked_parent_directories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("checkout");
+        let log = temp.path().join("job.log");
+        tokio::fs::create_dir_all(&checkout).await.unwrap();
+        let outside = temp.path().join("outside");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        let victim = outside.join("victim");
+        tokio::fs::write(&victim, b"keep me").await.unwrap();
+        symlink(&outside, checkout.join("escape")).unwrap();
+
+        let mut bundle = source_bundle("Beal/Proof.lean", b"new proof\n");
+        bundle.deleted_paths = vec!["escape/victim".to_string()];
+        bundle.operations_sha256 = Some(bundle_operations_sha256(&bundle));
+
+        let error = apply_source_bundle(&checkout, &bundle, &log)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("must not contain a symlink"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(tokio::fs::read(&victim).await.unwrap(), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_source_bundle_from_recursive_wrapper_materializes_without_fetch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Exercise the real shell encoder and compressed request, then feed its
+        // wire bundle through the node's validation and checkout materializer.
+        let output = Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/scripts/test_remote_lean_build_source.py"
+            ))
+            .arg("--emit-fixture")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(request.get("source_archive").is_none());
+        let bundle: SourceBundle =
+            serde_json::from_value(request["source_bundle"].clone()).unwrap();
+        assert!(bundle.complete);
+        assert_eq!(bundle.files.len(), 11);
+        validate_source_bundle(&bundle).unwrap();
+        let bundled_source = JobSource {
+            // This URL cannot supply the fixture. Successful materialization
+            // must use the complete bundle, with no source Git credentials.
+            repo: "https://example.invalid/private.git".to_string(),
+            commit: request["commit"].as_str().unwrap().to_string(),
+            base_tree_sha: Some(request["base_tree_sha"].as_str().unwrap().to_string()),
+            archive: None,
+            bundle: Some(bundle.clone()),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("job.log");
+        let checkout = ensure_checkout(
+            temp.path(),
+            &bundled_source,
+            &log,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        for file in &bundle.files {
+            let path = checkout.join(&file.path);
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(hex::encode(Sha256::digest(&bytes)), file.sha256);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o111 != 0,
+                file.executable.unwrap()
+            );
+        }
+        for root in ["", "deps/sub", "deps/sub/vendor/nested"] {
+            assert!(!checkout.join(root).join(".git").exists());
+        }
+        assert_eq!(
+            std::fs::read(checkout.join("Root.lean")).unwrap(),
+            b"root\n"
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("deps/sub/Sub.lean")).unwrap(),
+            b"sub\n"
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("deps/sub/vendor/nested/assets/data.bin")).unwrap(),
+            b"\x00\xffnested\n"
+        );
+
+        // The receiver still rejects tampering with nested bytes or modes.
+        let mut tampered = bundle.clone();
+        tampered.files[6].data_base64 =
+            base64::engine::general_purpose::STANDARD.encode(b"tampered");
+        assert!(validate_source_bundle(&tampered)
+            .unwrap_err()
+            .contains("content hash mismatch"));
+        let mut tampered = bundle;
+        tampered.files[8].executable = Some(false);
+        assert!(validate_source_bundle(&tampered)
+            .unwrap_err()
+            .contains("operations hash mismatch"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "local measured wrapper request; set REMOTE_BUILD_MEASURED_FIXTURE"]
+    async fn measured_complete_fixture_materializes_every_byte_and_mode() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let input = std::fs::read(std::env::var("REMOTE_BUILD_MEASURED_FIXTURE").unwrap()).unwrap();
+        let mut json = Vec::new();
+        flate2::read::GzDecoder::new(input.as_slice())
+            .take((64 << 20) + 1)
+            .read_to_end(&mut json)
+            .unwrap();
+        assert!(json.len() <= 64 << 20);
+        let request: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let bundle: SourceBundle =
+            serde_json::from_value(request["source_bundle"].clone()).unwrap();
+        assert!(bundle.complete);
+        validate_source_bundle(&bundle).unwrap();
+        let source = JobSource {
+            repo: "https://example.invalid/no-fetch.git".to_string(),
+            commit: request["commit"].as_str().unwrap().to_string(),
+            base_tree_sha: Some(request["base_tree_sha"].as_str().unwrap().to_string()),
+            archive: None,
+            bundle: Some(bundle.clone()),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = ensure_checkout(
+            temp.path(),
+            &source,
+            &temp.path().join("job.log"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        for file in &bundle.files {
+            let path = checkout.join(&file.path);
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                base64::engine::general_purpose::STANDARD
+                    .decode(&file.data_base64)
+                    .unwrap(),
+                "{}",
+                file.path
+            );
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o111 != 0,
+                file.executable.unwrap(),
+                "{}",
+                file.path
+            );
+        }
+        assert!(!walkdir::WalkDir::new(checkout)
+            .into_iter()
+            .any(|entry| entry.unwrap().file_name() == ".git"));
+    }
+
+    #[tokio::test]
+    async fn complete_source_bundle_materializes_without_git_and_rebuilds_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("job.log");
+        let mut bundled_source = source(&"a".repeat(40));
+        bundled_source.repo = "https://github.com/private/lido-proof.git".to_string();
+        let mut bundle = source_bundle("lean-toolchain", b"leanprover/lean4:v4.31.0\n");
+        bundle.complete = true;
+        bundle.manifest_sha256 = bundle_manifest_sha256_for_mode(
+            &bundle
+                .files
+                .iter()
+                .map(|file| (file.path.clone(), file.sha256.clone()))
+                .collect::<Vec<_>>(),
+            true,
+        );
+        bundled_source.bundle = Some(bundle);
+        let token = CancellationToken::new();
+
+        let checkout = ensure_checkout(temp.path(), &bundled_source, &log, &token)
+            .await
+            .unwrap();
+        assert_ne!(
+            checkout,
+            checkout_dir(temp.path(), &bundled_source.repo, &bundled_source.commit)
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(checkout.join("lean-toolchain"))
+                .await
+                .unwrap(),
+            "leanprover/lean4:v4.31.0\n"
+        );
+        assert!(!checkout.join(".git").exists());
+        tokio::fs::create_dir_all(checkout.join(".lake/build"))
+            .await
+            .unwrap();
+        tokio::fs::write(checkout.join(".lake/build/stale.olean"), b"stale")
+            .await
+            .unwrap();
+
+        let rebuilt = ensure_checkout(temp.path(), &bundled_source, &log, &token)
+            .await
+            .unwrap();
+        assert_eq!(checkout, rebuilt);
+        assert!(!rebuilt.join(".lake").exists());
     }
 
     #[test]
@@ -1614,12 +2845,16 @@ mod tests {
             "../repo",
             "repo",
             "C:/repos/x",
+            "https://user:placeholder@example.invalid/private.git",
+            "https://example.invalid/private.git?token=placeholder",
         ] {
             assert!(
                 validate_lean_build(
                     &JobSource {
+                        base_tree_sha: None,
                         repo: bad.to_string(),
                         commit: "a".repeat(40),
+                        archive: None,
                         bundle: None,
                     },
                     None,
@@ -1639,8 +2874,10 @@ mod tests {
             assert!(
                 validate_lean_build(
                     &JobSource {
+                        base_tree_sha: None,
                         repo: good.to_string(),
                         commit: "a".repeat(40),
+                        archive: None,
                         bundle: None,
                     },
                     None,
@@ -1832,18 +3069,24 @@ mod tests {
     fn lake_cache_key_is_partitioned_by_project_and_target() {
         let dependency_key = "same-toolchain-and-manifest";
         let source_a = JobSource {
+            base_tree_sha: None,
             repo: "https://example.com/a.git".to_string(),
             commit: "a".repeat(40),
+            archive: None,
             bundle: None,
         };
         let source_a_next_commit = JobSource {
+            base_tree_sha: None,
             repo: source_a.repo.clone(),
             commit: "b".repeat(40),
+            archive: None,
             bundle: None,
         };
         let source_b = JobSource {
+            base_tree_sha: None,
             repo: "https://example.com/b.git".to_string(),
             commit: "a".repeat(40),
+            archive: None,
             bundle: None,
         };
         let build = vec!["lake".to_string(), "build".to_string(), "A".to_string()];

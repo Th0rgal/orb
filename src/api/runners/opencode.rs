@@ -18,11 +18,18 @@ use crate::opencode::{extract_reasoning, extract_text};
 use crate::workspace::Workspace;
 use crate::workspace_exec::WorkspaceExec;
 
-/// Hard inactivity threshold when neither heartbeats nor proxy streaming are
-/// observed. Thinking models routinely spend 2–5 minutes inside a reasoning
-/// segment with zero harness output, so 120s produced false stall kills
-/// (mission f9ba703a: MiniMax-M3 killed mid-reasoning after exactly 120s).
-const GLOBAL_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Default inactivity threshold when neither heartbeats, proxy streaming, nor
+/// a live tool/child are observed. Thinking models routinely spend 2–5 minutes
+/// inside a reasoning segment with zero harness output, so 120s produced false
+/// stall kills (mission f9ba703a: MiniMax-M3 killed mid-reasoning after 120s).
+/// Override with `SANDBOXED_SH_OPENCODE_GLOBAL_INACTIVITY_SECS`.
+const DEFAULT_GLOBAL_INACTIVITY_SECS: u64 = 300;
+/// Default inactivity while a tool (or a descendant of the OpenCode CLI, e.g.
+/// `lake build`) is still running. Matches Claude Code's tool-idle default.
+/// Silent Lean/EVM builds emit no SSE for many minutes; a 300s global kill
+/// aborted Spark/OpenCode turns (eip-8282 P-DRAIN). Override with
+/// `SANDBOXED_SH_OPENCODE_TOOL_IDLE_TIMEOUT_SECS`.
+const DEFAULT_TOOL_IDLE_SECS: u64 = 1800;
 /// Inactivity threshold while OpenCode server heartbeats are still arriving.
 const HEARTBEAT_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(420);
 /// A builtin-proxy chunk within this window counts as "the LLM call is alive".
@@ -38,11 +45,28 @@ const PROXY_STREAM_INACTIVITY_CAP: std::time::Duration = std::time::Duration::fr
 /// Older Hermes skills used `kimi-k3`. OpenCode parses a slash-less value as
 /// a provider name with an empty model and fails with `Model not found:
 /// kimi-k3/`, even when the Kimi subscription itself is healthy.
+///
+/// Bare Grok ids (`grok-4.6`, `grok-4.5`, …) have the same trap: OpenCode
+/// records `providerID=grok-4.6, id=""` and the local server returns the
+/// opaque `Unexpected server error` that killed probe `b3dd8b65`. Map them
+/// onto the xAI provider prefix so the CLI argument can then be wrapped
+/// through `builtin/` (CLI-proxy OAuth + stream liveness).
 pub(crate) fn normalize_opencode_model_id(model: &str) -> Cow<'_, str> {
     let model = model.trim();
-    match model.to_ascii_lowercase().as_str() {
+    let lower = model.to_ascii_lowercase();
+    match lower.as_str() {
         "kimi-k3" => Cow::Borrowed("kimi/k3"),
         "kimi-k3-256k" => Cow::Borrowed("kimi/k3-256k"),
+        _ if !lower.contains('/') && lower.starts_with("grok-") => {
+            Cow::Owned(format!("xai/{lower}"))
+        }
+        // OpenCode 1.18+ ships a native `meta` provider (`sdk.responses`,
+        // Meta system prompt). Bare Muse Spark ids and the legacy `muse/`
+        // prefix must not stay as provider=muse (openai-compatible chat).
+        _ if !lower.contains('/') && lower.starts_with("muse-spark") => {
+            Cow::Owned(format!("meta/{lower}"))
+        }
+        _ if lower.starts_with("muse/") => Cow::Owned(format!("meta/{}", &lower["muse/".len()..])),
         _ => Cow::Borrowed(model),
     }
 }
@@ -55,6 +79,7 @@ pub(crate) fn normalize_opencode_model_id(model: &str) -> Cow<'_, str> {
 /// This uses `opencode run` directly for per-workspace isolation.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_opencode_turn(
+    mission_store: Option<std::sync::Arc<dyn crate::api::mission_store::MissionStore>>,
     workspace: &Workspace,
     work_dir: &std::path::Path,
     message: &str,
@@ -121,7 +146,7 @@ pub async fn run_opencode_turn(
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         })
-        .map(|model| normalize_opencode_model_id(&model).into_owned());
+        .map(|model| canonicalize_opencode_cli_model(&model));
     let auth_state = detect_opencode_provider_auth(Some(app_working_dir));
     let has_openai = auth_state.has_openai;
     let has_anthropic = auth_state.has_anthropic;
@@ -136,9 +161,18 @@ pub async fn run_opencode_turn(
     let configured_providers = &auth_state.configured_providers;
     let provider_available = |provider: &str| -> bool {
         match provider {
+            // Injected per mission and backed by the sandboxed proxy / CLI-proxy.
+            // Must not require an OpenCode auth.json account (subscription Grok
+            // is OAuth inside CLIProxyAPI, not an xAI API key).
+            "builtin" => true,
             "anthropic" | "claude" => has_anthropic,
             "openai" | "codex" => has_openai,
             "google" | "gemini" => has_google,
+            // OpenCode's native id is `meta`; we also mark `muse` when the
+            // META_MODEL_API_KEY / Muse provider row is present.
+            "muse" | "meta" => {
+                configured_providers.contains("muse") || configured_providers.contains("meta")
+            }
             // For known catalog providers (xai, zai, cerebras), check if they are actually configured
             p if crate::api::providers::DEFAULT_CATALOG_PROVIDER_IDS.contains(&p) => {
                 configured_providers.contains(p)
@@ -172,8 +206,17 @@ pub async fn run_opencode_turn(
         None
     };
 
+    // Providers whose OAuth is owned by CLIProxyAPI are reachable through the
+    // proxy with the proxy key; never enter the local refresh path for them.
+    let anthropic_via_proxy =
+        crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic);
+    let openai_via_proxy =
+        crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI);
+
     let refresh_provider = provider_hint.as_deref().or(fallback_provider);
     let refresh_result = match refresh_provider {
+        Some("anthropic") | Some("claude") if anthropic_via_proxy => Ok(()),
+        Some("openai") | Some("codex") if openai_via_proxy => Ok(()),
         Some("anthropic") | Some("claude") => ensure_anthropic_oauth_token_valid().await,
         Some("openai") | Some("codex") => ensure_openai_oauth_token_valid().await,
         Some("google") | Some("gemini") => ensure_google_oauth_token_valid().await,
@@ -271,7 +314,7 @@ pub async fn run_opencode_turn(
     let mut total_cache_creation_input_tokens: u64 = 0;
     let mut total_cache_read_input_tokens: u64 = 0;
     let agent_model = resolve_opencode_model_from_config(&opencode_config_dir_host, agent)
-        .map(|model| normalize_opencode_model_id(&model).into_owned());
+        .map(|model| canonicalize_opencode_cli_model(&model));
     if resolved_model.is_none() {
         resolved_model = agent_model.clone();
     }
@@ -313,7 +356,7 @@ pub async fn run_opencode_turn(
         )
         .await;
     }
-    if has_anthropic {
+    if has_anthropic && !anthropic_via_proxy {
         // OpenCode 1.17 does not load its Anthropic OAuth transport merely
         // because auth.json contains an OAuth credential. Without the plugin,
         // the provider is absent from the model catalog (or the plain AI SDK
@@ -329,7 +372,7 @@ pub async fn run_opencode_turn(
         )
         .await;
     }
-    if has_openai {
+    if has_openai && !openai_via_proxy {
         let openai_plugin = "opencode-openai-codex-auth@latest";
         ensure_opencode_plugin_specs(&opencode_config_dir_host, &[openai_plugin]);
         ensure_opencode_plugin_installed(
@@ -370,6 +413,26 @@ pub async fn run_opencode_turn(
     };
 
     let opencode_model = opencode_model_argument(resolved_model.as_deref());
+    // OpenCode's `--model` parser splits on the first `/`. A slash-less
+    // value becomes provider=<id> model="" and the CLI's local server
+    // answers with a generic 500 (`Unexpected server error`) instead of
+    // `Model not found`. Fail here with the actual id so a mis-dispatched
+    // probe is diagnosable.
+    if !opencode_model.contains('/') {
+        let err_msg = format!(
+            "OpenCode model '{opencode_model}' has no provider prefix. \
+             OpenCode treats the first path segment as the provider, so this \
+             becomes '{opencode_model}/' and fails with an opaque server error. \
+             Use provider/model (e.g. xai/grok-4.6, builtin/smart, zai/glm-5.2)."
+        );
+        tracing::error!(mission_id = %mission_id, "{}", err_msg);
+        let _ = events_tx.send(AgentEvent::Error {
+            message: err_msg.clone(),
+            mission_id: Some(mission_id),
+            resumable: true,
+        });
+        return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
+    }
     if opencode_model.starts_with("builtin/") {
         ensure_opencode_provider_for_model(
             &opencode_config_dir_host,
@@ -686,6 +749,16 @@ pub async fn run_opencode_turn(
 
     if let Some(auth) = opencode_auth.as_ref() {
         let providers = apply_opencode_auth_env(auth, &mut env);
+        // Server-env fallback for Muse/Meta: OpenCode's native `meta`
+        // provider (and any leftover muse adapter) reads META_MODEL_API_KEY.
+        // The key may live only on the service with no provider-store row.
+        if !env.contains_key("META_MODEL_API_KEY") {
+            if let Ok(value) = std::env::var("META_MODEL_API_KEY") {
+                if !value.trim().is_empty() {
+                    env.insert("META_MODEL_API_KEY".to_string(), value);
+                }
+            }
+        }
         if !providers.is_empty() {
             tracing::info!(
                 mission_id = %mission_id,
@@ -985,6 +1058,8 @@ pub async fn run_opencode_turn(
     // Used after the event loop to flag the result as incomplete so the caller
     // can surface the truncation to the user.
     let mut killed_by_idle_timeout = false;
+    // Guard contract: what the stall watchdog OBSERVED, for terminal_evidence.
+    let mut stall_evidence: Option<String> = None;
     // Track session idle state — used as a fallback completion signal when
     // response.completed is not emitted (common with GLM models).
     let mut session_idle_seen = false;
@@ -1002,10 +1077,15 @@ pub async fn run_opencode_turn(
     // A short timeout turns that acknowledgement into a false successful answer
     // for Telegram. Let the global inactivity timeout handle truly stuck turns.
     let opencode_text_idle_timeout_secs: u64 =
-        std::env::var("SANDBOXED_SH_OPENCODE_IDLE_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120);
+        env_u64("SANDBOXED_SH_OPENCODE_IDLE_TIMEOUT_SECS", 120);
+    let global_inactivity_timeout = std::time::Duration::from_secs(env_u64(
+        "SANDBOXED_SH_OPENCODE_GLOBAL_INACTIVITY_SECS",
+        DEFAULT_GLOBAL_INACTIVITY_SECS,
+    ));
+    let tool_idle_timeout = std::time::Duration::from_secs(env_u64(
+        "SANDBOXED_SH_OPENCODE_TOOL_IDLE_TIMEOUT_SECS",
+        DEFAULT_TOOL_IDLE_SECS,
+    ));
 
     loop {
         tokio::select! {
@@ -1141,7 +1221,11 @@ pub async fn run_opencode_turn(
                         } else {
                             sse_alive && *sse_tool_depth_rx.borrow() > 0
                         };
-                        if tools_active {
+                        let cli_has_children = child
+                            .id()
+                            .map(linux_pid_has_children)
+                            .unwrap_or(false);
+                        if tools_active || cli_has_children {
                             tracing::debug!(
                                 mission_id = %mission_id,
                                 tool_depth = *sse_tool_depth_rx.borrow(),
@@ -1195,6 +1279,11 @@ pub async fn run_opencode_turn(
                         } else {
                             sse_alive && *sse_tool_depth_rx.borrow() > 0
                         };
+                        let cli_pid = child.id();
+                        let cli_has_children = cli_pid
+                            .map(linux_pid_has_children)
+                            .unwrap_or(false);
+                        let long_tool = tools_active || cli_has_children;
                         let recent_activity = last_activity
                             .lock()
                             .ok()
@@ -1209,11 +1298,16 @@ pub async fn run_opencode_turn(
                             crate::api::proxy_liveness::time_since_activity(mission_id)
                                 .map(|d| d <= PROXY_STREAM_RECENT)
                                 .unwrap_or(false);
-                        if !recent_activity && !tools_active && !proxy_streaming {
+                        if !recent_activity && !long_tool && !proxy_streaming {
                             tracing::info!(
                                 mission_id = %mission_id,
                                 "OpenCode output idle timeout reached; terminating CLI process"
                             );
+                            stall_evidence = Some(format!(
+                                "no streamed text for {}s (SANDBOXED_SH_OPENCODE_IDLE_TIMEOUT_SECS), \
+                                 no active tools, no proxy streaming; CLI killed",
+                                opencode_text_idle_timeout_secs
+                            ));
                             killed_by_idle_timeout = true;
                             let _ = child.kill().await;
                             break;
@@ -1235,6 +1329,11 @@ pub async fn run_opencode_turn(
                 } else {
                     sse_alive && *sse_tool_depth_rx.borrow() > 0
                 };
+                let cli_pid = child.id();
+                let cli_alive = cli_pid.map(linux_pid_is_alive).unwrap_or(false);
+                let cli_has_children = cli_pid
+                    .map(linux_pid_has_children)
+                    .unwrap_or(false);
                 let inactivity_elapsed = last_activity
                     .lock()
                     .ok()
@@ -1246,7 +1345,14 @@ pub async fn run_opencode_turn(
                     .and_then(|g| *g)
                     .map(|ts| ts.elapsed() <= std::time::Duration::from_secs(45))
                     .unwrap_or(false);
-                if !tools_active && inactivity_elapsed >= GLOBAL_INACTIVITY_TIMEOUT {
+                if opencode_inactivity_should_kill(
+                    tools_active,
+                    cli_alive,
+                    cli_has_children,
+                    inactivity_elapsed,
+                    global_inactivity_timeout,
+                    tool_idle_timeout,
+                ) {
                     // Proxy-stream grace: the mission's own LLM call is still
                     // streaming chunks through the builtin proxy (long
                     // reasoning segments emit no OpenCode events). Defer the
@@ -1277,6 +1383,10 @@ pub async fn run_opencode_turn(
                             proxy_streaming = proxy_streaming,
                             "Global inactivity timeout; terminating stuck CLI process"
                         );
+                        stall_evidence = Some(format!(
+                            "no SSE events, stdout or stderr for {}s; CLI killed",
+                            inactivity_elapsed.as_secs()
+                        ));
                         killed_by_idle_timeout = true;
                         let _ = child.kill().await;
                         break;
@@ -1738,6 +1848,12 @@ pub async fn run_opencode_turn(
     if let Ok(status) = exit_status {
         if !status.success() && !sse_complete_seen {
             had_error = true;
+            // A non-zero CLI exit is authoritative unless a later recovery
+            // obtains an actual assistant message from session storage or the
+            // SSE text stream. In particular, raw shell diagnostics such as
+            // `sh: ...: not found` are stdout text, but they are not a model
+            // response and must never turn a launch failure into TurnComplete.
+            final_result_from_nonzero_exit = true;
             if opencode_output_needs_fallback(&final_result) {
                 if let Some(err_msg) = stderr_error_message.lock().unwrap().clone() {
                     final_result = err_msg;
@@ -1753,7 +1869,6 @@ pub async fn run_opencode_turn(
                 } else {
                     final_result = format!("OpenCode CLI exited with status: {}", status);
                 }
-                final_result_from_nonzero_exit = true;
             }
         }
     }
@@ -1792,14 +1907,20 @@ pub async fn run_opencode_turn(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
-    // Persist the opencode session id so the next turn can resume the
-    // conversation with `--session <id>`. Mirrors the path used by Grok
-    // (see `AgentEvent::SessionIdUpdate` emission in `run_grok_turn`).
+    // Acknowledge the exact native binding before completion can admit a
+    // queued successor. Broadcast delivery is not a persistence barrier.
     if let Some(sid) = session_id.as_deref() {
-        let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+        if let Err(failure) = super::persist_and_publish_native_session(
+            mission_store.as_ref(),
             mission_id,
-            session_id: sid.to_string(),
-        });
+            "opencode",
+            sid,
+            &events_tx,
+        )
+        .await
+        {
+            return *failure;
+        }
     }
     let stored_message = session_id
         .as_deref()
@@ -2032,7 +2153,13 @@ pub async fn run_opencode_turn(
         } else {
             TerminalReason::LlmError
         };
-        AgentResult::failure(final_result, 0).with_terminal_reason(reason)
+        let mut failure = AgentResult::failure(final_result, 0).with_terminal_reason(reason);
+        if reason == TerminalReason::Stalled {
+            if let Some(evidence) = stall_evidence.as_deref() {
+                failure = failure.with_terminal_evidence(evidence);
+            }
+        }
+        failure
     } else {
         AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::TurnComplete)
     };
@@ -2104,13 +2231,41 @@ pub async fn run_opencode_turn(
 /// the remainder as the upstream model. Route the exact Grok CLI bridge model
 /// through the existing `builtin` provider so the proxy receives the complete
 /// `grok-cli/grok-4.5` chain id instead of the ambiguous bare `grok-4.5`.
+///
+/// Direct `xai/grok-*` is wrapped the same way. OpenCode's native `@ai-sdk/xai`
+/// adapter talks to `api.x.ai` with an API key (or, worse, an OAuth token
+/// stuffed into `XAI_API_KEY`). Subscription Grok lives on CLIProxyAPI's
+/// Responses transport; going through `builtin` is what:
+///   1. authenticates with the loopback proxy (OAuth stays inside CLIProxyAPI),
+///   2. sends `x-sandboxed-mission-id` so reasoning chunks reset the idle
+///      watchdog (`proxy_liveness`) instead of dying after 300s of harness
+///      silence — the stall that killed writer `4d823bd9` gen1.
 fn opencode_model_argument(model: Option<&str>) -> Cow<'_, str> {
     let model = model.unwrap_or("builtin/fast");
-    if crate::api::grok_tool_bridge::is_bridge_model(model) {
+    if model.starts_with("builtin/") {
+        Cow::Borrowed(model)
+    } else if crate::api::grok_tool_bridge::is_bridge_model(model)
+        || model_is_xai_provider_id(model)
+    {
         Cow::Owned(format!("builtin/{model}"))
     } else {
         Cow::Borrowed(model)
     }
+}
+
+/// Normalize aliases then wrap proxy-routed Grok/xAI ids as `builtin/…`
+/// *before* the runner inspects the first path segment as an OpenCode
+/// provider. Otherwise `xai/grok-4.6` is dropped when OpenCode auth.json
+/// has no xAI API key (subscription Grok is CLI-proxy OAuth).
+fn canonicalize_opencode_cli_model(model: &str) -> String {
+    let canonical = normalize_opencode_model_id(model);
+    opencode_model_argument(Some(canonical.as_ref())).into_owned()
+}
+
+fn model_is_xai_provider_id(model: &str) -> bool {
+    model
+        .split_once('/')
+        .is_some_and(|(provider, rest)| provider.eq_ignore_ascii_case("xai") && !rest.is_empty())
 }
 
 fn opencode_path(
@@ -2132,9 +2287,60 @@ fn opencode_path(
     path_parts.join(":")
 }
 
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+/// True when `/proc/<pid>` still exists (Linux). False on missing /proc or ESRCH.
+fn linux_pid_is_alive(pid: u32) -> bool {
+    std::path::Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// True when `/proc/<pid>/task/<pid>/children` lists at least one child pid.
+/// OpenCode's bash/`lake` tools often emit no SSE while the descendant runs;
+/// SSE tool-depth then reads as 0 and a 300s global inactivity kill fires.
+fn linux_pid_has_children(pid: u32) -> bool {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    std::fs::read_to_string(path)
+        .map(|s| s.split_whitespace().any(|tok| !tok.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Decide whether the OpenCode inactivity watchdog should kill the CLI.
+///
+/// A live tool (SSE depth) **or** a live descendant of the CLI (`lake`, `lean`,
+/// `bash`) uses the longer `tool_idle` window. Only a wedged CLI with no
+/// children and no SSE tools is subject to the short global inactivity cap.
+fn opencode_inactivity_should_kill(
+    tools_active: bool,
+    cli_alive: bool,
+    cli_has_children: bool,
+    inactivity: std::time::Duration,
+    global_inactivity: std::time::Duration,
+    tool_idle: std::time::Duration,
+) -> bool {
+    if !cli_alive {
+        return false;
+    }
+    let long_tool = tools_active || cli_has_children;
+    if long_tool {
+        inactivity >= tool_idle
+    } else {
+        inactivity >= global_inactivity
+    }
+}
+
 #[cfg(test)]
 mod path_tests {
-    use super::{normalize_opencode_model_id, opencode_model_argument, opencode_path};
+    use super::{
+        canonicalize_opencode_cli_model, linux_pid_has_children, linux_pid_is_alive,
+        normalize_opencode_model_id, opencode_inactivity_should_kill, opencode_model_argument,
+        opencode_path,
+    };
+    use std::time::Duration;
 
     #[test]
     fn legacy_kimi_k3_aliases_are_canonicalized() {
@@ -2145,6 +2351,26 @@ mod path_tests {
         );
         assert_eq!(normalize_opencode_model_id("kimi/k3"), "kimi/k3");
         assert_eq!(normalize_opencode_model_id("zai/glm-5"), "zai/glm-5");
+    }
+
+    #[test]
+    fn muse_spark_ids_use_opencode_native_meta_provider() {
+        assert_eq!(
+            normalize_opencode_model_id("muse-spark-1.2"),
+            "meta/muse-spark-1.2"
+        );
+        assert_eq!(
+            normalize_opencode_model_id("muse/muse-spark-1.2"),
+            "meta/muse-spark-1.2"
+        );
+        assert_eq!(
+            normalize_opencode_model_id("meta/muse-spark-1.2"),
+            "meta/muse-spark-1.2"
+        );
+        assert_eq!(
+            canonicalize_opencode_cli_model("muse-spark-1.2"),
+            "meta/muse-spark-1.2"
+        );
     }
 
     #[test]
@@ -2159,9 +2385,62 @@ mod path_tests {
         );
         assert_eq!(
             opencode_model_argument(Some("xai/grok-4.5")),
-            "xai/grok-4.5"
+            "builtin/xai/grok-4.5"
+        );
+        assert_eq!(
+            opencode_model_argument(Some("builtin/xai/grok-4.6")),
+            "builtin/xai/grok-4.6"
         );
         assert_eq!(opencode_model_argument(None), "builtin/fast");
+    }
+
+    #[test]
+    fn bare_grok_ids_are_canonicalized_onto_xai_then_builtin_proxy() {
+        assert_eq!(normalize_opencode_model_id("grok-4.6"), "xai/grok-4.6");
+        assert_eq!(
+            normalize_opencode_model_id(" Grok-4.6-latest "),
+            "xai/grok-4.6-latest"
+        );
+        assert_eq!(normalize_opencode_model_id("grok-4.5"), "xai/grok-4.5");
+        assert_eq!(
+            normalize_opencode_model_id("grok-build-0.1"),
+            "xai/grok-build-0.1"
+        );
+        // Already-prefixed ids must not be double-wrapped at normalize time.
+        assert_eq!(normalize_opencode_model_id("xai/grok-4.6"), "xai/grok-4.6");
+        assert_eq!(
+            normalize_opencode_model_id("grok-cli/grok-4.5"),
+            "grok-cli/grok-4.5"
+        );
+        let canonical = normalize_opencode_model_id("grok-4.6");
+        assert_eq!(
+            opencode_model_argument(Some(canonical.as_ref())),
+            "builtin/xai/grok-4.6"
+        );
+        assert_eq!(
+            opencode_model_argument(Some("xai/grok-4.6")),
+            "builtin/xai/grok-4.6"
+        );
+        // Wrap happens before the provider-availability check so the first
+        // path segment is `builtin`, not catalog `xai` (which is absent when
+        // Grok is CLI-proxy OAuth only).
+        assert_eq!(
+            canonicalize_opencode_cli_model("grok-4.6"),
+            "builtin/xai/grok-4.6"
+        );
+        assert_eq!(
+            canonicalize_opencode_cli_model("xai/grok-4.6"),
+            "builtin/xai/grok-4.6"
+        );
+        let provider = canonicalize_opencode_cli_model("grok-4.6")
+            .split_once('/')
+            .map(|(p, _)| p.to_string())
+            .expect("slash");
+        assert_eq!(provider, "builtin");
+        assert!(
+            !crate::api::providers::DEFAULT_CATALOG_PROVIDER_IDS.contains(&provider.as_str()),
+            "builtin must not be treated as a catalog provider that requires OpenCode auth"
+        );
     }
 
     #[test]
@@ -2174,5 +2453,66 @@ mod path_tests {
 
         assert!(path.contains("/mission/.sandboxed-sh/bin:/usr/bin"));
         assert!(path.ends_with("/mission/.sandboxed-sh-bin"));
+    }
+
+    #[test]
+    fn inactivity_kill_spares_silent_cli_children_until_tool_idle() {
+        let global = Duration::from_secs(300);
+        let tool = Duration::from_secs(1800);
+        // The eip-8282 Spark failure: lake running, no SSE, 300s silence.
+        assert!(
+            !opencode_inactivity_should_kill(
+                false,
+                true,
+                true,
+                Duration::from_secs(300),
+                global,
+                tool
+            ),
+            "must not kill a live CLI with children at the 300s global cap"
+        );
+        assert!(
+            !opencode_inactivity_should_kill(
+                true,
+                true,
+                false,
+                Duration::from_secs(400),
+                global,
+                tool
+            ),
+            "SSE tool depth also uses the long window"
+        );
+        assert!(opencode_inactivity_should_kill(
+            false,
+            true,
+            false,
+            Duration::from_secs(300),
+            global,
+            tool
+        ));
+        assert!(opencode_inactivity_should_kill(
+            false,
+            true,
+            true,
+            Duration::from_secs(1800),
+            global,
+            tool
+        ));
+        assert!(!opencode_inactivity_should_kill(
+            false,
+            false,
+            false,
+            Duration::from_secs(10_000),
+            global,
+            tool
+        ));
+    }
+
+    #[test]
+    fn linux_pid_helpers_see_this_process() {
+        let pid = std::process::id();
+        assert!(linux_pid_is_alive(pid));
+        assert!(!linux_pid_is_alive(u32::MAX - 1));
+        let _ = linux_pid_has_children(pid);
     }
 }

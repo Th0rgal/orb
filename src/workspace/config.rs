@@ -8,6 +8,34 @@
 //! reader never observes a half-written config.
 
 use super::*;
+use std::collections::{HashMap, HashSet};
+
+const SANDBOXED_MANAGED_PROVIDER_KEY: &str = "x-sandboxed-managed";
+
+fn managed_opencode_provider_keys(custom_providers: Option<&[AIProvider]>) -> HashSet<String> {
+    let mut keys = HashSet::from(["kimi".to_string()]);
+    if let Some(providers) = custom_providers {
+        for provider in providers {
+            keys.insert(sanitize_key(&provider.name));
+            if provider.provider_type == ProviderType::Kimi {
+                keys.insert("kimi".to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn is_sandboxed_managed_provider(
+    key: &str,
+    provider: &serde_json::Value,
+    managed_keys: &HashSet<String>,
+) -> bool {
+    provider
+        .get(SANDBOXED_MANAGED_PROVIDER_KEY)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || managed_keys.contains(key)
+}
 
 /// Write `contents` to `path` atomically: write to a sibling `.tmp` file,
 /// then rename over the target. Renames within one directory are atomic on
@@ -239,6 +267,22 @@ pub(crate) async fn write_opencode_config(
         base_config = serde_json::json!({});
     }
 
+    // MCP synchronization rewrites the generated settings file.  A custom
+    // workspace can carry provider definitions that do not exist in the
+    // server-wide OpenCode base config, so retain its local `provider` map
+    // before replacing MCP settings.  Server-managed Custom/Kimi definitions
+    // below override only matching keys with their authoritative values.
+    let local_provider_map = tokio::fs::read_to_string(workspace_dir.join("opencode.json"))
+        .await
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|config| {
+            config
+                .get("provider")
+                .and_then(|value| value.as_object())
+                .cloned()
+        });
+
     {
         let base_obj = base_config.as_object_mut().expect("opencode base config");
         base_obj.insert(
@@ -251,6 +295,22 @@ pub(crate) async fn write_opencode_config(
             serde_json::Value::Object(permission),
         );
         base_obj.insert("tools".to_string(), serde_json::Value::Object(tools));
+
+        if let Some(provider_map) = local_provider_map {
+            let providers = base_obj
+                .entry("provider".to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(providers) = providers.as_object_mut() {
+                let mut managed_keys = managed_opencode_provider_keys(custom_providers);
+                managed_keys.extend(read_managed_opencode_provider_keys(workspace_root));
+                for (key, provider) in provider_map {
+                    if is_sandboxed_managed_provider(&key, &provider, &managed_keys) {
+                        continue;
+                    }
+                    providers.entry(key).or_insert(provider);
+                }
+            }
+        }
 
         // Add custom providers if any. Kimi is handled here too: like Custom
         // providers it is not an OpenCode built-in, so it needs an explicit
@@ -270,7 +330,11 @@ pub(crate) async fn write_opencode_config(
                 .collect();
 
             if !provider_blocks.is_empty() {
-                let mut provider_map = serde_json::Map::new();
+                let mut provider_map = base_obj
+                    .get("provider")
+                    .and_then(|value| value.as_object())
+                    .cloned()
+                    .unwrap_or_default();
 
                 for provider in provider_blocks {
                     // Kimi: OpenAI-compatible block with the OAuth access token as
@@ -346,6 +410,8 @@ pub(crate) async fn write_opencode_config(
                         provider_config
                             .insert("models".to_string(), serde_json::Value::Object(models_map));
 
+                        provider_config
+                            .insert(SANDBOXED_MANAGED_PROVIDER_KEY.to_string(), json!(true));
                         provider_map.insert(
                             "kimi".to_string(),
                             serde_json::Value::Object(provider_config),
@@ -419,6 +485,7 @@ pub(crate) async fn write_opencode_config(
                         }
                     }
 
+                    provider_config.insert(SANDBOXED_MANAGED_PROVIDER_KEY.to_string(), json!(true));
                     provider_map.insert(provider_id, serde_json::Value::Object(provider_config));
                 }
 
@@ -984,6 +1051,20 @@ async fn write_codex_config(
     // emitted, and the Thoughts panel has nothing to persist or replay.
     // Pin "detailed" unless the profile/operator already set a value.
     let config_payload = ensure_codex_reasoning_summary(&config_payload);
+    // When CLIProxyAPI owns the ChatGPT OAuth credential, Codex must send its
+    // Responses traffic to the proxy instead of chatgpt.com.
+    let config_payload = match crate::api::oauth_owner::codex_via_cli_proxy() {
+        Some(endpoint) => {
+            if workspace_type == WorkspaceType::Container && shared_network != Some(true) {
+                tracing::warn!(
+                    base_url = %endpoint.base_url,
+                    "Codex is routed through CLIProxyAPI on the host loopback, but this container has no shared network; the proxy may be unreachable"
+                );
+            }
+            ensure_codex_model_provider(&config_payload, &endpoint.openai_v1_url())
+        }
+        None => config_payload,
+    };
     write_file_atomic(&config_path, config_payload)?;
 
     // Write skills to ~/.codex/skills using Codex's native skills format
@@ -1117,6 +1198,105 @@ pub(crate) fn ensure_codex_reasoning_summary(config: &str) -> String {
         return config.to_string();
     }
     format!("model_reasoning_summary = \"detailed\"\n\n{}", config)
+}
+
+/// Point Codex at CLIProxyAPI: `model_provider = "cliproxy"` at the top level
+/// and a `[model_providers.cliproxy]` section speaking the Responses wire API.
+///
+/// An operator-set `model_provider` (profile or existing file) is respected
+/// and the config is returned unchanged. The section itself is rewritten on
+/// every call so a changed proxy URL takes effect.
+pub(crate) const CODEX_CLI_PROXY_PROVIDER_ID: &str = "cliproxy";
+
+pub(crate) fn ensure_codex_model_provider(config: &str, base_url: &str) -> String {
+    // A top-level `model_provider` written by an operator (or a profile) wins.
+    // Our own `model_provider = "cliproxy"` line from a previous pass does not
+    // count — it is rewritten below so a changed proxy URL takes effect.
+    let our_provider_line = format!("\"{CODEX_CLI_PROXY_PROVIDER_ID}\"");
+    let mut operator_set_provider = false;
+    for line in config
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with('['))
+    {
+        if let Some(value) = parse_top_level_model_provider(line) {
+            if value != our_provider_line {
+                operator_set_provider = true;
+            }
+        }
+    }
+    if operator_set_provider {
+        return config.to_string();
+    }
+
+    // Drop any previous cliproxy section and our own top-level line so the
+    // URL is always current and the key never appears twice.
+    let stripped = strip_codex_cli_proxy_provider(config);
+    let section_header = format!("[model_providers.{CODEX_CLI_PROXY_PROVIDER_ID}]");
+    let mut body = stripped.trim_end().to_string();
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    format!(
+        "model_provider = \"{CODEX_CLI_PROXY_PROVIDER_ID}\"\n\n{body}{section_header}\nname = \"CLIProxyAPI\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\nenv_key = \"OPENAI_API_KEY\"\n"
+    )
+}
+
+/// Parse a top-level `model_provider = "<value>"` line, returning the quoted
+/// value. Only meaningful before the first `[section]` header.
+fn parse_top_level_model_provider(line: &str) -> Option<String> {
+    let mut parts = line.trim().splitn(2, '=');
+    if parts.next().map(|key| key.trim() == "model_provider") != Some(true) {
+        return None;
+    }
+    Some(parts.next().unwrap_or("").trim().to_string())
+}
+
+/// Remove the `model_provider = "cliproxy"` top-level line and the
+/// `[model_providers.cliproxy]` section written by `ensure_codex_model_provider`.
+///
+/// Used when a Codex attempt runs on a non-proxy credential (rotation fell
+/// back from the CLIProxyAPI entry to an API key or a direct OAuth account):
+/// leaving the stanza would route requests at the proxy with no
+/// `OPENAI_API_KEY` in the process env, and the fallback attempt would fail
+/// on the missing env key instead of authenticating with its own credential.
+/// Operator-set providers and unrelated sections are preserved.
+pub(crate) fn strip_codex_cli_proxy_provider(config: &str) -> String {
+    let our_provider_line = format!("\"{CODEX_CLI_PROXY_PROVIDER_ID}\"");
+    let section_header = format!("[model_providers.{CODEX_CLI_PROXY_PROVIDER_ID}]");
+    let has_ours = config.contains(&section_header)
+        || config
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .any(|line| {
+                parse_top_level_model_provider(line).as_deref() == Some(&our_provider_line)
+            });
+    if !has_ours {
+        return config.to_string();
+    }
+
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    let mut past_top_level = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            past_top_level = true;
+            skipping = trimmed == section_header;
+        }
+        if !past_top_level
+            && parse_top_level_model_provider(line).as_deref() == Some(&our_provider_line)
+        {
+            continue;
+        }
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    let mut out = kept.join("\n").trim_end().to_string();
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 pub(crate) fn update_codex_mcp_config(existing: &str, entries: &[CodexMcpEntry]) -> String {
@@ -1364,6 +1544,120 @@ pub async fn write_backend_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_model_provider_points_at_cli_proxy_and_respects_operator_choice() {
+        let base = "http://127.0.0.1:8317/v1";
+        let out = ensure_codex_model_provider("model_reasoning_summary = \"detailed\"\n", base);
+        assert!(out.starts_with("model_provider = \"cliproxy\"\n"));
+        assert!(out.contains("[model_providers.cliproxy]"));
+        assert!(out.contains("base_url = \"http://127.0.0.1:8317/v1\""));
+        assert!(out.contains("wire_api = \"responses\""));
+        assert!(out.contains("env_key = \"OPENAI_API_KEY\""));
+        assert!(out.contains("model_reasoning_summary = \"detailed\""));
+
+        // Re-applying with a new URL rewrites the section instead of duplicating it.
+        let again = ensure_codex_model_provider(&out, "http://10.0.0.1:8317/v1");
+        assert_eq!(again.matches("[model_providers.cliproxy]").count(), 1);
+        assert_eq!(again.matches("model_provider = \"cliproxy\"").count(), 1);
+        assert!(again.contains("base_url = \"http://10.0.0.1:8317/v1\""));
+        assert!(!again.contains("127.0.0.1"));
+
+        // An operator-set provider wins untouched.
+        let operator = "model_provider = \"openai\"\n\n[mcp_servers.x]\ncommand = \"x\"\n";
+        assert_eq!(ensure_codex_model_provider(operator, base), operator);
+    }
+
+    #[test]
+    fn strip_codex_cli_proxy_provider_removes_only_our_stanza() {
+        let base = "http://127.0.0.1:8317/v1";
+        let with_proxy = ensure_codex_model_provider(
+            "model_reasoning_summary = \"detailed\"\n\n[mcp_servers.x]\ncommand = \"x\"\n",
+            base,
+        );
+        let stripped = strip_codex_cli_proxy_provider(&with_proxy);
+        assert!(!stripped.contains("cliproxy"));
+        assert!(stripped.contains("model_reasoning_summary = \"detailed\""));
+        assert!(stripped.contains("[mcp_servers.x]"));
+
+        // A later proxy-owned attempt can re-add the stanza cleanly.
+        let readded = ensure_codex_model_provider(&stripped, base);
+        assert_eq!(readded.matches("[model_providers.cliproxy]").count(), 1);
+        assert_eq!(readded.matches("model_provider = \"cliproxy\"").count(), 1);
+
+        // Configs that never had our stanza are returned unchanged.
+        let operator = "model_provider = \"openai\"\n\n[mcp_servers.x]\ncommand = \"x\"\n";
+        assert_eq!(strip_codex_cli_proxy_provider(operator), operator);
+        let plain = "model_reasoning_summary = \"detailed\"\n";
+        assert_eq!(strip_codex_cli_proxy_provider(plain), plain);
+    }
+
+    #[tokio::test]
+    async fn mcp_rewrite_retains_workspace_local_custom_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        std::fs::write(
+            workspace.join("opencode.json"),
+            r#"{"provider":{"local-relay":{"name":"Local Relay","options":{"baseURL":"https://relay.invalid/v1"}}}}"#,
+        )
+        .unwrap();
+
+        write_opencode_config(
+            workspace,
+            Vec::new(),
+            workspace,
+            WorkspaceType::Host,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(workspace.join("opencode.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            rewritten["provider"]["local-relay"]["options"]["baseURL"],
+            "https://relay.invalid/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_rewrite_drops_disabled_server_managed_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        std::fs::write(
+            workspace.join("opencode.json"),
+            r#"{"provider":{"kimi":{"name":"Kimi","x-sandboxed-managed":true,"options":{"apiKey":"stale"}},"local-relay":{"name":"Local Relay","options":{"baseURL":"https://relay.invalid/v1"}}}}"#,
+        )
+        .unwrap();
+
+        write_opencode_config(
+            workspace,
+            Vec::new(),
+            workspace,
+            WorkspaceType::Host,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(workspace.join("opencode.json")).unwrap())
+                .unwrap();
+        assert!(rewritten["provider"].get("kimi").is_none());
+        assert_eq!(
+            rewritten["provider"]["local-relay"]["options"]["baseURL"],
+            "https://relay.invalid/v1"
+        );
+    }
 
     #[tokio::test]
     async fn kimi_opencode_config_discovers_future_models_from_live_catalog() {

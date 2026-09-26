@@ -12,11 +12,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::client::RemoteNodeClient;
-use super::protocol::NodeHeartbeat;
+use super::protocol::{NodeHeartbeat, SourceBundleRequirement};
 use super::{RemoteNodeConfig, RemoteNodeSettings, RemoteNodeStatus};
 
 /// Consecutive missed probes after which a node is considered `Offline`
@@ -25,6 +25,8 @@ const OFFLINE_MISS_THRESHOLD: u32 = 3;
 
 /// Bounded length of the recent dispatch-outcome history.
 const RECENT_OUTCOMES_CAP: usize = 50;
+
+pub use crate::node::resource_history::Sample as NodeResourceSample;
 
 /// Cached status for one configured node.
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +44,7 @@ pub struct CachedNodeStatus {
     /// be represented by that heartbeat payload.
     pub last_probe_started_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    pub resource_history: Vec<NodeResourceSample>,
 }
 
 /// Outcome record for a remote dispatch (sync `/execute` or async job).
@@ -83,6 +86,20 @@ pub fn status_after_probe(previous_misses: u32, probe_ok: bool) -> (RemoteNodeSt
 pub struct FleetMonitor {
     statuses: RwLock<HashMap<String, CachedNodeStatus>>,
     recent: RwLock<VecDeque<DispatchOutcome>>,
+    /// Node ids an operator has cordoned: still probed and listed, but
+    /// excluded from automatic placement until uncordoned. Persisted to
+    /// `state_path` (see [`NodeStateFile`]) so a cordon survives restarts.
+    cordoned: RwLock<std::collections::HashSet<String>>,
+    /// Where the cordon set is persisted (`.sandboxed-sh/node_state.json`
+    /// under the working dir). `None` in tests / until startup wiring runs.
+    state_path: RwLock<Option<std::path::PathBuf>>,
+}
+
+/// On-disk shape of `.sandboxed-sh/node_state.json`.
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct NodeStateFile {
+    #[serde(default)]
+    cordoned: Vec<String>,
 }
 
 impl Default for FleetMonitor {
@@ -96,7 +113,66 @@ impl FleetMonitor {
         Self {
             statuses: RwLock::new(HashMap::new()),
             recent: RwLock::new(VecDeque::new()),
+            cordoned: RwLock::new(std::collections::HashSet::new()),
+            state_path: RwLock::new(None),
         }
+    }
+
+    /// Load the persisted cordon set from `path` and remember the path for
+    /// later writes. Missing or unreadable files start with an empty set (a
+    /// lost cordon is recoverable; refusing to start is not).
+    pub fn load_node_state(&self, path: std::path::PathBuf) {
+        let loaded: NodeStateFile = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        {
+            let mut cordoned = self.cordoned.write().unwrap_or_else(|e| e.into_inner());
+            *cordoned = loaded.cordoned.into_iter().collect();
+        }
+        let mut state_path = self.state_path.write().unwrap_or_else(|e| e.into_inner());
+        *state_path = Some(path);
+    }
+
+    pub fn is_cordoned(&self, node_id: &str) -> bool {
+        self.cordoned
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(node_id)
+    }
+
+    /// Cordon (`true`) or uncordon (`false`) a node and persist the set.
+    /// Returns whether the set changed.
+    pub fn set_cordoned(&self, node_id: &str, cordoned: bool) -> Result<bool, String> {
+        let snapshot: Vec<String> = {
+            let mut set = self.cordoned.write().unwrap_or_else(|e| e.into_inner());
+            let changed = if cordoned {
+                set.insert(node_id.to_string())
+            } else {
+                set.remove(node_id)
+            };
+            if !changed {
+                return Ok(false);
+            }
+            let mut nodes: Vec<String> = set.iter().cloned().collect();
+            nodes.sort();
+            nodes
+        };
+        let path = self
+            .state_path
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(path) = path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            let body = serde_json::to_string_pretty(&NodeStateFile { cordoned: snapshot })
+                .map_err(|e| e.to_string())?;
+            std::fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        Ok(true)
     }
 
     /// Record a successful heartbeat probe.
@@ -112,12 +188,42 @@ impl FleetMonitor {
     ) {
         let (status, misses) = status_after_probe(0, true);
         let mut statuses = self.statuses.write().unwrap_or_else(|e| e.into_inner());
+        let now = Utc::now().timestamp_millis();
+        let mut resource_history = statuses
+            .get(node_id)
+            .map(|s| s.resource_history.clone())
+            .unwrap_or_default();
+        resource_history.retain(|sample| sample.time >= now - 60_000);
+        resource_history.push(NodeResourceSample {
+            time: now,
+            cpu: None,
+            gpu: None,
+            memory: (heartbeat.mem_total_bytes > 0).then(|| {
+                heartbeat
+                    .mem_total_bytes
+                    .saturating_sub(heartbeat.mem_available_bytes) as f64
+                    / heartbeat.mem_total_bytes as f64
+                    * 100.0
+            }),
+        });
+        if !heartbeat.resource_history.is_empty() {
+            resource_history = heartbeat
+                .resource_history
+                .iter()
+                .filter(|s| s.time >= now - 60_000 && s.time <= now + 1_000)
+                .cloned()
+                .collect();
+        }
+        if resource_history.len() > 120 {
+            resource_history.drain(..resource_history.len() - 120);
+        }
         statuses.insert(
             node_id.to_string(),
             CachedNodeStatus {
                 node_id: node_id.to_string(),
                 status,
                 consecutive_misses: misses,
+                resource_history,
                 last_heartbeat: Some(heartbeat),
                 last_seen: Some(Utc::now()),
                 last_probe_started_at: Some(probe_started_at),
@@ -136,6 +242,7 @@ impl FleetMonitor {
                 node_id: node_id.to_string(),
                 status: RemoteNodeStatus::Unknown,
                 consecutive_misses: 0,
+                resource_history: Vec::new(),
                 last_heartbeat: None,
                 last_seen: None,
                 last_probe_started_at: None,
@@ -325,6 +432,31 @@ pub fn select_node_auto_with_protocol_and_resource_reservations(
     reservations: &HashMap<String, u32>,
     disk_reservations: &HashMap<String, u64>,
 ) -> Result<String, PlacementError> {
+    select_node_auto_with_source_and_resource_reservations(
+        nodes,
+        statuses,
+        requirements,
+        min_disk_bytes,
+        min_mem_bytes,
+        min_protocol_version,
+        None,
+        reservations,
+        disk_reservations,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Pure placement inputs stay explicit for auditability.
+pub fn select_node_auto_with_source_and_resource_reservations(
+    nodes: &[RemoteNodeConfig],
+    statuses: &HashMap<String, CachedNodeStatus>,
+    requirements: &[String],
+    min_disk_bytes: u64,
+    min_mem_bytes: u64,
+    min_protocol_version: u32,
+    source: Option<SourceBundleRequirement>,
+    reservations: &HashMap<String, u32>,
+    disk_reservations: &HashMap<String, u64>,
+) -> Result<String, PlacementError> {
     let mut reasons: Vec<(String, String)> = Vec::new();
     // (queued, specialized, load, capacity, mem_avail, id)
     //
@@ -357,6 +489,12 @@ pub fn select_node_auto_with_protocol_and_resource_reservations(
                 ),
             ));
             continue;
+        }
+        if let Some(source) = source {
+            if let Err(reason) = source.check(heartbeat) {
+                reasons.push((node.id.clone(), reason));
+                continue;
+            }
         }
         if requirements.iter().any(|requirement| requirement == "lean")
             && heartbeat.lean_runtime_ready == Some(false)
@@ -468,15 +606,41 @@ impl FleetMonitor {
         requirements: &[String],
         reservations: &HashMap<String, u32>,
     ) -> Result<String, PlacementError> {
+        let (nodes, mut cordoned_reasons) = self.partition_cordoned(&settings.nodes);
         let statuses = self.statuses.read().unwrap_or_else(|e| e.into_inner());
         select_node_auto_with_reservations(
-            &settings.nodes,
+            &nodes,
             &statuses,
             requirements,
             env_gb_bytes("REMOTE_NODE_MIN_DISK_GB", DEFAULT_MIN_DISK_GB),
             env_gb_bytes("REMOTE_NODE_MIN_MEM_GB", DEFAULT_MIN_MEM_GB),
             reservations,
         )
+        .map_err(|mut error| {
+            cordoned_reasons.append(&mut error.reasons);
+            PlacementError {
+                reasons: cordoned_reasons,
+            }
+        })
+    }
+
+    /// Split configured nodes into placeable ones and `(id, reason)` entries
+    /// for cordoned nodes, so exclusion reports still name every node.
+    fn partition_cordoned(
+        &self,
+        nodes: &[RemoteNodeConfig],
+    ) -> (Vec<RemoteNodeConfig>, Vec<(String, String)>) {
+        let cordoned = self.cordoned.read().unwrap_or_else(|e| e.into_inner());
+        let mut placeable = Vec::new();
+        let mut reasons = Vec::new();
+        for node in nodes {
+            if cordoned.contains(&node.id) {
+                reasons.push((node.id.clone(), "cordoned by operator".to_string()));
+            } else {
+                placeable.push(node.clone());
+            }
+        }
+        (placeable, reasons)
     }
 
     /// Like [`Self::place_auto_with_reservations`], with an explicit disk
@@ -510,17 +674,47 @@ impl FleetMonitor {
         reservations: &HashMap<String, u32>,
         disk_reservations: &HashMap<String, u64>,
     ) -> Result<String, PlacementError> {
+        self.place_auto_with_source_and_resource_reservations(
+            settings,
+            requirements,
+            min_disk_bytes,
+            min_protocol_version,
+            None,
+            reservations,
+            disk_reservations,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_auto_with_source_and_resource_reservations(
+        &self,
+        settings: &RemoteNodeSettings,
+        requirements: &[String],
+        min_disk_bytes: u64,
+        min_protocol_version: u32,
+        source: Option<SourceBundleRequirement>,
+        reservations: &HashMap<String, u32>,
+        disk_reservations: &HashMap<String, u64>,
+    ) -> Result<String, PlacementError> {
+        let (nodes, mut cordoned_reasons) = self.partition_cordoned(&settings.nodes);
         let statuses = self.statuses.read().unwrap_or_else(|e| e.into_inner());
-        select_node_auto_with_protocol_and_resource_reservations(
-            &settings.nodes,
+        select_node_auto_with_source_and_resource_reservations(
+            &nodes,
             &statuses,
             requirements,
             min_disk_bytes,
             env_gb_bytes("REMOTE_NODE_MIN_MEM_GB", DEFAULT_MIN_MEM_GB),
             min_protocol_version,
+            source,
             reservations,
             disk_reservations,
         )
+        .map_err(|mut error| {
+            cordoned_reasons.append(&mut error.reasons);
+            PlacementError {
+                reasons: cordoned_reasons,
+            }
+        })
     }
 }
 
@@ -540,6 +734,7 @@ pub fn global_fleet() -> Option<Arc<FleetMonitor>> {
 /// by `GET /api/remote-nodes`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteNodeView {
+    pub resource_history: Vec<NodeResourceSample>,
     pub id: String,
     pub base_url: String,
     pub token_env: String,
@@ -559,8 +754,12 @@ pub struct RemoteNodeView {
     pub disk_available_bytes: Option<u64>,
     pub cached_toolchains: Vec<String>,
     pub lean_runtime_ready: Option<bool>,
+    pub source_bundle_capacity: Option<super::protocol::SourceBundleCapacity>,
     pub last_seen: Option<DateTime<Utc>>,
     pub error: Option<String>,
+    /// Operator-cordoned: still probed and listed, but excluded from
+    /// automatic placement until uncordoned.
+    pub cordoned: bool,
 }
 
 impl RemoteNodeView {
@@ -574,6 +773,15 @@ impl RemoteNodeView {
             labels.retain(|label| label != "lean");
         }
         Self {
+            resource_history: cached
+                .map(|c| {
+                    c.resource_history
+                        .iter()
+                        .filter(|s| s.time >= Utc::now().timestamp_millis() - 60_000)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
             id: config.id.clone(),
             base_url: config.base_url.clone(),
             token_env: config.token_env.clone(),
@@ -597,8 +805,10 @@ impl RemoteNodeView {
                 .map(|h| h.cached_toolchains.clone())
                 .unwrap_or_default(),
             lean_runtime_ready: heartbeat.and_then(|h| h.lean_runtime_ready),
+            source_bundle_capacity: heartbeat.and_then(|h| h.source_bundle_capacity),
             last_seen: cached.and_then(|c| c.last_seen),
             error: cached.and_then(|c| c.last_error.clone()),
+            cordoned: false,
         }
     }
 }
@@ -610,6 +820,44 @@ pub struct RemoteNodesResponse {
     pub nodes: Vec<RemoteNodeView>,
     /// Last dispatch outcomes across the fleet, newest first (max 10).
     pub recent_jobs: Vec<DispatchOutcome>,
+    /// DGX Spark build-offload lane. A separate capacity lane from the
+    /// remote-node fleet (per-workspace opt-in + HMAC env, see
+    /// `src/api/spark.rs`); surfaced here so placement decisions can see the
+    /// whole picture instead of only `nodes`.
+    pub spark_offload: SparkOffloadStatus,
+    /// How `POST /api/control/missions` treats `remote_node_id` on this
+    /// backend. Absent on backends that still require a raw `remote_command`.
+    pub remote_launch: RemoteLaunchCapabilities,
+}
+
+/// Typed remote-launch contract (see `docs/REMOTE_NODES.md`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteLaunchCapabilities {
+    /// `prompt` + `remote_node_id` + `backend` (+ `model_override`) is
+    /// planned server-side; no client-built command or client-minted key.
+    pub typed: bool,
+    /// Backend ids nodes can run (`claudecode`, `opencode`).
+    pub harnesses: Vec<String>,
+    #[serde(default)]
+    pub requires_proxy_harnesses: Vec<String>,
+    /// An explicit `remote_command` is still accepted verbatim.
+    pub raw_command: bool,
+    /// `SANDBOXED_PUBLIC_URL` is set, so node harnesses can reach the proxy.
+    /// When false a typed launch fails at dispatch (502), not at planning.
+    pub proxy_url_configured: bool,
+    /// Prefixes of the plain-text 400 bodies returned before a mission exists.
+    pub error_prefixes: Vec<String>,
+}
+
+/// Status of the Spark offload lane for fleet/placement consumers.
+#[derive(Debug, Clone, Serialize)]
+pub struct SparkOffloadStatus {
+    /// Arbiter URL, token, SSH target, AND the capability-token signing
+    /// secret are all configured on the host — i.e. the lane is actually
+    /// reachable by opted-in workspaces, not merely credentialed.
+    pub configured: bool,
+    /// Names of workspaces with `spark_offload.enabled == true`.
+    pub enabled_workspaces: Vec<String>,
 }
 
 /// Probe one node and record the result into the monitor cache.
@@ -683,6 +931,34 @@ mod tests {
             "version": "test",
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn resource_history_prefers_node_samples_and_retains_legacy_probes() {
+        let fleet = FleetMonitor::new();
+        fleet.record_heartbeat("legacy", heartbeat("legacy"));
+        fleet.record_heartbeat("legacy", heartbeat("legacy"));
+        assert_eq!(fleet.get("legacy").unwrap().resource_history.len(), 2);
+        let mut hb = heartbeat("gpu");
+        let now = Utc::now().timestamp_millis();
+        hb.resource_history = vec![
+            NodeResourceSample {
+                time: now - 90_000,
+                cpu: Some(1.0),
+                memory: Some(2.0),
+                gpu: None,
+            },
+            NodeResourceSample {
+                time: now - 3_000,
+                cpu: Some(20.0),
+                memory: Some(30.0),
+                gpu: Some(80.0),
+            },
+        ];
+        fleet.record_heartbeat("gpu", hb);
+        let history = fleet.get("gpu").unwrap().resource_history;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].gpu, Some(80.0));
     }
 
     #[test]
@@ -775,6 +1051,7 @@ mod tests {
         }))
         .unwrap();
         CachedNodeStatus {
+            resource_history: Vec::new(),
             node_id: id.to_string(),
             status: RemoteNodeStatus::Online,
             consecutive_misses: 0,
@@ -786,6 +1063,62 @@ mod tests {
     }
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn cordoned_node_is_excluded_from_auto_placement_with_a_reason() {
+        let fleet = FleetMonitor::new();
+        // Two healthy nodes; "spark" is deliberately the more attractive one
+        // (more memory) so exclusion, not ranking, is what the test proves.
+        for (id, mem) in [("spark", 96), ("cpu1", 16)] {
+            let status = cached_online(id, &["lean"], 100, mem, 2, 0, 0);
+            fleet.record_heartbeat(id, status.last_heartbeat.unwrap());
+        }
+        let settings = RemoteNodeSettings {
+            enabled: true,
+            nodes: vec![node_config("spark"), node_config("cpu1")],
+        };
+        assert_eq!(fleet.place_auto(&settings, &[]).unwrap(), "spark");
+
+        assert!(fleet.set_cordoned("spark", true).unwrap());
+        assert!(fleet.is_cordoned("spark"));
+        assert_eq!(fleet.place_auto(&settings, &[]).unwrap(), "cpu1");
+
+        // With every node cordoned, the exclusion report names them.
+        assert!(fleet.set_cordoned("cpu1", true).unwrap());
+        let error = fleet.place_auto(&settings, &[]).unwrap_err();
+        assert!(error
+            .reasons
+            .iter()
+            .any(|(id, reason)| id == "spark" && reason.contains("cordoned")));
+
+        // Uncordon restores placement; repeat uncordon is a no-op.
+        assert!(fleet.set_cordoned("spark", false).unwrap());
+        assert!(!fleet.set_cordoned("spark", false).unwrap());
+        assert_eq!(fleet.place_auto(&settings, &[]).unwrap(), "spark");
+    }
+
+    #[test]
+    fn cordon_set_persists_via_node_state_file() {
+        let dir = std::env::temp_dir().join(format!("node-state-{}", Uuid::new_v4()));
+        let path = dir.join("node_state.json");
+
+        let fleet = FleetMonitor::new();
+        fleet.load_node_state(path.clone());
+        assert!(fleet.set_cordoned("dgx-spark", true).unwrap());
+
+        // A fresh monitor (restart) reads the same file back.
+        let reloaded = FleetMonitor::new();
+        reloaded.load_node_state(path.clone());
+        assert!(reloaded.is_cordoned("dgx-spark"));
+
+        // Uncordon persists too.
+        assert!(reloaded.set_cordoned("dgx-spark", false).unwrap());
+        let third = FleetMonitor::new();
+        third.load_node_state(path);
+        assert!(!third.is_cordoned("dgx-spark"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn place_auto_filters_by_status_labels_disk_mem_and_load() {
@@ -1086,6 +1419,90 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.reasons[0].1.contains("85 GiB reserved"));
+    }
+
+    #[test]
+    fn source_capacity_filters_mixed_fleet_before_ranking() {
+        use super::super::protocol::SourceBundleCapacity;
+        let nodes = vec![
+            node_config("a-old"),
+            node_config("b-small"),
+            node_config("z-capable"),
+        ];
+        let mut statuses = HashMap::new();
+        for node in &nodes {
+            let mut status = cached_online(&node.id, &["lean"], 100, 32, 2, 0, 0);
+            let hb = status.last_heartbeat.as_mut().unwrap();
+            hb.protocol_version = 4;
+            hb.source_bundle_capacity = match node.id.as_str() {
+                "b-small" => Some(SourceBundleCapacity {
+                    overlay_bytes: 8 << 20,
+                    complete_bytes: 8 << 20,
+                }),
+                "z-capable" => Some(SourceBundleCapacity {
+                    overlay_bytes: 1 << 20,
+                    complete_bytes: 32 << 20,
+                }),
+                _ => None,
+            };
+            statuses.insert(node.id.clone(), status);
+        }
+        let pick = |statuses: &HashMap<String, CachedNodeStatus>, bytes, complete| {
+            select_node_auto_with_source_and_resource_reservations(
+                &nodes,
+                statuses,
+                &["lean".to_string()],
+                20 * GIB,
+                8 * GIB,
+                if complete { 4 } else { 3 },
+                Some(SourceBundleRequirement { bytes, complete }),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        };
+        // Old v4 remains compatible at its historical complete ceiling.
+        assert_eq!(pick(&statuses, 16 << 20, true).unwrap(), "a-old");
+        assert_eq!(pick(&statuses, (16 << 20) + 1, true).unwrap(), "z-capable");
+        assert_eq!(pick(&statuses, 32 << 20, true).unwrap(), "z-capable");
+        assert_eq!(pick(&statuses, 1 << 20, false).unwrap(), "a-old");
+        assert_eq!(pick(&statuses, (1 << 20) + 1, false).unwrap(), "b-small");
+        assert!(pick(&statuses, (32 << 20) + 1, true)
+            .unwrap_err()
+            .reasons
+            .iter()
+            .all(|(_, reason)| reason.contains("receiver capacity")));
+        // Ranking and even spare slots must never rescue an undersized node.
+        statuses
+            .get_mut("z-capable")
+            .unwrap()
+            .last_heartbeat
+            .as_mut()
+            .unwrap()
+            .active_jobs = 2;
+        assert_eq!(pick(&statuses, 25 << 20, true).unwrap(), "z-capable");
+        statuses.get_mut("z-capable").unwrap().status = RemoteNodeStatus::Offline;
+        let err = pick(&statuses, 25 << 20, true).unwrap_err();
+        assert_eq!(err.reasons.len(), 3);
+        assert!(err
+            .reasons
+            .iter()
+            .any(|(id, reason)| id == "b-small" && reason.contains("8388608")));
+        // Configured ceilings below legacy defaults apply to small payloads too.
+        let hb = statuses["b-small"].last_heartbeat.as_ref().unwrap();
+        assert!(SourceBundleRequirement {
+            bytes: (8 << 20) + 1,
+            complete: true
+        }
+        .check(hb)
+        .is_err());
+        assert!(SourceBundleRequirement {
+            bytes: 8 << 20,
+            complete: true
+        }
+        .check(hb)
+        .is_ok());
+        let view = RemoteNodeView::from_cache(&nodes[1], statuses.get("b-small"));
+        assert_eq!(view.source_bundle_capacity, hb.source_bundle_capacity);
     }
 
     #[test]

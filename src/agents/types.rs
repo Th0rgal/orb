@@ -139,6 +139,10 @@ impl TurnOutcome {
     pub fn completion_signal(&self) -> CompletionSignal {
         match self {
             Self::Complete { signal, .. } => *signal,
+            Self::Interrupted {
+                reason: TerminalReason::NativeGoalStopped,
+                ..
+            } => CompletionSignal::NativeTerminal,
             Self::Failed { .. } | Self::Interrupted { .. } => CompletionSignal::ProcessExit,
         }
     }
@@ -189,6 +193,11 @@ pub struct AgentResult {
 
     /// Reason why execution terminated (if not successful completion)
     pub terminal_reason: Option<TerminalReason>,
+
+    /// What the terminating guard OBSERVED (the repeated substring, the
+    /// missing selector, the measured timeout). Guard contract, 2026-08-06:
+    /// a reason without evidence is how downstream agents invent causes.
+    pub terminal_evidence: Option<String>,
 }
 
 impl AgentResult {
@@ -203,6 +212,7 @@ impl AgentResult {
             model_used: None,
             data: None,
             terminal_reason: None,
+            terminal_evidence: None,
         }
     }
 
@@ -217,6 +227,7 @@ impl AgentResult {
             model_used: None,
             data: None,
             terminal_reason: None,
+            terminal_evidence: None,
         }
     }
 
@@ -296,6 +307,12 @@ impl AgentResult {
         self.terminal_reason = Some(reason);
         self
     }
+
+    /// Attach what the terminating guard observed.
+    pub fn with_terminal_evidence(mut self, evidence: impl Into<String>) -> Self {
+        self.terminal_evidence = Some(evidence.into());
+        self
+    }
 }
 
 /// Reason why agent execution terminated.
@@ -305,6 +322,12 @@ pub enum TerminalReason {
     TurnComplete,
     /// Task completed successfully
     Completed,
+    /// Native goal stopped without completing its objective; external steering may resume it.
+    NativeGoalStopped,
+    /// Native history/identity needs explicit reconciliation; never start fresh automatically.
+    CodexContinuityRequired,
+    /// A non-Codex native session or delivery outcome requires reconciliation.
+    NativeContinuityRequired,
     /// Task was cancelled by user
     Cancelled,
     /// Mission was interrupted because the server is shutting down
@@ -326,6 +349,17 @@ pub enum TerminalReason {
     CapacityLimited,
     /// Authentication credentials were rejected (expired/revoked token)
     AuthError,
+}
+
+impl TerminalReason {
+    pub fn requires_external_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::NativeGoalStopped
+                | Self::CodexContinuityRequired
+                | Self::NativeContinuityRequired
+        )
+    }
 }
 
 /// Errors that can occur in agent operations.

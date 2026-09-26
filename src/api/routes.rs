@@ -157,6 +157,13 @@ pub struct AppState {
     /// Cached remote-runner-node statuses + recent dispatch outcomes, kept
     /// fresh by the background fleet monitor (see `remote_node::monitor`).
     pub fleet: Arc<crate::remote_node::FleetMonitor>,
+    /// Persistent project validation campaigns, gates, receipts, and delivery outbox.
+    pub validation: super::validation::SharedValidationStore,
+    /// Explicitly-declared project facts (control conversation binding).
+    pub projects: super::projects_store::SharedProjectsStore,
+    /// Attention items per project slug as of the last `/api/projects/overview`
+    /// read; the next read diffs against it to record resolutions.
+    pub attention_snapshot: RwLock<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 /// Start the HTTP server.
@@ -282,6 +289,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // Initialize backend config store (persisted settings).
+    crate::agent_software::start_worker();
     // Probe each backend's declared CLI names so backends whose CLI is missing
     // default to disabled. CLI binary names live on the `Backend` trait
     // (`cli_names()`); this loop reads them via short-lived instances so the
@@ -493,6 +501,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     );
     control_state.set_telegram_bridge(Arc::clone(&telegram_bridge));
 
+    let validation = Arc::new(super::validation::ValidationStore::open(
+        config
+            .working_dir
+            .join(".sandboxed-sh/validation-campaigns.db"),
+    )?);
+    let projects = Arc::new(super::projects_store::ProjectsStore::open(
+        config.working_dir.join(".sandboxed-sh/projects.db"),
+    )?);
+
     let state = Arc::new(AppState {
         config: config.clone(),
         tasks: RwLock::new(HashMap::new()),
@@ -541,12 +558,27 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         provider_usage_cache: super::provider_usage_cache::ProviderUsageCache::new(),
         codex_usage: super::codex_usage::CodexUsageStore::new(),
         fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+        validation,
+        projects,
+        attention_snapshot: RwLock::new(HashMap::new()),
     });
+
+    state.control.bind_admission_state(&state);
+
+    // Persisted node state (operator cordons) survives restarts.
+    state
+        .fleet
+        .load_node_state(config.working_dir.join(".sandboxed-sh/node_state.json"));
+
+    super::validation::spawn_outbox_forwarder(Arc::clone(&state));
+    super::projects_overview::spawn_state_ingestor(Arc::clone(&state));
+    super::evidence_watch::spawn(Arc::clone(&state));
 
     // Remote-node fleet monitor: periodic heartbeat polling so
     // `/api/remote-nodes` and dispatch decisions read cached statuses
     // (REMOTE_NODE_MONITOR_SECS, default 15s, 0 disables). Only spawned when
     // remote nodes are enabled and configured.
+    super::project_files::start_context_observer(config.working_dir.clone());
     if config.remote_nodes.enabled && !config.remote_nodes.nodes.is_empty() {
         crate::remote_node::spawn_fleet_monitor(
             Arc::clone(&state.fleet),
@@ -606,6 +638,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Zombie-scope reaper: stops leftover sandboxed-exec-*.scope units whose
     // mission no longer needs a live harness (see scope_reaper docs).
     super::scope_reaper::spawn(Arc::clone(&state));
+
+    // Boot reconcile: stop scopes leaked by the previous process, interrupt +
+    // auto-resume ghost-active missions, and tag orphaned awaiting_user
+    // missions. Also reachable via POST /api/system/reconcile.
+    super::reconcile::spawn(Arc::clone(&state));
 
     // Re-attach poll loops for async remote jobs that were in flight when
     // the previous process exited (durable handles in remote-jobs.json).
@@ -705,8 +742,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/spark", super::spark::routes())
         // Remote lean-build dispatch: same per-mission HMAC capability-token
         // model as spark (domain-separated), verified inside the handlers,
-        // so it also bypasses require_auth.
-        .nest("/api/remote-build", super::remote_build::routes());
+        // so it also bypasses require_auth. Source payloads are bounded before
+        // base64 encoding; allow enough wire overhead for the archive/bundle
+        // and manifest instead of Axum's 2 MiB default.
+        .nest(
+            "/api/remote-build",
+            super::remote_build::routes().layer(DefaultBodyLimit::max(
+                crate::remote_node::protocol::MAX_SOURCE_REQUEST_BODY_BYTES,
+            )),
+        );
 
     // File upload routes with increased body limit (10GB)
     let upload_route = Router::new()
@@ -715,8 +759,21 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024));
 
     let protected_routes = Router::new()
+        .route(
+            "/api/uploads",
+            post(super::uploads::upload)
+                .layer(DefaultBodyLimit::max(crate::uploads::MAX_BODY_BYTES)),
+        )
         .route("/api/stats", get(get_stats))
+        .route("/api/software", get(super::agent_software::inventory))
+        .route("/api/software/updates", post(super::agent_software::update))
+        .route(
+            "/api/software/updates/cancel",
+            post(super::agent_software::cancel),
+        )
         .route("/api/remote-nodes", get(list_remote_nodes))
+        .route("/api/nodes/:name/cordon", post(cordon_remote_node))
+        .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))
         .route("/api/task", post(create_task))
         .route("/api/task/:id", get(get_task))
@@ -769,6 +826,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/current",
             get(control::get_current_mission),
         )
+        // Declared BEFORE `/:id` so the literal segment is not captured as a
+        // mission id.
+        .route(
+            "/api/control/missions/resolve",
+            get(control::resolve_mission_id),
+        )
         .route("/api/control/missions/:id", get(control::get_mission))
         .route(
             "/api/control/missions/:id/board",
@@ -796,10 +859,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .route("/api/control/alerts", get(control::get_alerts_feed))
         .route(
-            "/api/assistant/hermes/*path",
-            axum::routing::any(system_api::hermes_chat_proxy),
-        )
-        .route(
             "/api/control/missions/:id/tool-calls/:tool_call_id",
             get(control::get_mission_tool_call_events),
         )
@@ -820,6 +879,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::set_mission_status),
         )
         .route(
+            "/api/control/missions/:id/client-transcript",
+            post(control::append_client_transcript),
+        )
+        .route(
+            "/api/control/missions/:id/client-status",
+            post(control::set_client_mission_status),
+        )
+        .route(
             "/api/control/missions/:id/title",
             post(control::set_mission_title),
         )
@@ -830,6 +897,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/control/missions/:id/project",
             post(control::update_mission_project),
+        )
+        .route(
+            "/api/control/missions/:id/origin",
+            post(control::update_mission_origin),
         )
         .route(
             "/api/control/missions/:id/mode",
@@ -848,12 +919,24 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::resume_mission),
         )
         .route(
+            "/api/control/missions/:id/btw/agent",
+            post(control::fork::btw_agent),
+        )
+        .route(
+            "/api/control/missions/:id/fork",
+            post(control::fork::fork_mission),
+        )
+        .route(
             "/api/control/missions/:id/clone",
             post(control::clone_mission),
         )
         .route(
             "/api/control/missions/:id/parallel",
             post(control::start_mission_parallel),
+        )
+        .route(
+            "/api/control/missions/:id/btw",
+            post(crate::api::ask::btw::send).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
         )
         // Ask assistant (non-interrupting sidecar co-pilot)
         .route(
@@ -911,6 +994,21 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/control/missions/:id/automation-executions",
             get(control::get_mission_automation_executions),
+        )
+        .route(
+            "/api/control/missions/:id/machine-transfer",
+            get(control::machine_transfer::inspect)
+                .post(control::machine_transfer::operate)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/api/control/missions/:id/client-run",
+            post(control::machine_transfer::client_run),
+        )
+        .route(
+            "/api/control/local-origins",
+            post(control::machine_transfer::local_origin)
+                .layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
         // Mission portability — export a mission for transfer to another
         // instance, and import one coming from elsewhere. The import route
@@ -1101,6 +1199,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/runs/:id/tasks", get(get_run_tasks))
         .route("/api/memory/search", get(search_memory))
         // Remote file explorer endpoints (use Authorization header)
+        .route("/api/file-resources", post(super::file_resources::operate))
         .route("/api/fs/list", get(fs::list))
         .route("/api/fs/download", get(fs::download))
         .route("/api/fs/validate", get(fs::validate))
@@ -1124,6 +1223,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // Provider management endpoints
         .route("/api/providers", get(super::providers::list_providers))
         .route(
+            "/api/providers/discovery",
+            get(super::providers::model_discovery_status),
+        )
+        .route(
+            "/api/providers/snapshots",
+            get(super::providers::export_model_snapshots),
+        )
+        .route(
             "/api/providers/backend-models",
             get(super::providers::list_backend_model_options),
         )
@@ -1138,6 +1245,13 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/monitoring/memory-health",
             get(super::monitoring::memory_health_handler),
+        )
+        // What the caller can actually do here — so an agent asks instead of
+        // inferring a capability from an auth field. Authenticated: it names
+        // the connected GitHub account.
+        .route(
+            "/api/capabilities",
+            get(super::capabilities::get_capabilities),
         )
         // Library management endpoints
         .nest("/api/library", library_api::routes())
@@ -1195,6 +1309,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/desktop", desktop::routes())
         // Durable background jobs launched outside ephemeral agent-turn shells
         .nest("/api/durable-jobs", durable_jobs::routes())
+        // Projects board: read-only join of Hermes trackers, project-tagged
+        // missions, and cron deliveries.
+        .nest("/api/projects", super::projects_overview::routes())
+        // Project-native validation campaigns and structured receipts.
+        .nest("/api/validation-campaigns", super::validation::routes())
         // System component management endpoints
         .nest("/api/system", system_api::routes())
         // Auth management endpoints
@@ -1243,6 +1362,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     tracing::info!("Server listening on {}", addr);
+
+    // systemd integration: READY=1 now that the listener is bound, then the
+    // runtime-liveness watchdog loop (no-op without NOTIFY_SOCKET /
+    // WATCHDOG_USEC — Docker and dev runs are unaffected).
+    crate::watchdog::notify_ready();
+    crate::watchdog::spawn();
 
     // Setup graceful shutdown on SIGTERM/SIGINT
     let shutdown_state = Arc::clone(&state);
@@ -1442,6 +1567,7 @@ async fn health(State(state): State<Arc<AppState>>) -> (HeaderMap, Json<HealthRe
             max_iterations: state.config.max_iterations,
             library_remote,
             github_enabled: state.config.auth.github_enabled(),
+            dashboard_github_login_enabled: state.config.auth.github_enabled(),
         }),
     )
 }
@@ -1463,16 +1589,86 @@ async fn list_remote_nodes(
             crate::remote_node::probe_node(&state.fleet, &client, node).await;
         }
         let cached = state.fleet.get(&node.id);
-        nodes.push(crate::remote_node::RemoteNodeView::from_cache(
-            node,
-            cached.as_ref(),
-        ));
+        let mut view = crate::remote_node::RemoteNodeView::from_cache(node, cached.as_ref());
+        view.cordoned = state.fleet.is_cordoned(&node.id);
+        nodes.push(view);
     }
+    // The Spark offload lane is separate from the remote-node fleet; expose
+    // it alongside so `get_compute_fleet` consumers (Hermes, controllers) see
+    // all capacity lanes, not just `nodes`. `configured` requires the
+    // capability-token signing secret too: without it no workspace can mint a
+    // token for the endpoint, so advertising the lane would direct work at
+    // unusable capacity.
+    let spark_configured = state.config.spark_arbiter_url.is_some()
+        && state.config.spark_arbiter_token.is_some()
+        && state.config.spark_ssh_target.is_some()
+        && crate::api::spark::spark_offload_signing_available();
+    let spark_workspaces: Vec<String> = state
+        .workspaces
+        .list()
+        .await
+        .into_iter()
+        .filter(|w| w.spark_offload_enabled())
+        .map(|w| w.name)
+        .collect();
     Json(crate::remote_node::RemoteNodesResponse {
         enabled: settings.enabled,
         nodes,
         recent_jobs: state.fleet.recent_outcomes(10),
+        spark_offload: crate::remote_node::SparkOffloadStatus {
+            configured: spark_configured,
+            enabled_workspaces: spark_workspaces,
+        },
+        remote_launch: control::remote_launch_capabilities(),
     })
+}
+
+/// Cordon a remote node: keep probing and listing it, but exclude it from
+/// automatic placement until uncordoned. Persisted in
+/// `.sandboxed-sh/node_state.json` so it survives restarts.
+async fn cordon_remote_node(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    set_remote_node_cordon(&state, &name, true)
+}
+
+/// Undo a cordon: the node becomes eligible for automatic placement again.
+async fn uncordon_remote_node(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    set_remote_node_cordon(&state, &name, false)
+}
+
+fn set_remote_node_cordon(
+    state: &AppState,
+    name: &str,
+    cordoned: bool,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Only configured nodes can be (un)cordoned: a typo'd name silently
+    // persisted would look like a successful cordon of the real node.
+    if !state
+        .config
+        .remote_nodes
+        .nodes
+        .iter()
+        .any(|node| node.id == name)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown remote node '{name}'"),
+        ));
+    }
+    let changed = state
+        .fleet
+        .set_cordoned(name, cordoned)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(serde_json::json!({
+        "node": name,
+        "cordoned": cordoned,
+        "changed": changed,
+    })))
 }
 
 /// Optional query parameters for the stats endpoint.
@@ -1520,15 +1716,28 @@ async fn get_stats(
     // Get mission stats from mission store
     let control_state = state.control.get_or_spawn(&user).await;
 
-    // Count missions by status
-    let mission_counts = control_state
-        .mission_store
-        .count_missions_by_status()
-        .await
-        .unwrap_or_default();
+    // Count missions by status. `since` scopes the window used by the
+    // Overview "Last 24 hours" panel; lifetime totals omit it.
+    let mission_counts = if let Some(ref since) = params.since {
+        control_state
+            .mission_store
+            .count_missions_updated_since(since)
+            .await
+            .unwrap_or_default()
+    } else {
+        control_state
+            .mission_store
+            .count_missions_by_status()
+            .await
+            .unwrap_or_default()
+    };
     let mission_total = mission_counts.total;
     let mission_active = mission_counts.active;
-    let mission_completed = mission_counts.completed;
+    let mission_completed = if params.since.is_some() {
+        mission_counts.completed + mission_counts.acknowledged
+    } else {
+        mission_counts.completed
+    };
     let mission_failed = mission_counts.failed;
 
     // Combine legacy tasks and missions
@@ -1565,9 +1774,15 @@ async fn get_stats(
             (total, a, e, u)
         };
 
-    let finished = completed_tasks + failed_tasks;
+    let success_ok = completed_tasks
+        + if params.since.is_some() {
+            0
+        } else {
+            mission_counts.acknowledged
+        };
+    let finished = success_ok + failed_tasks;
     let success_rate = if finished > 0 {
-        completed_tasks as f64 / finished as f64
+        success_ok as f64 / finished as f64
     } else {
         1.0
     };
@@ -1670,6 +1885,8 @@ fn infer_provider_for_model(model: &str) -> Option<String> {
         Some("zai".to_string())
     } else if m.contains("minimax") || m.contains("abab") {
         Some("minimax".to_string())
+    } else if m.contains("muse") {
+        Some("muse".to_string())
     } else if m.contains("mistral") || m.contains("codestral") {
         Some("mistral".to_string())
     } else if m.contains("llama") && m.contains("groq") {
@@ -2889,6 +3106,8 @@ async fn oauth_token_refresher_loop(
             );
         }
 
+        ai_providers_api::reconcile_openai_store_from_codex_homes(&ai_providers).await;
+
         // Refresh store-backed OAuth accounts FIRST. For any account that also
         // owns the shared credential tiers, this rotates the token AND writes it
         // to the tiers before the file-tier pass runs below — otherwise that
@@ -2898,6 +3117,9 @@ async fn oauth_token_refresher_loop(
         let mut store_found = 0u32;
         let mut store_refreshed = 0u32;
         for &store_type in &store_oauth_types {
+            if crate::api::oauth_owner::cli_proxy_owns(store_type) {
+                continue;
+            }
             let (f, r) = ai_providers_api::refresh_due_store_oauth(
                 &ai_providers,
                 store_type,
@@ -2914,6 +3136,16 @@ async fn oauth_token_refresher_loop(
         let mut refreshed_count = 0u32;
 
         for &provider_type in &oauth_capable_types {
+            // CLIProxyAPI-owned credentials are never refreshed here: the
+            // proxy refreshes its own auth files, and a second refresher on
+            // the same rotating token family produces invalid_grant.
+            if crate::api::oauth_owner::cli_proxy_owns(provider_type) {
+                tracing::debug!(
+                    provider_type = ?provider_type,
+                    "Skipping proactive OAuth refresh: owned by CLIProxyAPI"
+                );
+                continue;
+            }
             let entry = match ai_providers_api::read_oauth_token_entry(provider_type) {
                 Some(e) => e,
                 None => continue,
@@ -3006,6 +3238,7 @@ async fn oauth_token_refresher_loop(
                             "Failed to refresh OAuth token"
                         );
                     }
+                    ai_providers_api::OAuthRefreshError::OwnedByCliProxy => {}
                 },
             }
         }

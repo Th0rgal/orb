@@ -45,7 +45,7 @@ use super::library::SharedLibrary;
 /// consumed by [`WorkspaceExec`]. Container callers naturally refer to guest
 /// paths (for example `/workspace/verity/base`), while the API process must
 /// validate the corresponding path below the container rootfs.
-fn resolve_mission_working_directory(
+pub(crate) fn resolve_mission_working_directory(
     workspace_root: &Path,
     workspace_type: WorkspaceType,
     requested: &str,
@@ -95,6 +95,40 @@ fn resolve_mission_working_directory(
     Ok(resolved)
 }
 
+/// Refuse a turn whose model this deployment no longer runs.
+///
+/// Reaching this means the dispatch-time upgrade (`model_for_dispatch`) could
+/// not be recorded, or a caller bypassed dispatch altogether. Both of the
+/// alternatives are worse than failing: silently upgrading here would run a
+/// model no client reports, and proceeding would run a model that has been
+/// withdrawn. Returning `Some` aborts the turn before its harness is spawned,
+/// because the caller returns it in place of running anything.
+///
+/// Coverage, stated precisely: this guards turns that go through
+/// `run_mission_turn`. Typed remote-node creation is a separate path —
+/// `plan_remote_harness` / `dispatch_remote_job` — which does not pass through
+/// here; an explicitly requested retired model is rejected there at create time
+/// by `validate_model_override`, and `model_for_dispatch` upgrades a stored one
+/// before either path reads it. So this is the last gate for local turns, not a
+/// single choke point for every typed remote dispatch.
+pub(crate) fn refuse_retired_model(mission_id: Uuid, model: &str) -> Option<AgentResult> {
+    let replacement = crate::model_policy::retired_claude_model(model)?;
+    tracing::error!(
+        mission_id = %mission_id,
+        requested = %model,
+        replacement = %replacement,
+        "refusing to run a retired model: the upgrade was not recorded"
+    );
+    Some(AgentResult::failure(
+        format!(
+            "This mission is set to '{model}', which this backend no longer runs, and the upgrade \
+             to '{replacement}' could not be saved. Nothing was started. Set the model to \
+             '{replacement}' in the mission's settings and run it again."
+        ),
+        0,
+    ))
+}
+
 /// Build the synthetic `AgentResult::failure` produced when a turn is
 /// cancelled. If the process has begun a graceful shutdown, return a
 /// friendlier "paused for restart" message and a `ServerShutdown` reason
@@ -121,7 +155,11 @@ fn failure_class_for_terminal_reason(reason: TerminalReason) -> FailureClass {
         TerminalReason::Stalled | TerminalReason::InfiniteLoop | TerminalReason::MaxIterations => {
             FailureClass::AgentError
         }
-        TerminalReason::Cancelled | TerminalReason::ServerShutdown => FailureClass::AgentError,
+        TerminalReason::Cancelled
+        | TerminalReason::ServerShutdown
+        | TerminalReason::NativeGoalStopped
+        | TerminalReason::CodexContinuityRequired
+        | TerminalReason::NativeContinuityRequired => FailureClass::AgentError,
         TerminalReason::LlmError => FailureClass::ProviderError,
         TerminalReason::TurnComplete | TerminalReason::Completed => FailureClass::Unknown,
     }
@@ -164,7 +202,11 @@ pub(crate) fn turn_outcome_for_result(
         let reason = result.terminal_reason.unwrap_or(TerminalReason::LlmError);
         if matches!(
             reason,
-            TerminalReason::Cancelled | TerminalReason::ServerShutdown
+            TerminalReason::Cancelled
+                | TerminalReason::ServerShutdown
+                | TerminalReason::NativeGoalStopped
+                | TerminalReason::CodexContinuityRequired
+                | TerminalReason::NativeContinuityRequired
         ) {
             interrupted_turn_outcome(reason)
         } else {
@@ -468,12 +510,12 @@ pub(crate) fn workspace_api_base_url(workspace: &Workspace) -> Option<String> {
 
 /// Claude Code's built-in `ScheduleWakeup` tool ends the agent's turn with a
 /// promise that "the harness re-invokes you when the wakeup fires" — but in
-/// `--print` mode, open_agent is the harness and would otherwise have no way
+/// `--print` mode, sandboxed.sh is the harness and would otherwise have no way
 /// to know about the request. These helpers translate the built-in tool call
-/// into an open_agent interval automation that fires the prompt back into the
+/// into a sandboxed.sh interval automation that fires the prompt back into the
 /// mission after the requested delay (mirroring `automation_manager_mcp`'s
 /// `schedule_wakeup`). The delay is clamped to the same [60, 3600] range
-/// open_agent's own wakeup tool advertises.
+/// sandboxed.sh's own wakeup tool advertises.
 const CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS: u64 = 60;
 const CLAUDE_BUILTIN_WAKEUP_MAX_SECONDS: u64 = 3600;
 
@@ -790,7 +832,7 @@ exec "$SCRIPT_DIR/.sandboxed-sh-telegram-action.py" "$@"
 // ChatGPT/OpenAI account.
 const CODEX_ACCOUNT_CONCURRENCY_LIMIT: usize = 10;
 const CODEX_OAUTH_ACCOUNT_CONCURRENCY_LIMIT: usize = 10;
-const CODEX_ACCOUNT_LEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const CODEX_ACCOUNT_LEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 static CODEX_ACCOUNT_POOL: LazyLock<StdMutex<HashMap<String, Arc<Semaphore>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -857,6 +899,9 @@ pub(crate) fn codex_cooldown_for_reason(reason: &TerminalReason) -> Option<std::
 pub(crate) enum CodexCredential {
     ApiKey(String),
     OAuth(crate::api::ai_providers::CodexOAuthAccount),
+    /// CLIProxyAPI owns the ChatGPT OAuth accounts and rotates across them
+    /// itself; sandboxed.sh sees a single proxy credential.
+    CliProxy(crate::api::oauth_owner::CliProxyEndpoint),
 }
 
 impl CodexCredential {
@@ -868,6 +913,7 @@ impl CodexCredential {
         match self {
             CodexCredential::ApiKey(k) => format!("apikey:{}", k),
             CodexCredential::OAuth(acc) => format!("oauth:{}", acc.chatgpt_account_id),
+            CodexCredential::CliProxy(endpoint) => format!("cliproxy:{}", endpoint.base_url),
         }
     }
 
@@ -875,12 +921,16 @@ impl CodexCredential {
         match self {
             CodexCredential::ApiKey(_) => CODEX_ACCOUNT_CONCURRENCY_LIMIT,
             CodexCredential::OAuth(_) => CODEX_OAUTH_ACCOUNT_CONCURRENCY_LIMIT,
+            // The proxy multiplexes every Codex account it holds; cap like an
+            // API key rather than a single subscription.
+            CodexCredential::CliProxy(_) => CODEX_ACCOUNT_CONCURRENCY_LIMIT,
         }
     }
 
     pub(crate) fn label_for_logs(&self) -> String {
         match self {
             CodexCredential::ApiKey(k) => codex_key_fingerprint(k),
+            CodexCredential::CliProxy(endpoint) => format!("cliproxy:{}", endpoint.base_url),
             CodexCredential::OAuth(acc) => {
                 // Truncate by char count, not byte index — `chatgpt_account_id`
                 // is an ASCII UUID in practice, but a stray multi-byte char
@@ -901,6 +951,9 @@ impl CodexCredential {
             }
             CodexCredential::OAuth(acc) => {
                 crate::api::ai_providers::CodexCredentialOverride::OAuth(acc)
+            }
+            CodexCredential::CliProxy(endpoint) => {
+                crate::api::ai_providers::CodexCredentialOverride::CliProxy(endpoint)
             }
         }
     }
@@ -1331,6 +1384,19 @@ pub(crate) fn collect_codex_credentials(working_dir: &std::path::Path) -> Vec<Co
             .into_iter()
             .map(CodexCredential::ApiKey)
             .collect();
+    // When CLIProxyAPI owns the ChatGPT OAuth accounts, sandboxed.sh never
+    // hands Codex an OAuth token: the proxy is the one (and only) OAuth
+    // credential, tried before any platform API key.
+    if let Some(endpoint) = super::oauth_owner::codex_via_cli_proxy() {
+        tracing::debug!(
+            working_dir = %working_dir.display(),
+            api_keys = api_keys.len(),
+            "collect_codex_credentials: ChatGPT OAuth owned by CLIProxyAPI"
+        );
+        let mut creds = vec![CodexCredential::CliProxy(endpoint)];
+        creds.extend(api_keys);
+        return creds;
+    }
     let oauths: Vec<CodexCredential> =
         super::ai_providers::get_all_openai_oauth_accounts(working_dir)
             .into_iter()
@@ -1347,6 +1413,15 @@ pub(crate) fn collect_codex_credentials(working_dir: &std::path::Path) -> Vec<Co
     let mut creds = api_keys;
     creds.extend(oauths);
     creds
+}
+
+/// Fresh accounts always win over usage-capped ones, even at 0 permits.
+fn pick_codex_lease_pool<T>(fresh: Vec<T>, cooled: Vec<T>) -> Vec<T> {
+    if fresh.is_empty() {
+        cooled
+    } else {
+        fresh
+    }
 }
 
 pub(crate) async fn lease_codex_account(
@@ -1373,10 +1448,11 @@ pub(crate) async fn lease_codex_account(
         return None;
     }
 
-    // Prefer credentials that aren't on a usage-cap cooldown; cooled ones stay
-    // in the list as a last resort so a single-account setup still retries
-    // instead of hard-failing. Within each group, prefer the least-loaded
-    // credential (highest available permits).
+    // Prefer credentials that aren't on a usage-cap cooldown. A cooled
+    // account is only considered when *every* remaining candidate is cooled
+    // (single-account, or all subscriptions exhausted). Mixing them used to
+    // lease the dead weekly-cap account (0 wait) while the healthy one was
+    // only at 0/10 permits — P-CONSOLIDATION-1 then died on "try again Aug 20".
     let (mut fresh, mut cooled): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
         codex_account_cooldown_remaining(&candidate.0.fingerprint()).is_none()
     });
@@ -1389,7 +1465,7 @@ pub(crate) async fn lease_codex_account(
         );
     }
     let candidates: Vec<(CodexCredential, Arc<Semaphore>, usize)> =
-        fresh.into_iter().chain(cooled).collect();
+        pick_codex_lease_pool(fresh, cooled);
 
     for (cred, sem, available) in &candidates {
         if let Ok(permit) = sem.clone().try_acquire_owned() {
@@ -1922,8 +1998,7 @@ pub(crate) use super::runners::grok::{
 pub(crate) use super::runners::codex::{
     codex_final_message_looks_like_progress_update, codex_is_goal_request,
     codex_missing_goal_final_response_message, codex_turn_requires_tool_activity,
-    extract_codex_reset_window, run_codex_turn, run_codex_turn_with_rotation,
-    summarize_codex_usage_caps,
+    extract_codex_reset_window, run_codex_turn_with_rotation, summarize_codex_usage_caps,
 };
 
 // Gemini runner moved to `super::runners::gemini` (Phase 2). Re-exported so
@@ -2613,6 +2688,11 @@ pub struct MissionRunner {
     /// Request Codex fast service tier for supported GPT models.
     pub fast_mode: bool,
 
+    /// Durable PR capability copied from the mission's `pr-readonly` tag.
+    /// This controls process-level git/gh mutation guards; prompt wording is
+    /// never treated as authority.
+    pub pr_readonly: bool,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -2678,6 +2758,7 @@ pub struct MissionRunner {
 
     /// Durable generation lease for the currently executing turn.
     pub durable_run: Option<crate::api::mission_store::MissionRun>,
+    session_store: Option<Arc<dyn crate::api::mission_store::MissionStore>>,
 
     /// Once cancellation is requested, this runner must drain its current
     /// handle and be removed without starting queued or automated follow-ups.
@@ -2688,6 +2769,8 @@ pub struct MissionRunner {
     /// JoinHandle here, so the deadline must travel with the runner rather than
     /// only being tracked by the control actor's main-runner state.
     cancellation_force_clear_deadline: Option<Instant>,
+    /// Abort is a request, not proof that the task has stopped.
+    force_abort_requested: bool,
 }
 
 const RUNNER_FORCE_CLEAR_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -2717,6 +2800,7 @@ impl MissionRunner {
             model_override,
             model_effort,
             fast_mode,
+            pr_readonly: false,
             queue: VecDeque::new(),
             inflight_message: None,
             history: Vec::new(),
@@ -2734,8 +2818,10 @@ impl MissionRunner {
             active_tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             background_tasks: HashMap::new(),
             durable_run: None,
+            session_store: None,
             cancellation_requested: false,
             cancellation_force_clear_deadline: None,
+            force_abort_requested: false,
         }
     }
 
@@ -2750,6 +2836,35 @@ impl MissionRunner {
         let run = mission_store
             .begin_mission_run(self.mission_id, owner_actor_id, None)
             .await?;
+        // A retained idle runner may predate a move away and back. Refresh the
+        // authoritative workspace after acquiring the generation, before spawn.
+        if super::control::machine_transfer::committed(mission_store, self.mission_id)
+            .await?
+            .is_some()
+        {
+            match mission_store.get_mission(self.mission_id).await {
+                Ok(Some(mission)) => {
+                    self.workspace_id = mission.workspace_id;
+                    self.working_directory = mission.working_directory;
+                    self.session_id = mission.session_id;
+                    self.backend_id = mission.backend;
+                    self.model_override = mission.model_override;
+                    self.model_effort = mission.model_effort;
+                    self.config_profile = mission.config_profile;
+                    self.agent_override = mission.agent;
+                }
+                _ => {
+                    let _ = mission_store
+                        .finish_mission_run(
+                            run.run_id,
+                            run.generation,
+                            Some("transfer_workspace_unavailable"),
+                        )
+                        .await;
+                    return Err("Transferred workspace could not be resolved".into());
+                }
+            }
+        }
         let alive = mission_store
             .heartbeat_mission_run(
                 run.run_id,
@@ -2764,6 +2879,7 @@ impl MissionRunner {
                 run.run_id, run.generation
             ));
         }
+        self.session_store = Some(mission_store.clone());
         self.durable_run = Some(run);
         Ok(())
     }
@@ -2805,6 +2921,16 @@ impl MissionRunner {
     /// Update the last activity timestamp.
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+    }
+
+    /// Live tool or a recent event — do not treat this runner as stuck
+    /// in a cancel drain. See [`crate::api::controller_honesty::CANCEL_TIMEOUT_FRESH_PROGRESS`].
+    pub fn has_fresh_progress(&self) -> bool {
+        self.active_tool_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+            || self.last_activity.elapsed()
+                < crate::api::controller_honesty::CANCEL_TIMEOUT_FRESH_PROGRESS
     }
 
     /// Clear turn-scoped tool hints before a runner is reused. Some harnesses
@@ -2900,7 +3026,28 @@ impl MissionRunner {
     /// Returns `true` when the runner should be removed from the actor's
     /// registry. A handle which has already finished is left for the normal
     /// completion path so its terminal result can still be recorded.
+    ///
+    /// A runner that still has a live tool or a recent event is *not*
+    /// force-killed: that is the cancel-timeout drain race that turned
+    /// Lido's same writer into a "CAMPAGNE RELANCÉE" every ~30 minutes.
     pub fn force_clear_cancelled_if_due(&mut self) -> bool {
+        if self.force_abort_requested {
+            if self
+                .running_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+            {
+                return false;
+            }
+            self.running_handle = None;
+            self.cancel_token = None;
+            self.inflight_message = None;
+            self.reset_turn_tool_calls();
+            self.state = MissionRunState::Finished;
+            self.cancellation_force_clear_deadline = None;
+            self.force_abort_requested = false;
+            return true;
+        }
         if !self.cancellation_requested
             || self
                 .cancellation_force_clear_deadline
@@ -2917,15 +3064,20 @@ impl MissionRunner {
             return false;
         }
 
-        if let Some(handle) = self.running_handle.take() {
+        if self.has_fresh_progress() {
+            self.cancellation_force_clear_deadline =
+                Some(Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
+            return false;
+        }
+
+        if let Some(handle) = self.running_handle.as_ref() {
             handle.abort();
         }
-        self.cancel_token = None;
-        self.inflight_message = None;
-        self.reset_turn_tool_calls();
-        self.state = MissionRunState::Finished;
-        self.cancellation_force_clear_deadline = None;
-        true
+        // Keep the runner, durable run, and assignment registered until the
+        // abort has actually completed. A task in synchronous work can still
+        // mutate its old assignment after abort() returns.
+        self.force_abort_requested = true;
+        false
     }
 
     pub fn inflight_message(&self) -> Option<&QueuedMessage> {
@@ -3018,6 +3170,7 @@ impl MissionRunner {
         let model_override = self.model_override.clone();
         let model_effort = self.model_effort.clone();
         let fast_mode = self.fast_mode;
+        let pr_readonly = self.pr_readonly;
         let backend_id = self.backend_id.clone();
         let session_id = self.session_id.clone();
         let config_profile = self.config_profile.clone();
@@ -3043,6 +3196,11 @@ impl MissionRunner {
 
         // Emit user message event with mission context, preserving the original
         // attribution (api:/telegram/…) stored on the queued message.
+        let harness_message = if msg_source.as_deref() == Some("scheduler") {
+            super::control::deferred_messages::strip(&user_message)
+        } else {
+            user_message.clone()
+        };
         let _ = events_tx.send(AgentEvent::UserMessage {
             id: msg_id,
             content: user_message.clone(),
@@ -3051,36 +3209,47 @@ impl MissionRunner {
             source: msg_source,
         });
 
+        let session_store = self.session_store.clone();
+        let session_update_run = self
+            .durable_run
+            .as_ref()
+            .map(crate::api::mission_store::SessionUpdateRun::from);
         let handle = tokio::spawn(async move {
-            let result = run_mission_turn(
-                config,
-                root_agent,
-                mcp,
-                workspaces,
-                library,
-                events_tx,
-                tool_hub,
-                status,
-                cancel,
-                hist_snapshot,
-                user_message.clone(),
-                Some(mission_ctrl),
-                tree_ref,
-                progress_ref,
-                mission_id,
-                Some(workspace_id),
-                backend_id,
-                agent_override,
-                model_override,
-                model_effort,
-                fast_mode,
-                secrets,
-                session_id,
-                config_profile,
-                working_directory,
-                user_id,
-            )
-            .await;
+            let result = crate::api::runners::SESSION_UPDATE_RUN
+                .scope(
+                    session_update_run,
+                    run_mission_turn(
+                        session_store,
+                        config,
+                        root_agent,
+                        mcp,
+                        workspaces,
+                        library,
+                        events_tx,
+                        tool_hub,
+                        status,
+                        cancel,
+                        hist_snapshot,
+                        harness_message,
+                        Some(mission_ctrl),
+                        tree_ref,
+                        progress_ref,
+                        mission_id,
+                        Some(workspace_id),
+                        backend_id,
+                        agent_override,
+                        model_override,
+                        model_effort,
+                        fast_mode,
+                        secrets,
+                        session_id,
+                        config_profile,
+                        working_directory,
+                        user_id,
+                        pr_readonly,
+                    ),
+                )
+                .await;
             (msg_id, user_message, result)
         });
 
@@ -3117,7 +3286,10 @@ impl MissionRunner {
                     // produced no output", "OpenCode CLI exited with status: ...")
                     // would contaminate context for future turns.
                     self.history.push(("user".to_string(), result.1.clone()));
-                    if result.2.success && !result.2.output.trim().is_empty() {
+                    if (result.2.success
+                        || result.2.terminal_reason == Some(TerminalReason::NativeGoalStopped))
+                        && !result.2.output.trim().is_empty()
+                    {
                         self.history
                             .push(("assistant".to_string(), result.2.output.clone()));
                     }
@@ -3430,6 +3602,7 @@ pub(crate) fn claudecode_resume_current_session_message() -> &'static str {
 /// Execute a single turn for a mission.
 #[allow(clippy::too_many_arguments)]
 async fn run_mission_turn(
+    mission_store: Option<Arc<dyn crate::api::mission_store::MissionStore>>,
     config: Config,
     _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -3456,7 +3629,41 @@ async fn run_mission_turn(
     mission_config_profile: Option<String>,
     mission_working_directory: Option<String>,
     boss_user_id: Option<String>,
+    pr_readonly: bool,
 ) -> AgentResult {
+    let _software_execution =
+        match crate::agent_software::begin(&mission_id.to_string(), &backend_id, None) {
+            Ok(guard) => guard,
+            Err(error) => return AgentResult::failure(error, 0),
+        };
+    #[cfg(test)]
+    if let Some(result) = super::control::dispatch_admission_tests::native_goal_fixture(
+        &config,
+        &workspaces,
+        mission_store.as_ref(),
+        mission_id,
+        &user_message,
+        events_tx.clone(),
+        cancel.clone(),
+    )
+    .await
+    {
+        return result;
+    }
+    let mission_working_directory = if let Some(store) = mission_store.as_ref() {
+        match super::control::machine_transfer::committed(store, mission_id).await {
+            Ok(Some(action)) => {
+                if action.destination != crate::api::mission_store::transfer::Machine::Core {
+                    return AgentResult::failure("Mission execution moved away from Core", 0);
+                }
+                action.destination_root
+            }
+            Ok(None) => mission_working_directory,
+            Err(error) => return AgentResult::failure(error, 0),
+        }
+    } else {
+        mission_working_directory
+    };
     let mut config = config;
     // Operator-note bridge: flush any pending Ask-assistant writes into this
     // turn's message so the working agent learns about out-of-band edits it
@@ -3482,6 +3689,18 @@ async fn run_mission_turn(
         config.opencode_agent = Some(agent.clone());
     }
     if let Some(ref model) = model_override {
+        // Fail closed. Retirement is applied once, at dispatch
+        // (`model_for_dispatch`), which also records the upgrade so clients
+        // show the model that is about to run. Silently upgrading again here
+        // would run a model nothing reported; silently accepting a retired id
+        // would run a model this deployment has withdrawn. So a retired id
+        // reaching this point means the upgrade was never recorded (or the
+        // caller bypassed dispatch) — refuse the turn and say why, before the
+        // harness is spawned. See `refuse_retired_model` for what this does and
+        // does not cover: typed remote creation is guarded at create instead.
+        if let Some(refusal) = refuse_retired_model(mission_id, model) {
+            return refusal;
+        }
         config.default_model = Some(model.clone());
     } else if backend_id == "claudecode" {
         config.default_model = config
@@ -3599,11 +3818,32 @@ async fn run_mission_turn(
     ));
     convo.push_str(&deliverable_reminder);
     convo.push_str("\n\nInstructions:\n- Respond to the CURRENT user request. The conversation history is context only: do not resume or continue earlier tasks from it unless the current request asks you to.\n- Use available tools to gather information or make changes.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n- USE information already provided in the message - do not ask for URLs, paths, or details that were already given.\n- When you have fully completed the user's goal or determined it cannot be completed, state that clearly in your final response.");
+    if pr_readonly {
+        convo.push_str("\n\nPR READ-ONLY CAPABILITY (server-enforced): inspect and run verification only. Do not edit tracked files, commit, push, comment, resolve threads, approve, close, or merge. Report findings with an explicit terminal line `VERDICT: CLEAN`, `VERDICT: BLOCKED`, or `VERDICT: INFRA_BLOCKED`. Git/gh mutation commands are disabled for this mission.");
+    }
     convo.push_str(multi_step_instructions);
     convo.push('\n');
 
     // Ensure mission workspace exists and is configured for OpenCode.
     let mut workspace = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
+    // Validate the requested source before config synchronization can create
+    // directories. A missing checkout is not a request for a new workspace.
+    let explicit_worktree = match mission_working_directory
+        .as_deref()
+        .map(|requested| {
+            resolve_mission_working_directory(&workspace.path, workspace.workspace_type, requested)
+        })
+        .transpose()
+    {
+        Ok(path) => path,
+        Err(error) => {
+            return AgentResult::failure(
+                format!("explicit working_directory is invalid: {error}"),
+                0,
+            )
+        }
+    };
+
     if let Err(e) =
         workspace::sync_workspace_mcp_binaries_for_workspace(&config.working_dir, &workspace).await
     {
@@ -3613,11 +3853,10 @@ async fn run_mission_turn(
             "Failed to sync MCP binaries into workspace"
         );
     }
-    let workspace_root = workspace.path.clone();
     let mission_work_dir_result = {
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
-        workspace::prepare_mission_workspace_with_skills_backend(
+        workspace::prepare_mission_workspace_with_skills_backend_at(
             &mut workspace,
             &mcp,
             lib_ref,
@@ -3627,10 +3866,14 @@ async fn run_mission_turn(
             effective_config_profile.as_deref(),
             boss_user_id.as_deref(),
             Some(&config.working_dir),
+            !pr_readonly,
+            explicit_worktree.as_deref(),
         )
         .await
     };
-    let mission_work_dir = match mission_work_dir_result {
+    let mission_work_dir = match workspace::require_verified_mission_workspace(
+        mission_work_dir_result,
+    ) {
         Ok(dir) => {
             tracing::info!(
                 "Mission {} workspace directory: {}",
@@ -3640,8 +3883,11 @@ async fn run_mission_turn(
             dir
         }
         Err(e) => {
-            tracing::warn!("Failed to prepare mission workspace, using default: {}", e);
-            workspace_root
+            // A persisted placement error means the original filesystem is
+            // unavailable or has changed identity. Running against the raw
+            // workspace root would silently write a different tree.
+            tracing::warn!(mission_id = %mission_id, error = %e, "refusing to run mission without its verified workspace");
+            return AgentResult::failure(e.to_string(), 0);
         }
     };
 
@@ -3649,6 +3895,32 @@ async fn run_mission_turn(
     let mission_work_dir = if let Some(ref wd) = mission_working_directory {
         match resolve_mission_working_directory(&workspace.path, workspace.workspace_type, wd) {
             Ok(wd_path) => {
+                if let Err(error) = workspace::verify_or_adopt_explicit_mission_working_directory(
+                    &workspace,
+                    &wd_path,
+                    &[mission_id],
+                ) {
+                    if workspace::is_generated_mission_directory_under_known_root(
+                        &workspace, &wd_path,
+                    ) {
+                        tracing::warn!(
+                            mission_id = %mission_id,
+                            requested_working_directory = %wd,
+                            "adopting pre-registry generated working_directory"
+                        );
+                    } else {
+                        tracing::warn!(
+                            mission_id = %mission_id,
+                            requested_working_directory = %wd,
+                            error = %error,
+                            "refusing explicit working_directory without a verified persisted owner"
+                        );
+                        return AgentResult::failure(
+                            format!("explicit working_directory owner is unavailable or unverified: {error}"),
+                            0,
+                        );
+                    }
+                }
                 tracing::info!(
                     mission_id = %mission_id,
                     requested_working_directory = %wd,
@@ -3662,13 +3934,76 @@ async fn run_mission_turn(
                     mission_id = %mission_id,
                     requested_working_directory = %wd,
                     error = %error,
-                    "Mission working_directory is invalid; using prepared mission directory"
+                    "refusing invalid explicit mission working_directory"
                 );
-                mission_work_dir
+                return AgentResult::failure(
+                    format!("explicit working_directory is invalid: {error}"),
+                    0,
+                );
             }
         }
     } else {
         mission_work_dir
+    };
+
+    let user_message = if super::context_execution::has_mentions(&user_message) {
+        let project = if let Some(store) = mission_store.as_ref() {
+            store
+                .get_mission(mission_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|mission| mission.project.project)
+        } else {
+            None
+        };
+        let Some(project) = project else {
+            return AgentResult::failure("Context references require a project", 0);
+        };
+        if !super::projects_overview::is_plain_key(&project) {
+            return AgentResult::failure("Invalid context project", 0);
+        }
+        let root = super::mission_payload::project_files_root(&config.working_dir, &project);
+        let metadata = config
+            .working_dir
+            .join(".sandboxed-sh/project-context-state")
+            .join(&project);
+        let manifest = match crate::project_context::Store::new(root.clone(), metadata).manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
+            }
+        };
+        let visible = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
+            .mount_project_context(&root, &project)
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
+        };
+        match super::context_execution::resolve(&user_message, Path::new(&visible), &manifest) {
+            Ok(message) => message,
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
+            }
+        }
+    } else {
+        user_message
+    };
+
+    let user_message = match crate::api::mission_payload::materialize_turn(
+        &config.working_dir,
+        &mission_work_dir,
+        mission_id,
+        &user_message,
+    ) {
+        Ok(message) => {
+            if message != user_message {
+                convo.push_str("\nRead attached context in `.paloma/attach.md`.\n");
+            }
+            message
+        }
+        Err(error) => return AgentResult::failure(format!("materialize attachments: {error}"), 0),
     };
 
     // For Telegram missions, append channel instructions and memory awareness
@@ -3707,10 +4042,32 @@ async fn run_mission_turn(
         .count();
     let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
 
+    let user_message = if let Some(store) = mission_store.as_ref() {
+        match super::control::machine_transfer::context(
+            store,
+            mission_id,
+            user_message,
+            session_id.as_deref(),
+        )
+        .await
+        {
+            Ok(prompt) => prompt,
+            Err(error) => return AgentResult::failure(error, 0),
+        }
+    } else {
+        user_message
+    };
+
     // Prepare user message and session ID (potentially with rotation)
     let (mut user_message, mut session_id) = (user_message, session_id);
 
-    if should_rotate && backend_id == "claudecode" {
+    if should_rotate
+        && backend_id == "claudecode"
+        && !user_message
+            .trim()
+            .strip_prefix("/plan")
+            .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+    {
         tracing::info!(
             mission_id = %mission_id,
             turn_count = turn_count,
@@ -3734,11 +4091,18 @@ async fn run_mission_turn(
             turn_count, summary, user_message
         );
 
-        // Update session ID and notify via events
-        let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+        // Persist before rotating or allowing a queued successor to start.
+        if let Err(failure) = crate::api::runners::persist_and_publish_native_session(
+            mission_store.as_ref(),
             mission_id,
-            session_id: new_session_id.clone(),
-        });
+            "claudecode",
+            &new_session_id,
+            &events_tx,
+        )
+        .await
+        {
+            return *failure;
+        }
 
         session_id = Some(new_session_id.clone());
 
@@ -3819,11 +4183,17 @@ async fn run_mission_turn(
                     history: &history,
                     max_history_total_chars: config.context.max_history_total_chars,
                 }
+            } else if backend_id == "codex" {
+                super::runners::TurnExtras::Codex {
+                    current_message: &user_message,
+                    tool_hub: Some(Arc::clone(&tool_hub)),
+                }
             } else {
                 super::runners::TurnExtras::None
             };
             runner
                 .run_turn(super::runners::TurnContext {
+                    mission_store,
                     workspace: &workspace,
                     work_dir: &mission_work_dir,
                     message: &turn_message,
@@ -4015,11 +4385,21 @@ pub(crate) fn workspace_path_for_env(
     workspace: &Workspace,
     host_path: &std::path::Path,
 ) -> std::path::PathBuf {
-    if workspace.workspace_type == workspace::WorkspaceType::Container
-        && workspace::use_nspawn_for_workspace(workspace)
-    {
-        if let Ok(rel) = host_path.strip_prefix(&workspace.path) {
-            return std::path::PathBuf::from("/").join(rel);
+    workspace_path_for_env_with_nspawn(
+        workspace,
+        host_path,
+        workspace::use_nspawn_for_workspace(workspace),
+    )
+}
+
+fn workspace_path_for_env_with_nspawn(
+    workspace: &Workspace,
+    host_path: &std::path::Path,
+    uses_nspawn: bool,
+) -> std::path::PathBuf {
+    if workspace.workspace_type == workspace::WorkspaceType::Container && uses_nspawn {
+        if let Some(relative) = workspace::strip_workspace_prefix(host_path, &workspace.path) {
+            return std::path::PathBuf::from("/").join(relative);
         }
     }
     host_path.to_path_buf()
@@ -4368,6 +4748,17 @@ pub(crate) async fn refresh_claude_credentials_after_auth_error(
         );
     }
 
+    // When CLIProxyAPI owns the credential the host tiers are not in play:
+    // an auth error came from the proxy, so leave the host files alone and
+    // let the caller retry through the proxy.
+    if super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic) {
+        tracing::info!(
+            context = log_context,
+            "Anthropic OAuth is owned by CLIProxyAPI; skipping host credential invalidation"
+        );
+        return;
+    }
+
     for host_path in &[
         std::path::PathBuf::from("/var/lib/opencode/.claude/.credentials.json"),
         std::path::PathBuf::from("/root/.claude/.credentials.json"),
@@ -4611,9 +5002,33 @@ fn is_opencode_exit_status_placeholder(output: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_shell_launch_diagnostic(output: &str) -> bool {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(line) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    let shell_prefix = lower.starts_with("sh: ")
+        || lower.starts_with("/bin/sh: ")
+        || lower.starts_with("bash: ")
+        || lower.starts_with("/bin/bash: ");
+    shell_prefix
+        && (lower.ends_with(": not found")
+            || lower.contains(": permission denied")
+            || lower.contains(": cannot open"))
+}
+
 pub(crate) fn opencode_output_needs_fallback(output: &str) -> bool {
     let sanitized = sanitized_opencode_stdout(output);
-    sanitized.trim().is_empty() || is_opencode_exit_status_placeholder(sanitized.as_ref())
+    sanitized.trim().is_empty()
+        || is_opencode_exit_status_placeholder(sanitized.as_ref())
+        || is_shell_launch_diagnostic(sanitized.as_ref())
 }
 
 pub(crate) fn summarize_recent_opencode_stderr(
@@ -4837,6 +5252,16 @@ pub(crate) fn detect_opencode_provider_auth(
             configured_providers.insert("anthropic".to_string());
         }
     }
+    // CLIProxyAPI-owned credentials are reachable through the proxy even when
+    // no OAuth file exists on the host any more.
+    if super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI) {
+        has_openai = true;
+        configured_providers.insert("openai".to_string());
+    }
+    if super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic) {
+        has_anthropic = true;
+        configured_providers.insert("anthropic".to_string());
+    }
     if let Ok(value) = std::env::var("GOOGLE_GENERATIVE_AI_API_KEY") {
         if !value.trim().is_empty() {
             has_google = true;
@@ -4872,6 +5297,13 @@ pub(crate) fn detect_opencode_provider_auth(
         if !value.trim().is_empty() {
             has_other = true;
             configured_providers.insert("cerebras".to_string());
+        }
+    }
+    if let Ok(value) = std::env::var("META_MODEL_API_KEY") {
+        if !value.trim().is_empty() {
+            has_other = true;
+            configured_providers.insert("muse".to_string());
+            configured_providers.insert("meta".to_string());
         }
     }
 
@@ -5192,6 +5624,59 @@ fn sanitize_custom_opencode_provider_id(name: &str) -> String {
         .replace('-', "_")
 }
 
+/// OpenCode provider block routing a native AI-SDK adapter through
+/// CLIProxyAPI, or `None` when the proxy does not own that provider.
+fn cli_proxy_opencode_provider_definition(
+    provider: crate::ai_providers::ProviderType,
+    npm: &str,
+    name: &str,
+    model_id: &str,
+) -> Option<serde_json::Value> {
+    let endpoint = super::oauth_owner::harness_via_cli_proxy(provider)?;
+    Some(serde_json::json!({
+        "npm": npm,
+        "name": name,
+        "models": {
+            model_id: { "name": model_id }
+        },
+        "options": {
+            "baseURL": endpoint.openai_v1_url(),
+            "apiKey": endpoint.api_key
+        }
+    }))
+}
+
+/// `auth.json` entries that replace host OAuth records for providers owned by
+/// CLIProxyAPI: OpenCode authenticates to the proxy with its key instead.
+fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (provider, keys) in [
+        (
+            crate::ai_providers::ProviderType::Anthropic,
+            &["anthropic", "claude"][..],
+        ),
+        (
+            crate::ai_providers::ProviderType::OpenAI,
+            &["openai", "codex"][..],
+        ),
+    ] {
+        let Some(endpoint) = super::oauth_owner::harness_via_cli_proxy(provider) else {
+            continue;
+        };
+        for key in keys {
+            map.insert(
+                (*key).to_string(),
+                serde_json::json!({ "type": "api", "key": endpoint.api_key }),
+            );
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
+}
+
 fn custom_opencode_provider_definition(
     app_working_dir: &std::path::Path,
     provider_id: &str,
@@ -5291,6 +5776,23 @@ pub(crate) fn ensure_opencode_provider_for_model(
     // OpenAI, Anthropic, Google are natively supported by OpenCode and their
     // OAuth plugins are installed by the runner when credentials are present.
     let provider_def: Option<serde_json::Value> = match provider_id {
+        // Anthropic / OpenAI through CLIProxyAPI when it owns the OAuth
+        // credential: the native AI-SDK adapters keep their protocol
+        // (Messages / Responses) and only the base URL and key change. Without
+        // ownership these stay `None` so OpenCode's built-in providers and
+        // OAuth plugins keep handling them.
+        "anthropic" | "claude" => cli_proxy_opencode_provider_definition(
+            crate::ai_providers::ProviderType::Anthropic,
+            "@ai-sdk/anthropic",
+            "Anthropic",
+            model_id,
+        ),
+        "openai" | "codex" => cli_proxy_opencode_provider_definition(
+            crate::ai_providers::ProviderType::OpenAI,
+            "@ai-sdk/openai",
+            "OpenAI",
+            model_id,
+        ),
         "zai" => {
             let base_url = std::env::var("ZAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.z.ai/api/coding/paas/v4".to_string());
@@ -5319,6 +5821,11 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 }
             }))
         }
+        // OpenCode 1.18+ ships a native `meta` provider that calls
+        // `sdk.responses()` and applies the Meta system prompt. Do not inject
+        // an openai-compatible `muse` block — that forced Chat Completions and
+        // skipped encrypted reasoning / the Spark 1.2 coding prompt.
+        "muse" | "meta" => None,
         "cerebras" => Some(serde_json::json!({
             "npm": "@ai-sdk/cerebras",
             "name": "Cerebras",
@@ -5363,6 +5870,49 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 "options": options
             }))
         }
+        "kimi" => {
+            // OpenCode's kimi provider otherwise talks to api.kimi.com with
+            // the workspace OAuth token. Empty assistant turns then 400
+            // (`must not be empty`) and the mission dies with llm_error.
+            // Route through the host proxy so rewrite_model_for_kimi can
+            // fill those turns; the adapter still strips `kimi/`, so the
+            // proxy accepts bare catalog ids (`k3-256k`).
+            let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+            let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    tracing::error!("SANDBOXED_PROXY_SECRET not set; kimi proxy auth will fail");
+                    String::new()
+                });
+            let mut options = serde_json::json!({
+                "baseURL": format!("http://{}:{}/v1", host_ip, port),
+                "apiKey": proxy_key
+            });
+            if let Some(mid) = mission_id {
+                options["headers"] = serde_json::json!({
+                    crate::api::proxy_liveness::MISSION_ID_HEADER: mid
+                });
+            }
+            let kimi_model = if model_id.starts_with("k3") {
+                serde_json::json!({
+                    "name": model_id,
+                    "capabilities": {
+                        "interleaved": { "field": "reasoning_content" }
+                    }
+                })
+            } else {
+                serde_json::json!({ "name": model_id })
+            };
+            Some(serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Kimi",
+                "models": {
+                    model_id: kimi_model
+                },
+                "options": options
+            }))
+        }
         _ => custom_opencode_provider_definition(app_working_dir, provider_id),
     };
 
@@ -5386,9 +5936,13 @@ pub(crate) fn ensure_opencode_provider_for_model(
         None => return,
     };
 
-    if provider_id == "builtin" {
-        // Always overwrite the builtin provider definition — the proxy secret
-        // (options.apiKey) changes on every server restart.
+    let cli_proxy_owned_provider =
+        matches!(provider_id, "anthropic" | "claude" | "openai" | "codex");
+    if provider_id == "builtin" || provider_id == "kimi" || cli_proxy_owned_provider {
+        // Always overwrite proxy-backed providers — the proxy secret
+        // (options.apiKey) changes on every server restart, Kimi must not
+        // keep a stale api.kimi.com block from workspace config, and a
+        // CLIProxyAPI-owned Anthropic/OpenAI block must track the proxy URL.
         providers_map.insert(provider_id.to_string(), provider_def);
     } else if let Some(existing) = providers_map.get_mut(provider_id) {
         // Provider already exists – make sure the model is listed.
@@ -5635,15 +6189,21 @@ fn build_opencode_auth_from_ai_providers(
         }
         let keys: Vec<&str> = match provider.provider_type {
             crate::ai_providers::ProviderType::OpenAI => vec!["openai", "codex"],
+            crate::ai_providers::ProviderType::Muse => vec!["muse", "meta"],
             _ => vec![provider.provider_type.id()],
         };
         if let Some(api_key) = provider.api_key {
-            let entry = serde_json::json!({
-                "type": "api_key",
-                "key": api_key,
-            });
             for key in &keys {
-                map.insert((*key).to_string(), entry.clone());
+                // OpenCode 1.18 native Auth only loads `type: "api"`. Keep
+                // `api_key` on the legacy `muse` alias for older CLIs.
+                let auth_type = if *key == "meta" { "api" } else { "api_key" };
+                map.insert(
+                    (*key).to_string(),
+                    serde_json::json!({
+                        "type": auth_type,
+                        "key": api_key,
+                    }),
+                );
             }
         } else if let Some(oauth) = provider.oauth {
             let entry = serde_json::json!({
@@ -5653,7 +6213,16 @@ fn build_opencode_auth_from_ai_providers(
                 "expires": oauth.expires_at,
             });
             for key in &keys {
-                map.insert((*key).to_string(), entry.clone());
+                // Several accounts can share one OpenCode provider key. Never let
+                // an older OAuth record overwrite a fresher credential just because
+                // it appears later in the provider store.
+                let existing_expiry = map
+                    .get(*key)
+                    .and_then(|value| value.get("expires"))
+                    .and_then(serde_json::Value::as_i64);
+                if existing_expiry.is_none_or(|expires| oauth.expires_at > expires) {
+                    map.insert((*key).to_string(), entry.clone());
+                }
             }
         }
     }
@@ -5769,8 +6338,18 @@ pub(crate) fn sync_opencode_auth_to_workspace(
         }
     }
 
-    if let Some(managed_auth) = build_opencode_auth_from_ai_providers(app_working_dir) {
-        overlay_opencode_auth(&mut auth_json, managed_auth);
+    let managed_auth = build_opencode_auth_from_ai_providers(app_working_dir);
+    let owner_overlay = cli_proxy_opencode_auth_overlay();
+    if managed_auth.is_some() || owner_overlay.is_some() {
+        if let Some(managed_auth) = managed_auth {
+            overlay_opencode_auth(&mut auth_json, managed_auth);
+        }
+        // Applied last: a CLIProxyAPI-owned provider must never reach OpenCode
+        // as an OAuth record (stale copies would be refreshed by the plugin
+        // and revoke the proxy's token family).
+        if let Some(owner_overlay) = owner_overlay {
+            overlay_opencode_auth(&mut auth_json, owner_overlay);
+        }
         if let (Some(value), Some(dest_path)) = (auth_json.as_ref(), auth_path.as_ref()) {
             if let Err(e) = write_json_file(dest_path, value) {
                 tracing::warn!(
@@ -5790,6 +6369,8 @@ pub(crate) fn sync_opencode_auth_to_workspace(
         "zai",
         "cerebras",
         "minimax",
+        "muse",
+        "meta",
     ];
     if let (Some(src_dir), Some(dest_dir)) =
         (host_opencode_provider_auth_dir(), provider_auth_dir.clone())
@@ -6120,27 +6701,150 @@ pub(crate) fn resolve_opencode_model_from_config(
     None
 }
 
+/// Guest PATH dirs mirrored onto the host-visible container rootfs.
+/// Keep in lockstep with `workspace_exec::CONTAINER_DEFAULT_PATH_DIRS`.
+const CONTAINER_OVERLAY_PATH_DIRS: &[&str] = &[
+    "root/.bun/bin",
+    "root/.cache/.bun/bin",
+    "root/.local/bin",
+    "usr/local/sbin",
+    "usr/local/bin",
+    "usr/sbin",
+    "usr/bin",
+    "sbin",
+    "bin",
+];
+
+fn path_is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Look for `program` on the host-visible container rootfs. The nspawn
+/// overlay is a normal directory (`workspace.path/usr/local/bin/grok`);
+/// reading it does not need nsenter and cannot time out.
+pub(crate) fn container_overlay_command_path(
+    workspace: &Workspace,
+    program: &str,
+) -> Option<PathBuf> {
+    if workspace.workspace_type != WorkspaceType::Container {
+        return None;
+    }
+    let guest = program.trim();
+    if guest.is_empty() {
+        return None;
+    }
+    if guest.contains('/') {
+        let rel = guest.trim_start_matches('/');
+        if rel.is_empty() {
+            return None;
+        }
+        let candidate = workspace.path.join(rel);
+        return path_is_executable(&candidate).then_some(candidate);
+    }
+    for dir in CONTAINER_OVERLAY_PATH_DIRS {
+        let candidate = workspace.path.join(dir).join(guest);
+        if path_is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Guest-absolute path for an overlay hit, e.g. `/usr/local/bin/grok`.
+///
+/// The overlay file wins over `program`. A configured host path such as
+/// `/opt/grok-cli` must not be returned once we have found the in-guest
+/// binary — `nsenter --root` can only exec a container path.
+pub(crate) fn container_overlay_guest_path(
+    workspace: &Workspace,
+    overlay_path: &Path,
+    program: &str,
+) -> String {
+    overlay_path
+        .strip_prefix(&workspace.path)
+        .ok()
+        .map(|rel| format!("/{}", rel.to_string_lossy()))
+        .filter(|guest| guest != "/")
+        .unwrap_or_else(|| {
+            if program.contains('/') {
+                program.to_string()
+            } else {
+                format!("/usr/local/bin/{program}")
+            }
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandPresence {
+    Present,
+    Absent,
+    /// An nsenter probe timed out. This is not proof the binary is missing
+    /// (Verity #2332, 2026-08-13: grok 0.2.93 sat on the overlay while
+    /// ~146 stuck nsenter made `command -v` exceed 30s).
+    Inconclusive,
+}
+
+/// Combine an overlay hit with an optional nsenter probe. A timeout
+/// (`probe == None`) is never mapped to [`CommandPresence::Absent`].
+pub(crate) fn resolve_command_presence(overlay_hit: bool, probe: Option<bool>) -> CommandPresence {
+    if overlay_hit {
+        return CommandPresence::Present;
+    }
+    match probe {
+        Some(true) => CommandPresence::Present,
+        Some(false) => CommandPresence::Absent,
+        None => CommandPresence::Inconclusive,
+    }
+}
+
 pub(crate) async fn command_available(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
     program: &str,
 ) -> bool {
+    matches!(
+        command_presence(workspace_exec, cwd, program).await,
+        CommandPresence::Present
+    )
+}
+
+pub(crate) async fn command_presence(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    program: &str,
+) -> CommandPresence {
     if workspace_exec.workspace.workspace_type == WorkspaceType::Host {
-        if program.contains('/') {
-            return std::path::Path::new(program).is_file();
-        }
-        if let Ok(path_var) = std::env::var("PATH") {
-            for dir in path_var.split(':') {
-                if dir.is_empty() {
-                    continue;
-                }
-                let candidate = std::path::Path::new(dir).join(program);
-                if candidate.is_file() {
-                    return true;
-                }
-            }
-        }
-        return false;
+        let present = if program.contains('/') {
+            std::path::Path::new(program).is_file()
+        } else {
+            std::env::var("PATH").ok().is_some_and(|path_var| {
+                path_var
+                    .split(':')
+                    .filter(|dir| !dir.is_empty())
+                    .any(|dir| std::path::Path::new(dir).join(program).is_file())
+            })
+        };
+        return if present {
+            CommandPresence::Present
+        } else {
+            CommandPresence::Absent
+        };
+    }
+
+    if container_overlay_command_path(&workspace_exec.workspace, program).is_some() {
+        return CommandPresence::Present;
     }
 
     async fn check_dir(
@@ -6176,7 +6880,8 @@ pub(crate) async fn command_available(
                 tracing::warn!(
                     program = %program,
                     timeout_secs = probe_timeout,
-                    "Workspace command probe timed out — host overloaded? Treating as unavailable"
+                    "Workspace command probe timed out — host overloaded? \
+                     Treating as inconclusive, not absent"
                 );
                 return None;
             }
@@ -6191,20 +6896,21 @@ pub(crate) async fn command_available(
         Some(!stdout.trim().is_empty())
     }
 
-    if let Some(found) = check_dir(workspace_exec, cwd, program).await {
-        if found {
-            return true;
+    match check_dir(workspace_exec, cwd, program).await {
+        Some(true) => CommandPresence::Present,
+        Some(false) => {
+            let fallback_dir = &workspace_exec.workspace.path;
+            if cwd != fallback_dir {
+                resolve_command_presence(
+                    false,
+                    check_dir(workspace_exec, fallback_dir, program).await,
+                )
+            } else {
+                CommandPresence::Absent
+            }
         }
+        None => CommandPresence::Inconclusive,
     }
-
-    let fallback_dir = &workspace_exec.workspace.path;
-    if cwd != fallback_dir {
-        if let Some(found) = check_dir(workspace_exec, fallback_dir, program).await {
-            return found;
-        }
-    }
-
-    false
 }
 
 async fn available_bun_command(
@@ -6742,6 +7448,23 @@ pub(crate) async fn check_opencode_connectivity(
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
+    // Providers owned by CLIProxyAPI are reached on the loopback proxy, not
+    // the vendor API; the direct egress may even be blocked. Probe the proxy.
+    if (has_openai && super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI))
+        || (has_anthropic
+            && super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic))
+    {
+        if let Some(endpoint) = super::oauth_owner::cli_proxy_endpoint() {
+            return check_api_reachability(
+                workspace_exec,
+                cwd,
+                "CLIProxyAPI",
+                &format!("{}/v1/models", endpoint.base_url),
+            )
+            .await;
+        }
+    }
+
     // Determine which API to check based on configured providers
     // Priority: OpenAI > Anthropic > Google > Z.AI > Minimax (most common first)
     // If none are explicitly configured, we already verified internet works
@@ -6976,14 +7699,67 @@ fn claudecode_install_command(
 }
 
 fn desired_claudecode_version() -> String {
-    // 2.1.140 ships the bug-fixed native `/goal` slash command (added in
-    // 2.1.139, hardened against `disableAllHooks` / `allowManagedHooksOnly`
-    // in 2.1.140). Bumping the pin so the per-workspace install matches what
-    // `run_claudecode_native_goal` relies on.
+    // Opus 5.5 requires 2.1.280. Treat the default as a minimum so fleet
+    // updates are not silently undone by mission startup. Explicit pins stay exact.
     std::env::var("SANDBOXED_SH_CLAUDECODE_VERSION")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "2.1.140".to_string())
+        .unwrap_or_else(|| "2.1.280".to_string())
+}
+
+fn claude_version_is_supported(output: &str, desired: &str, pinned: bool) -> bool {
+    let observed = output.split_whitespace().next().unwrap_or("");
+    if pinned {
+        return observed == desired;
+    }
+    fn version(value: &str) -> Option<(u64, u64, u64)> {
+        let mut parts = value.split('.');
+        let result = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        parts.next().is_none().then_some(result)
+    }
+    match (version(observed), version(desired)) {
+        (Some(actual), Some(minimum)) => actual >= minimum,
+        _ => false,
+    }
+}
+
+#[test]
+fn claude_cli_minimum_keeps_fleet_updates() {
+    assert!(claude_version_is_supported(
+        "2.1.280 (Claude Code)",
+        "2.1.280",
+        false
+    ));
+    assert!(claude_version_is_supported(
+        "2.1.281 (Claude Code)",
+        "2.1.280",
+        false
+    ));
+    assert!(!claude_version_is_supported(
+        "2.1.257 (Claude Code)",
+        "2.1.280",
+        false
+    ));
+    assert!(!claude_version_is_supported(
+        "2.1.2800 (Claude Code)",
+        "2.1.280",
+        true
+    ));
+    assert!(!claude_version_is_supported(
+        "2.1.281 (Claude Code)",
+        "2.1.280",
+        true
+    ));
+    assert!(claude_version_is_supported(
+        "2.1.280 (Claude Code)",
+        "2.1.280",
+        true
+    ));
+    assert!(!claude_version_is_supported("invalid", "2.1.280", false));
 }
 
 async fn claude_cli_matches_desired_version(
@@ -7015,7 +7791,9 @@ async fn claude_cli_matches_desired_version(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let version_output = format!("{}{}", stdout, stderr);
-            if version_output.contains(desired_version) {
+            let pinned = std::env::var("SANDBOXED_SH_CLAUDECODE_VERSION")
+                .is_ok_and(|value| !value.trim().is_empty());
+            if claude_version_is_supported(&version_output, desired_version, pinned) {
                 true
             } else {
                 tracing::info!(
@@ -7400,7 +8178,7 @@ fn resolve_codex_native_binary_search_paths(
     paths
 }
 
-fn resolve_host_executable(program: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_host_executable(program: &str) -> Option<std::path::PathBuf> {
     if program.contains('/') {
         let p = std::path::PathBuf::from(program);
         if p.is_file() {
@@ -7480,7 +8258,153 @@ fn host_executable_available(program: &str) -> bool {
     }
 }
 
-fn copy_host_executable_into_container(
+const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+pub(crate) const ELF_EM_X86_64: u16 = 62;
+pub(crate) const ELF_EM_AARCH64: u16 = 183;
+
+/// ELF `e_machine` from the first 20 bytes, or `None` for scripts / non-ELF.
+pub(crate) fn elf_e_machine(path: &std::path::Path) -> Option<u16> {
+    use std::io::Read;
+    let mut header = [0u8; 20];
+    let mut file = std::fs::File::open(path).ok()?;
+    file.read_exact(&mut header).ok()?;
+    if header[0..4] != ELF_MAGIC {
+        return None;
+    }
+    match header[5] {
+        1 => Some(u16::from_le_bytes([header[18], header[19]])),
+        2 => Some(u16::from_be_bytes([header[18], header[19]])),
+        _ => None,
+    }
+}
+
+fn elf_machine_name(machine: u16) -> &'static str {
+    match machine {
+        ELF_EM_X86_64 => "x86_64",
+        ELF_EM_AARCH64 => "aarch64",
+        _ => "unknown",
+    }
+}
+
+/// Keep every hop under the overlay root. `..` that walks out is refused.
+fn normalize_overlay_path(
+    root: &std::path::Path,
+    joined: std::path::PathBuf,
+) -> Option<std::path::PathBuf> {
+    let mut normalized = std::path::PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Normal(_) => normalized.push(component),
+        }
+    }
+    normalized.starts_with(root).then_some(normalized)
+}
+
+/// Resolve an overlay probe without following a symlink out of the rootfs.
+/// `File::open` would chase an absolute `/usr/bin/dash` link onto the host.
+/// A chain such as `sh -> /etc/alternatives/sh -> /usr/bin/dash` must be
+/// rewritten hop-by-hop; stopping after the first link still leaves a
+/// host-absolute target.
+fn overlay_trusted_path(
+    workspace: &crate::workspace::Workspace,
+    path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    const MAX_SYMLINK_HOPS: usize = 32;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let meta = current.symlink_metadata().ok()?;
+        if !meta.file_type().is_symlink() {
+            return Some(current);
+        }
+        let target = std::fs::read_link(&current).ok()?;
+        let joined = if target.is_absolute() {
+            workspace
+                .path
+                .join(target.strip_prefix("/").unwrap_or(target.as_path()))
+        } else {
+            current.parent()?.join(target)
+        };
+        current = normalize_overlay_path(&workspace.path, joined)?;
+    }
+    None
+}
+
+fn overlay_elf_e_machine(
+    workspace: &crate::workspace::Workspace,
+    path: &std::path::Path,
+) -> Option<u16> {
+    elf_e_machine(&overlay_trusted_path(workspace, path)?)
+}
+
+/// Container ISA from the nspawn overlay only. Unknown ISA is `None` —
+/// callers must fail closed rather than assume the host arch.
+pub(crate) fn container_overlay_elf_machine(
+    workspace: &crate::workspace::Workspace,
+) -> Option<u16> {
+    const PROBES: &[&str] = &[
+        "sh",
+        "bash",
+        "/bin/sh",
+        "/usr/bin/sh",
+        "/bin/bash",
+        "/usr/bin/bash",
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+        "/usr/lib/ld-linux-aarch64.so.1",
+        "/lib64/ld-linux-aarch64.so.1",
+    ];
+    for probe in PROBES {
+        if let Some(path) = container_overlay_command_path(workspace, probe) {
+            if let Some(machine) = overlay_elf_e_machine(workspace, &path) {
+                return Some(machine);
+            }
+        }
+        if probe.contains('/') {
+            let path = workspace.path.join(probe.trim_start_matches('/'));
+            if let Some(machine) = overlay_elf_e_machine(workspace, &path) {
+                return Some(machine);
+            }
+        }
+    }
+    None
+}
+
+fn refuse_cross_arch_host_copy(
+    workspace: &crate::workspace::Workspace,
+    host_executable: &std::path::Path,
+) -> Result<(), String> {
+    let Some(host_machine) = elf_e_machine(host_executable) else {
+        return Ok(());
+    };
+    let Some(container_machine) = container_overlay_elf_machine(workspace) else {
+        return Err(format!(
+            "Refusing to copy {} into the container: could not determine container arch from the nspawn overlay (x86_64=62, aarch64=183)",
+            host_executable.display(),
+        ));
+    };
+    if host_machine == container_machine {
+        return Ok(());
+    }
+    Err(format!(
+        "Refusing to copy {} into the container: host ELF machine {} ({}) does not match container arch {} ({}) (x86_64=62, aarch64=183)",
+        host_executable.display(),
+        host_machine,
+        elf_machine_name(host_machine),
+        container_machine,
+        elf_machine_name(container_machine),
+    ))
+}
+
+pub(crate) fn copy_host_executable_into_container(
     workspace: &crate::workspace::Workspace,
     host_executable: &std::path::Path,
 ) -> Result<String, String> {
@@ -7488,6 +8412,11 @@ fn copy_host_executable_into_container(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "Host executable has invalid filename".to_string())?;
+
+    // A host-native CLI exec-format-fails inside a foreign-arch nspawn
+    // rootfs. Refuse so the mission reports a missing CLI instead of
+    // dying later with Exec format error.
+    refuse_cross_arch_host_copy(workspace, host_executable)?;
 
     let dest_dir = workspace.path.join("usr").join("local").join("bin");
     std::fs::create_dir_all(&dest_dir)
@@ -7881,25 +8810,38 @@ pub async fn check_backend_prerequisites(
         }
         "grok" => {
             let cli = cli_path.unwrap_or("grok");
-            let available = command_available(&workspace_exec, cwd, cli).await;
+            let overlay = container_overlay_command_path(workspace, cli).is_some()
+                || container_overlay_command_path(workspace, "/usr/local/bin/grok").is_some();
+            let presence = if overlay {
+                CommandPresence::Present
+            } else {
+                command_presence(&workspace_exec, cwd, cli).await
+            };
+            let available = matches!(presence, CommandPresence::Present);
             BackendPreflightResult {
                 backend_id: "grok".to_string(),
                 available,
                 cli_available: available,
-                auto_install_possible: false,
-                missing_dependencies: if available {
+                // A timed-out probe is not "harness missing": allow create to
+                // proceed so the turn can use the overlay / host-copy path.
+                auto_install_possible: !available,
+                missing_dependencies: if matches!(
+                    presence,
+                    CommandPresence::Present | CommandPresence::Inconclusive
+                ) {
                     Vec::new()
                 } else {
                     vec!["grok CLI".to_string()]
                 },
-                message: if available {
-                    Some("Grok Build CLI is available".to_string())
-                } else {
-                    Some(
-                        "Grok Build CLI not found. Install it with: curl -fsSL https://x.ai/cli/install.sh | bash"
-                            .to_string(),
-                    )
-                },
+                message: Some(match presence {
+                    CommandPresence::Present => "Grok Build CLI is available".to_string(),
+                    CommandPresence::Inconclusive => {
+                        "Grok CLI nsenter probe timed out; not treating as absent".to_string()
+                    }
+                    CommandPresence::Absent => {
+                        "Grok Build CLI not found. Install it with: curl -fsSL https://x.ai/cli/install.sh | bash".to_string()
+                    }
+                }),
             }
         }
         "chatgpt_ui" => {
@@ -8456,24 +9398,36 @@ impl TextDeltaCoalescer {
     }
 }
 
+// KMP examines only the suffix that can overlap the incoming fragment.
+// UTF-8 is self-synchronizing: a matching prefix of a valid string ending at
+// an existing string boundary is also a complete code-point sequence.
 fn suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize {
-    let max_chars = existing.chars().count().min(incoming.chars().count());
-    for overlap_chars in (1..=max_chars).rev() {
-        let existing_start = existing
-            .char_indices()
-            .nth(existing.chars().count() - overlap_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        let incoming_end = incoming
-            .char_indices()
-            .nth(overlap_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(incoming.len());
-        if existing[existing_start..] == incoming[..incoming_end] {
-            return incoming_end;
+    let p = incoming.as_bytes();
+    if p.is_empty() {
+        return 0;
+    }
+    let mut pi = vec![0; p.len()];
+    for i in 1..p.len() {
+        let mut j = pi[i - 1];
+        while j > 0 && p[i] != p[j] {
+            j = pi[j - 1]
+        }
+        if p[i] == p[j] {
+            j += 1
+        }
+        pi[i] = j;
+    }
+    let start = existing.len().saturating_sub(p.len());
+    let mut j = 0;
+    for &b in &existing.as_bytes()[start..] {
+        while j > 0 && (j == p.len() || b != p[j]) {
+            j = pi[j - 1]
+        }
+        if b == p[j] {
+            j += 1
         }
     }
-    0
+    j
 }
 
 pub(crate) fn merge_stream_fragment(buffer: &mut String, fragment: &str) {
@@ -8513,93 +9467,30 @@ pub(crate) fn text_buffer_stream_looks_degenerate(
     min_substring_len: usize,
     min_repeats: usize,
 ) -> bool {
-    if min_substring_len == 0 || min_repeats < 2 || window_chars == 0 {
-        return false;
-    }
-    let chars: Vec<char> = accumulated.chars().collect();
-    if chars.len() < min_substring_len.saturating_mul(min_repeats) {
-        return false;
-    }
-    let window_end = chars.len();
-    let window_start = window_end.saturating_sub(window_chars);
-    let window = &chars[window_start..window_end];
-
-    // Walk every starting offset in the window. For each offset, try
-    // candidate substring lengths in `min_substring_len..=2*min_substring_len`
-    // (anything longer would have been broken up by the LLM streaming
-    // cadence). Count non-overlapping occurrences; if we find >= min_repeats
-    // we have a degenerate loop.
-    //
-    // To keep this O(window_chars * substring_len_max) per delta we cap the
-    // candidate substring length at 256 and bail out early once we have a hit.
-    let max_candidate_len = min_substring_len.saturating_mul(2).min(256);
-    for start in 0..window.len().saturating_sub(min_substring_len) {
-        for len in min_substring_len..=max_candidate_len {
-            if start + len > window.len() {
-                break;
-            }
-            let needle: String = window[start..start + len].iter().collect();
-            // Skip "noise" candidates that are mostly whitespace or a single
-            // character repeated (e.g. "----").
-            if !needle.chars().any(|c| c.is_alphanumeric()) {
-                continue;
-            }
-            // Skip single-token loops (e.g. "yes, yes, yes" or
-            // "ok. ok. ok."). Require the substring to contain at least
-            // two distinct "substantive" words (length >= 4, alphabetic).
-            // This is the key differentiator between a legitimate
-            // short-token echo and a model that has lost the plot on a
-            // meaningful phrase.
-            let distinct_substantive = count_distinct_substantive_words(&needle);
-            if distinct_substantive < 2 {
-                continue;
-            }
-            let mut count = 0usize;
-            let mut idx = 0usize;
-            while let Some(found) = find_subslice(window, &needle, idx) {
-                count += 1;
-                if count >= min_repeats {
-                    return true;
-                }
-                idx = found + 1;
-            }
-        }
-    }
-    false
+    degenerate_repeated_substring(accumulated, window_chars, min_substring_len, min_repeats)
+        .is_some()
 }
 
-/// Count distinct "substantive" words in `s`: tokens that are at least 4
-/// characters long and made up of letters/digits. Used to differentiate a
-/// meaningful phrase like "Yielding pending your choice" (4 substantive
-/// words) from a single-token echo like "yes, yes, yes" (1 word) or
-/// "ok. ok. ok." (1 word).
-fn count_distinct_substantive_words(s: &str) -> usize {
-    let mut seen = std::collections::HashSet::new();
-    for token in s.split(|c: char| !c.is_alphanumeric()) {
-        if token.chars().count() >= 4 {
-            seen.insert(token.to_ascii_lowercase());
-        }
+/// The substring that makes the stream look degenerate, if any — the guard's
+/// EVIDENCE. Returning it (rather than a bare bool) is what lets the runner
+/// record what actually tripped the kill, so a downstream agent reads a fact
+/// instead of inventing a transport bug (mission 7fb8970f, 2026-08-06).
+pub(crate) fn degenerate_repeated_substring(
+    accumulated: &str,
+    window_chars: usize,
+    min_substring_len: usize,
+    min_repeats: usize,
+) -> Option<String> {
+    match crate::api::runners::stream_guard::detect(
+        accumulated,
+        window_chars,
+        min_substring_len,
+        min_repeats,
+        &tokio_util::sync::CancellationToken::new(),
+    ) {
+        crate::api::runners::stream_guard::Verdict::Repeated { needle, .. } => Some(needle),
+        _ => None,
     }
-    seen.len()
-}
-
-/// Find the next index in `haystack` (a Vec<char>) that begins a run equal to
-/// `needle`, starting the search at `from`. Avoids allocating a substring per
-/// comparison by indexing through `chars`.
-fn find_subslice(haystack: &[char], needle: &str, from: usize) -> Option<usize> {
-    let needle_chars: Vec<char> = needle.chars().collect();
-    if needle_chars.is_empty() || from + needle_chars.len() > haystack.len() {
-        return None;
-    }
-    'outer: for i in from..=haystack.len() - needle_chars.len() {
-        for j in 0..needle_chars.len() {
-            if haystack[i + j] != needle_chars[j] {
-                continue 'outer;
-            }
-        }
-        return Some(i);
-    }
-    None
 }
 
 /// Compact info about a running mission (for API responses).
@@ -8833,12 +9724,13 @@ fn cleanup_old_debug_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        actual_cost_cents_from_total_cost_usd, apply_terminal_result_text, bind_command_params,
-        classify_copied_opencode_probe, claudecode_idle_timeout_for_state,
-        claudecode_incomplete_turn_message, claudecode_install_command,
-        claudecode_malformed_startup_message, claudecode_pre_turn_transport_message,
-        claudecode_resume_current_session_message, claudecode_transport_failure_data,
-        claudecode_transport_failure_stage, claudecode_transport_failure_stage_for_incomplete_turn,
+        actual_cost_cents_from_total_cost_usd, apply_opencode_auth_env, apply_terminal_result_text,
+        bind_command_params, build_opencode_auth_from_ai_providers, classify_copied_opencode_probe,
+        claudecode_idle_timeout_for_state, claudecode_incomplete_turn_message,
+        claudecode_install_command, claudecode_malformed_startup_message,
+        claudecode_pre_turn_transport_message, claudecode_resume_current_session_message,
+        claudecode_transport_failure_data, claudecode_transport_failure_stage,
+        claudecode_transport_failure_stage_for_incomplete_turn,
         claudecode_transport_recovery_strategy, clear_codex_account_cooldown,
         codex_account_cooldown_remaining, codex_chatgpt_fallback_for_result,
         codex_chatgpt_fallback_model, codex_cooldown_for_reason, codex_error_message_to_surface,
@@ -8857,20 +9749,21 @@ mod tests {
         opencode_session_exists_in_data_home, opencode_session_token_from_line,
         overlay_opencode_auth, parse_cli_semver, parse_cli_version, parse_opencode_goal_objective,
         parse_opencode_session_token, parse_opencode_sse_event, parse_opencode_stderr_text_part,
-        preferred_model_for_cost, preferred_opencode_bin_dir, prepend_unique_path_entry,
-        record_codex_error_message, replace_filepath_artifact_with_tool_output,
-        resolve_mission_working_directory, running_health, sanitized_opencode_stdout,
-        selected_opencode_auth_path, selected_opencode_provider_auth_dir,
-        set_codex_account_cooldown, should_sync_container_opencode, stall_severity,
-        strip_ansi_codes, strip_opencode_banner_lines, strip_think_tags,
-        summarize_codex_usage_caps, summarize_recent_opencode_stderr,
-        text_buffer_stream_looks_degenerate, thinking_overlaps_visible_answer, tls_error_hint,
-        truncate_garbled_output, use_thinking_only_fallback, utf8_safe_prefix,
+        pick_codex_lease_pool, preferred_model_for_cost, preferred_opencode_bin_dir,
+        prepend_unique_path_entry, record_codex_error_message,
+        replace_filepath_artifact_with_tool_output, resolve_mission_working_directory,
+        running_health, sanitized_opencode_stdout, selected_opencode_auth_path,
+        selected_opencode_provider_auth_dir, set_codex_account_cooldown,
+        should_sync_container_opencode, stall_severity, strip_ansi_codes,
+        strip_opencode_banner_lines, strip_think_tags, summarize_codex_usage_caps,
+        summarize_recent_opencode_stderr, text_buffer_stream_looks_degenerate,
+        thinking_overlaps_visible_answer, tls_error_hint, truncate_garbled_output,
+        use_thinking_only_fallback, utf8_safe_prefix, workspace_path_for_env_with_nspawn,
         ClaudeIncompleteTurnContext, ClaudeTransportFailureStage, ClaudeTransportRecoveryStrategy,
         ClaudeTurnWaitState, CopiedOpenCodeProbe, MissionHealth, MissionRunState, MissionRunner,
-        MissionStallSeverity, OpencodeSseState, CODEX_AUTH_ERROR_COOLDOWN, CODEX_CAPACITY_COOLDOWN,
-        CODEX_PENDING_TOOLS_ERROR_PREFIX, CODEX_RATE_LIMIT_COOLDOWN, STALL_SEVERE_SECS,
-        STALL_WARN_SECS,
+        MissionStallSeverity, OpencodeSseState, CODEX_ACCOUNT_LEASE_WAIT_TIMEOUT,
+        CODEX_AUTH_ERROR_COOLDOWN, CODEX_CAPACITY_COOLDOWN, CODEX_PENDING_TOOLS_ERROR_PREFIX,
+        CODEX_RATE_LIMIT_COOLDOWN, STALL_SEVERE_SECS, STALL_WARN_SECS,
     };
     use super::{
         extract_telegram_instructions, grok_event_reasoning, grok_event_text, grok_event_usage,
@@ -8886,6 +9779,332 @@ mod tests {
     use std::fs;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[cfg(unix)]
+    #[test]
+    fn container_env_path_accepts_canonical_mission_path_under_symlink_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_root = temp.path().join("srv/containers/verity");
+        let mission_dir = canonical_root.join("workspaces/mission-4ca18dbd");
+        std::fs::create_dir_all(&mission_dir).unwrap();
+        let script = mission_dir.join(".sandboxed-sh-opencode-cmd.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+
+        let alias_parent = temp.path().join("root/.sandboxed-sh/containers");
+        std::fs::create_dir_all(&alias_parent).unwrap();
+        let alias_root = alias_parent.join("verity");
+        symlink(&canonical_root, &alias_root).unwrap();
+        let workspace = crate::workspace::Workspace::new_container("verity".into(), alias_root);
+
+        assert_eq!(
+            workspace_path_for_env_with_nspawn(&workspace, &script, true),
+            std::path::PathBuf::from("/workspaces/mission-4ca18dbd/.sandboxed-sh-opencode-cmd.sh")
+        );
+    }
+
+    #[test]
+    fn copy_host_executable_follows_a_symlink_and_writes_a_real_binary() {
+        let host = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let real = host.path().join("grok-linux-x86_64");
+        fs::write(&real, b"#!/bin/sh\necho grok-ok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+            symlink(&real, host.path().join("grok")).unwrap();
+        }
+        #[cfg(not(unix))]
+        fs::copy(&real, host.path().join("grok")).unwrap();
+
+        let workspace = crate::workspace::Workspace {
+            id: Uuid::new_v4(),
+            name: "assistant".into(),
+            workspace_type: WorkspaceType::Container,
+            path: container.path().to_path_buf(),
+            status: crate::workspace::WorkspaceStatus::Ready,
+            error_message: None,
+            config: serde_json::json!({}),
+            template: None,
+            distro: None,
+            env_vars: Default::default(),
+            init_scripts: Vec::new(),
+            init_script: None,
+            created_at: chrono::Utc::now(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            shared_network: None,
+            tailscale_mode: None,
+            mcps: Vec::new(),
+            mcps_replace_defaults: true,
+            config_profile: None,
+            resolved_git_credentials: None,
+            read_only_command_guard_dir: None,
+            harness_versions: None,
+        };
+        let dest =
+            super::copy_host_executable_into_container(&workspace, &host.path().join("grok"))
+                .expect("copy");
+        assert_eq!(dest, "/usr/local/bin/grok");
+        let copied = container.path().join("usr/local/bin/grok");
+        assert!(copied.is_file(), "copied path must be a regular file");
+        assert!(
+            !copied.symlink_metadata().unwrap().file_type().is_symlink(),
+            "must not re-create the host symlink inside the container"
+        );
+        assert_eq!(fs::read(&copied).unwrap(), fs::read(&real).unwrap());
+    }
+
+    fn write_fake_elf(path: &std::path::Path, e_machine: u16) {
+        let mut header = vec![0u8; 64];
+        header[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        header[4] = 2; // ELFCLASS64
+        header[5] = 1; // ELFDATA2LSB
+        header[6] = 1; // EV_CURRENT
+        header[18..20].copy_from_slice(&e_machine.to_le_bytes());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, header).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_elf_follows_a_two_level_symlink_chain_inside_the_rootfs() {
+        let container = tempfile::tempdir().unwrap();
+        write_fake_elf(
+            &container.path().join("usr/bin/dash"),
+            super::ELF_EM_AARCH64,
+        );
+        fs::create_dir_all(container.path().join("etc/alternatives")).unwrap();
+        fs::create_dir_all(container.path().join("bin")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(
+                "/usr/bin/dash",
+                container.path().join("etc/alternatives/sh"),
+            )
+            .unwrap();
+            symlink("/etc/alternatives/sh", container.path().join("bin/sh")).unwrap();
+        }
+        let workspace = container_workspace_at(container.path());
+        assert_eq!(
+            super::overlay_elf_e_machine(&workspace, &container.path().join("bin/sh")),
+            Some(super::ELF_EM_AARCH64),
+            "must read the overlay dash ELF, not follow the second link onto the host"
+        );
+
+        let host = tempfile::tempdir().unwrap();
+        write_fake_elf(&host.path().join("grok"), super::ELF_EM_X86_64);
+        let err = super::copy_host_executable_into_container(&workspace, &host.path().join("grok"))
+            .expect_err("cross-arch copy must be refused after resolving the symlink chain");
+        assert!(
+            err.contains("does not match container arch"),
+            "expected arch-mismatch error, got: {err}"
+        );
+        assert!(
+            !container.path().join("usr/local/bin/grok").exists(),
+            "refused copy must not leave a guest binary"
+        );
+    }
+
+    #[test]
+    fn copy_host_executable_refuses_elf_arch_mismatch() {
+        let host = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let host_bin = host.path().join("grok");
+        write_fake_elf(&host_bin, super::ELF_EM_X86_64);
+        write_fake_elf(&container.path().join("bin/sh"), super::ELF_EM_AARCH64);
+
+        let workspace = container_workspace_at(container.path());
+        let err = super::copy_host_executable_into_container(&workspace, &host_bin)
+            .expect_err("cross-arch copy must be refused");
+        assert!(
+            err.contains("does not match container arch"),
+            "expected arch-mismatch error, got: {err}"
+        );
+        assert!(
+            err.contains("62") && err.contains("183"),
+            "error should name ELF e_machine values, got: {err}"
+        );
+        assert!(
+            !container.path().join("usr/local/bin/grok").exists(),
+            "refused copy must not leave a guest binary"
+        );
+    }
+
+    #[test]
+    fn copy_host_executable_refuses_elf_arch_mismatch_aarch64_on_x86_64() {
+        let host = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let host_bin = host.path().join("grok");
+        write_fake_elf(&host_bin, super::ELF_EM_AARCH64);
+        write_fake_elf(&container.path().join("bin/sh"), super::ELF_EM_X86_64);
+
+        let workspace = container_workspace_at(container.path());
+        let err = super::copy_host_executable_into_container(&workspace, &host_bin)
+            .expect_err("cross-arch copy must be refused");
+        assert!(
+            err.contains("does not match container arch"),
+            "expected arch-mismatch error, got: {err}"
+        );
+        assert!(
+            err.contains("62") && err.contains("183"),
+            "error should name ELF e_machine values, got: {err}"
+        );
+        assert!(
+            !container.path().join("usr/local/bin/grok").exists(),
+            "refused copy must not leave a guest binary"
+        );
+    }
+
+    #[test]
+    fn copy_host_executable_allows_matching_elf_arch() {
+        let host = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let host_bin = host.path().join("grok");
+        write_fake_elf(&host_bin, super::ELF_EM_AARCH64);
+        write_fake_elf(&container.path().join("bin/sh"), super::ELF_EM_AARCH64);
+
+        let workspace = container_workspace_at(container.path());
+        let dest = super::copy_host_executable_into_container(&workspace, &host_bin)
+            .expect("matching arch must copy");
+        assert_eq!(dest, "/usr/local/bin/grok");
+        assert!(container.path().join("usr/local/bin/grok").is_file());
+    }
+
+    #[test]
+    fn copy_host_executable_refuses_when_container_isa_unknown() {
+        let host = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let host_bin = host.path().join("grok");
+        write_fake_elf(&host_bin, super::ELF_EM_X86_64);
+
+        let workspace = container_workspace_at(container.path());
+        let err = super::copy_host_executable_into_container(&workspace, &host_bin)
+            .expect_err("unknown container ISA must refuse an ELF copy");
+        assert!(
+            err.contains("could not determine container arch"),
+            "expected fail-closed unknown-ISA error, got: {err}"
+        );
+        assert!(!container.path().join("usr/local/bin/grok").exists());
+    }
+
+    fn container_workspace_at(path: &std::path::Path) -> crate::workspace::Workspace {
+        crate::workspace::Workspace {
+            id: Uuid::new_v4(),
+            name: "verity".into(),
+            workspace_type: WorkspaceType::Container,
+            path: path.to_path_buf(),
+            status: crate::workspace::WorkspaceStatus::Ready,
+            error_message: None,
+            config: serde_json::json!({}),
+            template: None,
+            distro: None,
+            env_vars: Default::default(),
+            init_scripts: Vec::new(),
+            init_script: None,
+            created_at: chrono::Utc::now(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            shared_network: None,
+            tailscale_mode: None,
+            mcps: Vec::new(),
+            mcps_replace_defaults: true,
+            config_profile: None,
+            resolved_git_credentials: None,
+            read_only_command_guard_dir: None,
+            harness_versions: None,
+        }
+    }
+
+    #[test]
+    fn container_overlay_finds_grok_and_curl_without_nsenter() {
+        let root = tempfile::tempdir().unwrap();
+        let grok = root.path().join("usr/local/bin/grok");
+        let curl = root.path().join("usr/bin/curl");
+        fs::create_dir_all(grok.parent().unwrap()).unwrap();
+        fs::create_dir_all(curl.parent().unwrap()).unwrap();
+        fs::write(&grok, b"#!/bin/sh\necho grok\n").unwrap();
+        fs::write(&curl, b"#!/bin/sh\necho curl\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&grok, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let workspace = container_workspace_at(root.path());
+        let grok_hit =
+            super::container_overlay_command_path(&workspace, "grok").expect("grok on overlay");
+        assert_eq!(grok_hit, grok);
+        assert_eq!(
+            super::container_overlay_guest_path(&workspace, &grok_hit, "grok"),
+            "/usr/local/bin/grok"
+        );
+        assert_eq!(
+            super::container_overlay_guest_path(&workspace, &grok_hit, "/opt/grok-cli"),
+            "/usr/local/bin/grok",
+            "configured host path must not replace the overlay guest path"
+        );
+        assert_eq!(
+            super::container_overlay_command_path(&workspace, "/usr/bin/curl").as_deref(),
+            Some(curl.as_path())
+        );
+        assert!(super::container_overlay_command_path(&workspace, "missing").is_none());
+    }
+
+    #[test]
+    fn probe_timeout_is_inconclusive_not_absent() {
+        assert_eq!(
+            super::resolve_command_presence(true, None),
+            super::CommandPresence::Present
+        );
+        assert_eq!(
+            super::resolve_command_presence(false, None),
+            super::CommandPresence::Inconclusive
+        );
+        assert_eq!(
+            super::resolve_command_presence(false, Some(false)),
+            super::CommandPresence::Absent
+        );
+        assert_eq!(
+            super::resolve_command_presence(false, Some(true)),
+            super::CommandPresence::Present
+        );
+        assert_ne!(
+            super::resolve_command_presence(false, None),
+            super::CommandPresence::Absent,
+            "a 30s nsenter timeout must not be mapped to grok/curl absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_available_uses_container_overlay_without_nsenter() {
+        let root = tempfile::tempdir().unwrap();
+        let grok = root.path().join("usr/local/bin/grok");
+        fs::create_dir_all(grok.parent().unwrap()).unwrap();
+        fs::write(&grok, b"#!/bin/sh\necho grok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&grok, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let workspace = container_workspace_at(root.path());
+        let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
+        assert!(
+            super::command_available(&exec, root.path(), "grok").await,
+            "overlay grok must be visible without nsenter"
+        );
+        assert!(super::command_available(&exec, root.path(), "/usr/local/bin/grok").await);
+    }
 
     #[test]
     fn mission_working_directory_maps_container_guest_absolute_path() {
@@ -8961,6 +10180,79 @@ mod tests {
         assert_eq!(merged["anthropic"]["access"], "fresh");
         assert_eq!(merged["anthropic"]["expires"], 2);
         assert_eq!(merged["unmanaged"]["key"], "preserved");
+    }
+
+    #[test]
+    fn opencode_multiple_oauth_accounts_keep_freshest_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).unwrap();
+        let account = |expires_at, token: &str| {
+            let mut provider = crate::ai_providers::AIProvider::new(
+                crate::ai_providers::ProviderType::Anthropic,
+                "Test".into(),
+            );
+            provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+                access_token: token.into(),
+                refresh_token: "test-refresh".into(),
+                expires_at,
+            });
+            provider
+        };
+        for accounts in [
+            vec![account(200, "fresh"), account(100, "expired")],
+            vec![account(100, "expired"), account(200, "fresh")],
+        ] {
+            fs::write(
+                store.join("ai_providers.json"),
+                serde_json::to_vec(&accounts).unwrap(),
+            )
+            .unwrap();
+            let auth = build_opencode_auth_from_ai_providers(temp.path()).unwrap();
+            assert_eq!(auth["anthropic"]["access"], "fresh");
+            assert_eq!(auth["anthropic"]["expires"], 200);
+        }
+    }
+
+    #[test]
+    fn muse_provider_auth_is_written_under_opencode_meta_key() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).expect("store");
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Muse,
+            "Meta Muse".to_string(),
+        );
+        provider.api_key = Some("sk-meta-test".to_string());
+        fs::write(
+            store.join("ai_providers.json"),
+            serde_json::to_string(&vec![provider]).expect("serialize"),
+        )
+        .expect("write store");
+
+        let auth = build_opencode_auth_from_ai_providers(temp.path()).expect("auth");
+        assert_eq!(auth["meta"]["type"], "api");
+        assert_eq!(auth["meta"]["key"], "sk-meta-test");
+        assert_eq!(auth["muse"]["type"], "api_key");
+        assert_eq!(auth["muse"]["key"], "sk-meta-test");
+
+        let mut env = std::collections::HashMap::new();
+        let providers = apply_opencode_auth_env(&auth, &mut env);
+        assert_eq!(
+            env.get("META_MODEL_API_KEY").map(String::as_str),
+            Some("sk-meta-test")
+        );
+        assert!(providers.contains(&"muse"));
+
+        let meta_only = serde_json::json!({
+            "meta": { "type": "api_key", "key": "sk-meta-only" }
+        });
+        let mut env = std::collections::HashMap::new();
+        apply_opencode_auth_env(&meta_only, &mut env);
+        assert_eq!(
+            env.get("META_MODEL_API_KEY").map(String::as_str),
+            Some("sk-meta-only")
+        );
     }
 
     #[test]
@@ -9062,6 +10354,45 @@ mod tests {
             Some("private reasoning")
         );
         assert_eq!(grok_event_text(&event), None);
+    }
+
+    #[test]
+    fn stream_overlap_matches_unicode_oracle() {
+        fn oracle(a: &str, b: &str) -> usize {
+            b.char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(b.len()))
+                .filter(|&i| a.ends_with(&b[..i]))
+                .max()
+                .unwrap_or(0)
+        }
+        let mut strings = vec![String::new()];
+        let mut level = vec![String::new()];
+        for _ in 0..4 {
+            level = level
+                .iter()
+                .flat_map(|s| ["a", "b", "é", "🙂"].map(|c| format!("{s}{c}")))
+                .collect();
+            strings.extend(level.clone());
+        }
+        for a in &strings {
+            for b in &strings {
+                let got = super::suffix_prefix_overlap_len(a, b);
+                assert_eq!(got, oracle(a, b), "{a:?} {b:?}");
+                assert!(b.is_char_boundary(got));
+            }
+        }
+    }
+
+    #[test]
+    fn stream_overlap_handles_long_repeated_and_unicode_suffixes() {
+        let a = format!("{}é🙂ababab", "Contexte français. ".repeat(100_000));
+        assert_eq!(
+            super::suffix_prefix_overlap_len(&a, "é🙂ababab suite"),
+            "é🙂ababab".len()
+        );
+        assert_eq!(super::suffix_prefix_overlap_len(&a, &"z".repeat(2000)), 0);
+        assert_eq!(super::suffix_prefix_overlap_len("é🙂", "🙂fin"), "🙂".len());
     }
 
     #[test]
@@ -9260,6 +10591,22 @@ mod tests {
         assert!(!codex_turn_requires_tool_activity(
             "You must not edit files. Give a text-only answer.",
             "Here is the answer."
+        ));
+    }
+
+    #[test]
+    fn codex_tool_activity_handles_labeled_negative_instructions() {
+        assert!(!codex_turn_requires_tool_activity(
+            "Streaming probe: Do not use tools or access files. Write a Markdown table about software testing.",
+            "Here is the table."
+        ));
+        assert!(codex_turn_requires_tool_activity(
+            "Run cargo test: do not modify files. Report the result.",
+            "Here is the result."
+        ));
+        assert!(codex_turn_requires_tool_activity(
+            "Task: Do not modify files; run cargo test.",
+            "Here is the result."
         ));
     }
 
@@ -9472,6 +10819,21 @@ mod tests {
         assert!(remaining > std::time::Duration::from_secs(50));
         clear_codex_account_cooldown(fp);
         assert!(codex_account_cooldown_remaining(fp).is_none());
+    }
+
+    #[test]
+    fn pick_codex_lease_pool_never_falls_through_to_cooled_when_fresh_exists() {
+        let fresh = vec!["ben"];
+        let cooled = vec!["thomas"];
+        assert_eq!(pick_codex_lease_pool(fresh, cooled), vec!["ben"]);
+        assert_eq!(
+            pick_codex_lease_pool(Vec::<&str>::new(), vec!["thomas"]),
+            vec!["thomas"]
+        );
+        assert_eq!(
+            CODEX_ACCOUNT_LEASE_WAIT_TIMEOUT,
+            std::time::Duration::from_secs(180)
+        );
     }
 
     #[test]
@@ -9974,6 +11336,13 @@ mod tests {
 
         let normal_text = "The OpenCode CLI exited with status: 1 in a prior run, now fixed.";
         assert!(!opencode_output_needs_fallback(normal_text));
+
+        assert!(opencode_output_needs_fallback(
+            "sh: 1: /srv/container/.sandboxed-sh-opencode-cmd.sh: not found"
+        ));
+        assert!(!opencode_output_needs_fallback(
+            "I found that sh: 1 reported a missing command in the prior run."
+        ));
     }
 
     #[test]
@@ -10361,6 +11730,52 @@ mod tests {
     }
 
     #[test]
+    fn ensure_opencode_provider_kimi_routes_through_host_proxy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+
+        // Workspace config would have written api.kimi.com; the runner must
+        // overwrite it so empty-assistant sanitization in the proxy applies.
+        fs::write(
+            config_dir.join("opencode.json"),
+            r#"{"provider":{"kimi":{"npm":"@ai-sdk/openai-compatible","name":"Kimi","options":{"baseURL":"https://api.kimi.com/coding/v1","apiKey":"stale"}}}}"#,
+        )
+        .unwrap();
+
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "kimi/k3-256k",
+            "10.88.0.1",
+            Some("00000000-0000-0000-0000-000000000123"),
+        );
+
+        let opencode_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("opencode.json")).expect("opencode.json"),
+        )
+        .expect("parse opencode.json");
+        let provider = &opencode_json["provider"]["kimi"];
+        let base_url = provider["options"]["baseURL"].as_str().expect("baseURL");
+        assert!(
+            base_url.starts_with("http://10.88.0.1:"),
+            "expected host proxy baseURL, got {base_url}"
+        );
+        assert_ne!(base_url, "https://api.kimi.com/coding/v1");
+        assert_eq!(
+            provider["options"]["headers"][crate::api::proxy_liveness::MISSION_ID_HEADER],
+            "00000000-0000-0000-0000-000000000123"
+        );
+        assert_eq!(provider["models"]["k3-256k"]["name"], "k3-256k");
+        assert_eq!(
+            provider["models"]["k3-256k"]["capabilities"]["interleaved"]["field"],
+            "reasoning_content"
+        );
+    }
+
+    #[test]
     fn ensure_opencode_provider_builtin_uses_workspace_host_ip() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config_dir = temp.path().join("ws");
@@ -10394,6 +11809,87 @@ mod tests {
             .as_str()
             .expect("mission id header");
         assert_eq!(mission_header, "00000000-0000-0000-0000-000000000123");
+    }
+
+    #[test]
+    fn ensure_opencode_provider_does_not_inject_muse_chat_adapter() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "meta/muse-spark-1.2",
+            "127.0.0.1",
+            None,
+        );
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "muse/muse-spark-1.2",
+            "127.0.0.1",
+            None,
+        );
+
+        let path = config_dir.join("opencode.json");
+        if path.exists() {
+            let opencode_json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).expect("opencode.json"))
+                    .expect("parse");
+            assert!(
+                opencode_json
+                    .get("provider")
+                    .and_then(|p| p.get("muse"))
+                    .is_none(),
+                "must not inject a muse openai-compatible block"
+            );
+            assert!(
+                opencode_json
+                    .get("provider")
+                    .and_then(|p| p.get("meta"))
+                    .is_none(),
+                "must not override OpenCode's native meta Responses provider"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_opencode_provider_builtin_accepts_xai_slash_model_id() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+
+        // `--model builtin/xai/grok-4.6` splits as provider=builtin,
+        // model=xai/grok-4.6. The model key must keep the slash so the
+        // proxy sees the full provider/model passthrough id.
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "builtin/xai/grok-4.6",
+            "127.0.0.1",
+            Some("00000000-0000-0000-0000-000000000123"),
+        );
+
+        let opencode_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("opencode.json")).expect("opencode.json"),
+        )
+        .expect("parse opencode.json");
+        assert_eq!(
+            opencode_json["provider"]["builtin"]["models"]["xai/grok-4.6"]["name"],
+            "xai/grok-4.6"
+        );
+        let base_url = opencode_json["provider"]["builtin"]["options"]["baseURL"]
+            .as_str()
+            .expect("baseURL");
+        assert!(
+            base_url.starts_with("http://127.0.0.1:"),
+            "expected loopback proxy baseURL, got {base_url}"
+        );
     }
 
     // ── extract_part_text tests ───────────────────────────────────────
@@ -12239,6 +13735,57 @@ mod tests {
     // large enough to matter, and NOT fire on a normal response that
     // happens to contain repeated short strings (e.g. "yes, yes, yes").
 
+    /// The 7fb8970f incident (2026-08-06): a Fable 5 review was killed
+    /// mid-way through its final report because a 17-guarantee table repeats
+    /// long row scaffolding. Legitimate structure repeats are SEPARATED by
+    /// distinct content; a degenerate loop is back to back.
+    /// Guard contract: the detector must surrender its evidence, not a bool.
+    #[test]
+    fn degenerate_detector_names_the_repeated_substring() {
+        let phrase = "Yielding pending your choice between the three options. ";
+        let s = phrase.repeat(50);
+        let needle = super::degenerate_repeated_substring(&s, 4096, 40, 3)
+            .expect("a 50x adjacent repeat must be caught");
+        assert!(
+            phrase.contains(&needle) || needle.contains(phrase.trim_end()),
+            "the evidence must be the actual repeated text, got {needle:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_detector_spares_a_structured_report() {
+        let mut s = String::from("## Hypothesis report\n### Sources verified\n");
+        for i in 0..17 {
+            s.push_str(&format!(
+                "| P-GUARANTEE-{i} | verified against the PR head checkout \
+                 | Source/Correspondence{i}.lean lines {}..{} | detailed note \
+                 about branch conditions and revert paths for case {i} |\n",
+                i * 40,
+                i * 40 + 39
+            ));
+        }
+        assert!(
+            !text_buffer_stream_looks_degenerate(&s, 4096, 40, 3),
+            "a review table with distinct data between repeated scaffolding \
+             is a report, not a loop"
+        );
+    }
+
+    /// Non-overlap regression: a periodic phrase must be counted by whole
+    /// occurrences, not by every one-char offset of itself.
+    #[test]
+    fn degenerate_detector_counts_whole_occurrences_only() {
+        // Two adjacent copies of a 56-char phrase: below min_repeats=3, so it
+        // must NOT fire — the old `found + 1` overlap walk could inflate a
+        // periodic needle past the threshold.
+        let phrase = "Yielding pending your choice between the three options. ";
+        let s = phrase.repeat(2);
+        assert!(
+            !text_buffer_stream_looks_degenerate(&s, 4096, 40, 3),
+            "two copies are two, not three"
+        );
+    }
+
     #[test]
     fn degenerate_detector_flags_long_repeated_phrase() {
         let phrase = "Yielding pending your choice between the three options. ";
@@ -12381,11 +13928,97 @@ mod tests {
         runner.cancel();
         runner.cancellation_force_clear_deadline =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        // Age last_activity so the cancel-timeout fresh-progress gate does
+        // not keep a truly stuck handle alive.
+        runner.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(120);
 
+        assert!(!runner.force_clear_cancelled_if_due());
+        assert!(runner.running_handle.is_some());
+        while !runner.check_finished() {
+            tokio::task::yield_now().await;
+        }
         assert!(runner.force_clear_cancelled_if_due());
         assert!(runner.running_handle.is_none());
         assert!(matches!(runner.state, MissionRunState::Finished));
         assert!(!runner.force_clear_cancelled_if_due());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_request_keeps_assignment_runner_until_synchronous_work_stops() {
+        let mut runner = MissionRunner::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            Some("codex".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let old_work = barrier.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        runner.state = MissionRunState::Running;
+        runner.running_handle = Some(tokio::spawn(async move {
+            entered_tx.send(()).unwrap();
+            // Model a tool doing synchronous work: abort cannot stop it until
+            // it returns to the executor. No timing sleeps establish order.
+            old_work.wait();
+            (
+                Uuid::new_v4(),
+                String::new(),
+                AgentResult::failure("stopped", 0),
+            )
+        }));
+        entered_rx.await.unwrap();
+        runner.cancel();
+        runner.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(120);
+        runner.cancellation_force_clear_deadline = Some(std::time::Instant::now());
+        assert!(!runner.force_clear_cancelled_if_due());
+        assert!(runner.is_running());
+        assert!(!runner.check_finished());
+        assert!(!runner.force_clear_cancelled_if_due());
+        barrier.wait();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !runner.check_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(runner.force_clear_cancelled_if_due());
+        assert!(runner.is_finished());
+        assert!(runner.running_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_timeout_does_not_kill_a_runner_with_fresh_progress() {
+        let mut runner = MissionRunner::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            Some("codex".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        runner.state = MissionRunState::Running;
+        runner.running_handle = Some(tokio::spawn(async {
+            std::future::pending::<(Uuid, String, AgentResult)>().await
+        }));
+        runner
+            .active_tool_calls
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        runner.cancel();
+        runner.cancellation_force_clear_deadline =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+
+        assert!(!runner.force_clear_cancelled_if_due());
+        assert!(runner.running_handle.is_some());
+        assert!(matches!(runner.state, MissionRunState::Running));
     }
 
     #[test]
@@ -12417,12 +14050,12 @@ mod tests {
 
     #[test]
     fn claude_install_prefers_npm_for_native_package_when_bun_is_also_present() {
-        let command = claudecode_install_command("2.1.140", true, Some("bun"))
+        let command = claudecode_install_command("2.1.257", true, Some("bun"))
             .expect("npm should produce an install command");
 
         assert_eq!(
             command,
-            "npm install -g @anthropic-ai/claude-code@'2.1.140'"
+            "npm install -g @anthropic-ai/claude-code@'2.1.257'"
         );
         assert!(!command.contains("bun install"));
     }

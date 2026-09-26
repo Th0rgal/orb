@@ -984,8 +984,10 @@ fn paloma_alert_kind_for_status(status: MissionStatus) -> Option<&'static str> {
 fn paloma_alert_importance_for_mission(
     mission: &Mission,
     interest: TelegramMissionInterestLevel,
+    waiting_for_user_tool: bool,
+    wait_started_at: Option<&str>,
 ) -> &'static str {
-    planner::alert_importance_for_mission(mission, interest)
+    planner::alert_importance_for_mission(mission, interest, waiting_for_user_tool, wait_started_at)
 }
 
 fn paloma_alert_event_kind_at(
@@ -1001,6 +1003,19 @@ fn paloma_alert_event_kind_at(
         now,
         ChronoDuration::minutes(PALOMA_LONG_RUNNING_ALERT_BUCKET_MINUTES),
     )
+}
+
+/// Unique alert key for a live AskUserQuestion. Status stays `active`, so
+/// the usual status-event suffix would collapse every wait on the same
+/// mission onto one telegram_alerts row.
+fn paloma_alert_event_kind_for_live_wait(wait_started_at: Option<&str>) -> String {
+    match wait_started_at {
+        Some(started) => format!(
+            "mission_awaiting_user:{}",
+            started.replace([':', '.', '+'], "-")
+        ),
+        None => "mission_awaiting_user:live".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1278,6 +1293,36 @@ async fn paloma_pending_alert_still_eligible(
     let Ok(Some(mission)) = ctx.mission_store.get_mission(mission_id).await else {
         return false;
     };
+    let active_run = ctx
+        .mission_store
+        .get_active_mission_run(mission.id)
+        .await
+        .ok()
+        .flatten();
+    let waiting_for_user_tool = active_run.as_ref().is_some_and(|run| {
+        run.execution_state == crate::api::mission_store::MissionExecutionState::WaitingUser
+    });
+    // Live AskUserQuestion alerts are keyed `mission_awaiting_user:<start>`
+    // while the stored mission stays Active. Kind-from-status would derive
+    // `mission_long_running` and drop the pending page before delivery.
+    if alert.event_kind.starts_with("mission_awaiting_user") {
+        if !waiting_for_user_tool {
+            return false;
+        }
+        let wait_started_at = match active_run.as_ref() {
+            Some(run) => {
+                crate::api::control::user_wait_tool_started_at(ctx.mission_store.as_ref(), run)
+                    .await
+            }
+            None => None,
+        };
+        return crate::api::operator_attention::mission_needs_operator(
+            &mission,
+            true,
+            wait_started_at.as_deref(),
+            now,
+        );
+    }
     let Some(current_kind) = paloma_alert_kind_for_status(mission.status) else {
         return false;
     };
@@ -1332,9 +1377,6 @@ async fn plan_paloma_alert_for_mission(
     alert_preferences: &[TelegramAlertPreference],
     mission: Mission,
 ) {
-    let Some(base_kind) = paloma_alert_kind_for_status(mission.status) else {
-        return;
-    };
     let interest = subscriptions
         .get(&mission.id)
         .copied()
@@ -1346,7 +1388,50 @@ async fn plan_paloma_alert_for_mission(
         .await
         .unwrap_or_default();
     let alert_now = Utc::now();
-    let policy_snapshot = paloma_policy_snapshot_json(&mission, interest, alert_now);
+    let active_run = ctx
+        .mission_store
+        .get_active_mission_run(mission.id)
+        .await
+        .ok()
+        .flatten();
+    let waiting_for_user_tool = active_run.as_ref().is_some_and(|run| {
+        run.execution_state == crate::api::mission_store::MissionExecutionState::WaitingUser
+    });
+    let wait_started_at = match active_run.as_ref() {
+        Some(run) => {
+            crate::api::control::user_wait_tool_started_at(ctx.mission_store.as_ref(), run).await
+        }
+        None => None,
+    };
+    let needs_operator = crate::api::operator_attention::mission_needs_operator(
+        &mission,
+        waiting_for_user_tool,
+        wait_started_at.as_deref(),
+        alert_now,
+    );
+    // Needs You is a qualified page. Ack, inspect, and in-grace
+    // controller-owned questions stay out of the human inbox.
+    if (mission.status == MissionStatus::AwaitingUser || waiting_for_user_tool) && !needs_operator {
+        tracing::debug!(
+            mission_id = %mission.id,
+            "Paloma alert: holding — not a qualified operator page"
+        );
+        return;
+    }
+    let Some(base_kind) = (if waiting_for_user_tool && needs_operator {
+        Some("mission_awaiting_user")
+    } else {
+        paloma_alert_kind_for_status(mission.status)
+    }) else {
+        return;
+    };
+    // Qualified live AskUserQuestion is a user page, not a long-running
+    // Active turn — skip the 30-minute gate and "is still running" copy.
+    let mut policy_mission = mission.clone();
+    if waiting_for_user_tool && needs_operator {
+        policy_mission.status = MissionStatus::AwaitingUser;
+    }
+    let policy_snapshot = paloma_policy_snapshot_json(&policy_mission, interest, alert_now);
     if interest == TelegramMissionInterestLevel::Muted {
         log_paloma_alert_decision(
             ctx,
@@ -1362,8 +1447,8 @@ async fn plan_paloma_alert_for_mission(
         .await;
         return;
     }
-    if paloma_mission_has_failure_only_preference(alert_preferences, mission.id)
-        && mission.status != MissionStatus::Failed
+    if paloma_mission_has_failure_only_preference(alert_preferences, policy_mission.id)
+        && policy_mission.status != MissionStatus::Failed
     {
         log_paloma_alert_decision(
             ctx,
@@ -1379,7 +1464,7 @@ async fn plan_paloma_alert_for_mission(
         .await;
         return;
     }
-    if !paloma_should_alert_mission_at(&mission, &events, interest, alert_now) {
+    if !paloma_should_alert_mission_at(&policy_mission, &events, interest, alert_now) {
         log_paloma_alert_decision(
             ctx,
             owner_id,
@@ -1388,7 +1473,10 @@ async fn plan_paloma_alert_for_mission(
             "create_alert",
             false,
             Some(paloma_alert_suppression_reason(
-                &mission, &events, interest, alert_now,
+                &policy_mission,
+                &events,
+                interest,
+                alert_now,
             )),
             policy_snapshot,
             None,
@@ -1421,7 +1509,7 @@ async fn plan_paloma_alert_for_mission(
         .await;
         return;
     }
-    let body = paloma_alert_body(&mission, &events);
+    let body = paloma_alert_body(&policy_mission, &events);
     log_paloma_alert_decision(
         ctx,
         owner_id,
@@ -1435,8 +1523,18 @@ async fn plan_paloma_alert_for_mission(
     )
     .await;
     let now = now_string();
-    let event_kind = paloma_alert_event_kind_at(&mission, base_kind, &events, alert_now);
-    let importance = paloma_alert_importance_for_mission(&mission, interest).to_string();
+    let event_kind = if waiting_for_user_tool && needs_operator {
+        paloma_alert_event_kind_for_live_wait(wait_started_at.as_deref())
+    } else {
+        paloma_alert_event_kind_at(&mission, base_kind, &events, alert_now)
+    };
+    let importance = paloma_alert_importance_for_mission(
+        &mission,
+        interest,
+        waiting_for_user_tool,
+        wait_started_at.as_deref(),
+    )
+    .to_string();
     let _ = ctx
         .mission_store
         .create_telegram_alert_if_absent(TelegramAlert {
@@ -3668,6 +3766,8 @@ async fn resolve_or_create_mission(
             working_directory: None,
             scheduling: Default::default(),
             requires_local_disk: true,
+            estimated_disk_gib: None,
+            admission_tags: Vec::new(),
             respond: tx,
         })
         .await;
@@ -6786,14 +6886,14 @@ mod tests {
         is_paloma_shared_summary_allowed, markdown_to_telegram_html, merge_telegram_chat_metadata,
         mission_card_should_reanchor, mission_label, normalize_paloma_natural_command,
         paloma_alert_body, paloma_alert_class_from_event_kind, paloma_alert_digest_text,
-        paloma_alert_event_kind_at, paloma_alert_importance_for_mission,
-        paloma_alert_kind_for_status, paloma_channel_job_name, paloma_chat_is_allowed,
-        paloma_command_error_response, paloma_mission_has_failure_only_preference,
-        paloma_role_for_user, paloma_shared_summary_body,
-        paloma_should_alert_long_running_mission_at, paloma_should_alert_mission_at,
-        paloma_status_event_is_new, paloma_status_seen_sequences, paloma_timestamp_is_recent,
-        parse_paloma_selector_and_payload, redact_for_telegram, render_telegram_chunk,
-        sanitize_telegram_visible_text, scope_for_extracted_memory,
+        paloma_alert_event_kind_at, paloma_alert_event_kind_for_live_wait,
+        paloma_alert_importance_for_mission, paloma_alert_kind_for_status, paloma_channel_job_name,
+        paloma_chat_is_allowed, paloma_command_error_response,
+        paloma_mission_has_failure_only_preference, paloma_role_for_user,
+        paloma_shared_summary_body, paloma_should_alert_long_running_mission_at,
+        paloma_should_alert_mission_at, paloma_status_event_is_new, paloma_status_seen_sequences,
+        paloma_timestamp_is_recent, parse_paloma_selector_and_payload, redact_for_telegram,
+        render_telegram_chunk, sanitize_telegram_visible_text, scope_for_extracted_memory,
         select_latest_awaiting_user_mission, should_silence_paloma_shared_command,
         telegram_action_target_matches, telegram_chat_display_title, telegram_shared_file_caption,
         truncate_for_telegram, verify_internal_telegram_action_token, workflow_reply_text,
@@ -6837,8 +6937,10 @@ mod tests {
             desktop_sessions: vec![],
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::Task,
             goal_mode: false,
             goal_objective: None,
@@ -6847,6 +6949,8 @@ mod tests {
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         }
     }
 
@@ -7580,6 +7684,44 @@ mod tests {
     }
 
     #[test]
+    fn controller_first_triage_holds_unqualified_awaiting_user() {
+        use crate::api::mission_store::AwaitingKind;
+        use crate::api::operator_attention::{
+            mission_needs_operator, CONTROLLER_TRIAGE_GRACE_SECS,
+        };
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let mut owned = test_mission("triage me", MissionStatus::AwaitingUser);
+        owned.awaiting_kind = Some(AwaitingKind::Decision);
+        owned.origin_session_id = Some("sess-1".into());
+        owned.updated_at = (now - chrono::Duration::seconds(60)).to_rfc3339();
+        assert!(
+            !mission_needs_operator(&owned, false, None, now),
+            "fresh controller-owned decision stays with the controller"
+        );
+
+        owned.updated_at =
+            (now - chrono::Duration::seconds(CONTROLLER_TRIAGE_GRACE_SECS + 1)).to_rfc3339();
+        assert!(
+            mission_needs_operator(&owned, false, None, now),
+            "expired grace pages the human"
+        );
+
+        let mut unowned = test_mission("ask the human", MissionStatus::AwaitingUser);
+        unowned.awaiting_kind = Some(AwaitingKind::Decision);
+        unowned.origin_session_id = None;
+        unowned.updated_at = (now - chrono::Duration::seconds(5)).to_rfc3339();
+        assert!(mission_needs_operator(&unowned, false, None, now));
+
+        let mut ack = test_mission("review me", MissionStatus::AwaitingUser);
+        ack.awaiting_kind = Some(AwaitingKind::Ack);
+        ack.origin_session_id = Some("sess-1".into());
+        ack.updated_at =
+            (now - chrono::Duration::seconds(CONTROLLER_TRIAGE_GRACE_SECS + 1)).to_rfc3339();
+        assert!(!mission_needs_operator(&ack, false, None, now));
+    }
+
+    #[test]
     fn paloma_alert_status_rules_cover_questions_and_long_running_terminal_states() {
         let now = Utc.with_ymd_and_hms(2026, 5, 20, 1, 0, 0).unwrap();
 
@@ -7693,11 +7835,44 @@ mod tests {
         assert_eq!(kind_early, "mission_long_running");
         assert_eq!(kind_early, kind_later);
         assert_eq!(
-            paloma_alert_importance_for_mission(&mission, TelegramMissionInterestLevel::Normal),
+            paloma_alert_importance_for_mission(
+                &mission,
+                TelegramMissionInterestLevel::Normal,
+                false,
+                None
+            ),
             "normal"
         );
         assert_eq!(
-            paloma_alert_importance_for_mission(&mission, TelegramMissionInterestLevel::High),
+            paloma_alert_importance_for_mission(
+                &mission,
+                TelegramMissionInterestLevel::High,
+                false,
+                None
+            ),
+            "high"
+        );
+
+        let mut ack = test_mission("review me", MissionStatus::AwaitingUser);
+        ack.awaiting_kind = Some(crate::api::mission_store::AwaitingKind::Ack);
+        assert_eq!(
+            paloma_alert_importance_for_mission(
+                &ack,
+                TelegramMissionInterestLevel::Normal,
+                false,
+                None
+            ),
+            "low"
+        );
+        let mut decision = test_mission("pick one", MissionStatus::AwaitingUser);
+        decision.awaiting_kind = Some(crate::api::mission_store::AwaitingKind::Decision);
+        assert_eq!(
+            paloma_alert_importance_for_mission(
+                &decision,
+                TelegramMissionInterestLevel::Normal,
+                false,
+                None
+            ),
             "high"
         );
     }
@@ -7741,6 +7916,23 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 5, 20, 1, 0, 0).unwrap()
             ),
             "mission_awaiting_user:2026-05-20T00-05-00Z"
+        );
+    }
+
+    #[test]
+    fn live_wait_alert_kind_uses_the_tool_start_not_the_active_status() {
+        assert_eq!(
+            paloma_alert_event_kind_for_live_wait(Some("2026-05-20T01:10:00Z")),
+            "mission_awaiting_user:2026-05-20T01-10-00Z"
+        );
+        assert_ne!(
+            paloma_alert_event_kind_for_live_wait(Some("2026-05-20T01:10:00Z")),
+            paloma_alert_event_kind_for_live_wait(Some("2026-05-20T01:40:00Z")),
+            "a second AskUserQuestion on the same active mission must not collide"
+        );
+        assert_eq!(
+            paloma_alert_event_kind_for_live_wait(None),
+            "mission_awaiting_user:live"
         );
     }
 

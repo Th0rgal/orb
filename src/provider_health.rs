@@ -315,6 +315,31 @@ impl ProviderHealthTracker {
             .unwrap_or(true) // Unknown accounts are healthy by default
     }
 
+    /// Return true when at least one currently configured candidate account is
+    /// in an active cooldown.
+    pub async fn any_account_has_active_cooldown(&self, account_ids: &[Uuid]) -> bool {
+        let accounts = self.accounts.read().await;
+        account_ids
+            .iter()
+            .any(|id| accounts.get(id).is_some_and(AccountHealth::is_in_cooldown))
+    }
+
+    /// Return true when any of the given subscription keys has an active
+    /// shared cooldown. Complements `any_account_has_active_cooldown`: a
+    /// sibling filtered out by a subscription lane (whose original offender
+    /// may since have been deleted) must still classify the empty chain as
+    /// retryable rather than as a configuration error.
+    pub async fn any_subscription_cooldown_active(&self, keys: &[SubscriptionKey]) -> bool {
+        let cooldowns = self.subscription_cooldowns.read().await;
+        let now = std::time::Instant::now();
+        keys.iter().any(|key| {
+            cooldowns
+                .get(key)
+                .and_then(|entry| entry.cooldown_until)
+                .is_some_and(|until| now < until)
+        })
+    }
+
     /// Check whether a shared subscription (e.g. Claude Pro org) is currently
     /// cooling down. Callers pass `None` for accounts without a known shared
     /// identity; those are always healthy at this layer.
@@ -339,6 +364,11 @@ impl ProviderHealthTracker {
         if health.provider_id.is_none() {
             health.provider_id = Some(provider_id.to_string());
         }
+    }
+
+    /// Remove all account-scoped health state after its provider account is deleted.
+    pub async fn remove_account(&self, account_id: Uuid) {
+        self.accounts.write().await.remove(&account_id);
     }
 
     /// Record a successful request for an account.
@@ -670,6 +700,31 @@ pub struct ChainEntry {
 }
 
 /// A named model chain (fallback sequence).
+/// The Meta Muse model every chain should ride: the current Spark on the
+/// contributor tier. See `migrate_muse_entries`.
+pub const MUSE_DEFAULT_MODEL: &str = "muse-spark-1.3-contributor";
+
+/// Rewrite superseded / full-price Muse entries to [`MUSE_DEFAULT_MODEL`].
+/// Returns whether anything changed.
+pub fn migrate_muse_entries(chain: &mut ModelChain) -> bool {
+    let mut migrated = false;
+    for entry in &mut chain.entries {
+        if entry.provider_id == "muse"
+            && matches!(
+                entry.model_id.as_str(),
+                "muse-spark-1.1"
+                    | "muse-spark-1.2"
+                    | "muse-spark-1.2-contributor"
+                    | "muse-spark-1.3"
+            )
+        {
+            entry.model_id = MUSE_DEFAULT_MODEL.to_string();
+            migrated = true;
+        }
+    }
+    migrated
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelChain {
     /// Unique chain ID (e.g., "builtin/smart", "user/fast").
@@ -885,7 +940,11 @@ impl ModelChainStore {
                     },
                     ChainEntry {
                         provider_id: "zai".to_string(),
-                        model_id: "glm-5.2".to_string(),
+                        model_id: "glm-5.3".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "muse".to_string(),
+                        model_id: MUSE_DEFAULT_MODEL.to_string(),
                     },
                 ],
                 is_default: true,
@@ -895,15 +954,26 @@ impl ModelChainStore {
             });
             changed = true;
         } else {
+            // Meta Muse tier policy (owner decision 2026-09-03): every chain
+            // rides the current Spark on the contributor (data-sharing) tier,
+            // ~12x cheaper than the no-training tier. Older Spark ids and the
+            // full-price id are rewritten in place, order preserved.
+            for chain in chains.iter_mut() {
+                if migrate_muse_entries(chain) {
+                    chain.updated_at = now;
+                    changed = true;
+                    tracing::info!(chain = %chain.id, "Migrated Meta Muse entries to {MUSE_DEFAULT_MODEL}");
+                }
+            }
             // Built-in chains are managed defaults. Preserve configured order
             // and extra fallbacks, but keep their stock model IDs current.
             if let Some(chain) = chains.iter_mut().find(|c| c.id == "builtin/smart") {
                 let mut migrated = false;
                 for entry in &mut chain.entries {
                     if entry.provider_id == "zai"
-                        && matches!(entry.model_id.as_str(), "glm-5" | "glm-5.1")
+                        && matches!(entry.model_id.as_str(), "glm-5" | "glm-5.1" | "glm-5.2")
                     {
-                        entry.model_id = "glm-5.2".to_string();
+                        entry.model_id = "glm-5.3".to_string();
                         migrated = true;
                     }
                     if entry.provider_id == "minimax"
@@ -925,6 +995,22 @@ impl ModelChainStore {
                     chain.entries.swap(0, 1);
                     migrated = true;
                     tracing::info!("Reordered builtin/smart to lead with MiniMax");
+                }
+                // 2026-08-06: append Meta Muse as a tail fallback to already-
+                // persisted chains. Appending (never inserting) preserves the
+                // operator's configured priority — prod runs a kimi-first
+                // custom order that the stock migrations deliberately skip.
+                if !chain
+                    .entries
+                    .iter()
+                    .any(|entry| entry.provider_id == "muse")
+                {
+                    chain.entries.push(ChainEntry {
+                        provider_id: "muse".to_string(),
+                        model_id: MUSE_DEFAULT_MODEL.to_string(),
+                    });
+                    migrated = true;
+                    tracing::info!("Appended muse/{MUSE_DEFAULT_MODEL} to builtin/smart");
                 }
                 if migrated {
                     chain.updated_at = now;
@@ -1313,26 +1399,29 @@ impl ModelChainStore {
                 // `api.openai.com/v1/chat/completions`; those accounts keep
                 // `api_key = None, has_oauth = true` and route through the
                 // CLI-proxy adapter instead.
-                let routed_api_key = account.api_key.clone().or_else(|| {
-                    if !matches!(
-                        provider_type,
-                        crate::ai_providers::ProviderType::Anthropic
-                            | crate::ai_providers::ProviderType::Kimi
-                    ) {
-                        return None;
-                    }
-                    if !oauth_is_fresh {
-                        return None;
-                    }
-                    account.oauth.as_ref().and_then(|oauth| {
-                        let token = oauth.access_token.trim();
-                        if token.is_empty() {
-                            None
-                        } else {
-                            Some(token.to_string())
-                        }
-                    })
-                });
+                // A CLIProxyAPI-owned Anthropic OAuth record never routes its
+                // own access token: it resolves as an OAuth-only entry, which
+                // the proxy layer sends through CLIProxyAPI with the proxy key.
+                let anthropic_oauth_cli_proxy_routable =
+                    matches!(provider_type, crate::ai_providers::ProviderType::Anthropic)
+                        && account.api_key.is_none()
+                        && account.oauth.is_some()
+                        && crate::api::oauth_owner::cli_proxy_owns(
+                            crate::ai_providers::ProviderType::Anthropic,
+                        );
+                let fresh_oauth_token = if oauth_is_fresh && !anthropic_oauth_cli_proxy_routable {
+                    account
+                        .oauth
+                        .as_ref()
+                        .map(|oauth| oauth.access_token.as_str())
+                } else {
+                    None
+                };
+                let (routed_api_key, credential_is_oauth_token) = preferred_store_credential(
+                    provider_type,
+                    account.api_key.as_deref(),
+                    fresh_oauth_token,
+                );
                 // `routed_api_key` is only populated for OpenAI/Anthropic
                 // OAuth (where we can forward the access token as a Bearer
                 // credential). Google OAuth is routed via `get_google_access_token`
@@ -1344,7 +1433,26 @@ impl ModelChainStore {
                 let provider_is_google =
                     matches!(provider_type, crate::ai_providers::ProviderType::Google);
                 let google_oauth_routable = provider_is_google && account.oauth.is_some();
-                if account.api_key.is_none() && !oauth_is_fresh && !google_oauth_routable {
+                // Kimi tokens live ~300s, so the stored access token is often
+                // expired by the time a request (or a catalog listing) resolves
+                // the chain. The proxy refreshes Kimi OAuth at request time and
+                // retries once on 401, so keep the account routable whenever it
+                // holds OAuth at all instead of dropping it on staleness.
+                let kimi_oauth_routable =
+                    matches!(provider_type, crate::ai_providers::ProviderType::Kimi)
+                        && account.oauth.is_some();
+                let xai_oauth_cli_proxy_routable =
+                    matches!(provider_type, crate::ai_providers::ProviderType::Xai)
+                        && account.api_key.is_none()
+                        && account.oauth.is_some()
+                        && crate::api::ai_providers::xai_cli_proxy_account_available();
+                if account.api_key.is_none()
+                    && !oauth_is_fresh
+                    && !google_oauth_routable
+                    && !kimi_oauth_routable
+                    && !xai_oauth_cli_proxy_routable
+                    && !anthropic_oauth_cli_proxy_routable
+                {
                     tracing::debug!(
                         account_id = %account.id,
                         provider = %entry.provider_id,
@@ -1384,21 +1492,23 @@ impl ModelChainStore {
                 // attaching OAuth-only headers (Bearer + oauth beta) to an
                 // x-api-key request. Google still needs `has_oauth=true` to
                 // trigger its adapter regardless of store-token freshness.
-                let provider_oauth_is_proxy_routable = matches!(
-                    provider_type,
-                    crate::ai_providers::ProviderType::Anthropic
-                        | crate::ai_providers::ProviderType::Kimi
-                );
-                let credential_is_oauth_token =
-                    account.api_key.is_none() && oauth_is_fresh && provider_oauth_is_proxy_routable;
+                // `credential_is_oauth_token` comes from
+                // `preferred_store_credential` above so it always describes the
+                // credential actually routed (Kimi routes the live OAuth token
+                // even when a stale `api_key` snapshot is persisted).
                 let xai_oauth_cli_proxy_routable =
                     matches!(provider_type, crate::ai_providers::ProviderType::Xai)
                         && account.api_key.is_none()
-                        && oauth_is_fresh
+                        && account.oauth.is_some()
                         && crate::api::ai_providers::xai_cli_proxy_account_available();
                 let entry_has_oauth = credential_is_oauth_token
+                    || (provider_type == crate::ai_providers::ProviderType::OpenAI
+                        && oauth_is_fresh
+                        && routed_api_key.is_none())
                     || google_oauth_routable
-                    || xai_oauth_cli_proxy_routable;
+                    || xai_oauth_cli_proxy_routable
+                    || anthropic_oauth_cli_proxy_routable
+                    || (kimi_oauth_routable && routed_api_key.is_none());
                 let entry_has_api_key = routed_api_key.is_some();
                 resolved.push(ResolvedEntry {
                     provider_id: entry.provider_id.clone(),
@@ -1502,6 +1612,115 @@ impl ModelChainStore {
 
         resolved
     }
+
+    /// Return account IDs that are currently enabled, credentialed, and match
+    /// the requested entries, without filtering them through provider health.
+    /// Used to distinguish a real cooldown from an unconfigured route.
+    pub async fn configured_account_ids(
+        &self,
+        entries: &[ChainEntry],
+        ai_providers: &crate::ai_providers::AIProviderStore,
+        standard_accounts: &[StandardAccount],
+    ) -> Vec<Uuid> {
+        let mut ids = std::collections::HashSet::new();
+        for entry in entries {
+            let provider_type = crate::ai_providers::ProviderType::from_id(&entry.provider_id)
+                .unwrap_or(crate::ai_providers::ProviderType::Custom);
+            for account in ai_providers.get_all_by_type(provider_type).await {
+                if !account.has_credentials() {
+                    continue;
+                }
+                if matches!(provider_type, crate::ai_providers::ProviderType::Custom) {
+                    let matches = if entry.provider_id == "custom" {
+                        account
+                            .custom_models
+                            .as_ref()
+                            .is_some_and(|models| models.iter().any(|m| m.id == entry.model_id))
+                    } else {
+                        crate::api::providers::sanitize_custom_provider_id(&account.name)
+                            == entry.provider_id
+                    };
+                    if !matches {
+                        continue;
+                    }
+                }
+                ids.insert(account.id);
+            }
+            for account in standard_accounts {
+                if account.provider_type == provider_type
+                    && (account.api_key.is_some() || account.has_oauth)
+                {
+                    ids.insert(account.account_id);
+                }
+            }
+        }
+        ids.into_iter().collect()
+    }
+
+    /// Subscription keys of the same candidate set `configured_account_ids`
+    /// derives, for classifying an empty chain. Standard (auth.json) accounts
+    /// resolve with no subscription key, matching `resolve_entries`.
+    pub async fn configured_subscription_keys(
+        &self,
+        entries: &[ChainEntry],
+        ai_providers: &crate::ai_providers::AIProviderStore,
+    ) -> Vec<SubscriptionKey> {
+        let mut keys = std::collections::HashSet::new();
+        for entry in entries {
+            let provider_type = crate::ai_providers::ProviderType::from_id(&entry.provider_id)
+                .unwrap_or(crate::ai_providers::ProviderType::Custom);
+            for account in ai_providers.get_all_by_type(provider_type).await {
+                if !account.has_credentials() {
+                    continue;
+                }
+                if let Some(key) = store_account_subscription_key(provider_type, &account) {
+                    keys.insert(key);
+                }
+            }
+        }
+        keys.into_iter().collect()
+    }
+}
+
+/// Pick the credential the proxy will forward for a store account, returning
+/// `(credential, credential_is_oauth_token)`.
+///
+/// Only Anthropic and Kimi chat endpoints accept the OAuth access token as a
+/// Bearer credential, so OAuth hoisting is limited to those types. Ordering
+/// differs per provider:
+/// - **Kimi**: the live OAuth token always wins. Kimi Code access tokens live
+///   ~300s and are refreshed in the background, so any `api_key` persisted in
+///   `ai_providers.json` is a stale snapshot of an old token — routing it
+///   produces deterministic 401s. The stored key is only a last-resort
+///   fallback when no fresh OAuth token exists.
+/// - **Anthropic** (and everything else): a real API key wins over OAuth, so
+///   the proxy sends `x-api-key`-style auth when the operator configured one.
+pub(crate) fn preferred_store_credential(
+    provider_type: crate::ai_providers::ProviderType,
+    api_key: Option<&str>,
+    fresh_oauth_access_token: Option<&str>,
+) -> (Option<String>, bool) {
+    use crate::ai_providers::ProviderType as PT;
+    let oauth_routable = matches!(provider_type, PT::Anthropic | PT::Kimi);
+    let oauth_token = fresh_oauth_access_token
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && oauth_routable)
+        .map(str::to_string);
+    let stored_key = api_key
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
+    if provider_type == PT::Kimi {
+        if let Some(token) = oauth_token {
+            return (Some(token), true);
+        }
+        return (stored_key, false);
+    }
+    match (stored_key, oauth_token) {
+        (Some(key), _) => (Some(key), false),
+        (None, Some(token)) => (Some(token), true),
+        (None, None) => (None, false),
+    }
 }
 
 /// Shared chain store type.
@@ -1509,11 +1728,82 @@ pub type SharedModelChainStore = Arc<ModelChainStore>;
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn subscription_cooldown_classifies_empty_chain_as_retryable() {
+        use super::*;
+        let tracker = ProviderHealthTracker::new();
+        let key = SubscriptionKey("anthropic:org-123".to_string());
+        let other = SubscriptionKey("openai:org-999".to_string());
+        let offender = Uuid::new_v4();
+
+        tracker
+            .record_failure_with_subscription(
+                offender,
+                Some(&key),
+                CooldownReason::RateLimit,
+                Some(std::time::Duration::from_secs(60)),
+            )
+            .await;
+        // The offending account is deleted; only the shared lane remains.
+        tracker.remove_account(offender).await;
+
+        assert!(!tracker.any_account_has_active_cooldown(&[offender]).await);
+        assert!(
+            tracker
+                .any_subscription_cooldown_active(&[key.clone()])
+                .await
+        );
+        assert!(!tracker.any_subscription_cooldown_active(&[other]).await);
+        assert!(!tracker.any_subscription_cooldown_active(&[]).await);
+    }
     use super::*;
     use crate::ai_providers::{
         AIProvider, AIProviderStore, OAuthCredentials, ProviderStatus, ProviderType,
     };
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn active_cooldown_is_detected_for_candidate_account_ids() {
+        let tracker = ProviderHealthTracker::with_backoff(BackoffConfig {
+            base_delay: std::time::Duration::from_secs(60),
+            max_delay: std::time::Duration::from_secs(60),
+            multiplier: 1.0,
+            circuit_breaker_threshold: 5,
+            degraded_multiplier: 1.0,
+        });
+        let account_id = uuid::Uuid::new_v4();
+        let other_id = uuid::Uuid::new_v4();
+        tracker.set_provider_id(account_id, "zai").await;
+
+        assert!(!tracker.any_account_has_active_cooldown(&[account_id]).await);
+        tracker
+            .record_failure(account_id, CooldownReason::RateLimit, None)
+            .await;
+        assert!(tracker.any_account_has_active_cooldown(&[account_id]).await);
+        assert!(!tracker.any_account_has_active_cooldown(&[other_id]).await);
+    }
+
+    #[tokio::test]
+    async fn removed_account_no_longer_contributes_provider_cooldown() {
+        let tracker = ProviderHealthTracker::with_backoff(BackoffConfig {
+            base_delay: std::time::Duration::from_secs(60),
+            max_delay: std::time::Duration::from_secs(60),
+            multiplier: 1.0,
+            circuit_breaker_threshold: 5,
+            degraded_multiplier: 1.0,
+        });
+        let account_id = uuid::Uuid::new_v4();
+        tracker.set_provider_id(account_id, "zai").await;
+        tracker
+            .record_failure(account_id, CooldownReason::RateLimit, None)
+            .await;
+        assert!(tracker.any_account_has_active_cooldown(&[account_id]).await);
+
+        tracker.remove_account(account_id).await;
+
+        assert!(!tracker.any_account_has_active_cooldown(&[account_id]).await);
+    }
 
     async fn store_with(providers: Vec<AIProvider>) -> AIProviderStore {
         let tmp = TempDir::new().unwrap();
@@ -1618,15 +1908,54 @@ mod tests {
             models,
             vec![
                 ("minimax".to_string(), "MiniMax-M3".to_string()),
-                // glm-5.1 is migrated to glm-5.2 by ensure_default_chain.
-                ("zai".to_string(), "glm-5.2".to_string()),
+                // glm-5.1 is migrated to glm-5.3 by ensure_default_chain.
+                ("zai".to_string(), "glm-5.3".to_string()),
                 ("cerebras".to_string(), "zai-glm-4.7".to_string()),
+                // The 2026-08-06 migration appends Meta Muse as a tail
+                // fallback to persisted chains, never reordering them.
+                ("muse".to_string(), MUSE_DEFAULT_MODEL.to_string()),
             ]
         );
 
         let custom = store.get("user/custom").await.unwrap();
         assert_eq!(custom.entries.len(), 1);
         assert_eq!(custom.entries[0].model_id, "gpt-oss-120b");
+    }
+
+    #[tokio::test]
+    async fn ensure_defaults_migrates_stock_glm_52_to_53() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("chains.json");
+        let now = chrono::Utc::now();
+        let chains = vec![ModelChain {
+            id: "builtin/smart".to_string(),
+            name: "Smart (Default)".to_string(),
+            entries: vec![
+                ChainEntry {
+                    provider_id: "minimax".to_string(),
+                    model_id: "MiniMax-M3".to_string(),
+                },
+                ChainEntry {
+                    provider_id: "zai".to_string(),
+                    model_id: "glm-5.2".to_string(),
+                },
+            ],
+            is_default: true,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        }];
+        std::fs::write(&path, serde_json::to_string(&chains).unwrap()).unwrap();
+        let store = ModelChainStore::new(path).await;
+        std::mem::forget(tmp);
+
+        let smart = store.get("builtin/smart").await.unwrap();
+        let zai = smart
+            .entries
+            .iter()
+            .find(|e| e.provider_id == "zai")
+            .expect("zai entry");
+        assert_eq!(zai.model_id, "glm-5.3");
     }
 
     fn past_ms(hours: i64) -> i64 {
@@ -1720,6 +2049,58 @@ mod tests {
             ),
             cli_proxy_available
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_chain_keeps_expired_xai_oauth_when_cli_proxy_is_refreshable() {
+        let auth_dir = TempDir::new().unwrap();
+        std::fs::write(
+            auth_dir.path().join("xai-thomas.json"),
+            serde_json::json!({
+                "type": "xai",
+                "access_token": "proxy-access",
+                "refresh_token": "proxy-refresh"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let previous = std::env::var("CLI_PROXY_AUTH_DIR").ok();
+        std::env::set_var("CLI_PROXY_AUTH_DIR", auth_dir.path());
+
+        let mut xai = AIProvider::new(ProviderType::Xai, "xAI (Grok Build OAuth)".to_string());
+        xai.oauth = Some(OAuthCredentials {
+            access_token: "stale-store-copy".to_string(),
+            refresh_token: "shared-refresh".to_string(),
+            expires_at: past_ms(2),
+        });
+        xai.status = ProviderStatus::Connected;
+
+        let store = store_with(vec![xai]).await;
+        let chains = store_with_chain(
+            "grok-4.6",
+            vec![ChainEntry {
+                provider_id: "xai".to_string(),
+                model_id: "grok-4.6".to_string(),
+            }],
+        )
+        .await;
+        let tracker = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("grok-4.6", &store, &[], &tracker)
+            .await;
+
+        match previous {
+            Some(value) => std::env::set_var("CLI_PROXY_AUTH_DIR", value),
+            None => std::env::remove_var("CLI_PROXY_AUTH_DIR"),
+        }
+
+        assert_eq!(
+            resolved.len(),
+            1,
+            "expired store copy must not drop SuperGrok when CLIProxyAPI can refresh"
+        );
+        assert!(resolved[0].api_key.is_none());
+        assert!(resolved[0].has_oauth);
     }
 
     #[tokio::test]
@@ -1899,6 +2280,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_account_ids_match_custom_name_and_generic_alias() {
+        let account = custom_account("Spark", "https://spark.example/v1", &["muse-spark-1.2"]);
+        let account_id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain("noop", vec![]).await;
+
+        for provider_id in ["spark", "custom"] {
+            let ids = chains
+                .configured_account_ids(
+                    &[ChainEntry {
+                        provider_id: provider_id.to_string(),
+                        model_id: "muse-spark-1.2".to_string(),
+                    }],
+                    &store,
+                    &[],
+                )
+                .await;
+            assert_eq!(ids, vec![account_id]);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_account_ids_exclude_disabled_accounts() {
+        let mut account = custom_account("Spark", "https://spark.example/v1", &["muse-spark-1.2"]);
+        let account_id = account.id;
+        let store = store_with(vec![account.clone()]).await;
+        account.enabled = false;
+        store.update(account_id, account).await.unwrap();
+        let chains = store_with_chain("noop", vec![]).await;
+
+        let ids = chains
+            .configured_account_ids(
+                &[ChainEntry {
+                    provider_id: "spark".to_string(),
+                    model_id: "muse-spark-1.2".to_string(),
+                }],
+                &store,
+                &[],
+            )
+            .await;
+
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
     async fn record_success_resets_counters_after_recovery() {
         // The real-world scenario: a 429 burst cools the account down briefly,
         // the cooldown timer expires on its own, and the next request succeeds.
@@ -2065,5 +2491,181 @@ mod tests {
             store_account_subscription_key(ProviderType::Anthropic, &acc),
             None
         );
+    }
+
+    #[test]
+    fn preferred_store_credential_kimi_prefers_live_oauth_over_stored_key() {
+        // Kimi: a persisted api_key is a stale snapshot of a ~300s OAuth
+        // token; the live token must win.
+        assert_eq!(
+            preferred_store_credential(
+                ProviderType::Kimi,
+                Some("stale-snapshot"),
+                Some("live-token")
+            ),
+            (Some("live-token".to_string()), true)
+        );
+        // Without a fresh token, the stored key remains a last-resort fallback.
+        assert_eq!(
+            preferred_store_credential(ProviderType::Kimi, Some("stale-snapshot"), None),
+            (Some("stale-snapshot".to_string()), false)
+        );
+        // Anthropic keeps key-first ordering.
+        assert_eq!(
+            preferred_store_credential(ProviderType::Anthropic, Some("sk-ant"), Some("oauth-at")),
+            (Some("sk-ant".to_string()), false)
+        );
+        assert_eq!(
+            preferred_store_credential(ProviderType::Anthropic, None, Some("oauth-at")),
+            (Some("oauth-at".to_string()), true)
+        );
+        // OAuth hoisting stays limited to Anthropic/Kimi — an xAI token must
+        // never be forwarded as an API key.
+        assert_eq!(
+            preferred_store_credential(ProviderType::Xai, None, Some("grok-oauth")),
+            (None, false)
+        );
+        // Whitespace-only credentials are treated as absent.
+        assert_eq!(
+            preferred_store_credential(ProviderType::Kimi, Some("  "), Some("  ")),
+            (None, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_entries_preserves_codex_oauth_without_hoisting_it_to_an_api_key() {
+        for key in [None, Some("api-key".to_string())] {
+            let mut account = AIProvider::new(ProviderType::OpenAI, "Codex".into());
+            account.api_key = key.clone();
+            account.oauth = Some(OAuthCredentials {
+                access_token: "codex-access".into(),
+                refresh_token: "codex-refresh".into(),
+                expires_at: future_ms(1),
+            });
+            account.status = ProviderStatus::Connected;
+            let id = account.id;
+            let store = store_with(vec![account]).await;
+            let chains = store_with_chain("unused", vec![]).await;
+            let resolved = chains
+                .resolve_entries(
+                    &[ChainEntry {
+                        provider_id: "openai".into(),
+                        model_id: "gpt-6-astra".into(),
+                    }],
+                    &store,
+                    &[],
+                    &ProviderHealthTracker::new(),
+                )
+                .await;
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].account_id, id);
+            assert_eq!(resolved[0].api_key, key);
+            assert_eq!(resolved[0].has_oauth, key.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_entries_kimi_routes_live_oauth_not_stale_api_key() {
+        let mut kimi = AIProvider::new(ProviderType::Kimi, "Kimi".to_string());
+        kimi.api_key = Some("stale-snapshot".to_string());
+        kimi.oauth = Some(OAuthCredentials {
+            access_token: "live-kimi-token".to_string(),
+            refresh_token: "kimi-rt".to_string(),
+            expires_at: future_ms(1),
+        });
+        kimi.status = ProviderStatus::Connected;
+        let store = store_with(vec![kimi]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let tracker = ProviderHealthTracker::new();
+
+        let resolved = chains
+            .resolve_entries(
+                &[ChainEntry {
+                    provider_id: "kimi".to_string(),
+                    model_id: "k3".to_string(),
+                }],
+                &store,
+                &[],
+                &tracker,
+            )
+            .await;
+
+        assert_eq!(resolved.len(), 1, "kimi entry should resolve: {resolved:?}");
+        assert_eq!(
+            resolved[0].api_key.as_deref(),
+            Some("live-kimi-token"),
+            "must route the live OAuth token, never the persisted api_key snapshot"
+        );
+        assert!(resolved[0].has_oauth);
+        assert_eq!(resolved[0].model_id, "k3");
+    }
+
+    #[tokio::test]
+    async fn resolve_entries_kimi_stays_routable_with_expired_oauth() {
+        // Kimi tokens live ~300s; between refresh cycles the stored snapshot
+        // is expired. The account must still resolve (api_key: None,
+        // has_oauth: true) so GET /v1/models keeps the kimi catalog and the
+        // proxy can refresh the token at request time.
+        let mut kimi = AIProvider::new(ProviderType::Kimi, "Kimi".to_string());
+        kimi.oauth = Some(OAuthCredentials {
+            access_token: "expired-kimi-token".to_string(),
+            refresh_token: "kimi-rt".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() - 60_000,
+        });
+        kimi.status = ProviderStatus::Connected;
+        let store = store_with(vec![kimi]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let tracker = ProviderHealthTracker::new();
+
+        let resolved = chains
+            .resolve_entries(
+                &[ChainEntry {
+                    provider_id: "kimi".to_string(),
+                    model_id: "k3".to_string(),
+                }],
+                &store,
+                &[],
+                &tracker,
+            )
+            .await;
+
+        assert_eq!(
+            resolved.len(),
+            1,
+            "kimi entry with expired OAuth should resolve: {resolved:?}"
+        );
+        assert_eq!(
+            resolved[0].api_key, None,
+            "an expired token must not be hoisted as a Bearer credential"
+        );
+        assert!(resolved[0].has_oauth);
+    }
+
+    #[tokio::test]
+    async fn cooldown_clears_on_success_for_account_and_subscription() {
+        // A rate-limit failure parks the account and its shared subscription;
+        // one successful request through any credential of the subscription
+        // must fully clear both cooldowns.
+        let tracker = ProviderHealthTracker::new();
+        let account = Uuid::new_v4();
+        let key = SubscriptionKey::new("anthropic", "org-x");
+
+        let cd = tracker
+            .record_failure_with_subscription(
+                account,
+                Some(&key),
+                CooldownReason::RateLimit,
+                Some(std::time::Duration::from_secs(600)),
+            )
+            .await;
+        assert!(cd >= std::time::Duration::from_secs(600));
+        assert!(!tracker.is_healthy(account).await);
+        assert!(!tracker.subscription_is_healthy(Some(&key)).await);
+
+        tracker
+            .record_success_with_subscription(account, Some(&key))
+            .await;
+        assert!(tracker.is_healthy(account).await);
+        assert!(tracker.subscription_is_healthy(Some(&key)).await);
     }
 }

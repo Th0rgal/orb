@@ -20,6 +20,36 @@ use crate::nspawn;
 use crate::util::env_var_bool;
 use crate::workspace::{use_nspawn_for_workspace, TailscaleMode, Workspace, WorkspaceType};
 
+/// Evidence that command construction or exec failed before the target could
+/// accept argv. Generic Tokio spawn errors do not provide this guarantee:
+/// registration of an already spawned child's pipes can also fail.
+#[derive(Debug, thiserror::Error)]
+#[error("workspace command was not launched: {0}")]
+pub(crate) struct ConfirmedNoLaunch(pub anyhow::Error);
+
+fn spawn_streaming_command(cmd: &mut Command) -> anyhow::Result<Child> {
+    cmd.spawn().map_err(|error| {
+        // Linux exec-specific failures. Tokio 1.51's post-spawn fcntl,
+        // epoll ADD and signal-registration path cannot emit these errors.
+        // Resource/registration failures and other platforms stay ambiguous.
+        #[cfg(target_os = "linux")]
+        if matches!(
+            error.raw_os_error(),
+            Some(
+                libc::ENOENT
+                    | libc::ENOEXEC
+                    | libc::E2BIG
+                    | libc::ENOTDIR
+                    | libc::ETXTBSY
+                    | libc::ELOOP
+            )
+        ) {
+            return ConfirmedNoLaunch(error.into()).into();
+        }
+        anyhow::Error::new(error).context("Workspace spawn outcome is uncertain")
+    })
+}
+
 const CONTAINER_KEEPALIVE_ENV_KEY: &str = "SANDBOXED_SH_CONTAINER_KEEPALIVE";
 const CONTAINER_KEEPALIVE_ENV_VALUE: &str = "1";
 const ALLOW_TRANSIENT_CONTAINER_NSENTER_ENV: &str =
@@ -625,6 +655,7 @@ fn persistent_nspawn_command(scope_args: Option<&[String]>) -> Command {
 
 #[cfg(test)]
 mod tests {
+    use super::{spawn_streaming_command, ConfirmedNoLaunch};
     use crate::nspawn;
 
     use super::{
@@ -641,6 +672,19 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use tokio::process::Command;
+
+    #[tokio::test]
+    async fn streaming_no_launch_evidence_distinguishes_exec_failure_from_child_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut missing = Command::new(dir.path().join("missing-cli"));
+        let error = spawn_streaming_command(&mut missing).unwrap_err();
+        #[cfg(target_os = "linux")]
+        assert!(error.downcast_ref::<ConfirmedNoLaunch>().is_some());
+        let mut launched = Command::new("/bin/sh");
+        launched.args(["-c", "exit 127"]);
+        let mut child = spawn_streaming_command(&mut launched).unwrap();
+        assert_eq!(child.wait().await.unwrap().code(), Some(127));
+    }
 
     #[test]
     fn mission_tag_extracted_from_workspace_cwd() {
@@ -1263,6 +1307,41 @@ impl WorkspaceExec {
         Self { workspace }
     }
 
+    /// Bind only the project's files into the live container namespace.
+    pub async fn mount_project_context(
+        &self,
+        source: &Path,
+        project: &str,
+    ) -> anyhow::Result<String> {
+        if !use_nspawn_for_workspace(&self.workspace) {
+            return Ok(source.to_string_lossy().into_owned());
+        }
+        anyhow::ensure!(
+            !project.is_empty()
+                && project
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            "Invalid context project"
+        );
+        let leader = self
+            .ensure_persistent_container_leader(&self.build_env(HashMap::new()))
+            .await?;
+        let output = Command::new("python3")
+            .arg("-c")
+            .arg(include_str!("../shared/mount_project_context.py"))
+            .arg(source)
+            .arg(&leader)
+            .arg(project)
+            .output()
+            .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Context mount failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(format!("/run/sandboxed-context/{project}"))
+    }
+
     /// Translate a host path to a container-relative path.
     ///
     /// For container workspaces using nspawn/nsenter, paths must be relative to the container
@@ -1285,7 +1364,7 @@ impl WorkspaceExec {
 
     fn rel_path_in_container(&self, cwd: &Path) -> String {
         let root = &self.workspace.path;
-        let rel = cwd.strip_prefix(root).unwrap_or_else(|_| Path::new(""));
+        let rel = crate::workspace::strip_workspace_prefix(cwd, root).unwrap_or_default();
         if rel.as_os_str().is_empty() {
             "/".to_string()
         } else {
@@ -1370,6 +1449,43 @@ impl WorkspaceExec {
                 self.workspace.workspace_type,
                 &self.workspace.env_vars,
             );
+        }
+
+        if let Some(guard_dir) = self.workspace.read_only_command_guard_dir.as_ref() {
+            let fixture_root = guard_dir
+                .parent()
+                .expect("read-only guard directory has a parent")
+                .join("read-only-fixtures");
+            let fixture_root = self.translate_path_for_container(&fixture_root);
+            let guard_dir = self.translate_path_for_container(guard_dir);
+            let existing_path = merged
+                .get("PATH")
+                .cloned()
+                .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".to_string());
+            merged.insert("PATH".to_string(), format!("{guard_dir}:{existing_path}"));
+            merged.insert("SANDBOXED_SH_PR_READONLY".to_string(), "1".to_string());
+            merged.insert("TMPDIR".to_string(), fixture_root);
+            merged.insert("GIT_TERMINAL_PROMPT".to_string(), "0".to_string());
+            merged.insert("GCM_INTERACTIVE".to_string(), "never".to_string());
+            // Standard pushes are blocked twice: the PATH guard rejects the
+            // subcommand and the per-process config gives common remotes an
+            // unusable push URL. Authenticated GETs remain available for
+            // private-repository review through gh.
+            for remote in ["origin", "upstream"] {
+                let index = merged
+                    .get("GIT_CONFIG_COUNT")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                merged.insert("GIT_CONFIG_COUNT".to_string(), (index + 1).to_string());
+                merged.insert(
+                    format!("GIT_CONFIG_KEY_{index}"),
+                    format!("remote.{remote}.pushurl"),
+                );
+                merged.insert(
+                    format!("GIT_CONFIG_VALUE_{index}"),
+                    "disabled://pr-readonly".to_string(),
+                );
+            }
         }
 
         merged
@@ -1686,6 +1802,31 @@ impl WorkspaceExec {
                 "--bind={}:/root/context",
                 global_context_root.display()
             ));
+        }
+
+        // Disk-backed `/tmp` (Layer 2, opt-in). nspawn's default is a tmpfs at
+        // 10% of host RAM — small, RAM-priced, silent when it fills, and
+        // invisible to every host-side disk check. See `container_tmp`.
+        //
+        // This is bound before the X11 socket on purpose for readability only:
+        // nspawn sorts custom mounts by destination depth, so `/tmp` is mounted
+        // before `/tmp/.X11-unix` regardless of argument order.
+        if let Some(tmp_dir) = crate::container_tmp::dir_for(&self.workspace.name) {
+            match crate::container_tmp::prepare(&tmp_dir) {
+                Ok(()) => {
+                    cmd.arg(format!("--bind={}:/tmp", tmp_dir.display()));
+                }
+                Err(error) => {
+                    // Falling back to the stock tmpfs keeps the container
+                    // bootable; a workspace with no `/tmp` at all would not be.
+                    tracing::warn!(
+                        workspace = %self.workspace.name,
+                        path = %tmp_dir.display(),
+                        %error,
+                        "Could not prepare a disk-backed /tmp; falling back to the nspawn tmpfs"
+                    );
+                }
+            }
         }
 
         let x11_socket_path = Path::new("/tmp/.X11-unix");
@@ -2083,6 +2224,17 @@ impl WorkspaceExec {
         env: HashMap<String, String>,
     ) -> anyhow::Result<Child> {
         let env = self.build_env(env);
+        // Validate merged inputs: std::process::Command can replace a NUL-
+        // containing value internally while remembering a deferred spawn error.
+        if program.contains('\0')
+            || args.iter().any(|v| v.contains('\0'))
+            || env
+                .iter()
+                .any(|(k, v)| k.contains('\0') || v.contains('\0'))
+            || cwd.as_os_str().to_string_lossy().contains('\0')
+        {
+            return Err(ConfirmedNoLaunch(anyhow::anyhow!("command contains NUL")).into());
+        }
         let mut cmd = self
             .build_command(
                 cwd,
@@ -2095,10 +2247,11 @@ impl WorkspaceExec {
                 None,
             )
             .await
-            .context("Failed to build workspace command")?;
+            .map_err(|error| {
+                ConfirmedNoLaunch(error.context("Failed to build workspace command"))
+            })?;
 
-        let child = cmd.spawn().context("Failed to spawn workspace command")?;
-        Ok(child)
+        spawn_streaming_command(&mut cmd)
     }
 
     /// Spawn a workspace-aware command with caller-provided stdio.

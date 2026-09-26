@@ -58,6 +58,13 @@ struct ChatCompletionRequest {
     stream: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NativeProtocolRequest {
+    model: String,
+    #[serde(default)]
+    stream: Option<bool>,
+}
+
 /// Minimal error response matching OpenAI's format.
 #[derive(Serialize)]
 struct ErrorResponse {
@@ -80,6 +87,68 @@ fn error_response(status: StatusCode, message: String, code: &str) -> Response {
         },
     };
     (status, Json(body)).into_response()
+}
+
+const DEFAULT_COOLDOWN_RETRY_AFTER_SECS: u64 = 60;
+const MAX_COOLDOWN_RETRY_AFTER_SECS: u64 = 60;
+
+fn preserved_upstream_error_response(
+    status: StatusCode,
+    response_headers: &HeaderMap,
+    response_body: bytes::Bytes,
+) -> Response {
+    let mut response = (status, Body::from(response_body)).into_response();
+    for name in [header::CONTENT_TYPE, header::RETRY_AFTER] {
+        if let Some(value) = response_headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    response
+}
+
+fn cooldown_retry_after_secs() -> u64 {
+    std::env::var("PROXY_COOLDOWN_RETRY_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_COOLDOWN_RETRY_AFTER_SECS)
+        .clamp(1, MAX_COOLDOWN_RETRY_AFTER_SECS)
+}
+
+fn cooldown_error_response_with_retry_after(chain_id: &str, retry_after_secs: u64) -> Response {
+    let mut response = error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        format!(
+            "All providers in chain '{}' are currently in cooldown or unconfigured",
+            chain_id
+        ),
+        "rate_limit_exceeded",
+    );
+    let retry_after = retry_after_secs
+        .clamp(1, MAX_COOLDOWN_RETRY_AFTER_SECS)
+        .to_string();
+    if let Ok(value) = HeaderValue::from_str(&retry_after) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
+fn cooldown_error_response(chain_id: &str) -> Response {
+    cooldown_error_response_with_retry_after(chain_id, cooldown_retry_after_secs())
+}
+
+fn unavailable_chain_response(chain_id: &str, provider_in_cooldown: bool) -> Response {
+    if provider_in_cooldown {
+        cooldown_error_response(chain_id)
+    } else {
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "No configured or routable providers are available for chain '{}'",
+                chain_id
+            ),
+            "provider_configuration_error",
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -145,13 +214,14 @@ static KIMI_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
 ///
 /// Returns `None` for providers that don't have an OpenAI-compatible API
 /// (e.g., Google Gemini uses a different format).
-fn default_base_url(provider_type: ProviderType) -> Option<&'static str> {
+pub(crate) fn default_base_url(provider_type: ProviderType) -> Option<&'static str> {
     match provider_type {
         ProviderType::OpenAI => Some("https://api.openai.com/v1"),
         ProviderType::Xai => Some("https://api.x.ai/v1"),
         ProviderType::Cerebras => Some("https://api.cerebras.ai/v1"),
         ProviderType::Zai => Some("https://api.z.ai/api/coding/paas/v4"),
         ProviderType::Minimax => Some("https://api.minimax.io/v1"),
+        ProviderType::Muse => Some("https://api.meta.ai/v1"),
         ProviderType::DeepInfra => Some("https://api.deepinfra.com/v1/openai"),
         ProviderType::Groq => Some("https://api.groq.com/openai/v1"),
         ProviderType::OpenRouter => Some("https://openrouter.ai/api/v1"),
@@ -179,6 +249,71 @@ fn completions_url(provider_type: ProviderType, account_base_url: Option<&str>) 
     Some(format!("{}/chat/completions", base))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeProtocol {
+    Responses,
+    AnthropicMessages,
+}
+
+fn protocol_url(
+    protocol: NativeProtocol,
+    provider_type: ProviderType,
+    account_base_url: Option<&str>,
+) -> Option<String> {
+    let default = match protocol {
+        NativeProtocol::Responses => match provider_type {
+            ProviderType::OpenAI | ProviderType::Xai | ProviderType::Muse => {
+                default_base_url(provider_type)
+            }
+            _ => None,
+        },
+        NativeProtocol::AnthropicMessages => match provider_type {
+            ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
+            _ => None,
+        },
+    };
+    let base = account_base_url.or(default)?.trim_end_matches('/');
+    let suffix = match protocol {
+        NativeProtocol::Responses => "responses",
+        NativeProtocol::AnthropicMessages => "messages",
+    };
+    if base.ends_with(&format!("/{suffix}")) {
+        Some(base.to_string())
+    } else {
+        Some(format!("{base}/{suffix}"))
+    }
+}
+
+fn native_protocol_supported(
+    protocol: NativeProtocol,
+    provider_type: ProviderType,
+    has_api_key: bool,
+    has_oauth: bool,
+) -> bool {
+    match protocol {
+        NativeProtocol::Responses => match provider_type {
+            ProviderType::Muse => has_api_key,
+            // OAuth Responses use the configured credential owner: core or
+            // CLIProxyAPI for Codex, CLIProxyAPI for Grok Build. These
+            // subscription routes require client-side input replay.
+            ProviderType::OpenAI => has_api_key || has_oauth,
+            ProviderType::Xai => {
+                has_api_key
+                    || (has_oauth && crate::api::ai_providers::xai_cli_proxy_account_available())
+            }
+            _ => false,
+        },
+        // The resolver supplies a direct API key or core-owned OAuth token.
+        // OAuth-only entries use CLIProxyAPI when it owns the credential.
+        NativeProtocol::AnthropicMessages => {
+            provider_type == ProviderType::Anthropic
+                && (has_api_key
+                    || (has_oauth
+                        && crate::api::ai_providers::anthropic_cli_proxy_account_available()))
+        }
+    }
+}
+
 fn cli_proxy_chat_completions_url() -> String {
     // Alias precedence lives in `util::CLI_PROXY_BASE_URL_ENV_VARS` so every
     // CLI-proxy code path agrees. `env_var_nonempty` (used by the helper)
@@ -193,6 +328,18 @@ fn cli_proxy_chat_completions_url() -> String {
         format!("{}/chat/completions", base)
     } else {
         format!("{}/v1/chat/completions", base)
+    }
+}
+
+fn cli_proxy_native_url(suffix: &str) -> String {
+    let base = crate::util::cli_proxy_base_url_from_env()
+        .unwrap_or_else(|| DEFAULT_CLI_PROXY_API_BASE_URL.to_string());
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+    if base.ends_with("/v1") {
+        format!("{}/{}", base, suffix)
+    } else {
+        format!("{}/v1/{}", base, suffix)
     }
 }
 
@@ -234,6 +381,13 @@ pub(crate) fn has_routable_proxy_credentials(
                 || (has_oauth && crate::api::ai_providers::xai_cli_proxy_account_available())
         }
         ProviderType::Google => has_api_key || has_oauth,
+        // Kimi access tokens live ~300s, so between refresh cycles the stored
+        // token is routinely expired and the resolved entry carries no
+        // hoisted `api_key`. The proxy refreshes the OAuth token at request
+        // time (and once more on a 401), so a connected Kimi account is
+        // routable whenever it holds OAuth at all — otherwise `GET /v1/models`
+        // drops the kimi catalog every time the snapshot happens to be stale.
+        ProviderType::Kimi => has_api_key || has_oauth,
         _ => has_api_key,
     }
 }
@@ -245,9 +399,18 @@ pub(crate) fn has_routable_proxy_credentials(
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
     Router::new()
         .route("/chat/completions", post(chat_completions))
+        .route("/responses", post(responses))
+        .route("/messages", post(anthropic_messages))
+        .route("/capabilities", get(list_capabilities))
         .route("/deferred/:id", get(get_deferred_request))
         .route("/deferred/:id", delete(cancel_deferred_request))
         .route("/models", axum::routing::get(list_models))
+        // OpenAI retrieve-model: GET /v1/models/{id}. Hermes-cli and OpenCode
+        // probe the selected id (e.g. `xai/grok-4.6`) after listing. Without
+        // this route the request falls through to JWT `require_auth`, which
+        // rejects a valid proxy key as "Invalid or expired token" (HTTP 401)
+        // even though POST /v1/chat/completions for the same model succeeds.
+        .route("/models/*model_id", axum::routing::get(get_model))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,10 +431,128 @@ struct ModelObject {
     owned_by: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProtocolCapabilities {
+    chat_completions: bool,
+    responses: bool,
+    anthropic_messages: bool,
+    previous_response_id: bool,
+    reasoning_content_replay: bool,
+    thinking_blocks_replay: bool,
+    native_function_tools: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderProtocolCapabilities {
+    provider: String,
+    model: String,
+    currently_available: bool,
+    capabilities: ProtocolCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelProtocolCapabilities {
+    id: String,
+    providers: Vec<ProviderProtocolCapabilities>,
+}
+
+#[derive(Serialize)]
+struct CapabilitiesResponse {
+    object: &'static str,
+    data: Vec<ModelProtocolCapabilities>,
+}
+
+fn protocol_capabilities(
+    provider_type: ProviderType,
+    has_api_key: bool,
+    has_oauth: bool,
+) -> ProtocolCapabilities {
+    let responses = native_protocol_supported(
+        NativeProtocol::Responses,
+        provider_type,
+        has_api_key,
+        has_oauth,
+    );
+    let anthropic_messages = native_protocol_supported(
+        NativeProtocol::AnthropicMessages,
+        provider_type,
+        has_api_key,
+        has_oauth,
+    );
+    match provider_type {
+        ProviderType::OpenAI | ProviderType::Xai | ProviderType::Muse => ProtocolCapabilities {
+            chat_completions: has_routable_proxy_credentials(provider_type, has_api_key, has_oauth),
+            responses,
+            anthropic_messages,
+            // The CLI-proxy Responses route (OAuth-only OpenAI/xAI) is
+            // stateless and ignores `previous_response_id`; only a direct
+            // API-key route offers server-side continuation.
+            previous_response_id: responses && has_api_key,
+            reasoning_content_replay: false,
+            thinking_blocks_replay: false,
+            native_function_tools: responses,
+        },
+        ProviderType::Anthropic => ProtocolCapabilities {
+            chat_completions: has_routable_proxy_credentials(provider_type, has_api_key, has_oauth),
+            responses,
+            anthropic_messages,
+            previous_response_id: false,
+            reasoning_content_replay: false,
+            thinking_blocks_replay: anthropic_messages,
+            native_function_tools: anthropic_messages,
+        },
+        ProviderType::Kimi => {
+            let chat_completions =
+                has_routable_proxy_credentials(provider_type, has_api_key, has_oauth);
+            ProtocolCapabilities {
+                chat_completions,
+                responses,
+                anthropic_messages,
+                previous_response_id: false,
+                // Stateless replay carried in each Chat request, so it needs no
+                // account affinity — but it is only meaningful on a routable route.
+                reasoning_content_replay: chat_completions,
+                thinking_blocks_replay: false,
+                native_function_tools: chat_completions,
+            }
+        }
+        // Z.AI GLM chat returns `reasoning_content` on thinking models and
+        // accepts the complete assistant message (including that field) on
+        // replay — the same stateless Kimi-style continuity contract.
+        ProviderType::Zai => {
+            let chat_completions =
+                has_routable_proxy_credentials(provider_type, has_api_key, has_oauth);
+            ProtocolCapabilities {
+                chat_completions,
+                responses,
+                anthropic_messages,
+                previous_response_id: false,
+                reasoning_content_replay: chat_completions,
+                thinking_blocks_replay: false,
+                native_function_tools: chat_completions,
+            }
+        }
+        _ => ProtocolCapabilities {
+            chat_completions: has_routable_proxy_credentials(provider_type, has_api_key, has_oauth),
+            responses,
+            anthropic_messages,
+            previous_response_id: false,
+            reasoning_content_replay: false,
+            thinking_blocks_replay: false,
+            native_function_tools: has_routable_proxy_credentials(
+                provider_type,
+                has_api_key,
+                has_oauth,
+            ),
+        },
+    }
+}
+
 /// Verify the proxy bearer token from the Authorization header.
 ///
 /// Accepts either the internal `SANDBOXED_PROXY_SECRET` or any user-generated
 /// proxy API key from the `ProxyApiKeyStore`.
+#[allow(clippy::result_large_err)] // Axum's Response is the endpoint error contract.
 pub(crate) async fn verify_proxy_auth(
     headers: &HeaderMap,
     state: &super::routes::AppState,
@@ -312,6 +593,156 @@ pub(crate) async fn verify_proxy_auth(
     ))
 }
 
+async fn list_capabilities(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let standard_accounts =
+        crate::api::ai_providers::read_standard_accounts(&state.config.working_dir);
+    let mut by_model: HashMap<String, Vec<ProviderProtocolCapabilities>> = HashMap::new();
+    let capability_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+    for chain in state.chain_store.list().await {
+        let configured_account_ids = state
+            .chain_store
+            .configured_account_ids(&chain.entries, &state.ai_providers, &standard_accounts)
+            .await;
+        let stateful_affinity = chain.entries.len() == 1 && configured_account_ids.len() == 1;
+        let available = state
+            .chain_store
+            .resolve_entries(
+                &chain.entries,
+                &state.ai_providers,
+                &standard_accounts,
+                &state.health_tracker,
+            )
+            .await;
+        let available_ids: HashSet<_> = available.iter().map(|entry| entry.account_id).collect();
+        let configured = state
+            .chain_store
+            .resolve_entries(
+                &chain.entries,
+                &state.ai_providers,
+                &standard_accounts,
+                &capability_tracker,
+            )
+            .await;
+        let mut provider_map: HashMap<(String, String), ProviderProtocolCapabilities> =
+            HashMap::new();
+        for entry in configured {
+            let provider_type =
+                ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+            let mut capabilities =
+                protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
+            if !stateful_affinity {
+                capabilities.previous_response_id = false;
+                capabilities.thinking_blocks_replay = false;
+            }
+            let key = (entry.provider_id.clone(), entry.model_id.clone());
+            let currently_available = available_ids.contains(&entry.account_id);
+            provider_map
+                .entry(key)
+                .and_modify(|provider| {
+                    provider.currently_available |= currently_available;
+                    provider.capabilities.chat_completions |= capabilities.chat_completions;
+                    provider.capabilities.responses |= capabilities.responses;
+                    provider.capabilities.anthropic_messages |= capabilities.anthropic_messages;
+                    provider.capabilities.native_function_tools |=
+                        capabilities.native_function_tools;
+                })
+                .or_insert(ProviderProtocolCapabilities {
+                    provider: entry.provider_id,
+                    model: entry.model_id,
+                    currently_available,
+                    capabilities,
+                });
+        }
+        let mut providers: Vec<_> = provider_map.into_values().collect();
+        providers.sort_by(|left, right| {
+            (&left.provider, &left.model).cmp(&(&right.provider, &right.model))
+        });
+        by_model.insert(chain.id, providers);
+    }
+    let direct_models =
+        crate::api::providers::catalog_model_options_for_state(&state, true, true).await;
+    for model in routable_direct_catalog_models(&state, direct_models).await {
+        let provider_type =
+            ProviderType::from_id(&model.provider_id).unwrap_or(ProviderType::Custom);
+        let synthetic = crate::provider_health::ChainEntry {
+            provider_id: model.provider_id.clone(),
+            model_id: model.id.clone(),
+        };
+        let configured_account_ids = state
+            .chain_store
+            .configured_account_ids(
+                std::slice::from_ref(&synthetic),
+                &state.ai_providers,
+                &standard_accounts,
+            )
+            .await;
+        let stateful_affinity = configured_account_ids.len() == 1;
+        let available = state
+            .chain_store
+            .resolve_entries(
+                std::slice::from_ref(&synthetic),
+                &state.ai_providers,
+                &standard_accounts,
+                &state.health_tracker,
+            )
+            .await;
+        let available_ids: HashSet<_> = available.iter().map(|entry| entry.account_id).collect();
+        let configured = state
+            .chain_store
+            .resolve_entries(
+                std::slice::from_ref(&synthetic),
+                &state.ai_providers,
+                &standard_accounts,
+                &capability_tracker,
+            )
+            .await;
+        let mut aggregate: Option<ProtocolCapabilities> = None;
+        for entry in configured {
+            let mut capabilities =
+                protocol_capabilities(provider_type, entry.api_key.is_some(), entry.has_oauth);
+            if !stateful_affinity {
+                capabilities.previous_response_id = false;
+                capabilities.thinking_blocks_replay = false;
+            }
+            if let Some(existing) = aggregate.as_mut() {
+                existing.chat_completions |= capabilities.chat_completions;
+                existing.responses |= capabilities.responses;
+                existing.anthropic_messages |= capabilities.anthropic_messages;
+                existing.reasoning_content_replay |= capabilities.reasoning_content_replay;
+                existing.native_function_tools |= capabilities.native_function_tools;
+            } else {
+                aggregate = Some(capabilities);
+            }
+        }
+        if let Some(capabilities) = aggregate {
+            by_model.entry(model.value).or_insert_with(|| {
+                vec![ProviderProtocolCapabilities {
+                    provider: model.provider_id,
+                    model: model.id,
+                    currently_available: !available_ids.is_empty(),
+                    capabilities,
+                }]
+            });
+        }
+    }
+    let mut data: Vec<_> = by_model
+        .into_iter()
+        .map(|(id, providers)| ModelProtocolCapabilities { id, providers })
+        .collect();
+    data.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(CapabilitiesResponse {
+        object: "list",
+        data,
+    })
+    .into_response()
+}
+
 async fn list_models(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
@@ -319,6 +750,63 @@ async fn list_models(
     if let Err(resp) = verify_proxy_auth(&headers, &state).await {
         return resp;
     }
+    let data = collect_proxy_models(&state).await;
+    Json(ModelsResponse {
+        object: "list",
+        data,
+    })
+    .into_response()
+}
+
+async fn get_model(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    Path(model_id): Path<String>,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let id = normalize_retrieved_model_id(&model_id);
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Model id is required".to_string(),
+            "invalid_request_error",
+        );
+    }
+    let data = collect_proxy_models(&state).await;
+    match data
+        .into_iter()
+        .find(|m| m.id == id || (is_known_kimi_model_id(&id) && m.id == format!("kimi/{id}")))
+    {
+        Some(mut model) => {
+            // OpenCode probes the stripped id (`k3-256k`) after listing
+            // `kimi/k3-256k`. Echo the requested id so the adapter keeps it.
+            if model.id != id {
+                model.id = id;
+            }
+            Json(model).into_response()
+        }
+        None if parse_kimi_bare_model_entry(&id).is_some() => Json(ModelObject {
+            id,
+            object: "model",
+            created: 0,
+            owned_by: "kimi",
+        })
+        .into_response(),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            format!("The model '{id}' does not exist"),
+            "model_not_found",
+        ),
+    }
+}
+
+fn normalize_retrieved_model_id(raw: &str) -> String {
+    raw.trim().trim_start_matches('/').to_string()
+}
+
+async fn collect_proxy_models(state: &Arc<super::routes::AppState>) -> Vec<ModelObject> {
     let chains = state.chain_store.list().await;
     let mut seen = HashSet::new();
     let mut data = Vec::new();
@@ -335,8 +823,8 @@ async fn list_models(
     }
 
     let direct_models =
-        crate::api::providers::catalog_model_options_for_state(&state, true, true).await;
-    let direct_models = routable_direct_catalog_models(&state, direct_models).await;
+        crate::api::providers::catalog_model_options_for_state(state, true, true).await;
+    let direct_models = routable_direct_catalog_models(state, direct_models).await;
     append_direct_models_to_proxy_models(
         &mut data,
         &mut seen,
@@ -359,11 +847,7 @@ async fn list_models(
     }
 
     data.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(ModelsResponse {
-        object: "list",
-        data,
-    })
-    .into_response()
+    data
 }
 
 async fn routable_direct_catalog_models(
@@ -504,6 +988,23 @@ fn parse_direct_model_entry(model: &str) -> Option<crate::provider_health::Chain
     })
 }
 
+/// Native Claude Code sends bare Anthropic model IDs. Configured chains are
+/// resolved first; this fallback preserves the exact requested model.
+fn parse_native_model_entry(
+    model: &str,
+    protocol: NativeProtocol,
+) -> Option<crate::provider_health::ChainEntry> {
+    parse_direct_model_entry(model).or_else(|| {
+        (protocol == NativeProtocol::AnthropicMessages
+            && model.starts_with("claude-")
+            && !model.contains('/'))
+        .then(|| crate::provider_health::ChainEntry {
+            provider_id: "anthropic".into(),
+            model_id: model.into(),
+        })
+    })
+}
+
 /// Parse a direct `provider/model` id whose prefix is a **custom** provider
 /// referenced by its sanitized name (e.g. `spark/step3p7-flash-148b`) — the id
 /// the catalog and model-routing UI expose for self-hosted OpenAI-compatible
@@ -611,7 +1112,508 @@ fn proxy_usage_sink(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Handler
+// Native protocol handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn native_response_usage(body: &[u8]) -> Option<(u64, u64)> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let usage = value.get("usage")?;
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    (input > 0 || output > 0).then_some((input, output))
+}
+
+fn body_has_previous_response_id(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("previous_response_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| !id.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// True only when the request depends on upstream server-side state.
+///
+/// `previous_response_id` refers to a response object that lives on one
+/// provider account, so it can only be honored by the exact account that
+/// produced it. Everything else a client can send — `function_call_output`
+/// items, reasoning items in `input`, signed `thinking` blocks, `tool_result`
+/// blocks — is client-side replay: the full transcript travels with the
+/// request, and the ordered chain failover can serve it like a fresh turn.
+/// Gating those on singleton affinity turned every tool turn on a multi-entry
+/// chain (for example `builtin/assistant`) into a hard 409.
+fn native_request_requires_server_state(protocol: NativeProtocol, body: &[u8]) -> bool {
+    match protocol {
+        NativeProtocol::Responses => body_has_previous_response_id(body),
+        NativeProtocol::AnthropicMessages => false,
+    }
+}
+
+async fn responses(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    native_protocol_proxy(state, headers, body, NativeProtocol::Responses).await
+}
+
+async fn anthropic_messages(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    native_protocol_proxy(state, headers, body, NativeProtocol::AnthropicMessages).await
+}
+
+async fn native_protocol_proxy(
+    state: Arc<super::routes::AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+    protocol: NativeProtocol,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let req: NativeProtocolRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("Invalid request body: {error}"),
+                "invalid_request_error",
+            );
+        }
+    };
+    let requested_model = req.model;
+    let is_stream = req.stream.unwrap_or(false);
+    super::ai_providers::reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
+    let standard_accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
+    let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
+    let resolved_chain_id = if exact_chain_exists {
+        Some(requested_model.clone())
+    } else {
+        let prefixed = format!("builtin/{requested_model}");
+        state.chain_store.get(&prefixed).await.map(|_| prefixed)
+    };
+    let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
+        let configured = state
+            .chain_store
+            .get(&id)
+            .await
+            .map(|chain| chain.entries)
+            .unwrap_or_default();
+        let resolved = state
+            .chain_store
+            .resolve_chain(
+                &id,
+                &state.ai_providers,
+                &standard_accounts,
+                &state.health_tracker,
+            )
+            .await;
+        (id, configured, resolved)
+    } else if let Some(direct) = parse_native_model_entry(&requested_model, protocol)
+        .or(parse_kimi_bare_model_entry(&requested_model))
+        .or(parse_custom_direct_model_entry(&state, &requested_model).await)
+    {
+        let resolved = state
+            .chain_store
+            .resolve_entries(
+                std::slice::from_ref(&direct),
+                &state.ai_providers,
+                &standard_accounts,
+                &state.health_tracker,
+            )
+            .await;
+        (requested_model.clone(), vec![direct], resolved)
+    } else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("Model '{requested_model}' is not a known chain or provider/model id"),
+            "model_not_found",
+        );
+    };
+
+    if entries.is_empty() {
+        let candidate_ids = state
+            .chain_store
+            .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
+            .await;
+        let cooling = state
+            .health_tracker
+            .any_account_has_active_cooldown(&candidate_ids)
+            .await;
+        return unavailable_chain_response(&chain_id, cooling);
+    }
+
+    if native_request_requires_server_state(protocol, &body) {
+        let candidate_ids = state
+            .chain_store
+            .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
+            .await;
+        if chain_entries.len() != 1 || candidate_ids.len() != 1 || entries.len() != 1 {
+            return error_response(
+                StatusCode::CONFLICT,
+                format!(
+                    "Stateful continuation for chain '{chain_id}' requires exactly one provider/model and one configured account"
+                ),
+                "stateful_affinity_required",
+            );
+        }
+    }
+
+    let mut supported_entries = 0usize;
+    let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
+    for entry in &entries {
+        let provider_type =
+            ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+        if !native_protocol_supported(
+            protocol,
+            provider_type,
+            entry.api_key.is_some(),
+            entry.has_oauth,
+        ) {
+            continue;
+        }
+        // OAuth entries reach native protocols through the local CLI proxy,
+        // which owns the credential:
+        //   - Responses for OAuth-only OpenAI (Codex) / xAI (Grok Build);
+        //   - Anthropic Messages for Claude subscription OAuth.
+        // The CLI-proxy Responses route is stateless: it silently ignores
+        // `previous_response_id`, so reject stateful continuation instead of
+        // pretending it was honored. Messages continuity is client-side block
+        // replay, which the CLI proxy preserves.
+        // Core-owned Codex accounts already use the shared refresh lock for
+        // local app-server launches. Remote clients use the same owner through
+        // this proxy; never copy rotating ChatGPT credentials onto leaf nodes.
+        let direct_codex = matches!(protocol, NativeProtocol::Responses)
+            && provider_type == ProviderType::OpenAI
+            && entry.has_oauth
+            && entry
+                .api_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+                .is_none()
+            && !super::oauth_owner::cli_proxy_owns(ProviderType::OpenAI);
+        let mut codex_account_id = None;
+        let via_cli_proxy = !direct_codex
+            && match protocol {
+                NativeProtocol::Responses => {
+                    matches!(provider_type, ProviderType::OpenAI | ProviderType::Xai)
+                        && entry
+                            .api_key
+                            .as_deref()
+                            .filter(|v| !v.trim().is_empty())
+                            .is_none()
+                }
+                NativeProtocol::AnthropicMessages => {
+                    provider_type == ProviderType::Anthropic
+                        && entry.has_oauth
+                        && entry
+                            .api_key
+                            .as_deref()
+                            .filter(|v| !v.trim().is_empty())
+                            .is_none()
+                }
+            };
+        let (url, credential) = if direct_codex {
+            if !is_stream || body_has_previous_response_id(&body) {
+                return error_response(StatusCode::BAD_REQUEST,
+                    "Core-owned Codex OAuth requires stream=true and replayed input; previous_response_id is unsupported".to_string(), "unsupported_parameter");
+            }
+            let Some(account) =
+                super::ai_providers::get_all_openai_oauth_accounts(&state.config.working_dir)
+                    .into_iter()
+                    .find(|account| account.provider_id == entry.account_id)
+            else {
+                continue;
+            };
+            let account = match super::ai_providers::prepare_codex_oauth_account_for_launch(
+                &state.config.working_dir,
+                &account,
+            )
+            .await
+            {
+                Ok(account) => account,
+                Err(_) => {
+                    state
+                        .health_tracker
+                        .record_entry_failure(entry, CooldownReason::AuthError, None)
+                        .await;
+                    continue;
+                }
+            };
+            codex_account_id = Some(account.chatgpt_account_id);
+            (
+                "https://chatgpt.com/backend-api/codex/responses".to_string(),
+                account.access_token,
+            )
+        } else if via_cli_proxy {
+            if matches!(protocol, NativeProtocol::Responses) && body_has_previous_response_id(&body)
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Chain '{chain_id}' routes Responses through the stateless CLI proxy, which does not honor 'previous_response_id'; replay prior output items in 'input' instead"
+                    ),
+                    "unsupported_parameter",
+                );
+            }
+            let Some(key) =
+                crate::util::cli_proxy_api_key_from_env().filter(|v| !v.trim().is_empty())
+            else {
+                continue;
+            };
+            let suffix = match protocol {
+                NativeProtocol::Responses => "responses",
+                NativeProtocol::AnthropicMessages => "messages",
+            };
+            (cli_proxy_native_url(suffix), key)
+        } else {
+            let Some(url) = protocol_url(protocol, provider_type, entry.base_url.as_deref()) else {
+                continue;
+            };
+            let Some(credential) = entry.api_key.as_deref().filter(|v| !v.trim().is_empty()) else {
+                continue;
+            };
+            (url, credential.to_string())
+        };
+        let credential = credential.as_str();
+        supported_entries += 1;
+        let rewrite_model_id = if via_cli_proxy && provider_type == ProviderType::Xai {
+            cli_proxy_xai_model_id(&entry.model_id)
+        } else {
+            entry.model_id.as_str()
+        };
+        let mut upstream_body = match rewrite_model(&body, rewrite_model_id) {
+            Ok(body) => body,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("Could not rewrite request model: {error}"),
+                    "invalid_request_error",
+                );
+            }
+        };
+        if direct_codex {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&upstream_body).expect("rewritten JSON");
+            value["store"] = serde_json::json!(false);
+            upstream_body = serde_json::to_vec(&value)
+                .expect("serializable JSON")
+                .into();
+        }
+        let mut request = state
+            .http_client
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(upstream_body);
+        if let Some(account_id) = codex_account_id {
+            request = request
+                .header("chatgpt-account-id", account_id)
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("originator", "codex_cli_rs");
+        }
+        match protocol {
+            NativeProtocol::Responses => {
+                request = request.bearer_auth(credential);
+            }
+            // The CLI proxy authenticates with its own bearer key and injects
+            // the Claude credential itself — Anthropic auth headers would be
+            // wrong there.
+            NativeProtocol::AnthropicMessages if via_cli_proxy => {
+                request = request.bearer_auth(credential);
+                for name in ["anthropic-version", "anthropic-beta"] {
+                    if let Some(value) = headers.get(name) {
+                        request = request.header(name, value);
+                    }
+                }
+            }
+            NativeProtocol::AnthropicMessages => {
+                for (name, value) in build_anthropic_proxy_headers(credential, entry.has_oauth) {
+                    if let Some(name) = name {
+                        request = request.header(name, value);
+                    }
+                }
+                // Preserve native features without dropping the OAuth beta
+                // required by a core-owned subscription credential.
+                for name in ["anthropic-version", "user-agent"] {
+                    if let Some(value) = headers.get(name) {
+                        request = request.header(name, value);
+                    }
+                }
+                if let Some(beta) = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
+                    request = request.header(
+                        "anthropic-beta",
+                        native_anthropic_beta(beta, entry.has_oauth),
+                    );
+                }
+            }
+        }
+        if !is_stream {
+            request = request.timeout(Duration::from_secs(300));
+        }
+        state
+            .health_tracker
+            .set_provider_id(entry.account_id, &entry.provider_id)
+            .await;
+        let upstream = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let reason = if error.is_timeout() {
+                    CooldownReason::Timeout
+                } else {
+                    CooldownReason::ServerError
+                };
+                state
+                    .health_tracker
+                    .record_entry_failure(entry, reason, None)
+                    .await;
+                continue;
+            }
+        };
+        let status = upstream.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            let _ = upstream.bytes().await;
+            state
+                .health_tracker
+                .record_entry_failure(entry, CooldownReason::AuthError, None)
+                .await;
+            continue;
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            let response_headers = upstream.headers().clone();
+            let retry_after = parse_rate_limit_headers(&response_headers, provider_type);
+            let response_body = upstream.bytes().await.unwrap_or_default();
+            let reason = if status.as_u16() == 529 {
+                CooldownReason::Overloaded
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                CooldownReason::RateLimit
+            } else {
+                CooldownReason::ServerError
+            };
+            state
+                .health_tracker
+                .record_entry_failure(entry, reason, retry_after)
+                .await;
+            last_upstream_error = Some((status, response_headers, response_body));
+            continue;
+        }
+        let response_headers = upstream.headers().clone();
+        if is_stream && status.is_success() {
+            let liveness_mission_id = headers
+                .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok());
+            let upstream_stream = upstream
+                .bytes_stream()
+                .map(|item| item.map_err(|error| std::io::Error::other(error.to_string())));
+            let tracked_stream = track_stream_health(
+                upstream_stream,
+                state.health_tracker.clone(),
+                entry.account_id,
+                None,
+                entry.subscription_key.clone(),
+                Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                liveness_mission_id,
+            );
+            let mut response = (status, Body::from_stream(tracked_stream)).into_response();
+            for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+                if let Some(value) = response_headers.get(&name) {
+                    response.headers_mut().insert(name, value.clone());
+                }
+            }
+            return response;
+        }
+        let response_body = match upstream.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                state
+                    .health_tracker
+                    .record_entry_failure(entry, CooldownReason::ServerError, None)
+                    .await;
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to read upstream response: {error}"),
+                    "upstream_error",
+                );
+            }
+        };
+        if status.is_success() {
+            state.health_tracker.record_entry_success(entry).await;
+            if let Some((input_tokens, output_tokens)) = native_response_usage(&response_body) {
+                state
+                    .health_tracker
+                    .record_token_usage(entry.account_id, input_tokens, output_tokens)
+                    .await;
+                record_proxy_usage(&state, &entry.model_id, input_tokens, output_tokens).await;
+            }
+        }
+        let mut response = (status, Body::from(response_body)).into_response();
+        for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+            if let Some(value) = response_headers.get(&name) {
+                response.headers_mut().insert(name, value.clone());
+            }
+        }
+        return response;
+    }
+
+    if let Some((status, response_headers, response_body)) = last_upstream_error {
+        return preserved_upstream_error_response(status, &response_headers, response_body);
+    }
+    let message = if supported_entries == 0 {
+        unsupported_native_protocol_message(protocol, &chain_id, &entries)
+    } else {
+        format!("All native protocol providers in chain '{chain_id}' failed")
+    };
+    error_response(StatusCode::BAD_GATEWAY, message, "unsupported_protocol")
+}
+
+fn native_protocol_path(protocol: NativeProtocol) -> &'static str {
+    match protocol {
+        NativeProtocol::Responses => "/v1/responses",
+        NativeProtocol::AnthropicMessages => "/v1/messages",
+    }
+}
+
+/// Explain a protocol miss so clients do not treat a missing wire format as a
+/// dead model. Anthropic never implements OpenAI Responses; MiniMax-style Chat
+/// cohorts should stay on `/v1/chat/completions`.
+fn unsupported_native_protocol_message(
+    protocol: NativeProtocol,
+    chain_id: &str,
+    entries: &[crate::provider_health::ResolvedEntry],
+) -> String {
+    let path = native_protocol_path(protocol);
+    let all_anthropic = !entries.is_empty()
+        && entries.iter().all(|entry| {
+            ProviderType::from_id(&entry.provider_id) == Some(ProviderType::Anthropic)
+        });
+    let mut message =
+        format!("Chain '{chain_id}' has no entries with native support for POST {path}");
+    if matches!(protocol, NativeProtocol::Responses) && all_anthropic {
+        message.push_str(
+            ". Anthropic models do not implement OpenAI Responses; use POST /v1/messages (native) or POST /v1/chat/completions (portable). Discover protocols via GET /v1/capabilities.",
+        );
+    } else {
+        message.push_str(". Discover protocols via GET /v1/capabilities.");
+    }
+    message
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn chat_completions(
@@ -717,7 +1719,13 @@ pub(crate) async fn chat_completions_inner(
         }
     };
 
-    let (chain_id, entries) = if let Some(id) = resolved_chain_id {
+    let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
+        let chain_entries = state
+            .chain_store
+            .get(&id)
+            .await
+            .map(|chain| chain.entries)
+            .unwrap_or_default();
         let entries = state
             .chain_store
             .resolve_chain(
@@ -727,12 +1735,15 @@ pub(crate) async fn chat_completions_inner(
                 &state.health_tracker,
             )
             .await;
-        (id, entries)
+        (id, chain_entries, entries)
     } else if let Some(direct) = parse_direct_model_entry(&requested_model)
+        .or(parse_kimi_bare_model_entry(&requested_model))
         .or(parse_custom_direct_model_entry(&state, &requested_model).await)
     {
         // Direct provider/model passthrough (single synthetic entry) — either a
-        // built-in provider prefix or a custom provider's sanitized name.
+        // built-in provider prefix, a bare Kimi catalog id (OpenCode strips
+        // `kimi/`), or a custom provider's sanitized name.
+        let chain_entries = vec![direct.clone()];
         let entries = state
             .chain_store
             .resolve_entries(
@@ -742,7 +1753,7 @@ pub(crate) async fn chat_completions_inner(
                 &state.health_tracker,
             )
             .await;
-        (requested_model.clone(), entries)
+        (requested_model.clone(), chain_entries, entries)
     } else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -768,14 +1779,26 @@ pub(crate) async fn chat_completions_inner(
         if defer_on_rate_limit {
             return enqueue_deferred_request(&state, &headers, &chain_id, &body).await;
         }
-        return error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "All providers in chain '{}' are currently in cooldown or unconfigured",
-                chain_id
-            ),
-            "rate_limit_exceeded",
-        );
+        let candidate_account_ids = state
+            .chain_store
+            .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
+            .await;
+        let candidate_subscription_keys = state
+            .chain_store
+            .configured_subscription_keys(&chain_entries, &state.ai_providers)
+            .await;
+        // Account-level OR subscription-level: a sibling held back only by a
+        // shared subscription lane (possibly inherited from a since-deleted
+        // account) still means "retry later", not "misconfigured".
+        let provider_in_cooldown = state
+            .health_tracker
+            .any_account_has_active_cooldown(&candidate_account_ids)
+            .await
+            || state
+                .health_tracker
+                .any_subscription_cooldown_active(&candidate_subscription_keys)
+                .await;
+        return unavailable_chain_response(&chain_id, provider_in_cooldown);
     }
 
     // 4. Try each entry in order (waterfall)
@@ -785,6 +1808,10 @@ pub(crate) async fn chat_completions_inner(
     let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
 
     let chain_length = entries.len() as u32;
+    // Accounts whose Kimi OAuth token was already force-refreshed after a 401
+    // in this request — the retry is one-shot per account, never a loop.
+    let mut kimi_auth_refreshed: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
     for (entry_idx, entry) in entries.iter().enumerate() {
         // Non-builtin prefixes are custom providers referenced by their
         // sanitized name (e.g. "spark"); they all route as `Custom` through the
@@ -810,12 +1837,13 @@ pub(crate) async fn chat_completions_inner(
             None
         };
 
-        // The synthetic "anthropic-cli-proxy" account is the only Anthropic
-        // entry without an api_key — `read_standard_accounts` hoists the
-        // access_token into `api_key` for real Anthropic OAuth records so we
-        // can forward it as a Bearer credential. Gate the CLI-proxy adapter on
-        // that distinction, otherwise direct Anthropic OAuth accounts get sent
-        // through the local CLI proxy with no credential and fail.
+        // Anthropic OAuth entries reach the CLI-proxy adapter in two shapes:
+        // the synthetic "anthropic-cli-proxy" account (always keyless), and —
+        // once CLIProxyAPI owns the credential — any store-backed Anthropic
+        // OAuth record, because `read_standard_accounts` no longer hoists the
+        // access_token into `api_key` for those. In legacy owner mode the
+        // hoisting still applies, so only the synthetic account (or an
+        // account with an unusable token) lands here.
         let use_anthropic_oauth_cli_proxy_adapter =
             provider_type == ProviderType::Anthropic && entry.has_oauth && entry.api_key.is_none();
         let use_anthropic_adapter =
@@ -871,7 +1899,8 @@ pub(crate) async fn chat_completions_inner(
                 build_cli_proxy_headers(),
             )
         } else if use_xai_oauth_cli_proxy_adapter {
-            let upstream_body = match rewrite_model(&body, &entry.model_id) {
+            let upstream_model = cli_proxy_xai_model_id(&entry.model_id);
+            let upstream_body = match rewrite_model(&body, upstream_model) {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!("Failed to rewrite model in request body: {}", e);
@@ -972,7 +2001,10 @@ pub(crate) async fn chat_completions_inner(
             let rewrite_result = if provider_type == ProviderType::Kimi {
                 rewrite_model_for_kimi(&body, &entry.model_id)
             } else {
-                rewrite_model(&body, &entry.model_id)
+                rewrite_model(
+                    &body,
+                    canonical_upstream_model(provider_type, &entry.model_id),
+                )
             };
             let upstream_body = match rewrite_result {
                 Ok(b) => b,
@@ -989,6 +2021,15 @@ pub(crate) async fn chat_completions_inner(
                 extra.insert(header::USER_AGENT, HeaderValue::from_static("KimiCLI/1.5"));
             }
             (url, upstream_body, extra)
+        };
+
+        // Keep the exact request parts around for a one-shot resend when a
+        // Kimi 401 turns out to be a stale access token (see the auth-error
+        // handler below). `Bytes` clones are refcounted, so this is cheap.
+        let kimi_retry_parts = if provider_type == ProviderType::Kimi {
+            Some((url.clone(), upstream_body.clone(), extra_headers.clone()))
+        } else {
+            None
         };
 
         // Forward the request.
@@ -1262,13 +2303,11 @@ pub(crate) async fn chat_completions_inner(
 
             if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
                 let elapsed_ms = request_start.elapsed().as_millis() as u64;
-                let retry_after = parse_rate_limit_headers(&response_headers, provider_type);
-                let reason = if status.as_u16() == 529 {
-                    CooldownReason::Overloaded
-                } else if body_is_quota_exhausted(&resp_body) {
-                    CooldownReason::QuotaExhausted
+                let retry_after_hdr = parse_rate_limit_headers(&response_headers, provider_type);
+                let (reason, retry_after) = if status.as_u16() == 529 {
+                    (CooldownReason::Overloaded, retry_after_hdr)
                 } else {
-                    CooldownReason::RateLimit
+                    classify_429(provider_type, retry_after_hdr, &resp_body)
                 };
                 let cooldown = state
                     .health_tracker
@@ -1505,13 +2544,10 @@ pub(crate) async fn chat_completions_inner(
 
             if status == StatusCode::TOO_MANY_REQUESTS {
                 let elapsed_ms = request_start.elapsed().as_millis() as u64;
-                let retry_after = parse_google_retry_after(&response_headers, &resp_body)
+                let retry_after_hdr = parse_google_retry_after(&response_headers, &resp_body)
                     .or_else(|| parse_rate_limit_headers(&response_headers, provider_type));
-                let reason = if body_is_quota_exhausted(&resp_body) {
-                    CooldownReason::QuotaExhausted
-                } else {
-                    CooldownReason::RateLimit
-                };
+                let (reason, retry_after) =
+                    classify_429(provider_type, retry_after_hdr, &resp_body);
                 let cooldown = state
                     .health_tracker
                     .record_entry_failure(entry, reason, retry_after)
@@ -1662,19 +2698,7 @@ pub(crate) async fn chat_completions_inner(
         // Pre-stream error handling: 429, 529, 5xx → cooldown + try next
         if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
             let elapsed_ms = request_start.elapsed().as_millis() as u64;
-            let mut retry_after = parse_rate_limit_headers(upstream_resp.headers(), provider_type);
-            // Kimi: keep the rate-limit cooldown short instead of letting it grow
-            // exponentially (5s→300s). Its rolling-window quota frees up
-            // continuously and we already throttle via `KIMI_CONCURRENCY`, so a
-            // brief account-wide pause is enough; a multi-minute cooldown would
-            // outlast a caller's retry budget and make the whole run give up.
-            // Honor a real upstream `retry-after` when present (and shorter).
-            if provider_type == ProviderType::Kimi && status == StatusCode::TOO_MANY_REQUESTS {
-                let capped = retry_after
-                    .unwrap_or(std::time::Duration::from_secs(5))
-                    .min(std::time::Duration::from_secs(15));
-                retry_after = Some(capped);
-            }
+            let retry_after_hdr = parse_rate_limit_headers(upstream_resp.headers(), provider_type);
             // Passive Codex usage capture (B): a 429 from the local CLIProxyAPI
             // on the Codex path carries a `model_cooldown` body with the weekly
             // (secondary) window reset. The cli-proxy strips the rich x-codex-*
@@ -1697,12 +2721,10 @@ pub(crate) async fn chat_completions_inner(
                     codex_store.put_passive_cooldown(store_key, reset_at).await;
                 }
             }
-            let reason = if status.as_u16() == 529 {
-                CooldownReason::Overloaded
-            } else if body_is_quota_exhausted(&err_body) {
-                CooldownReason::QuotaExhausted
+            let (reason, retry_after) = if status.as_u16() == 529 {
+                (CooldownReason::Overloaded, retry_after_hdr)
             } else {
-                CooldownReason::RateLimit
+                classify_429(provider_type, retry_after_hdr, &err_body)
             };
             tracing::info!(
                 provider = %entry.provider_id,
@@ -1762,6 +2784,91 @@ pub(crate) async fn chat_completions_inner(
         }
 
         // Auth errors (401/403) — bad credentials, try next account
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            // Kimi first gets ONE token refresh + resend before the account is
+            // cooled down: its access tokens only live ~300s, so an auth error
+            // usually means the routed Bearer went stale between the background
+            // refresh cycles rather than that the subscription is broken.
+            if should_attempt_kimi_auth_refresh(
+                provider_type,
+                kimi_auth_refreshed.insert(entry.account_id),
+            ) {
+                if let Some((retry_url, retry_body, retry_headers)) = kimi_retry_parts.clone() {
+                    match crate::api::ai_providers::refresh_store_account_oauth_locked(
+                        &state.ai_providers,
+                        entry.account_id,
+                        ProviderType::Kimi,
+                        "",
+                    )
+                    .await
+                    {
+                        Ok((fresh_token, _, _))
+                            if !fresh_token.trim().is_empty()
+                                && Some(fresh_token.as_str()) != entry.api_key.as_deref() =>
+                        {
+                            tracing::info!(
+                                provider = %entry.provider_id,
+                                account_id = %entry.account_id,
+                                "Kimi auth error with stale token — refreshed, retrying once"
+                            );
+                            let mut retry_req = state
+                                .http_client
+                                .post(&retry_url)
+                                .header("Content-Type", "application/json")
+                                .header("Authorization", format!("Bearer {}", fresh_token))
+                                .body(retry_body);
+                            for (name, value) in &retry_headers {
+                                retry_req = retry_req.header(name, value);
+                            }
+                            if !is_stream {
+                                retry_req = retry_req.timeout(std::time::Duration::from_secs(300));
+                            }
+                            match retry_req.send().await {
+                                // Only a successful retry rescues the entry;
+                                // any other status keeps the original
+                                // auth-error handling (cooldown + next entry)
+                                // so the chain still fails over.
+                                Ok(resp) if resp.status().is_success() => {
+                                    upstream_resp = resp;
+                                    status = upstream_resp.status();
+                                }
+                                Ok(resp) => {
+                                    tracing::warn!(
+                                        provider = %entry.provider_id,
+                                        account_id = %entry.account_id,
+                                        status = %resp.status(),
+                                        "Kimi retry with refreshed token still failed"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider = %entry.provider_id,
+                                        account_id = %entry.account_id,
+                                        error = %e,
+                                        "Kimi retry with refreshed token failed to send"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Token unchanged — the 401 wasn't staleness, a
+                            // retry with the same Bearer would fail again.
+                            tracing::debug!(
+                                account_id = %entry.account_id,
+                                "Kimi token refresh returned the same credential; not retrying"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                account_id = %entry.account_id,
+                                error = %e,
+                                "Kimi OAuth refresh after auth error failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             let elapsed_ms = request_start.elapsed().as_millis() as u64;
             tracing::warn!(
@@ -2195,15 +3302,7 @@ pub(crate) async fn chat_completions_inner(
         if defer_on_rate_limit {
             return enqueue_deferred_request(&state, &headers, &chain_id, &body).await;
         }
-        error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "All {} providers in chain '{}' are rate-limited or unavailable",
-                entries.len(),
-                chain_id
-            ),
-            "rate_limit_exceeded",
-        )
+        cooldown_error_response(&chain_id)
     }
 }
 
@@ -2253,6 +3352,16 @@ async fn enqueue_deferred_request(
         .into_response()
 }
 
+// Older catalogs advertised this client-side context hint as an API model ID.
+// Z.ai exposes the same 1M context under the canonical glm-5.3 ID.
+fn canonical_upstream_model(provider: ProviderType, model: &str) -> &str {
+    if provider == ProviderType::Zai && model == "glm-5.3[1m]" {
+        "glm-5.3"
+    } else {
+        model
+    }
+}
+
 /// Rewrite the `model` field in the JSON request body.
 fn rewrite_model(body: &[u8], new_model: &str) -> Result<bytes::Bytes, String> {
     let mut value: serde_json::Value =
@@ -2261,6 +3370,19 @@ fn rewrite_model(body: &[u8], new_model: &str) -> Result<bytes::Bytes, String> {
     serde_json::to_vec(&value)
         .map(bytes::Bytes::from)
         .map_err(|e| format!("Failed to serialize: {}", e))
+}
+
+/// CLIProxyAPI's xAI executor keys models by exact id. Official rolling
+/// aliases in our catalog (`grok-4.6-latest`) are not CLI-proxy IDs — it
+/// returns HTTP 502 `unknown provider for model grok-4.6-latest` in a few
+/// milliseconds, which the waterfall then surfaces as "chain unavailable".
+fn cli_proxy_xai_model_id(model_id: &str) -> &str {
+    match model_id {
+        "grok-4.6-latest" => "grok-4.6",
+        "grok-4.5-latest" => "grok-4.5",
+        "grok-build-latest" => "grok-4.5",
+        other => other,
+    }
 }
 
 /// Newer Opus models reject explicit sampling params (`temperature`, `top_p`,
@@ -2314,6 +3436,109 @@ fn strip_thinking_blocks(messages: &mut [serde_json::Value]) {
     }
 }
 
+/// Whether an upstream 401/403 should trigger a one-shot OAuth refresh +
+/// resend instead of immediately cooling the account down. Only Kimi qualifies
+/// (its Bearer is a ~300s OAuth access token, so staleness is the common
+/// cause), and only on the first auth error per account per request —
+/// `first_refresh_for_account` is the result of inserting the account into the
+/// per-request refreshed set, so a second 401 falls through to the normal
+/// cooldown path.
+fn should_attempt_kimi_auth_refresh(
+    provider_type: ProviderType,
+    first_refresh_for_account: bool,
+) -> bool {
+    provider_type == ProviderType::Kimi && first_refresh_for_account
+}
+
+/// Placeholder for a Kimi chat message whose `content` would otherwise be
+/// empty. Kimi's coding endpoint 400s with `the message at position N with
+/// role 'assistant' must not be empty` on OpenAI-style tool-call turns that
+/// send `content: ""` / `content: []` next to `tool_calls`. A single period
+/// keeps the role sequence valid without inventing a reply.
+const KIMI_EMPTY_CONTENT_PLACEHOLDER: &str = ".";
+
+/// Bare model ids the `@ai-sdk/openai-compatible` adapter sends after it
+/// strips the `kimi/` provider prefix (`kimi/k3-256k` arrives as `k3-256k`).
+fn parse_kimi_bare_model_entry(model: &str) -> Option<crate::provider_health::ChainEntry> {
+    let model = model.trim();
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    if !is_known_kimi_model_id(model) {
+        return None;
+    }
+    Some(crate::provider_health::ChainEntry {
+        provider_id: "kimi".to_string(),
+        model_id: model.to_string(),
+    })
+}
+
+fn is_known_kimi_model_id(model: &str) -> bool {
+    if crate::api::providers::kimi_fallback_models()
+        .iter()
+        .any(|entry| entry.id == model)
+    {
+        return true;
+    }
+    // Future K3 context-window suffixes (`k3-1m`) and coding aliases.
+    model.starts_with("k3-") || model.starts_with("kimi-for-coding")
+}
+
+fn kimi_content_is_empty(content: &serde_json::Value) -> bool {
+    match content {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(text) => text.trim().is_empty(),
+        serde_json::Value::Array(parts) => parts.iter().all(|part| match part {
+            serde_json::Value::String(text) => text.trim().is_empty(),
+            serde_json::Value::Object(obj) => {
+                let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match kind {
+                    "text" => obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty(),
+                    "reasoning" | "thinking" | "redacted_thinking" => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn kimi_message_content_is_empty(message: &serde_json::Value) -> bool {
+    match message.get("content") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(content) => kimi_content_is_empty(content),
+    }
+}
+
+/// Fill empty user/assistant `content` so Kimi does not 400 mid-session.
+/// Leaves non-empty content, tool_calls, and reasoning fields intact.
+fn sanitize_kimi_chat_messages(messages: &mut [serde_json::Value]) {
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if role != "assistant" && role != "user" {
+            continue;
+        }
+        if !kimi_message_content_is_empty(message) {
+            continue;
+        }
+        if let Some(obj) = message.as_object_mut() {
+            obj.insert(
+                "content".to_string(),
+                serde_json::Value::String(KIMI_EMPTY_CONTENT_PLACEHOLDER.to_string()),
+            );
+        }
+    }
+}
+
 /// Rewrite the model id and normalize sampling params for Kimi's coding endpoint.
 ///
 /// `kimi-for-coding` rejects any temperature other than 1 with
@@ -2322,6 +3547,10 @@ fn strip_thinking_blocks(messages: &mut [serde_json::Value]) {
 /// therefore 400 on every request. Force the only accepted value when the
 /// caller specified a temperature; leave it absent otherwise so Kimi's own
 /// default applies.
+///
+/// Also fill empty assistant/user `content`. OpenCode (and other OpenAI-style
+/// clients) persist tool-only turns as `content: ""`; Kimi rejects those as
+/// empty assistant messages and the mission dies with `llm_error`.
 fn rewrite_model_for_kimi(body: &[u8], new_model: &str) -> Result<bytes::Bytes, String> {
     let mut value: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -2329,6 +3558,12 @@ fn rewrite_model_for_kimi(body: &[u8], new_model: &str) -> Result<bytes::Bytes, 
     if let Some(obj) = value.as_object_mut() {
         if obj.contains_key("temperature") {
             obj.insert("temperature".to_string(), serde_json::json!(1));
+        }
+        if let Some(messages) = obj
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            sanitize_kimi_chat_messages(messages);
         }
     }
     serde_json::to_vec(&value)
@@ -2388,9 +3623,13 @@ fn anthropic_body_drop_thinking_and_disable(body: &[u8]) -> Result<bytes::Bytes,
         strip_thinking_blocks(messages);
     }
     if let Some(obj) = value.as_object_mut() {
+        let adaptive_only = obj
+            .get("model")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::model_policy::requires_adaptive_thinking);
         obj.insert(
             "thinking".to_string(),
-            serde_json::json!({ "type": "disabled" }),
+            serde_json::json!({ "type": if adaptive_only { "adaptive" } else { "disabled" } }),
         );
         // Opus 5 rejects disabled thinking at xhigh/max effort. This recovery
         // path deliberately disables thinking for one turn, so cap an
@@ -2404,7 +3643,7 @@ fn anthropic_body_drop_thinking_and_disable(body: &[u8]) -> Result<bytes::Bytes,
                 .get("effort")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|effort| matches!(effort, "xhigh" | "max"));
-            if incompatible {
+            if incompatible && !adaptive_only {
                 output_config.insert("effort".to_string(), serde_json::json!("high"));
             }
         }
@@ -2855,6 +4094,89 @@ fn parse_rate_limit_duration(s: &str) -> Option<std::time::Duration> {
 /// Detect a hard quota/usage-limit exhaustion from a raw upstream error body
 /// (e.g. a 429 response payload). Used to park an exhausted subscription on a
 /// long cooldown instead of the short transient-rate-limit backoff.
+/// Upper bound on the cooldown applied for a *transient* rate-limit 429.
+///
+/// A per-minute (RPM/TPM) limit clears within the minute by definition, so a
+/// longer cooldown only blackholes the provider past the point where it would
+/// already accept traffic again. This bounds both an upstream `Retry-After`
+/// (some providers send pathological values) and our own default.
+const RATE_429_COOLDOWN_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Default cooldown for a transient rate-limit 429 when the upstream sent no
+/// usable `Retry-After`/reset header.
+const RATE_429_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Detect rate-limit-style wording (per-minute / TPM / RPM windows) in a 429
+/// body. Such a limit is transient by construction — one oversized request can
+/// trip a tokens-per-minute window even though the account has plenty of quota
+/// left — so it must never be classified as hard quota exhaustion.
+fn body_is_per_minute_rate_limit(body: &[u8]) -> bool {
+    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    lower.contains("per minute")
+        || lower.contains("per-minute")
+        || lower.contains("tokens per min")
+        || lower.contains("requests per min")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("rate-limit")
+        || lower.contains("try again in")
+        || lower.contains("too many requests")
+}
+
+/// Per-provider cooldown policy for transient rate-limit 429s.
+///
+/// - **Kimi**: rolling-window budget frees up continuously and we already
+///   throttle via `KIMI_CONCURRENCY`; a brief pause is enough (≤15s).
+/// - **Anthropic / Z.AI / Muse**: per-minute token windows that a single large
+///   payload (e.g. a big Lean context) can trip on its own; keep the pause
+///   well under a minute so one heavy request can't park the account.
+/// - Everyone else: honor a bounded `Retry-After` when present, otherwise let
+///   the health tracker's exponential backoff decide.
+fn rate_429_cooldown(
+    provider_type: ProviderType,
+    retry_after: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match provider_type {
+        ProviderType::Kimi => Some(
+            retry_after
+                .unwrap_or(std::time::Duration::from_secs(5))
+                .min(std::time::Duration::from_secs(15)),
+        ),
+        ProviderType::Anthropic | ProviderType::Zai | ProviderType::Muse => Some(
+            retry_after
+                .unwrap_or(RATE_429_DEFAULT_COOLDOWN)
+                .min(RATE_429_COOLDOWN_CAP),
+        ),
+        _ => retry_after.map(|d| d.min(RATE_429_COOLDOWN_CAP)),
+    }
+}
+
+/// Classify an upstream 429 into a cooldown reason plus an explicit cooldown
+/// duration override.
+///
+/// A `Retry-After`/reset header, or per-minute rate-limit wording in the body,
+/// marks the 429 as *transient*: the upstream expects the caller back shortly,
+/// so it gets [`CooldownReason::RateLimit`] with a short bounded cooldown —
+/// even when the body also contains quota-ish phrasing (Z.AI's per-minute 429
+/// says "usage limit", which would otherwise be misread as hard exhaustion and
+/// park the whole subscription for `PROVIDER_QUOTA_COOLDOWN_SECS` ≈ 1h).
+/// Only an explicit quota/billing exhaustion body *without* any transient
+/// signal earns the long [`CooldownReason::QuotaExhausted`] cooldown.
+fn classify_429(
+    provider_type: ProviderType,
+    retry_after: Option<std::time::Duration>,
+    body: &[u8],
+) -> (CooldownReason, Option<std::time::Duration>) {
+    let transient = retry_after.is_some() || body_is_per_minute_rate_limit(body);
+    if !transient && body_is_quota_exhausted(body) {
+        return (CooldownReason::QuotaExhausted, retry_after);
+    }
+    (
+        CooldownReason::RateLimit,
+        rate_429_cooldown(provider_type, retry_after),
+    )
+}
+
 fn body_is_quota_exhausted(body: &[u8]) -> bool {
     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
         if matches!(classify_embedded_error(&v), CooldownReason::QuotaExhausted) {
@@ -3339,6 +4661,84 @@ fn build_flush_chunk_line(
 /// timeout fire and fail the whole mission turn.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+    let (index, delimiter_len) = match (lf, crlf) {
+        (Some(left), Some(right)) => {
+            if left.0 <= right.0 {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(found), None) | (None, Some(found)) => found,
+        (None, None) => return None,
+    };
+    let event = buffer.drain(..index).collect();
+    buffer.drain(..delimiter_len);
+    Some(event)
+}
+
+fn usage_from_sse_event(event: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
+    let text = std::str::from_utf8(event).ok()?;
+    for line in text.lines() {
+        let Some(data) = line.trim_end_matches('\r').strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        for usage in [
+            value.get("usage"),
+            value.pointer("/response/usage"),
+            value.pointer("/message/usage"),
+            value.pointer("/delta/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let input = usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(serde_json::Value::as_u64);
+            let output = usage
+                .get("completion_tokens")
+                .or_else(|| usage.get("output_tokens"))
+                .and_then(serde_json::Value::as_u64);
+            if input.is_some() || output.is_some() {
+                return Some((input, output));
+            }
+        }
+    }
+    None
+}
+
+fn update_sse_usage(
+    buffer: &mut Vec<u8>,
+    chunk: &[u8],
+    input_tokens: &mut u64,
+    output_tokens: &mut u64,
+) {
+    buffer.extend_from_slice(chunk);
+    while let Some(event) = take_sse_event(buffer) {
+        if let Some((input, output)) = usage_from_sse_event(&event) {
+            if let Some(value) = input {
+                *input_tokens = (*input_tokens).max(value);
+            }
+            if let Some(value) = output {
+                *output_tokens = (*output_tokens).max(value);
+            }
+        }
+    }
+}
+
 fn track_stream_health(
     inner: impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
     health_tracker: crate::provider_health::SharedProviderHealthTracker,
@@ -3355,6 +4755,7 @@ fn track_stream_health(
         let mut idle_timeout = false;
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut sse_buffer = Vec::new();
         loop {
             match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
                 Err(_) => {
@@ -3382,29 +4783,27 @@ fn track_stream_health(
                             if let Some(id) = liveness_mission_id {
                                 crate::api::proxy_liveness::note_activity(id);
                             }
-                            // Scan SSE data lines for usage in the final chunk.
-                            // OpenAI-compatible providers include a `usage` object
-                            // in the last `data:` event of the stream.
-                            if let Ok(text) = std::str::from_utf8(chunk) {
-                                for line in text.lines() {
-                                    if let Some(json_str) = line.strip_prefix("data: ") {
-                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                            if let Some(usage) = v.get("usage") {
-                                                if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
-                                                    input_tokens = pt;
-                                                }
-                                                if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
-                                                    output_tokens = ct;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            // Decode complete SSE events without altering the relayed bytes.
+                            update_sse_usage(
+                                &mut sse_buffer,
+                                chunk,
+                                &mut input_tokens,
+                                &mut output_tokens,
+                            );
                         }
                         Err(_) => errored = true,
                     }
                     yield item;
+                }
+            }
+        }
+        if !sse_buffer.is_empty() {
+            if let Some((input, output)) = usage_from_sse_event(&sse_buffer) {
+                if let Some(value) = input {
+                    input_tokens = input_tokens.max(value);
+                }
+                if let Some(value) = output {
+                    output_tokens = output_tokens.max(value);
                 }
             }
         }
@@ -3449,6 +4848,22 @@ fn apply_google_client_headers(builder: reqwest::RequestBuilder) -> reqwest::Req
         .header(header::USER_AGENT, GOOGLE_USER_AGENT)
         .header("X-Goog-Api-Client", GOOGLE_API_CLIENT)
         .header("Client-Metadata", GOOGLE_CLIENT_METADATA)
+}
+
+fn native_anthropic_beta(beta: &str, oauth: bool) -> String {
+    if oauth
+        && !beta
+            .split(',')
+            .any(|value| value.trim() == "oauth-2025-04-20")
+    {
+        if beta.trim().is_empty() {
+            "oauth-2025-04-20".into()
+        } else {
+            format!("{beta},oauth-2025-04-20")
+        }
+    } else {
+        beta.to_string()
+    }
 }
 
 fn build_anthropic_proxy_headers(credential: &str, has_oauth: bool) -> HeaderMap {
@@ -3530,20 +4945,37 @@ fn build_anthropic_upstream_request(
     if model_changed {
         strip_thinking_blocks(&mut messages);
     }
-    // OAuth-subscription tokens require the Claude Code identity as the first
-    // system block, else Anthropic returns a misleading 429. Prepend it unless
-    // the caller's own system prompt already leads with it (idempotent so a
-    // retry can't double it).
-    let system = if force_claude_code_identity && !system.starts_with(CLAUDE_CODE_IDENTITY) {
-        if system.is_empty() {
-            CLAUDE_CODE_IDENTITY.to_string()
+    // OAuth-subscription tokens require the Claude Code identity as the FIRST
+    // system block and Anthropic exact-matches that block's text, else it
+    // returns a misleading 429. Merging the identity and the caller's system
+    // prompt into one string breaks the exact match (the first block's text is
+    // then "identity\n\ncustom…"), so with a custom system prompt we must emit
+    // `system` as an array of blocks: block 0 is exactly the identity, the
+    // caller's content follows as its own block. This mirrors what real Claude
+    // Code and CLIProxyAPI send. Idempotent: a system prompt already leading
+    // with the identity has it stripped from the remainder first, so a retry
+    // can't double it.
+    if force_claude_code_identity {
+        let rest = system
+            .strip_prefix(CLAUDE_CODE_IDENTITY)
+            .unwrap_or(&system)
+            .trim_start()
+            .to_string();
+        if rest.is_empty() {
+            out.insert(
+                "system".to_string(),
+                serde_json::Value::String(CLAUDE_CODE_IDENTITY.to_string()),
+            );
         } else {
-            format!("{CLAUDE_CODE_IDENTITY}\n\n{system}")
+            out.insert(
+                "system".to_string(),
+                serde_json::json!([
+                    { "type": "text", "text": CLAUDE_CODE_IDENTITY },
+                    { "type": "text", "text": rest },
+                ]),
+            );
         }
-    } else {
-        system
-    };
-    if !system.is_empty() {
+    } else if !system.is_empty() {
         out.insert("system".to_string(), serde_json::Value::String(system));
     }
     out.insert("messages".to_string(), serde_json::Value::Array(messages));
@@ -3774,6 +5206,7 @@ fn anthropic_tools_from_openai(tools: Option<&serde_json::Value>) -> Option<serd
             function
                 .get("parameters")
                 .cloned()
+                .map(strip_json_schema_meta_keys)
                 .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
         );
         out.push(serde_json::Value::Object(converted));
@@ -3782,6 +5215,26 @@ fn anthropic_tools_from_openai(tools: Option<&serde_json::Value>) -> Option<serd
         None
     } else {
         Some(serde_json::Value::Array(out))
+    }
+}
+
+/// Anthropic's `input_schema` accepts a JSON Schema object but rejects
+/// meta-schema keys (the Claude Code / opencode harnesses annotate every tool
+/// with `"$schema": "https://json-schema.org/draft/2020-12/schema"`, which the
+/// Messages API answers with a 400). Strip them recursively.
+fn strip_json_schema_meta_keys(value: serde_json::Value) -> serde_json::Value {
+    const META_KEYS: [&str; 3] = ["$schema", "$id", "$comment"];
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(k, _)| !META_KEYS.contains(&k.as_str()))
+                .map(|(k, v)| (k, strip_json_schema_meta_keys(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(strip_json_schema_meta_keys).collect())
+        }
+        other => other,
     }
 }
 
@@ -5026,6 +6479,311 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
 
+    #[test]
+    fn opus_55_recovery_keeps_adaptive_thinking_and_effort() {
+        let body = br#"{"model":"claude-opus-5-5","thinking":{"type":"enabled","budget_tokens":2048},"output_config":{"effort":"max"},"messages":[]}"#;
+        let repaired = anthropic_body_drop_thinking_and_disable(body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&repaired).unwrap();
+        assert_eq!(value["thinking"], serde_json::json!({"type":"adaptive"}));
+        assert_eq!(value["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn protocol_capabilities_are_credential_aware_and_fail_closed() {
+        let xai_key = protocol_capabilities(ProviderType::Xai, true, false);
+        assert!(xai_key.chat_completions && xai_key.responses && xai_key.previous_response_id);
+        assert!(!xai_key.anthropic_messages && !xai_key.thinking_blocks_replay);
+
+        let core_codex = protocol_capabilities(ProviderType::OpenAI, false, true);
+        assert!(core_codex.responses && core_codex.native_function_tools);
+        assert!(!core_codex.previous_response_id);
+        let disconnected_codex = protocol_capabilities(ProviderType::OpenAI, false, false);
+        assert!(!disconnected_codex.responses);
+
+        let xai_oauth = protocol_capabilities(ProviderType::Xai, false, true);
+        assert!(!xai_oauth.responses && !xai_oauth.previous_response_id);
+
+        let anthropic_key = protocol_capabilities(ProviderType::Anthropic, true, false);
+        assert!(anthropic_key.chat_completions && anthropic_key.anthropic_messages);
+        assert!(anthropic_key.thinking_blocks_replay);
+        assert!(!anthropic_key.responses && !anthropic_key.previous_response_id);
+
+        let anthropic_cli = protocol_capabilities(ProviderType::Anthropic, false, true);
+        assert!(!anthropic_cli.anthropic_messages);
+        // A directly resolved credential remains usable when an OAuth account
+        // also exists; the resolver owns credential validation.
+        let anthropic_key_with_oauth = protocol_capabilities(ProviderType::Anthropic, true, true);
+        assert!(anthropic_key_with_oauth.anthropic_messages);
+
+        let kimi = protocol_capabilities(ProviderType::Kimi, true, false);
+        assert!(kimi.chat_completions && kimi.reasoning_content_replay);
+        assert!(!kimi.responses && !kimi.anthropic_messages);
+
+        let kimi_no_creds = protocol_capabilities(ProviderType::Kimi, false, false);
+        assert!(!kimi_no_creds.reasoning_content_replay && !kimi_no_creds.native_function_tools);
+
+        let zai = protocol_capabilities(ProviderType::Zai, true, false);
+        assert!(zai.chat_completions && zai.reasoning_content_replay);
+        assert!(!zai.responses && !zai.anthropic_messages && !zai.previous_response_id);
+        let zai_no_creds = protocol_capabilities(ProviderType::Zai, false, false);
+        assert!(!zai_no_creds.reasoning_content_replay);
+
+        // Direct API keys keep server-side continuation; the stateless
+        // CLI-proxy route must never advertise `previous_response_id`.
+        let openai_key = protocol_capabilities(ProviderType::OpenAI, true, false);
+        assert!(openai_key.responses && openai_key.previous_response_id);
+    }
+
+    #[test]
+    fn cli_proxy_native_url_derives_from_base() {
+        std::env::remove_var("CLI_PROXY_API_BASE_URL");
+        assert!(cli_proxy_native_url("responses").ends_with("/v1/responses"));
+        assert!(cli_proxy_native_url("messages").ends_with("/v1/messages"));
+    }
+
+    #[test]
+    fn body_previous_response_id_detection() {
+        assert!(body_has_previous_response_id(
+            br#"{"previous_response_id":"resp_1"}"#
+        ));
+        assert!(!body_has_previous_response_id(
+            br#"{"previous_response_id":""}"#
+        ));
+        assert!(!body_has_previous_response_id(br#"{"input":"hi"}"#));
+    }
+
+    #[test]
+    fn native_protocol_urls_honor_overrides_and_fail_closed() {
+        assert_eq!(
+            protocol_url(NativeProtocol::Responses, ProviderType::Xai, None).as_deref(),
+            Some("https://api.x.ai/v1/responses")
+        );
+        assert_eq!(
+            protocol_url(
+                NativeProtocol::Responses,
+                ProviderType::OpenAI,
+                Some("https://gateway.example/v1/")
+            )
+            .as_deref(),
+            Some("https://gateway.example/v1/responses")
+        );
+        assert_eq!(
+            protocol_url(
+                NativeProtocol::AnthropicMessages,
+                ProviderType::Anthropic,
+                None
+            )
+            .as_deref(),
+            Some("https://api.anthropic.com/v1/messages")
+        );
+        assert!(protocol_url(NativeProtocol::Responses, ProviderType::Kimi, None).is_none());
+        assert!(!native_protocol_supported(
+            NativeProtocol::Responses,
+            ProviderType::Anthropic,
+            true,
+            false,
+        ));
+        assert!(!native_protocol_supported(
+            NativeProtocol::Responses,
+            ProviderType::Anthropic,
+            false,
+            true,
+        ));
+        assert!(!native_protocol_supported(
+            NativeProtocol::Responses,
+            ProviderType::Anthropic,
+            true,
+            true,
+        ));
+        assert!(native_protocol_supported(
+            NativeProtocol::AnthropicMessages,
+            ProviderType::Anthropic,
+            true,
+            false,
+        ));
+        assert!(native_protocol_supported(
+            NativeProtocol::Responses,
+            ProviderType::OpenAI,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn unsupported_responses_on_anthropic_points_at_messages_or_chat() {
+        let entries = [crate::provider_health::ResolvedEntry {
+            provider_id: "anthropic".to_string(),
+            model_id: "claude-opus-5".to_string(),
+            account_id: uuid::Uuid::nil(),
+            api_key: Some("sk-ant-test".to_string()),
+            has_oauth: false,
+            base_url: None,
+            subscription_key: None,
+        }];
+        let message = unsupported_native_protocol_message(
+            NativeProtocol::Responses,
+            "anthropic/claude-opus-5",
+            &entries,
+        );
+        assert!(message.contains("POST /v1/responses"));
+        assert!(message.contains("POST /v1/messages"));
+        assert!(message.contains("POST /v1/chat/completions"));
+        assert!(message.contains("GET /v1/capabilities"));
+    }
+
+    #[test]
+    fn native_body_rewrite_preserves_protocol_fields() {
+        let body = br#"{"model":"chain","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}],"stream":true,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":"ok"}]}]}"#;
+        let rewritten = rewrite_model(body, "native-model").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["model"], "native-model");
+        assert_eq!(value["previous_response_id"], "resp_1");
+        assert_eq!(value["input"][0]["type"], "function_call_output");
+        assert_eq!(value["thinking"]["type"], "enabled");
+        assert_eq!(value["messages"][0]["content"][0]["type"], "tool_result");
+    }
+
+    #[test]
+    fn only_previous_response_id_requires_server_state_affinity() {
+        assert!(native_request_requires_server_state(
+            NativeProtocol::Responses,
+            br#"{"model":"x","previous_response_id":"resp_1","input":[]}"#
+        ));
+        // Tool-result replay carries the whole transcript: stateless.
+        assert!(!native_request_requires_server_state(
+            NativeProtocol::Responses,
+            br#"{"model":"x","input":[{"type":"function_call_output","call_id":"c","output":"ok"}]}"#
+        ));
+        assert!(!native_request_requires_server_state(
+            NativeProtocol::Responses,
+            br#"{"model":"x","previous_response_id":"","input":"hello"}"#
+        ));
+        // Messages continuity is client-side block replay, never server state.
+        assert!(!native_request_requires_server_state(
+            NativeProtocol::AnthropicMessages,
+            br#"{"model":"x","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}]}"#
+        ));
+        assert!(!native_request_requires_server_state(
+            NativeProtocol::AnthropicMessages,
+            br#"{"model":"x","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"s"}]}]}"#
+        ));
+    }
+
+    #[test]
+    fn fragmented_native_sse_usage_is_buffered_and_protocol_aware() {
+        let mut buffer = Vec::new();
+        let mut input = 0;
+        let mut output = 0;
+        update_sse_usage(
+            &mut buffer,
+            b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tok",
+            &mut input,
+            &mut output,
+        );
+        assert_eq!((input, output), (0, 0));
+        update_sse_usage(
+            &mut buffer,
+            b"ens\":12,\"output_tokens\":4}}}\n\n",
+            &mut input,
+            &mut output,
+        );
+        assert_eq!((input, output), (12, 4));
+
+        update_sse_usage(
+            &mut buffer,
+            b"event: message_start\r\ndata: {\"message\":{\"usage\":{\"input_tokens\":20}}}\r\n\r\n",
+            &mut input,
+            &mut output,
+        );
+        update_sse_usage(
+            &mut buffer,
+            b"event: message_delta\ndata: {\"usage\":{\"output_tokens\":9}}\n\n",
+            &mut input,
+            &mut output,
+        );
+        assert_eq!((input, output), (20, 9));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn native_usage_accepts_responses_and_chat_field_names() {
+        assert_eq!(
+            native_response_usage(br#"{"usage":{"input_tokens":12,"output_tokens":3}}"#),
+            Some((12, 3))
+        );
+        assert_eq!(
+            native_response_usage(br#"{"usage":{"prompt_tokens":7,"completion_tokens":2}}"#),
+            Some((7, 2))
+        );
+        assert_eq!(native_response_usage(br#"{"usage":{}}"#), None);
+    }
+
+    #[test]
+    fn terminal_upstream_error_preserves_status_and_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("17"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let response = preserved_upstream_error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            bytes::Bytes::from_static(br#"{"error":"slow down"}"#),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "17");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn cooldown_error_includes_retry_after_header() {
+        let response = cooldown_error_response_with_retry_after("zai/glm-5.2", 60);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+    }
+
+    #[test]
+    fn cooldown_retry_after_is_capped_at_sixty_seconds() {
+        let response = cooldown_error_response_with_retry_after("muse/muse-spark-1.2", 3600);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+    }
+
+    #[test]
+    fn unconfigured_chain_is_not_reported_as_retryable_cooldown() {
+        let response = unavailable_chain_response("zai/glm-5.2", false);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    #[test]
+    fn cooled_down_chain_is_reported_as_retryable() {
+        let response = unavailable_chain_response("zai/glm-5.2", true);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+    }
+
     /// Feed an input as a single chunk and flush; the full-content path.
     fn strip_once(input: &str) -> String {
         let mut s = ThinkStripper::default();
@@ -5187,6 +6945,66 @@ mod tests {
     }
 
     #[test]
+    fn cli_proxy_xai_model_id_maps_rolling_aliases() {
+        assert_eq!(cli_proxy_xai_model_id("grok-4.6-latest"), "grok-4.6");
+        assert_eq!(cli_proxy_xai_model_id("grok-4.6"), "grok-4.6");
+        assert_eq!(cli_proxy_xai_model_id("grok-4.5-latest"), "grok-4.5");
+        assert_eq!(cli_proxy_xai_model_id("grok-build-latest"), "grok-4.5");
+        assert_eq!(cli_proxy_xai_model_id("grok-4.3"), "grok-4.3");
+    }
+
+    #[test]
+    fn retrieve_model_path_keeps_provider_slash() {
+        assert_eq!(normalize_retrieved_model_id("xai/grok-4.6"), "xai/grok-4.6");
+        assert_eq!(
+            normalize_retrieved_model_id("/xai/grok-4.6-latest"),
+            "xai/grok-4.6-latest"
+        );
+        assert_eq!(normalize_retrieved_model_id("  grok-4.6  "), "grok-4.6");
+        assert_eq!(normalize_retrieved_model_id("/"), "");
+    }
+
+    #[test]
+    fn native_anthropic_core_owned_oauth_is_supported() {
+        assert!(native_protocol_supported(
+            NativeProtocol::AnthropicMessages,
+            ProviderType::Anthropic,
+            true,
+            true
+        ));
+        assert_eq!(
+            native_anthropic_beta("context-1m", true),
+            "context-1m,oauth-2025-04-20"
+        );
+        assert_eq!(
+            native_anthropic_beta("context-1m,oauth-2025-04-20", true),
+            "context-1m,oauth-2025-04-20"
+        );
+        assert_eq!(native_anthropic_beta("context-1m", false), "context-1m");
+        assert_eq!(native_anthropic_beta("", true), "oauth-2025-04-20");
+    }
+
+    #[test]
+    fn native_anthropic_models_keep_exact_catalog_id() {
+        let e =
+            super::parse_native_model_entry("claude-sonnet-4-6", NativeProtocol::AnthropicMessages)
+                .unwrap();
+        assert_eq!(e.provider_id, "anthropic");
+        assert_eq!(e.model_id, "claude-sonnet-4-6");
+        assert!(
+            super::parse_native_model_entry("claude-sonnet-4-6", NativeProtocol::Responses)
+                .is_none()
+        );
+        assert!(
+            super::parse_native_model_entry("smart", NativeProtocol::AnthropicMessages).is_none()
+        );
+        assert!(
+            super::parse_native_model_entry("typo/model", NativeProtocol::AnthropicMessages)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn parse_direct_model_entry_accepts_known_provider_prefix() {
         let e = parse_direct_model_entry("xai/grok-4.5").expect("known provider");
         assert_eq!(e.provider_id, "xai");
@@ -5202,6 +7020,40 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k3_routes_as_direct_passthrough_to_coding_endpoint() {
+        // `kimi/k3` (and any `kimi/<model>`) must resolve as a direct
+        // provider/model passthrough entry...
+        let e = parse_direct_model_entry("kimi/k3").expect("kimi is a known provider prefix");
+        assert_eq!(e.provider_id, "kimi");
+        assert_eq!(e.model_id, "k3");
+        let e = parse_direct_model_entry("kimi/k3-256k").expect("kimi is a known provider prefix");
+        assert_eq!(e.model_id, "k3-256k");
+        // ...aimed at the Kimi Code coding endpoint (OpenAI-compatible).
+        assert_eq!(
+            completions_url(ProviderType::Kimi, None).as_deref(),
+            Some("https://api.kimi.com/coding/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn kimi_auth_refresh_is_one_shot_and_kimi_only() {
+        // First 401 on a Kimi account → refresh + retry once.
+        assert!(should_attempt_kimi_auth_refresh(ProviderType::Kimi, true));
+        // Second auth error for the same account in the same request → normal
+        // cooldown path, never a refresh loop.
+        assert!(!should_attempt_kimi_auth_refresh(ProviderType::Kimi, false));
+        // Other providers keep their existing 401 handling untouched.
+        assert!(!should_attempt_kimi_auth_refresh(
+            ProviderType::Anthropic,
+            true
+        ));
+        assert!(!should_attempt_kimi_auth_refresh(
+            ProviderType::OpenAI,
+            true
+        ));
+    }
+
+    #[test]
     fn parse_direct_model_entry_rejects_non_provider_or_bare_ids() {
         // Unknown prefix (chain-ish / typo) → not a direct passthrough.
         assert!(parse_direct_model_entry("builtin/smart").is_none());
@@ -5210,6 +7062,62 @@ mod tests {
         // Empty halves.
         assert!(parse_direct_model_entry("xai/").is_none());
         assert!(parse_direct_model_entry("/grok-4.5").is_none());
+    }
+
+    #[test]
+    fn parse_kimi_bare_model_entry_accepts_catalog_ids() {
+        let e = parse_kimi_bare_model_entry("k3-256k").expect("k3-256k");
+        assert_eq!(e.provider_id, "kimi");
+        assert_eq!(e.model_id, "k3-256k");
+        assert!(parse_kimi_bare_model_entry("k3").is_some());
+        assert!(parse_kimi_bare_model_entry("kimi-for-coding").is_some());
+        assert!(parse_kimi_bare_model_entry("k3-1m").is_some());
+        assert!(parse_kimi_bare_model_entry("kimi/k3-256k").is_none());
+        assert!(parse_kimi_bare_model_entry("grok-4.5").is_none());
+        assert!(parse_kimi_bare_model_entry("smart").is_none());
+    }
+
+    #[test]
+    fn zai_context_hint_is_not_an_upstream_model_id() {
+        assert_eq!(
+            canonical_upstream_model(ProviderType::Zai, "glm-5.3[1m]"),
+            "glm-5.3"
+        );
+        assert_eq!(
+            canonical_upstream_model(ProviderType::Zai, "glm-5.3"),
+            "glm-5.3"
+        );
+        assert_eq!(
+            canonical_upstream_model(ProviderType::Custom, "glm-5.3[1m]"),
+            "glm-5.3[1m]"
+        );
+    }
+
+    #[test]
+    fn rewrite_model_for_kimi_fills_empty_assistant_content() {
+        let body = serde_json::json!({
+            "model": "kimi/k3-256k",
+            "temperature": 0,
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "" },
+                { "role": "assistant", "content": [], "tool_calls": [{"id": "t1", "type": "function"}] },
+                { "role": "assistant", "content": [{"type": "text", "text": "  "}] },
+                { "role": "assistant", "content": "keep me" }
+            ]
+        });
+        let payload =
+            rewrite_model_for_kimi(serde_json::to_vec(&body).unwrap().as_slice(), "k3-256k")
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_ref()).unwrap();
+        assert_eq!(value["model"], "k3-256k");
+        assert_eq!(value["temperature"], 1);
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["content"], KIMI_EMPTY_CONTENT_PLACEHOLDER);
+        assert_eq!(messages[2]["content"], KIMI_EMPTY_CONTENT_PLACEHOLDER);
+        assert!(messages[2]["tool_calls"].as_array().unwrap().len() == 1);
+        assert_eq!(messages[3]["content"], KIMI_EMPTY_CONTENT_PLACEHOLDER);
+        assert_eq!(messages[4]["content"], "keep me");
     }
 
     #[test]
@@ -5561,6 +7469,85 @@ mod tests {
     }
 
     #[test]
+    fn classify_429_honors_retry_after_capped_at_60s() {
+        // A Retry-After header marks the 429 as transient even when the body
+        // carries quota-ish wording; the cooldown honors it, bounded at 60s.
+        let secs = |s| std::time::Duration::from_secs(s);
+        let quota_body = br#"{"error":{"message":"The usage limit has been reached"}}"#;
+        let (reason, cd) = classify_429(ProviderType::Zai, Some(secs(20)), quota_body);
+        assert!(matches!(reason, CooldownReason::RateLimit));
+        assert_eq!(cd, Some(secs(20)));
+        // Pathologically long Retry-After is capped.
+        let (reason, cd) = classify_429(ProviderType::Anthropic, Some(secs(1800)), b"429");
+        assert!(matches!(reason, CooldownReason::RateLimit));
+        assert_eq!(cd, Some(secs(60)));
+    }
+
+    #[test]
+    fn classify_429_per_minute_body_is_rate_not_quota() {
+        // A tokens-per-minute breach from one oversized payload is transient:
+        // it must never earn the 3600s quota cooldown, even without headers.
+        let secs = |s| std::time::Duration::from_secs(s);
+        let body = br#"{"error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit of 80,000 input tokens per minute"}}"#;
+        let (reason, cd) = classify_429(ProviderType::Anthropic, None, body);
+        assert!(matches!(reason, CooldownReason::RateLimit));
+        assert_eq!(cd, Some(secs(30)), "capped provider gets a short default");
+        // Same for a quota-worded body that also mentions the minute window.
+        let zai = br#"{"error":{"message":"The usage limit has been reached, requests per minute exceeded"}}"#;
+        let (reason, _) = classify_429(ProviderType::Zai, None, zai);
+        assert!(matches!(reason, CooldownReason::RateLimit));
+    }
+
+    #[test]
+    fn classify_429_explicit_quota_body_stays_quota() {
+        // No Retry-After, no per-minute wording: hard exhaustion keeps the
+        // long quota cooldown class.
+        let body = br#"{"error":{"type":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details"}}"#;
+        let (reason, cd) = classify_429(ProviderType::OpenAI, None, body);
+        assert!(matches!(reason, CooldownReason::QuotaExhausted));
+        assert_eq!(cd, None);
+    }
+
+    #[test]
+    fn classify_429_provider_caps() {
+        let secs = |s| std::time::Duration::from_secs(s);
+        // Kimi keeps its short 5s default / 15s cap.
+        let (_, cd) = classify_429(ProviderType::Kimi, None, b"429");
+        assert_eq!(cd, Some(secs(5)));
+        let (_, cd) = classify_429(ProviderType::Kimi, Some(secs(120)), b"429");
+        assert_eq!(cd, Some(secs(15)));
+        // Anthropic / Z.AI / Muse rate 429s are always bounded.
+        for pt in [
+            ProviderType::Anthropic,
+            ProviderType::Zai,
+            ProviderType::Muse,
+        ] {
+            let (_, cd) = classify_429(pt, None, b"429");
+            assert_eq!(cd, Some(secs(30)), "{pt:?}");
+        }
+        // Uncapped providers without headers defer to exponential backoff.
+        let (_, cd) = classify_429(ProviderType::Minimax, None, b"429");
+        assert_eq!(cd, None);
+    }
+
+    #[test]
+    fn kimi_routable_via_oauth_for_catalog() {
+        // A connected Kimi account whose ~300s token snapshot is stale resolves
+        // with `api_key: None, has_oauth: true`; the /v1/models routability
+        // filter must keep it (the proxy refreshes the token at request time).
+        assert!(has_routable_proxy_credentials(
+            ProviderType::Kimi,
+            false,
+            true
+        ));
+        assert!(!has_routable_proxy_credentials(
+            ProviderType::Kimi,
+            false,
+            false
+        ));
+    }
+
+    #[test]
     fn build_google_request_tool_message_uses_only_function_response_part() {
         let body = serde_json::json!({
             "messages": [
@@ -5767,10 +7754,53 @@ mod tests {
     }
 
     #[test]
+    fn build_anthropic_request_strips_json_schema_meta_keys_from_tools() {
+        let body = serde_json::json!({
+            "model": "haiku",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "parameters": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "$comment": "primary",
+                                "type": "string",
+                                "items": { "$id": "x", "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }],
+            "max_tokens": 16
+        });
+
+        let payload_bytes = build_anthropic_upstream_request(
+            serde_json::to_vec(&body).unwrap().as_slice(),
+            "claude-haiku-4-5",
+            false,
+            false,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(payload_bytes.as_ref()).unwrap();
+        let schema = &payload["tools"][0]["input_schema"];
+        assert!(schema.get("$schema").is_none());
+        assert!(schema["properties"]["command"].get("$comment").is_none());
+        assert!(schema["properties"]["command"]["items"]
+            .get("$id")
+            .is_none());
+        assert_eq!(schema["properties"]["command"]["type"], "string");
+    }
+
+    #[test]
     fn anthropic_oauth_request_prepends_claude_code_identity() {
         // OAuth path (force_claude_code_identity = true): the Claude Code
-        // identity must lead the system prompt, else Anthropic 429s the
-        // subscription token.
+        // identity must be the first system BLOCK and match exactly (Anthropic
+        // exact-matches block 0's text), else Anthropic 429s the subscription
+        // token. Custom system content follows as its own block.
         let body = serde_json::json!({
             "model": "claude-opus-4-8",
             "messages": [
@@ -5787,10 +7817,11 @@ mod tests {
         )
         .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(bytes.as_ref()).unwrap();
-        assert_eq!(
-            payload["system"],
-            "You are Claude Code, Anthropic's official CLI for Claude.\n\nBe brief."
-        );
+        let expected_blocks = serde_json::json!([
+            { "type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude." },
+            { "type": "text", "text": "Be brief." },
+        ]);
+        assert_eq!(payload["system"], expected_blocks);
 
         // Idempotent: a system prompt already leading with the identity is not
         // doubled (covers the thinking-strip retry re-running the builder).
@@ -5810,10 +7841,7 @@ mod tests {
         )
         .unwrap();
         let payload2: serde_json::Value = serde_json::from_slice(bytes2.as_ref()).unwrap();
-        assert_eq!(
-            payload2["system"],
-            "You are Claude Code, Anthropic's official CLI for Claude.\n\nBe brief."
-        );
+        assert_eq!(payload2["system"], expected_blocks);
 
         // Empty system + OAuth: identity becomes the whole system prompt.
         let body3 = serde_json::json!({

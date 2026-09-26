@@ -7,9 +7,24 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
+pub(crate) mod client_placement;
+pub(crate) mod deferred_messages;
+pub(crate) mod dispatch_admission;
+#[cfg(test)]
+pub(crate) mod dispatch_admission_tests;
+pub(crate) mod execution_ownership;
+pub mod fork;
+pub(crate) mod machine_transfer;
+mod remote_grok;
+#[cfg(test)]
+use dispatch_admission::admit_dispatch;
+pub use dispatch_admission::DispatchAdmission;
+pub(super) use dispatch_admission::DISPATCH_ADMISSION;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -44,7 +59,7 @@ use uuid::Uuid;
 use super::supervision::{
     ack_promotion_loop, background_task_autoresume_loop, cleanup_stale_active_missions_once,
     recover_server_shutdown_missions, reset_waiting_background_on_boot, stale_mission_cleanup_loop,
-    stuck_mission_watchdog_loop,
+    stuck_mission_watchdog_loop, watchdog_skips_control_owned_mission,
 };
 use crate::agents::{AgentContext, AgentRef, TerminalReason};
 use crate::config::Config;
@@ -66,6 +81,20 @@ use super::routes::AppState;
 
 pub(crate) const SERVER_SHUTDOWN_AUTO_RESUME_MAX_AGE_HOURS: u64 = 48;
 const INTERRUPTED_RESUME_PROMPT: &str = "You were interrupted, resume your work.";
+
+/// The 15-minute registered-liveness interrupt is a second idle gate beside
+/// the stuck-mission watchdog. #840 taught the watchdog to skip Hermes-tagged
+/// writers; this gate still force-aborted Lido `04b0a5d8` after the watchdog
+/// correctly logged NOT auto-killing. Same ownership rule applies here.
+fn skip_idle_registered_liveness_interrupt(
+    backend_id: Option<&str>,
+    origin: Option<&str>,
+    origin_session_id: Option<&str>,
+    tags: &[String],
+) -> bool {
+    backend_id == Some("chatgpt_ui")
+        || watchdog_skips_control_owned_mission(origin, origin_session_id, tags)
+}
 
 fn parse_durable_job_result(result: &serde_json::Value) -> Option<serde_json::Value> {
     fn visit(value: &serde_json::Value, depth: u8) -> Option<serde_json::Value> {
@@ -205,6 +234,19 @@ async fn pop_next_runnable_control_queue(
 /// CancelMission re-check to keep the two views of "stalled" consistent.
 pub(crate) const STUCK_SECONDS: u64 = 900;
 
+/// The effective stall threshold, overridable at runtime via
+/// `MISSION_STUCK_SECONDS` (clamped to >= 30s so a typo can't make the
+/// watchdog trigger-happy). An ops lever to widen the window for tracks that
+/// legitimately go quiet between tool calls (long scans/builds) without a
+/// redeploy.
+pub(crate) fn stuck_seconds() -> u64 {
+    std::env::var("MISSION_STUCK_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v >= 30)
+        .unwrap_or(STUCK_SECONDS)
+}
+
 /// Grace period after the user first opens an `AwaitingUser` mission before
 /// the ack-promotion tick auto-archives it to `Acknowledged` (Finished).
 /// Resets whenever the user sends a new message (status returns to Active and
@@ -224,6 +266,17 @@ pub(crate) const ACK_PROMOTION_TICK_INTERVAL: std::time::Duration =
 /// (see `MissionStore::update_mission_status`) — otherwise the stale timestamp
 /// survives the later demotion back to `AwaitingUser` and the ack-promotion
 /// sweep can archive a mission whose next turn just started.
+/// Reason written when a cancel's JoinHandle never resolves. During a
+/// deploy/SIGTERM drain this must stay `server_shutdown` so boot recovery
+/// and reconcile resume the writer instead of leaving it stranded.
+fn cancel_timeout_interrupt_reason() -> &'static str {
+    if super::routes::is_shutdown_initiated() {
+        super::reconcile::SERVER_SHUTDOWN_REASON
+    } else {
+        super::reconcile::FORCE_KILLED_CANCEL_TIMEOUT_REASON
+    }
+}
+
 pub(crate) fn message_activates_mission(status: MissionStatus) -> bool {
     matches!(
         status,
@@ -236,6 +289,37 @@ pub(crate) fn message_activates_mission(status: MissionStatus) -> bool {
             | MissionStatus::WaitingBackground
             | MissionStatus::Acknowledged
     )
+}
+
+fn background_tasks_block_ack(status: MissionStatus, task_count: usize) -> bool {
+    status == MissionStatus::Acknowledged && task_count > 0
+}
+
+/// Stash a newly arrived operator message as the mission's deferred goal.
+///
+/// Pending missions have not run yet, so multiple pre-dispatch messages
+/// concatenate. A Failed/Interrupted/… mission already executed its original
+/// prompt (left in `deferred_goal` on purpose for a capacity-race retry).
+/// Concatenating a follow-up onto that prompt buries the operator's message
+/// and the scheduler never re-dispatches non-Pending rows, so the follow-up
+/// is lost. Replace instead.
+pub(crate) fn deferred_goal_for_incoming_message(
+    status: MissionStatus,
+    previous_goal: Option<&str>,
+    content: &str,
+) -> String {
+    if status == MissionStatus::Pending {
+        match previous_goal {
+            Some(prev) if !prev.is_empty() => deferred_messages::join(prev, content),
+            _ => content.to_string(),
+        }
+    } else {
+        content.to_string()
+    }
+}
+
+fn follow_up_should_requeue_as_pending(status: MissionStatus) -> bool {
+    message_activates_mission(status) && status != MissionStatus::Pending
 }
 
 fn queued_delivery_requires_activation(
@@ -502,6 +586,65 @@ fn extract_short_description_from_recent_history(
         .or_else(|| extract_short_description_from_recent_role(history, "user", max_len))
 }
 
+fn terminal_verdict_from_content(content: &str) -> Option<&'static str> {
+    // The contract asks for a terminal line. Scan backward so a long review's
+    // conclusion wins over status prose or quoted historical verdicts above.
+    for raw_line in content.lines().rev().take(80) {
+        let line = strip_markdown_prefixes(raw_line.trim());
+        let normalized = line.replace(['`', '*'], "").trim().to_ascii_uppercase();
+        let explicit = normalized
+            .strip_prefix("VERDICT:")
+            .or_else(|| normalized.strip_prefix("FINAL DECISION:"))
+            .map(str::trim);
+        let value = explicit.unwrap_or(normalized.as_str());
+        if value == "INFRA_BLOCKED"
+            || value == "INFRA BLOCKED"
+            || value.starts_with("INFRA_BLOCKED ")
+            || value.starts_with("INFRA BLOCKED ")
+        {
+            return Some("infra_blocked");
+        }
+        if value == "BLOCKED"
+            || value == "NOT CERTIFIED"
+            || value.starts_with("BLOCKED ")
+            || value.starts_with("NOT CERTIFIED ")
+        {
+            return Some("blocked");
+        }
+        if value == "CLEAN"
+            || value == "CERTIFIED"
+            || value == "MERGE READY"
+            || value == "MERGE-READY"
+            || value.starts_with("CLEAN ")
+            || value.starts_with("CERTIFIED ")
+            || value.starts_with("MERGE READY ")
+            || value.starts_with("MERGE-READY ")
+        {
+            return Some("clean");
+        }
+    }
+    None
+}
+
+fn terminal_verdict_from_history(history: &[(String, String)]) -> Option<&'static str> {
+    history
+        .iter()
+        .rev()
+        .find(|(role, content)| role == "assistant" && !content.trim().is_empty())
+        .and_then(|(_, content)| terminal_verdict_from_content(content))
+}
+
+fn terminal_verdict_description(verdict: &str) -> &'static str {
+    match verdict {
+        "clean" => "VERDICT: CLEAN — exact-head review reported no blocking finding.",
+        "blocked" => "VERDICT: BLOCKED — exact-head review reported unresolved blockers.",
+        "infra_blocked" => {
+            "VERDICT: INFRA_BLOCKED — verification could not complete because of infrastructure."
+        }
+        _ => "VERDICT: UNKNOWN",
+    }
+}
+
 fn extract_short_description_from_first_successful_assistant(
     history: &[(String, String)],
     max_len: usize,
@@ -732,6 +875,641 @@ everything is truly done, report completion and stop."
 }
 
 #[cfg(test)]
+mod campaign_guard_tests {
+    use super::*;
+
+    async fn mk_campaign(store: &Arc<dyn MissionStore>, project: &str) -> Uuid {
+        let mission = store
+            .create_mission(Some("campaign"), None, None, None, None, None, None)
+            .await
+            .expect("create");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    project: Some(Some(project.to_string())),
+                    track: Some(Some("campaign".to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        mission.id
+    }
+
+    async fn mk_tracked(store: &Arc<dyn MissionStore>, project: &str, track: &str) -> Uuid {
+        let mission = store
+            .create_mission(Some(track), None, None, None, None, None, None)
+            .await
+            .expect("create");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    project: Some(Some(project.to_string())),
+                    track: Some(Some(track.to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        mission.id
+    }
+
+    /// A mission with an explicit model selection and a live native session,
+    /// as it exists on disk before any turn is dispatched.
+    async fn mk_selected(
+        store: &Arc<dyn MissionStore>,
+        backend: &str,
+        model: Option<&str>,
+    ) -> Mission {
+        let mission = store
+            .create_mission(Some("selected"), None, None, None, None, None, None)
+            .await
+            .expect("create");
+        store
+            .update_mission_run_settings(
+                mission.id,
+                Some(backend),
+                Some(Some("writer")),
+                Some(model.map(|m| m).map(Some).unwrap_or(None)),
+                Some(Some("high")),
+                Some(true),
+                Some(Some("telegram")),
+                "native-session-1",
+            )
+            .await
+            .expect("settings");
+        store
+            .get_mission(mission.id)
+            .await
+            .expect("load")
+            .expect("present")
+    }
+
+    #[tokio::test]
+    async fn dispatch_never_drops_a_model_this_deployment_still_runs() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        // The regression this guards: returning None here silently erased the
+        // user's selection and fell back to the harness default.
+        for (backend, model) in [
+            ("codex", "gpt-6-astra"),
+            ("codex", "gpt-5.6-sol"),
+            ("claudecode", crate::model_policy::CURRENT_CLAUDE_FABLE),
+            ("claudecode", crate::model_policy::CURRENT_CLAUDE_OPUS),
+            ("claudecode", "claude-sonnet-4-6"),
+            ("grok", "grok-4.6"),
+            ("opencode", "xai/grok-4.6"),
+            ("opencode", "anthropic/claude-opus-5"),
+        ] {
+            let mission = mk_selected(&store, backend, Some(model)).await;
+            assert_eq!(
+                model_for_dispatch(&store, &mission).await.as_deref(),
+                Some(model),
+                "{backend}/{model} must reach the runner unchanged"
+            );
+            let reloaded = store.get_mission(mission.id).await.unwrap().unwrap();
+            assert_eq!(reloaded.model_override.as_deref(), Some(model));
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_leaves_an_unset_model_unset() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = mk_selected(&store, "claudecode", None).await;
+        assert_eq!(mission.model_override, None);
+        assert_eq!(model_for_dispatch(&store, &mission).await, None);
+        let reloaded = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.model_override, None, "no override was invented");
+    }
+
+    #[tokio::test]
+    async fn dispatch_upgrades_a_retired_model_and_records_it() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = mk_selected(&store, "claudecode", Some("claude-opus-4-1")).await;
+        let before = store.get_mission(mission.id).await.unwrap().unwrap();
+
+        let effective = model_for_dispatch(&store, &mission).await;
+        assert_eq!(
+            effective.as_deref(),
+            Some(crate::model_policy::CURRENT_CLAUDE_OPUS)
+        );
+
+        // What clients read must match what the turn will run — the whole point
+        // of persisting the upgrade rather than only applying it in the runner.
+        let after = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(after.model_override.as_deref(), effective.as_deref());
+
+        // A model change must not cost the conversation its native session, its
+        // history, or any other run setting.
+        assert_eq!(after.session_id, before.session_id);
+        assert!(
+            after.session_id.is_some(),
+            "session was preserved, not cleared"
+        );
+        assert_eq!(after.backend, before.backend);
+        assert_eq!(after.agent, before.agent);
+        assert_eq!(after.model_effort, before.model_effort);
+        assert_eq!(after.fast_mode, before.fast_mode);
+        assert_eq!(after.config_profile, before.config_profile);
+        assert_eq!(after.history.len(), before.history.len());
+        assert_eq!(after.created_at, before.created_at);
+    }
+
+    #[tokio::test]
+    async fn dispatch_keeps_the_provider_prefix_when_upgrading() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        // OpenCode addresses models as provider/model; dropping the prefix
+        // would produce an id it cannot resolve.
+        let mission = mk_selected(&store, "opencode", Some("anthropic/claude-opus-4-8")).await;
+        assert_eq!(
+            model_for_dispatch(&store, &mission).await.as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        let after = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.model_override.as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_is_refused_rather_than_run_on_a_retired_model() {
+        use crate::api::mission_runner::refuse_retired_model;
+
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = mk_selected(&store, "claudecode", Some("claude-opus-4-1")).await;
+
+        // Make the upgrade unrecordable: the write `model_for_dispatch` needs
+        // now fails, exactly as it would against an unavailable store.
+        assert!(store.delete_mission(mission.id).await.expect("delete"));
+
+        // Dispatch hands back the stored id rather than a model nothing reports.
+        let dispatched = model_for_dispatch(&store, &mission)
+            .await
+            .expect("a model is still resolved");
+        assert_eq!(dispatched, "claude-opus-4-1");
+
+        // The pre-harness guard then refuses the turn. This is the fail-closed
+        // half: no harness is spawned, locally or remotely, and the retired
+        // model never runs.
+        let refusal = refuse_retired_model(mission.id, &dispatched)
+            .expect("a retired model must not reach a harness");
+        assert!(!refusal.success);
+        assert_eq!(refusal.cost_cents, 0);
+        assert!(refusal.output.contains("claude-opus-4-1"));
+        assert!(refusal
+            .output
+            .contains(crate::model_policy::CURRENT_CLAUDE_OPUS));
+        assert!(
+            refusal.output.contains("Nothing was started"),
+            "the refusal must say no work began: {}",
+            refusal.output
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guard_never_refuses_a_model_this_deployment_runs() {
+        use crate::api::mission_runner::refuse_retired_model;
+
+        let id = Uuid::new_v4();
+        for allowed in [
+            crate::model_policy::CURRENT_CLAUDE_OPUS,
+            crate::model_policy::CURRENT_CLAUDE_FABLE,
+            "claude-opus-6",
+            "claude-opus-5-20260101",
+            "claude-sonnet-4-6",
+            "gpt-6-astra",
+            "grok-4.6",
+            "anthropic/claude-opus-5",
+        ] {
+            assert!(
+                refuse_retired_model(id, allowed).is_none(),
+                "{allowed} must be allowed to run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_does_not_downgrade_a_newer_model() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        for newer in [
+            "claude-opus-6",
+            "claude-fable-6-1",
+            "claude-opus-5-20260101",
+        ] {
+            let mission = mk_selected(&store, "claudecode", Some(newer)).await;
+            assert_eq!(
+                model_for_dispatch(&store, &mission).await.as_deref(),
+                Some(newer),
+                "{newer} must not be rewritten"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonterminal_missions_for_project_counts_the_live_footprint() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        assert!(nonterminal_missions_for_project(&store, "proj")
+            .await
+            .is_empty());
+
+        let a = mk_tracked(&store, "proj", "alpha").await;
+        mk_tracked(&store, "proj", "beta").await;
+        mk_tracked(&store, "other", "alpha").await; // different project — excluded
+
+        let live = nonterminal_missions_for_project(&store, "proj").await;
+        assert_eq!(
+            live.len(),
+            2,
+            "counts only this project's non-terminal missions"
+        );
+        // The (project, track) dedup key: track 'alpha' is present exactly once.
+        assert_eq!(
+            live.iter()
+                .filter(|m| m.project.track.as_deref() == Some("alpha"))
+                .count(),
+            1
+        );
+
+        // A terminal mission drops out of the footprint (frees the cap slot).
+        store
+            .update_mission_status(a, MissionStatus::Completed)
+            .await
+            .expect("complete");
+        assert_eq!(
+            nonterminal_missions_for_project(&store, "proj").await.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_digest_reads_durable_goal_independently_of_mission_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "goal-digest-test")
+                .await
+                .unwrap();
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let objective = "🦀".repeat(1500);
+        store
+            .update_mission_goal(mission.id, true, Some(&objective))
+            .await
+            .unwrap();
+        drop(store);
+        let reopened =
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "goal-digest-test")
+                .await
+                .unwrap();
+        let loaded = reopened.get_mission(mission.id).await.unwrap().unwrap();
+        let digest = mission_goal_digest(&loaded);
+        assert_eq!(digest["mission_mode"], "task");
+        assert_eq!(digest["goal_mode"], true);
+        assert_eq!(
+            digest["goal_objective"].as_str().unwrap().chars().count(),
+            1001
+        );
+        assert!(digest["goal_objective"].as_str().unwrap().ends_with('…'));
+        let listed = reopened.list_missions(10, 0).await.unwrap();
+        assert_eq!(mission_goal_digest(&listed[0]), digest);
+        reopened
+            .update_mission_goal(mission.id, false, None)
+            .await
+            .unwrap();
+        let cleared = reopened.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(
+            mission_goal_digest(&cleared),
+            serde_json::json!({
+                "mission_mode": "task", "goal_mode": false, "goal_objective": null,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn control_continuation_validates_against_stored_identity_without_mutation() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("RESERVE-1"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    track: Some(Some("trio-reserve1".into())),
+                    tags: Some(vec!["pr-readonly".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let loaded = store.get_mission(mission.id).await.unwrap().unwrap();
+        let request: ControlMessageRequest = serde_json::from_value(serde_json::json!({
+            "mission_id": mission.id, "content": "Continue RESERVE-1 on PR 244; exclude PR #230.",
+            "continue_identity": {"project": null, "track": "trio-reserve1", "github_pr": null}
+        }))
+        .unwrap();
+        assert!(request.extra.is_empty());
+        let patch = dispatch_identity_patch(
+            request.github_pr,
+            request.track,
+            request.title,
+            Some(request.content),
+            request.continue_identity,
+        );
+        let next = writer_reuse_or_conflict(&loaded, &patch).unwrap();
+        assert_eq!(next.track, loaded.project.track);
+        assert_eq!(next.github_pr, None);
+        let unchanged = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.project.tags, vec!["pr-readonly"]);
+        let resume: ResumeMissionRequest = serde_json::from_value(serde_json::json!({
+            "content": "Different work PR #90", "continue_identity": {"project": null, "track": "different", "github_pr": null}
+        })).unwrap();
+        let err = writer_reuse_or_conflict(
+            &loaded,
+            &dispatch_identity_patch(
+                resume.github_pr,
+                resume.track,
+                resume.title,
+                resume.content,
+                resume.continue_identity,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn silent_recycle_of_pr88_writer_as_reserve_is_rejected() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Repair Lido PR #88"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    github_pr: Some(Some("lfglabs-dev/lido-srv3-proof-closure#88".to_string())),
+                    track: Some(Some("pr-88-repair".to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        let loaded = store.get_mission(mission.id).await.unwrap().unwrap();
+        let err = writer_reuse_or_conflict(
+            &loaded,
+            &dispatch_identity_patch(
+                None,
+                None,
+                None,
+                Some("Implement P-RESERVE-RELATIONAL first slice".into()),
+                None,
+            ),
+        )
+        .expect_err("silent recycle");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("writer_identity_stale"));
+
+        let updated = writer_reuse_or_conflict(
+            &loaded,
+            &dispatch_identity_patch(
+                Some(String::new()),
+                Some("p-reserve-relational".into()),
+                Some("P-RESERVE-RELATIONAL first slice".into()),
+                Some("Implement P-RESERVE-RELATIONAL first slice".into()),
+                None,
+            ),
+        )
+        .expect("explicit retag");
+        assert_eq!(updated.github_pr.as_deref(), None);
+        assert_eq!(updated.track.as_deref(), Some("p-reserve-relational"));
+    }
+
+    #[tokio::test]
+    async fn same_work_followup_without_pr_mention_is_accepted() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Repair Lido PR #88"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    github_pr: Some(Some("lfglabs-dev/lido-srv3-proof-closure#88".to_string())),
+                    track: Some(Some("pr-88-repair".to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tag");
+        let loaded = store.get_mission(mission.id).await.unwrap().unwrap();
+        writer_reuse_or_conflict(
+            &loaded,
+            &dispatch_identity_patch(None, None, None, Some("fix the failing test".into()), None),
+        )
+        .expect("same-work chat must not 409");
+        let updated = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.project.github_pr.as_deref(),
+            Some("lfglabs-dev/lido-srv3-proof-closure#88")
+        );
+        assert_eq!(updated.project.track.as_deref(), Some("pr-88-repair"));
+        assert_eq!(updated.title.as_deref(), Some("Repair Lido PR #88"));
+    }
+
+    #[tokio::test]
+    async fn untagged_new_mission_opening_message_is_accepted() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create");
+        let loaded = store.get_mission(mission.id).await.unwrap().unwrap();
+        writer_reuse_or_conflict(
+            &loaded,
+            &dispatch_identity_patch(
+                None,
+                None,
+                None,
+                Some("Continue from PR #105. Launch P-TOPUP-2 and P-ALLOC-1.".into()),
+                None,
+            ),
+        )
+        .expect("blank writer first message must not 409");
+    }
+
+    #[test]
+    fn dispatch_gate_blocks_paused_and_archived_only() {
+        // paused → 423 Locked; archived → 409 Conflict.
+        assert_eq!(
+            dispatch_gate_for_status("paused"),
+            Some((StatusCode::LOCKED, "project_paused"))
+        );
+        assert_eq!(
+            dispatch_gate_for_status("archived"),
+            Some((StatusCode::CONFLICT, "project_archived"))
+        );
+        // Active (and any unknown/legacy status) permits dispatch.
+        assert_eq!(dispatch_gate_for_status("active"), None);
+        assert_eq!(dispatch_gate_for_status(""), None);
+        assert_eq!(dispatch_gate_for_status("blocked"), None);
+    }
+
+    #[tokio::test]
+    async fn second_campaign_is_blocked_until_the_first_terminates() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        // No campaign yet: the slot is free (first create would succeed).
+        assert!(find_open_campaign_mission(&store, "verity").await.is_none());
+
+        let first = mk_campaign(&store, "verity").await;
+        // Second create for the same project sees the open campaign → 409.
+        let existing = find_open_campaign_mission(&store, "verity")
+            .await
+            .expect("open campaign found");
+        assert_eq!(existing.id, first);
+        // A different project is unaffected.
+        assert!(find_open_campaign_mission(&store, "other").await.is_none());
+
+        // Every listed non-terminal status holds the slot.
+        for status in [
+            MissionStatus::Active,
+            MissionStatus::AwaitingUser,
+            MissionStatus::WaitingBackground,
+            MissionStatus::Paused,
+        ] {
+            store
+                .update_mission_status(first, status)
+                .await
+                .expect("status");
+            assert!(
+                find_open_campaign_mission(&store, "verity").await.is_some(),
+                "{status} should hold the campaign slot"
+            );
+        }
+
+        // Once the first completes, a new campaign is allowed.
+        store
+            .update_mission_status(first, MissionStatus::Completed)
+            .await
+            .expect("status");
+        assert!(find_open_campaign_mission(&store, "verity").await.is_none());
+        let second = mk_campaign(&store, "verity").await;
+        assert_ne!(first, second);
+        assert_eq!(
+            find_open_campaign_mission(&store, "verity")
+                .await
+                .expect("new open campaign")
+                .id,
+            second
+        );
+    }
+
+    #[tokio::test]
+    async fn live_mission_on_workspace_is_the_unique_occupant() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let writer = store
+            .create_mission(Some("writer"), None, None, None, None, None, None)
+            .await
+            .expect("create");
+        store
+            .update_mission_status(writer.id, MissionStatus::Active)
+            .await
+            .expect("active");
+        let occupant = live_mission_on_workspace(&store, writer.workspace_id)
+            .await
+            .expect("occupant");
+        assert_eq!(occupant.id, writer.id);
+        store
+            .update_mission_status(writer.id, MissionStatus::Completed)
+            .await
+            .expect("complete");
+        assert!(
+            live_mission_on_workspace(&store, writer.workspace_id)
+                .await
+                .is_none(),
+            "a finished writer frees the worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_codex_oauth_invalidation_detects_chatgpt_refresh_death() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("E1 parallel"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .expect("create");
+        store
+            .update_mission_status(mission.id, MissionStatus::Failed)
+            .await
+            .expect("fail");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                Some(Some(
+                    "auth refresh request failed: ChatGPT OAuth refresh failed: OpenAI OAuth refresh failed (401 Unauthorized): refresh_token_invalidated",
+                )),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("desc");
+        assert!(chatgpt_oauth_refresh_invalidated(
+            "sandboxed-sh: ChatGPT OAuth refresh failed: refresh_token_invalidated"
+        ));
+        assert!(
+            recent_codex_oauth_invalidation(&store).await.is_some(),
+            "a fresh Codex OAuth death must trip the gate"
+        );
+    }
+
+    #[test]
+    fn terminal_and_archived_statuses_do_not_hold_the_slot() {
+        for status in [
+            MissionStatus::Completed,
+            MissionStatus::Failed,
+            MissionStatus::Interrupted,
+            MissionStatus::Blocked,
+            MissionStatus::NotFeasible,
+            MissionStatus::Acknowledged,
+        ] {
+            assert!(!campaign_slot_held_by(status), "{status}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod stall_guard_tests {
     use super::*;
 
@@ -779,6 +1557,50 @@ mod stall_guard_tests {
         reset_stall_guard(boss);
         assert!(maybe_arm_stall_guard_wakeup(&store, boss).await);
         reset_stall_guard(boss);
+    }
+
+    #[test]
+    fn project_patches_only_arbitrate_the_writer_lease_when_they_could_change_it() {
+        let parse = |json: &str| -> UpdateMissionProjectRequest {
+            serde_json::from_str(json).expect("valid patch")
+        };
+
+        // Retagging metadata cannot make a mission a writer, so it must not be
+        // gated on someone else's lease.
+        assert!(!patch_can_change_writer_status(&parse(
+            r#"{"project":"verity","track":"phase1d/core-c3"}"#
+        )));
+        assert!(!patch_can_change_writer_status(&parse(r#"{}"#)));
+        assert!(!patch_can_change_writer_status(&parse(
+            r#"{"desired_state":"green","next_check_at":"2026-08-05T00:00:00Z"}"#
+        )));
+
+        // Anything `becomes_writer` is derived from still arbitrates.
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"github_pr":"https://github.com/o/r/pull/1"}"#
+        )));
+        assert!(patch_can_change_writer_status(&parse(r#"{"writer":true}"#)));
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"writer":false}"#
+        )));
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"intent":"implementation"}"#
+        )));
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"tags":["pr-writer"]}"#
+        )));
+
+        // An explicit null is a clear, not an absence: dropping the PR or the
+        // intent changes writer status just as much as setting one.
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"github_pr":null}"#
+        )));
+        assert!(patch_can_change_writer_status(&parse(r#"{"intent":null}"#)));
+
+        // A patch that mixes both still arbitrates.
+        assert!(patch_can_change_writer_status(&parse(
+            r#"{"project":"verity","writer":true}"#
+        )));
     }
 
     #[tokio::test]
@@ -1904,6 +2726,7 @@ async fn generate_mission_metadata_updates(
     let has_successful_assistant_reply = history
         .iter()
         .any(|(role, content)| role == "assistant" && assistant_reply_is_successful(content));
+    let deterministic_terminal_verdict = terminal_verdict_from_history(history);
     let should_bootstrap_title_from_first_assistant =
         title_missing && has_successful_assistant_reply;
     let should_bootstrap_short_description_from_first_assistant = has_successful_assistant_reply
@@ -1953,7 +2776,11 @@ async fn generate_mission_metadata_updates(
             }
 
             if needs_description {
-                if let Some(candidate) = llm_status {
+                if let Some(candidate) = deterministic_terminal_verdict
+                    .map(terminal_verdict_description)
+                    .map(str::to_string)
+                    .or(llm_status)
+                {
                     if should_accept_metadata_candidate(
                         mission.short_description.as_deref(),
                         &candidate,
@@ -2017,7 +2844,9 @@ async fn generate_mission_metadata_updates(
     };
 
     let short_description_candidate = if needs_description {
-        if should_bootstrap_short_description_from_first_assistant {
+        if let Some(verdict) = deterministic_terminal_verdict {
+            Some(terminal_verdict_description(verdict).to_string())
+        } else if should_bootstrap_short_description_from_first_assistant {
             extract_short_description_from_first_successful_assistant(history, 160)
                 .or_else(|| extract_short_description_from_history(history, 160))
         } else if should_refresh {
@@ -2690,14 +3519,27 @@ async fn mission_has_active_automation(
     }
 }
 
+fn mission_is_terminal_for_goal_loop(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Acknowledged
+            | MissionStatus::Completed
+            | MissionStatus::Failed
+            | MissionStatus::Interrupted
+            | MissionStatus::NotFeasible
+            | MissionStatus::Paused
+    )
+}
+
 async fn stop_policy_matches_status(
     stop_policy: &mission_store::StopPolicy,
-    _status: MissionStatus,
+    status: MissionStatus,
     consecutive_failures: u32,
     has_fired: bool,
 ) -> bool {
     match stop_policy {
         mission_store::StopPolicy::Never => false,
+        mission_store::StopPolicy::WhenMissionTerminal => mission_is_terminal_for_goal_loop(status),
         mission_store::StopPolicy::WhenFailingConsecutively { count } => {
             consecutive_failures >= *count
         }
@@ -2832,9 +3674,16 @@ pub(crate) async fn resolve_claudecode_default_model(
 
 /// Return the default model for Codex CLI when no override is specified.
 pub(crate) fn resolve_codex_default_model() -> String {
-    // Keep aligned with Codex upstream:
-    // https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json
-    "gpt-5.6-sol".to_string()
+    // Keep aligned with the live ChatGPT Codex catalog (`codex debug models`):
+    // gpt-6-astra listed on both prod accounts 2026-09-05 (efforts low..ultra,
+    // default medium). Owner decision: Astra is the Codex default.
+    if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
+        let trimmed = model.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "gpt-6-astra".to_string()
 }
 
 /// Return the default model for Gemini CLI when no override is specified.
@@ -2917,6 +3766,10 @@ async fn close_mission_desktop_sessions(
 /// Message posted by a user to the control session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlMessageRequest {
+    /// Explicit same-work assertion, checked against stored identity before dispatch.
+    #[serde(default)]
+    pub continue_identity: Option<crate::api::writer_recycle::WriterContinuation>,
+
     pub content: String,
     /// Client-generated idempotency key for the send action. When present,
     /// the backend uses it as the message id and ignores duplicate commands
@@ -2934,6 +3787,18 @@ pub struct ControlMessageRequest {
     /// message to the session's current mission.
     #[serde(default, alias = "target_mission_id")]
     pub mission_id: Option<Uuid>,
+    /// Explicit identity update when retasking a writer. Omit to leave
+    /// stored `github_pr` / `track` / `title` unchanged; empty string
+    /// clears. A different objective without these fields is refused.
+    #[serde(default)]
+    pub github_pr: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Follow-up `@` chips: written into the live workspace before this message.
+    #[serde(default)]
+    pub attachments: Option<Vec<crate::api::mission_payload::MissionAttachment>>,
     /// Catch-all for unrecognized request fields — surfaced as `warnings` in
     /// the response instead of being silently dropped (a mistyped targeting
     /// field once silently rerouted a message to the wrong mission).
@@ -2945,6 +3810,12 @@ pub struct ControlMessageRequest {
 pub struct ControlMessageResponse {
     pub id: Uuid,
     pub queued: bool,
+    pub message_accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<Uuid>,
+    /// Only populated for an accepted idle wake, not an active queued steer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_execution: Option<MessagePreviousExecution>,
     /// Non-fatal request problems (e.g. unrecognized fields that were
     /// ignored). Empty on clean requests; omitted from the JSON then.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -2970,6 +3841,23 @@ pub struct QueuedMessage {
     /// interrupted and an explicit resume is required.
     #[serde(default)]
     pub inflight: bool,
+}
+
+/// A scheduler batch keeps one transport entry, but every original receipt ID
+/// remains an admission identity. Never insert aliases into the persisted queue:
+/// that would replay/display the same batch more than once.
+fn control_message_contains_id(
+    outer_id: Uuid,
+    content: &str,
+    source: Option<&str>,
+    candidate: Uuid,
+) -> bool {
+    outer_id == candidate
+        || (source == Some("scheduler")
+            && deferred_messages::decode(content)
+                .1
+                .iter()
+                .any(|(id, _)| *id == candidate))
 }
 
 fn partition_restored_control_messages(
@@ -3391,6 +4279,10 @@ impl FrontendToolHub {
         rx
     }
 
+    pub async fn unregister(&self, tool_call_id: &str) {
+        self.pending.lock().await.remove(tool_call_id);
+    }
+
     /// Resolve a pending tool call by id.
     ///
     /// Returns `true` if a live waiter received the result (the running mission
@@ -3419,8 +4311,7 @@ impl FrontendToolHub {
             {
                 let mut pending = self.pending.lock().await;
                 if let Some(tx) = pending.remove(tool_call_id) {
-                    let _ = tx.send(result);
-                    return true;
+                    return tx.send(result).is_ok();
                 }
             }
             if attempt < REGISTER_GRACE_ATTEMPTS {
@@ -3428,6 +4319,11 @@ impl FrontendToolHub {
             }
         }
 
+        // Native requests are registered before publication. Never replay an
+        // expired answer into a future waiter.
+        if tool_call_id.starts_with("native-") {
+            return false;
+        }
         let mut early = self.early_results.lock().await;
         const MAX_EARLY_RESULTS: usize = 256;
         if early.len() >= MAX_EARLY_RESULTS {
@@ -3520,6 +4416,9 @@ pub struct ControlState {
     pub progress: Arc<RwLock<ExecutionProgress>>,
     /// Running missions (for parallel execution)
     pub running_missions: Arc<RwLock<Vec<super::mission_runner::RunningMissionInfo>>>,
+    /// Published by the owning actor before it processes its next command.
+    /// Admission/sweep read this without recursively querying that actor.
+    pub(crate) assignment_owners: Arc<RwLock<HashSet<Uuid>>>,
     /// Max parallel missions allowed
     pub max_parallel: usize,
     /// Mission persistence (SQLite-backed)
@@ -3531,6 +4430,8 @@ pub struct ControlState {
 /// Control session manager for per-user sessions.
 #[derive(Clone)]
 pub struct ControlHub {
+    admission_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
+    admission_ready: Arc<tokio::sync::Notify>,
     sessions: Arc<RwLock<HashMap<String, ControlState>>>,
     config: Config,
     root_agent: AgentRef,
@@ -3558,6 +4459,8 @@ impl ControlHub {
         secrets: Option<Arc<SecretsStore>>,
     ) -> Self {
         Self {
+            admission_state: Arc::new(std::sync::OnceLock::new()),
+            admission_ready: Arc::new(tokio::sync::Notify::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
             root_agent,
@@ -3566,6 +4469,21 @@ impl ControlHub {
             library,
             secrets,
             telegram_bridge: None,
+        }
+    }
+
+    pub(crate) fn bind_admission_state(&self, state: &Arc<AppState>) {
+        let _ = self.admission_state.set(Arc::downgrade(state));
+        self.admission_ready.notify_waiters();
+    }
+
+    pub(crate) async fn wait_for_admission_state(&self) -> Option<Arc<AppState>> {
+        loop {
+            let ready = self.admission_ready.notified();
+            if let Some(state) = self.admission_state.get() {
+                return state.upgrade();
+            }
+            ready.await;
         }
     }
 
@@ -3655,8 +4573,372 @@ impl ControlHub {
         self.sessions.read().await.values().cloned().collect()
     }
 
-    /// Inventory every live and persisted mission store without opening
-    /// offline SQLite stores in read-write migration mode.
+    /// Resolve a mission capability against the store that owns it.  Never use
+    /// `get_mission_store` for this: that convenience method intentionally
+    /// chooses an arbitrary desktop/default session and is not an authority
+    /// lookup in a multi-user deployment.
+    pub(crate) async fn find_mission_store_owner(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Option<(Arc<dyn MissionStore>, Mission)>, String> {
+        // A Spark token can only have been minted by a running session, so a
+        // live owner is required.  Do not open offline SQLite files here: a
+        // capability check must not create a competing writer just to find a
+        // row that cannot currently execute.
+        let stores: Vec<_> = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .map(|state| Arc::clone(&state.mission_store))
+            .collect();
+        for store in stores {
+            if let Some(mission) = store.get_mission(mission_id).await? {
+                return Ok(Some((store, mission)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Collect every mission that carries a `project` tag across all mission
+    /// stores (live, offline file, offline sqlite). Read-only; used by the
+    /// projects-overview board. Terminal missions older than `terminal_horizon`
+    /// are skipped so the scan stays bounded on long-lived stores.
+    pub(crate) async fn collect_project_missions(
+        &self,
+        terminal_horizon: chrono::Duration,
+    ) -> Result<Vec<Mission>, String> {
+        const PAGE_SIZE: usize = 200;
+        let cutoff = chrono::Utc::now() - terminal_horizon;
+        let keep = |mission: &Mission| -> bool {
+            if mission.project.project.is_none() {
+                return false;
+            }
+            if mission.status.is_terminal() || mission.status == MissionStatus::Acknowledged {
+                return chrono::DateTime::parse_from_rfc3339(&mission.updated_at)
+                    .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+                    .unwrap_or(false);
+            }
+            true
+        };
+        let mut collected: Vec<Mission> = Vec::new();
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let inventory = self.mission_store_inventory().await?;
+        let mut stores: Vec<Arc<dyn MissionStore>> = inventory.live;
+        for user in inventory.offline_file_users {
+            stores.push(Arc::new(
+                mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
+            ));
+        }
+        for store in stores {
+            let mut offset = 0;
+            loop {
+                let page = store.list_missions(PAGE_SIZE, offset).await?;
+                let page_len = page.len();
+                for mission in page {
+                    if keep(&mission) && seen.insert(mission.id) {
+                        collected.push(mission);
+                    }
+                }
+                if page_len < PAGE_SIZE {
+                    break;
+                }
+                offset += page_len;
+            }
+        }
+        for path in inventory.offline_sqlite {
+            let cutoff_str = cutoff.to_rfc3339();
+            let rows = tokio::task::spawn_blocking(move || {
+                collect_project_missions_from_sqlite(&path, &cutoff_str)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            for mission in rows {
+                if seen.insert(mission.id) {
+                    collected.push(mission);
+                }
+            }
+        }
+        Ok(collected)
+    }
+
+    /// Live AskUserQuestion waits: mission id → user-wait tool `started_at`.
+    /// Presence means `WaitingUser`; the value is the grace clock (None if the
+    /// tool row is not registered yet — treated as just started).
+    ///
+    /// Returns `(waits, complete)`. When `complete` is false at least one store
+    /// or page failed — the map is a best-effort subset, not negative evidence.
+    pub(crate) async fn collect_waiting_user_waits(&self) -> (HashMap<Uuid, Option<String>>, bool) {
+        let mut waits = HashMap::new();
+        let Ok(inventory) = self.mission_store_inventory().await else {
+            return (waits, false);
+        };
+        let mut complete = true;
+        for store in inventory.live {
+            let Ok(runs) = store.list_active_mission_runs().await else {
+                complete = false;
+                continue;
+            };
+            let (store_waits, store_complete) =
+                user_wait_starts_for_runs_checked(store.as_ref(), &runs).await;
+            complete &= store_complete;
+            waits.extend(store_waits);
+        }
+        (waits, complete)
+    }
+
+    /// Board tasks across every store whose boss mission belongs to this
+    /// project family. Kept for boss-internal / debug reads. The public
+    /// project roadmap is the item list (`load_project_items`), not this.
+    #[allow(dead_code)]
+    pub(crate) async fn collect_project_board_tasks(
+        &self,
+        project: &str,
+    ) -> Result<Vec<mission_store::BoardTask>, String> {
+        let inventory = self.mission_store_inventory().await?;
+        let mut collected = Vec::new();
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for store in inventory.live {
+            for task in store.list_board_tasks_for_project(project).await? {
+                if seen.insert(task.id) {
+                    collected.push(task);
+                }
+            }
+        }
+        for path in inventory.offline_sqlite {
+            let project = project.to_string();
+            let tasks = tokio::task::spawn_blocking(move || {
+                mission_store::sqlite::read_board_tasks_for_project(&path, &project)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            for task in tasks {
+                if seen.insert(task.id) {
+                    collected.push(task);
+                }
+            }
+        }
+        Ok(collected)
+    }
+
+    /// Attention-horizon missions for one project: live / waiting / blocked
+    /// and unabsorbed failed/interrupted attempts. Used by the item-first
+    /// project read so controllers do not walk historical missions.
+    ///
+    /// `project` may be a roster nickname; every `routes.json` alias that
+    /// folds onto the same canonical is queried. Offline sqlite is read
+    /// read-only — opening a second writer on `missions-prod.db` is how a
+    /// `get_project` would lock or fail closed to an empty item list.
+    pub(crate) async fn collect_attention_missions_for_project(
+        &self,
+        project: &str,
+    ) -> Result<Vec<Mission>, String> {
+        let keys = super::projects_overview::project_tag_keys(project);
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Self::collect_attention_inventory(self.mission_store_inventory().await?, &keys).await
+    }
+
+    /// A roster is usable as negative evidence only when every store and page
+    /// was read successfully. Never turn a skipped store into an empty result.
+    async fn collect_attention_inventory(
+        inventory: MissionStoreInventory,
+        keys: &[String],
+    ) -> Result<Vec<Mission>, String> {
+        const PAGE_SIZE: usize = 200;
+        let mut collected = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stores = inventory.live;
+        for user in inventory.offline_file_users {
+            stores.push(Arc::new(
+                mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
+            ));
+        }
+        let filters: Vec<_> = keys
+            .iter()
+            .map(|key| mission_store::MissionFilter {
+                project: Some(key.clone()),
+                attention_only: true,
+                ..Default::default()
+            })
+            .collect();
+        for store in stores {
+            let mut offset = 0;
+            loop {
+                // The trait's filtered-list fallback stops after 5000 raw
+                // rows. Scan raw pages once so old waits cannot disappear.
+                let page = store.list_missions(PAGE_SIZE, offset).await?;
+                let page_len = page.len();
+                for mission in page {
+                    if filters.iter().any(|filter| filter.matches(&mission))
+                        && seen.insert(mission.id)
+                    {
+                        collected.push(mission);
+                    }
+                }
+                if page_len < PAGE_SIZE {
+                    break;
+                }
+                offset += page_len;
+            }
+        }
+        for path in inventory.offline_sqlite {
+            for key in keys {
+                let path = path.clone();
+                let key = key.clone();
+                let rows = tokio::task::spawn_blocking(move || {
+                    collect_attention_missions_from_sqlite(&path, &key)
+                })
+                .await
+                .map_err(|error| error.to_string())??;
+                for mission in rows {
+                    if seen.insert(mission.id) {
+                        collected.push(mission);
+                    }
+                }
+            }
+        }
+        Ok(collected)
+    }
+
+    /// Delete every mission tagged with any of these project keys across live
+    /// and offline stores. Callers must pass every alias the board folds onto
+    /// the project (`project_tag_keys`), not only the canonical slug. This is
+    /// intentionally fail-closed: a project-wide data delete cannot race a
+    /// running, queued, paused, or otherwise resumable mission. The operator
+    /// must finish or cancel those missions first. All tags are scanned before
+    /// any delete so a live mission on an alias cannot be discovered after a
+    /// partial wipe.
+    pub(crate) async fn delete_project_missions(
+        &self,
+        projects: &[String],
+    ) -> Result<Vec<Uuid>, String> {
+        const PAGE_SIZE: usize = 200;
+        let inventory = self.mission_store_inventory().await?;
+        let mut stores: Vec<Arc<dyn MissionStore>> = inventory.live;
+        for user in inventory.offline_file_users {
+            stores.push(Arc::new(
+                mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
+            ));
+        }
+        for path in inventory.offline_sqlite {
+            let Some(user) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("missions-"))
+                .and_then(|name| name.strip_suffix(".db"))
+            else {
+                return Err(format!("invalid mission store path {}", path.display()));
+            };
+            stores.push(Arc::new(
+                mission_store::SqliteMissionStore::new(inventory.base_dir.clone(), user).await?,
+            ));
+        }
+
+        let tags: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            projects
+                .iter()
+                .map(|tag| tag.trim())
+                .filter(|tag| !tag.is_empty() && seen.insert((*tag).to_string()))
+                .map(str::to_string)
+                .collect()
+        };
+        let mut plans: Vec<(Arc<dyn MissionStore>, Vec<Mission>)> = Vec::new();
+        for store in stores {
+            let mut matched = Vec::new();
+            let mut seen_ids = std::collections::HashSet::new();
+            for tag in &tags {
+                let filter = mission_store::MissionFilter {
+                    project: Some(tag.clone()),
+                    ..Default::default()
+                };
+                let mut offset = 0;
+                loop {
+                    let page = store
+                        .list_missions_filtered(&filter, PAGE_SIZE, offset)
+                        .await?;
+                    let page_len = page.len();
+                    for mission in page {
+                        if seen_ids.insert(mission.id) {
+                            matched.push(mission);
+                        }
+                    }
+                    if page_len < PAGE_SIZE {
+                        break;
+                    }
+                    offset += page_len;
+                }
+            }
+            for mission in &matched {
+                if !mission.status.is_terminal() && mission.status != MissionStatus::Acknowledged {
+                    return Err(format!(
+                        "Cannot delete project data while mission {} is {}. Finish or cancel it first.",
+                        mission.id, mission.status
+                    ));
+                }
+                if store.get_active_mission_run(mission.id).await?.is_some() {
+                    return Err(format!(
+                        "Cannot delete project data while mission {} still has an active run.",
+                        mission.id
+                    ));
+                }
+                let children = collect_child_mission_ids(&store, mission.id)
+                    .await
+                    .map_err(|(_, error)| error)?;
+                for child_id in children {
+                    if !seen_ids.contains(&child_id) {
+                        return Err(format!(
+                            "Cannot delete project data while mission {} has descendant {} tagged outside this project. Re-tag or delete that child first.",
+                            mission.id, child_id
+                        ));
+                    }
+                }
+            }
+            plans.push((store, matched));
+        }
+
+        let mut deleted_ids = std::collections::HashSet::new();
+        for (store, missions) in plans {
+            let selected: std::collections::HashSet<Uuid> =
+                missions.iter().map(|mission| mission.id).collect();
+            let roots: Vec<Uuid> = missions
+                .iter()
+                .filter(|mission| {
+                    mission
+                        .parent_mission_id
+                        .is_none_or(|parent| !selected.contains(&parent))
+                })
+                .map(|mission| mission.id)
+                .collect();
+            for mission_id in roots {
+                if store.get_mission(mission_id).await?.is_none() {
+                    continue;
+                }
+                cleanup_mission_workspace_dirs_for_delete(
+                    &store,
+                    &self.workspaces,
+                    mission_id,
+                    &[],
+                )
+                .await
+                .map_err(|(_, error)| error)?;
+                let removed = delete_mission_with_children(&store, mission_id, &[])
+                    .await
+                    .map_err(|(_, error)| error)?;
+                for id in removed {
+                    clear_mission_metadata_refresh_state(id);
+                    deleted_ids.insert(id);
+                }
+            }
+        }
+
+        let mut deleted: Vec<Uuid> = deleted_ids.into_iter().collect();
+        deleted.sort_unstable();
+        Ok(deleted)
+    }
+
     async fn mission_store_inventory(&self) -> Result<MissionStoreInventory, String> {
         let sessions = self.sessions.read().await;
         let live: Vec<Arc<dyn MissionStore>> = sessions
@@ -3812,7 +5094,8 @@ pub async fn post_message(
     if content.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "content is required".to_string()));
     }
-
+    crate::api::mission_payload::validate_user_content(&content)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let id = req.client_message_id.unwrap_or_else(Uuid::new_v4);
     let agent = req.agent;
     let target_mission_id = req.mission_id;
@@ -3828,48 +5111,116 @@ pub async fn post_message(
         );
         warnings.push(format!("unrecognized fields ignored: {joined}"));
     }
+    if req.continue_identity.is_some() && target_mission_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "continue_identity requires an explicit mission_id".into(),
+        ));
+    }
     // A real user message means the operator is steering this mission — reset
     // its stall-guard budget so future genuine stalls get the full allowance.
     if let Some(mid) = target_mission_id {
         reset_stall_guard(mid);
     }
     let control = control_for_user(&state, &user).await;
-    if let Some(mission_id) = target_mission_id {
-        if let Some(mission) = control
-            .mission_store
-            .get_mission(mission_id)
+    if let Some(mid) = target_mission_id {
+        machine_transfer::guard(&control.mission_store, mid)
+            .await
+            .map_err(internal_error)?;
+        if mission_is_client_placed(&control, mid)
             .await
             .map_err(internal_error)?
         {
-            if mission_is_pr_writer_in_store(&control.mission_store, &mission)
+            return Err((
+                StatusCode::CONFLICT,
+                "this mission runs on the Orb client; the backend will not execute it".into(),
+            ));
+        }
+        if let Some(placement) =
+            remote_grok::placement(&state.config.working_dir, &control.mission_store, mid)
                 .await
                 .map_err(internal_error)?
-                || message_requests_pr_writer(&mission, &content)
-            {
-                let _guard = acquire_durable_pr_writer_lock(&state.control)
-                    .await
-                    .map_err(internal_error)?;
-                if let Some(github_pr) = mission.project.github_pr.as_deref() {
-                    if let Some(existing) =
-                        find_existing_pr_writer_global(&state.control, github_pr, Some(mission.id))
-                            .await
-                            .map_err(internal_error)?
-                    {
-                        return Err((
-                            StatusCode::CONFLICT,
-                            format!(
-                                "PR writer lease is already held by mission {} (status={}); cannot send a writer message to mission {} for {}",
-                                existing.id,
-                                existing.status,
-                                mission.id,
-                                canonical_github_pr(github_pr)
-                            ),
-                        ));
-                    }
-                }
+        {
+            if req.attachments.as_ref().is_some_and(|a| {
+                a.iter()
+                    .any(|item| item.kind != crate::api::mission_payload::AttachmentKind::Context)
+            }) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "remote follow-up attachments are not supported".into(),
+                ));
             }
+            if agent.is_some()
+                || req.github_pr.is_some()
+                || req.track.is_some()
+                || req.title.is_some()
+                || req.continue_identity.is_some()
+            {
+                return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
+            }
+            // Public follow-ups can continue the native session on its node.
+            // Internal actor routes retain their fence against local execution.
+            remote_grok::continue_on_node(
+                &state,
+                &control,
+                &user.id,
+                mid,
+                placement,
+                Some(content),
+                Some(id),
+            )
+            .await?;
+            return Ok(Json(ControlMessageResponse {
+                id,
+                queued: false,
+                message_accepted: true,
+                mission_id: Some(mid),
+                previous_execution: None,
+                warnings,
+            }));
         }
     }
+    let content = if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
+        let mid = target_mission_id.ok_or((
+            StatusCode::BAD_REQUEST,
+            "attachments require mission_id".into(),
+        ))?;
+        let mission = control
+            .mission_store
+            .get_mission(mid)
+            .await
+            .map_err(internal_error)?
+            .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+        let mut payload = crate::api::mission_payload::MissionPayload {
+            attachments: attachments.clone(),
+            project: mission.project.project.clone(),
+            controller_md: None,
+        };
+        if attachments
+            .iter()
+            .any(|a| a.kind == crate::api::mission_payload::AttachmentKind::Controller)
+        {
+            if let Some(project) = payload.project.as_deref() {
+                payload.controller_md = Some(
+                    super::projects_overview::controller_snapshot_markdown(&state, project).await,
+                );
+            }
+        }
+        let (content, report) = crate::api::mission_payload::stage_message(
+            &state.config.working_dir,
+            mid,
+            id,
+            &content,
+            &payload,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("attachments: {e}")))?;
+        if !report.skipped.is_empty() || report.truncated {
+            warnings.push(format!("Some attachments were skipped or capped; see .paloma/messages/{id}/.paloma/attach.md"));
+        }
+        content
+    } else {
+        content
+    };
     let (queued_tx, queued_rx) = oneshot::channel();
     tracing::info!(
         user_id = %user.id,
@@ -3882,35 +5233,54 @@ pub async fn post_message(
     );
     control
         .cmd_tx
-        .send(ControlCommand::UserMessage {
-            id,
-            content,
-            agent,
-            target_mission_id,
-            strict: false,
-            source: Some(format!("api:{}", user.id)),
-            respond: queued_tx,
+        .send(ControlCommand::AdmitDispatch {
+            admission: Box::new(DispatchAdmission {
+                internal_work_hint: None,
+                state: state.clone(),
+                store: control.mission_store.clone(),
+                patch: dispatch_identity_patch(
+                    req.github_pr,
+                    req.track,
+                    req.title,
+                    Some(content.clone()),
+                    req.continue_identity,
+                ),
+            }),
+            command: Box::new(ControlCommand::UserMessage {
+                id,
+                content,
+                agent,
+                target_mission_id,
+                strict: false,
+                source: Some(format!("api:{}", user.id)),
+                respond: queued_tx,
+            }),
         })
         .await
         .map_err(session_unavailable)?;
-    let queued = match queued_rx.await {
-        // The wire response keeps its historical bool shape: `queued` is true
-        // only when the message is waiting for the next turn boundary.
-        // Dropped messages surface as an `AgentEvent::Error` on the stream.
-        Ok(UserMessageAck::Queued) => true,
-        Ok(UserMessageAck::Delivered) => false,
-        Ok(UserMessageAck::Dropped) => false,
+    #[cfg(test)]
+    if let Some(mission_id) = target_mission_id {
+        dispatch_admission_tests::notify_wait(mission_id, "enqueued");
+    }
+    let (queued, message_accepted, previous_execution) = match queued_rx.await {
+        Ok(UserMessageAck::Queued) => (true, true, None),
+        Ok(UserMessageAck::Delivered) => (false, true, None),
+        Ok(UserMessageAck::Continued {
+            queued,
+            previous_execution,
+        }) => (queued, true, Some(previous_execution)),
+        Ok(UserMessageAck::Dropped) => (false, false, None),
         Ok(UserMessageAck::Rejected(reason)) => {
             return Err((StatusCode::CONFLICT, reason));
         }
-        Err(_) => {
-            let status = control.status.read().await;
-            status.state != ControlRunState::Idle
-        }
+        Err(error) => return Err(recv_failed(error)),
     };
     Ok(Json(ControlMessageResponse {
         id,
         queued,
+        message_accepted,
+        mission_id: target_mission_id,
+        previous_execution,
         warnings,
     }))
 }
@@ -3937,9 +5307,30 @@ pub struct BoardUtilization {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct UnresolvableDep {
+    pub task_key: String,
+    pub missing_dep: String,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct BoardResponse {
     pub tasks: Vec<BoardTask>,
     pub utilization: BoardUtilization,
+    /// Pending tasks parked forever on a `depends_on` key that doesn't exist
+    /// on this board (typo'd or never-registered dependency). The scheduler
+    /// wakes the boss when this is non-empty; fix by re-registering the task
+    /// with corrected depends_on via plan_tasks.
+    pub unresolvable_deps: Vec<UnresolvableDep>,
+}
+
+fn board_unresolvable_deps(tasks: &[BoardTask]) -> Vec<UnresolvableDep> {
+    board::unresolvable_dependencies(tasks)
+        .into_iter()
+        .map(|(task_key, missing_dep)| UnresolvableDep {
+            task_key,
+            missing_dep,
+        })
+        .collect()
 }
 
 fn validate_and_normalize_board_tasks(
@@ -3989,6 +5380,34 @@ fn validate_and_normalize_board_tasks(
             .model_override
             .as_deref()
             .and_then(|model| normalize_model_override_for_backend(Some(&t.backend), model));
+        // Blank acceptance criteria must not count as an outcome contract:
+        // `[" "]` would otherwise suppress spec_warnings, emit a blank bullet
+        // in the worker contract, and declare the prompt advisory on retry.
+        t.acceptance_criteria = t
+            .acceptance_criteria
+            .iter()
+            .map(|criterion| criterion.trim().to_string())
+            .filter(|criterion| !criterion.is_empty())
+            .collect();
+        t.verification_command = t
+            .verification_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(String::from);
+        // `risk_class` now gates scheduler behavior (high = no silent retry),
+        // so an unrecognized value must fail loudly instead of silently acting
+        // like "normal".
+        t.risk_class = t.risk_class.trim().to_ascii_lowercase();
+        if !matches!(t.risk_class.as_str(), "low" | "normal" | "high") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "task `{}`: unknown risk_class `{}` (use low|normal|high)",
+                    t.task_key, t.risk_class
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -4022,6 +5441,7 @@ pub async fn get_mission_board(
     let max_parallel = crate::settings::max_parallel_missions_cached_or(control.max_parallel);
     Ok(Json(BoardResponse {
         utilization: board_utilization(&tasks, max_parallel),
+        unresolvable_deps: board_unresolvable_deps(&tasks),
         tasks,
     }))
 }
@@ -4063,6 +5483,7 @@ pub async fn upsert_mission_board_tasks(
     let max_parallel = crate::settings::max_parallel_missions_cached_or(control.max_parallel);
     Ok(Json(BoardResponse {
         utilization: board_utilization(&tasks, max_parallel),
+        unresolvable_deps: board_unresolvable_deps(&tasks),
         tasks,
     }))
 }
@@ -4074,6 +5495,30 @@ pub struct BoardVerdictRequest {
     /// Required for reject: feedback delivered to the worker.
     #[serde(default)]
     pub feedback: Option<String>,
+    /// The calling boss mission, when the caller IS a mission (orchestrator
+    /// MCP always sends its own id). Must match the task's board — a mission
+    /// may not judge another board's tasks. Absent = owner/dashboard call,
+    /// which passes on auth alone.
+    #[serde(default)]
+    pub boss_mission_id: Option<Uuid>,
+}
+
+/// A mission may only act on its own board; the owner (no mission id) may act
+/// on any.
+fn assert_board_ownership(
+    task: &BoardTask,
+    caller: Option<Uuid>,
+) -> Result<(), (StatusCode, String)> {
+    match caller {
+        Some(caller) if caller != task.boss_mission_id => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "task `{}` belongs to boss {}, not {} — a mission may only judge its own board",
+                task.task_key, task.boss_mission_id, caller
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// POST /api/control/board/tasks/:task_id/verdict — boss judgment on a
@@ -4092,6 +5537,7 @@ pub async fn board_task_verdict(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or((StatusCode::NOT_FOUND, format!("task {} not found", task_id)))?;
+    assert_board_ownership(&task, req.boss_mission_id)?;
 
     match req.action.as_str() {
         "accept" => {
@@ -4183,12 +5629,20 @@ pub async fn board_task_verdict(
     Ok(Json(task))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct CancelBoardTaskRequest {
+    /// See `BoardVerdictRequest::boss_mission_id`.
+    #[serde(default)]
+    pub boss_mission_id: Option<Uuid>,
+}
+
 /// POST /api/control/board/tasks/:task_id/cancel — mark a task cancelled.
 /// A running worker is left to finish its current turn; its settle is ignored.
 pub async fn cancel_board_task(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(task_id): Path<Uuid>,
+    body: Option<Json<CancelBoardTaskRequest>>,
 ) -> Result<Json<BoardTask>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let mut task = control
@@ -4197,6 +5651,7 @@ pub async fn cancel_board_task(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or((StatusCode::NOT_FOUND, format!("task {} not found", task_id)))?;
+    assert_board_ownership(&task, body.and_then(|Json(req)| req.boss_mission_id))?;
     if task.status.is_terminal() {
         return Err((
             StatusCode::CONFLICT,
@@ -4274,10 +5729,17 @@ pub async fn post_cancel(
 
 // ==================== Queue Management Endpoints ====================
 
-/// Get the current message queue.
+#[derive(Deserialize, Default)]
+pub struct QueueQuery {
+    pub mission_id: Option<Uuid>,
+}
+
+/// Get the current message queue, including durable scheduled/capacity deferrals
+/// when requesting a mission. The control store is scoped to the authenticated user.
 pub async fn get_queue(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(query): Query<QueueQuery>,
 ) -> Result<Json<Vec<QueuedMessage>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let (tx, rx) = oneshot::channel();
@@ -4286,12 +5748,92 @@ pub async fn get_queue(
         .send(ControlCommand::GetQueue { respond: tx })
         .await
         .map_err(session_unavailable)?;
-    let queue = rx.await.map_err(|_| {
+    let mut queue = rx.await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to get queue".to_string(),
         )
     })?;
+    if let Some(mid) = query.mission_id {
+        let mission = control
+            .mission_store
+            .get_mission(mid)
+            .await
+            .map_err(internal_error)?
+            .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+        queue.retain(|entry| entry.mission_id == Some(mid));
+        // The asynchronous transcript logger can lag dispatch. The durable
+        // snapshot retains `inflight=true` only after a run lease was acquired,
+        // so a fresh reader can reconcile that ID even before history catches up.
+        // Keep the unscoped queue's existing pending-only contract unchanged.
+        let durable = control
+            .mission_store
+            .load_control_queue(&user.id)
+            .await
+            .map_err(internal_error)?;
+        if !durable.is_empty() {
+            let persisted: Vec<QueuedMessage> =
+                serde_json::from_str(&durable).map_err(internal_error)?;
+            let mut snapshot = Vec::new();
+            for entry in persisted
+                .into_iter()
+                .filter(|entry| entry.mission_id == Some(mid))
+            {
+                let parts = if entry.source.as_deref() == Some("scheduler") {
+                    deferred_messages::decode(&entry.content).1
+                } else {
+                    Vec::new()
+                };
+                if parts.is_empty() {
+                    snapshot.push(entry);
+                } else {
+                    for (id, content) in parts {
+                        snapshot.push(QueuedMessage {
+                            id,
+                            content,
+                            agent: entry.agent.clone(),
+                            mission_id: entry.mission_id,
+                            source: entry.source.clone(),
+                            inflight: entry.inflight,
+                        });
+                    }
+                }
+            }
+            let ids: HashSet<Uuid> = snapshot.iter().map(|entry| entry.id).collect();
+            snapshot.extend(queue.into_iter().filter(|entry| !ids.contains(&entry.id)));
+            queue = snapshot;
+        }
+        if mission.status == MissionStatus::Pending {
+            if let Some(goal) = control
+                .mission_store
+                .get_deferred_goal(mid)
+                .await
+                .map_err(internal_error)?
+            {
+                let mut deferred: Vec<QueuedMessage> = deferred_messages::decode(&goal)
+                    .1
+                    .into_iter()
+                    .map(|(id, content)| QueuedMessage {
+                        id,
+                        content,
+                        agent: None,
+                        mission_id: Some(mid),
+                        source: Some("scheduler".into()),
+                        inflight: false,
+                    })
+                    .collect();
+                let delivered: HashSet<Uuid> = queue
+                    .iter()
+                    .filter(|entry| entry.inflight)
+                    .map(|entry| entry.id)
+                    .collect();
+                deferred.retain(|entry| !delivered.contains(&entry.id));
+                let ids: HashSet<Uuid> = deferred.iter().map(|entry| entry.id).collect();
+                deferred.extend(queue.into_iter().filter(|entry| !ids.contains(&entry.id)));
+                queue = deferred;
+            }
+        }
+    }
     Ok(Json(queue))
 }
 
@@ -4374,12 +5916,28 @@ pub struct ListMissionsQuery {
     /// Optional filter: exact project identifier.
     #[serde(default)]
     pub project: Option<String>,
+    /// Optional filter: project FAMILY — matches `X` and `X-*`. Use this to
+    /// span a project whose missions are still split across per-phase slugs
+    /// (`verity`, `verity-core`, `verity-phase1d`, …). `project` stays exact
+    /// so existing callers keep their current results.
+    #[serde(default)]
+    pub project_prefix: Option<String>,
+    /// Optional filter: exact track within a project.
+    #[serde(default)]
+    pub track: Option<String>,
     /// Optional filter: missions carrying this tag.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Optional filter: the conversation a mission was launched from.
+    #[serde(default)]
+    pub origin_session_id: Option<String>,
     /// Optional filter: workspace by id or (case-insensitive) name.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// Include acknowledged/completed/absorbed missions that default listings
+    /// hide (e.g. a project's full history view). Ignored when `status` is set.
+    #[serde(default)]
+    pub all: Option<bool>,
 }
 
 fn mission_execution_projection(run: &MissionRun, status: MissionStatus) -> serde_json::Value {
@@ -4391,7 +5949,9 @@ fn mission_execution_projection(run: &MissionRun, status: MissionStatus) -> serd
                 .max(0) as u64
         })
         .unwrap_or(u64::MAX);
-    let conflict = if status == MissionStatus::Acknowledged || status.is_terminal() {
+    let conflict = if run.execution_state.is_terminal() {
+        None
+    } else if status == MissionStatus::Acknowledged || status.is_terminal() {
         Some(format!("status_{status}_with_non_terminal_run"))
     } else if heartbeat_age > 60 && run.execution_state != MissionExecutionState::WaitingUser {
         Some(format!("run_heartbeat_stale_{heartbeat_age}s"))
@@ -4405,6 +5965,8 @@ fn mission_execution_projection(run: &MissionRun, status: MissionStatus) -> serd
         "health": if conflict.is_some() { "reconciling" } else { "healthy" },
         "heartbeat_at": run.heartbeat_at,
         "scope_unit": run.scope_unit,
+        "ended_at": run.ended_at,
+        "terminal_reason": run.terminal_reason,
         "status_conflict": conflict,
     })
 }
@@ -4413,6 +5975,7 @@ fn attach_execution_to_mission_value(
     mut value: serde_json::Value,
     mission: &Mission,
     run: Option<&MissionRun>,
+    wait_started_at: Option<&str>,
 ) -> serde_json::Value {
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -4428,12 +5991,90 @@ fn attach_execution_to_mission_value(
                 serde_json::Value::Null
             },
         );
+        let waiting_for_user_tool =
+            run.is_some_and(|run| run.execution_state == MissionExecutionState::WaitingUser);
+        object.insert(
+            "needs_operator".to_string(),
+            serde_json::Value::Bool(super::operator_attention::mission_needs_operator(
+                mission,
+                waiting_for_user_tool,
+                wait_started_at,
+                chrono::Utc::now(),
+            )),
+        );
     }
     value
 }
 
 fn is_user_wait_tool(tool_kind: &str) -> bool {
     matches!(tool_kind, "request_user_input" | "frontend_tool") || is_interactive_ui_tool(tool_kind)
+}
+
+/// Grace clock for a `WaitingUser` run. `Ok(None)` means the user-wait tool
+/// row is not registered yet (treated as just started); `Err` means the tool
+/// scan itself failed, which callers must not confuse with "just started".
+pub(crate) async fn user_wait_tool_started_at_checked(
+    store: &dyn MissionStore,
+    run: &MissionRun,
+) -> Result<Option<String>, String> {
+    if run.execution_state != MissionExecutionState::WaitingUser {
+        return Ok(None);
+    }
+    let tools = store.list_active_tool_executions(run.run_id).await?;
+    Ok(tools
+        .into_iter()
+        .filter(|tool| is_user_wait_tool(&tool.tool_kind))
+        .map(|tool| tool.started_at)
+        .min())
+}
+
+/// Best-effort variant for surfaces that only render the clock.
+pub(crate) async fn user_wait_tool_started_at(
+    store: &dyn MissionStore,
+    run: &MissionRun,
+) -> Option<String> {
+    user_wait_tool_started_at_checked(store, run)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Returns `(waits, complete)`. `complete` is false when any tool scan
+/// failed: the run still appears in the map (it *is* waiting), but its
+/// clock is unknown, so the map must not be used as negative evidence.
+pub(crate) async fn user_wait_starts_for_runs_checked(
+    store: &dyn MissionStore,
+    runs: impl IntoIterator<Item = &MissionRun>,
+) -> (HashMap<Uuid, Option<String>>, bool) {
+    let mut waits = HashMap::new();
+    let mut complete = true;
+    for run in runs {
+        if run.execution_state != MissionExecutionState::WaitingUser {
+            continue;
+        }
+        let started = match user_wait_tool_started_at_checked(store, run).await {
+            Ok(started) => started,
+            Err(error) => {
+                tracing::warn!(
+                    mission_id = %run.mission_id,
+                    run_id = %run.run_id,
+                    %error,
+                    "user-wait tool scan failed; wait inventory is incomplete"
+                );
+                complete = false;
+                None
+            }
+        };
+        waits.insert(run.mission_id, started);
+    }
+    (waits, complete)
+}
+
+pub(crate) async fn user_wait_starts_for_runs(
+    store: &dyn MissionStore,
+    runs: impl IntoIterator<Item = &MissionRun>,
+) -> HashMap<Uuid, Option<String>> {
+    user_wait_starts_for_runs_checked(store, runs).await.0
 }
 
 const PROVISIONAL_TOOL_DEADLINE_SECS: i64 = 120;
@@ -4580,8 +6221,12 @@ async fn recoverable_remote_continuation(
     let Some(receipt) = receipt else {
         return Ok(None);
     };
-    if crate::remote_node::job_ledger::require_terminal_receipt_wake(working_dir, receipt.job_id)
-        .await?
+    if crate::remote_node::job_ledger::require_terminal_receipt_wake(
+        working_dir,
+        receipt.job_id,
+        receipt.mission_id,
+    )
+    .await?
     {
         Ok(Some(receipt.job_id))
     } else {
@@ -4670,7 +6315,9 @@ async fn arm_unresolved_remote_build_wake(working_dir: &std::path::Path, mission
         }
     };
 
-    match crate::remote_node::job_ledger::require_terminal_wake(working_dir, job_id).await {
+    match crate::remote_node::job_ledger::require_terminal_wake(working_dir, job_id, mission_id)
+        .await
+    {
         Ok(true) => true,
         Ok(false) => false,
         Err(error) => {
@@ -4718,33 +6365,52 @@ pub async fn list_missions(
     let control = control_for_user(&state, &user).await;
     // Default to the most recent 50; honor an explicit limit so callers (e.g.
     // the assistant MCP) can request more, capped to keep the response bounded.
-    let has_filters = query.status.is_some()
-        || query.project.is_some()
-        || query.tag.is_some()
-        || query.workspace.is_some();
+    let project = query.project.as_deref().map(|raw| {
+        let canonical = super::projects_overview::canonicalize_project_slug(raw);
+        if canonical.is_empty() {
+            raw.to_string()
+        } else {
+            canonical
+        }
+    });
+    let filter = crate::api::mission_store::MissionFilter {
+        status: query.status.clone(),
+        project,
+        project_prefix: query.project_prefix.clone(),
+        track: query.track.clone(),
+        tag: query.tag.clone(),
+        origin_session_id: query.origin_session_id.clone(),
+        // Default listings (no explicit status) hide acknowledged / completed /
+        // absorbed attempts. An explicit status is a precise query; `all=true`
+        // opts out for callers that want full history (project views).
+        attention_only: query.status.is_none() && query.all != Some(true),
+    };
+    // Workspace is the one predicate the store cannot answer: matching by
+    // name needs `populate_workspace_names`, and the persisted
+    // `workspace_name` column is not authoritative. It is applied in memory —
+    // but over STORE-FILTERED candidates, so combining it with
+    // origin_session_id/project/track keeps the pushdown and its unlimited
+    // depth instead of falling back to scanning raw rows.
+    let needs_workspace_scan = query.workspace.is_some();
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0);
 
-    let mut missions = if !has_filters {
-        // Fast path: no filters, list the page directly.
+    let mut missions = if !needs_workspace_scan {
+        // The store owns the predicate — sqlite pushes it into SQL, so a match
+        // is found however deep it sits in the fleet.
         let mut page = control
             .mission_store
-            .list_missions(limit, offset)
+            .list_missions_filtered(&filter, limit, offset)
             .await
             .map_err(internal_error)?;
         populate_workspace_names(&state, &mut page).await;
         page
     } else {
-        // Filtered path: predicate-match runs in memory, so a single 200-row
-        // page would silently drop matches on a larger fleet. Scan from the
-        // start, collecting matches, until we have `offset + limit` of them or
-        // hit a bounded ceiling. `offset` here means "skip this many MATCHING
-        // missions" (consistent with filtered pagination), not raw rows.
         const PAGE: usize = 200;
-        const MAX_SCAN: usize = 5_000;
-        let status = query.status.as_deref();
-        let project = query.project.as_deref();
-        let tag = query.tag.as_deref();
+        // Bounds how many STORE-FILTERED candidates we resolve workspace names
+        // for, not how deep we read into the fleet: with a selective filter
+        // the store already skipped everything irrelevant.
+        const MAX_CANDIDATES: usize = 5_000;
         let workspace_lower = query.workspace.as_deref().map(|w| w.to_lowercase());
         let workspace_raw = query.workspace.as_deref();
         let want = offset.saturating_add(limit);
@@ -4755,24 +6421,21 @@ pub async fn list_missions(
         loop {
             let mut page = control
                 .mission_store
-                .list_missions(PAGE, scan_offset)
+                .list_missions_filtered(&filter, PAGE, scan_offset)
                 .await
                 .map_err(internal_error)?;
             let page_len = page.len();
             populate_workspace_names(&state, &mut page).await;
             for m in page {
-                let keep = status.is_none_or(|s| m.status.to_string() == s)
-                    && project.is_none_or(|p| m.project.project.as_deref() == Some(p))
-                    && tag.is_none_or(|t| m.project.tags.iter().any(|x| x == t))
-                    && match (workspace_raw, workspace_lower.as_deref()) {
-                        (Some(raw), Some(lower)) => {
-                            m.workspace_id.to_string() == raw
-                                || m.workspace_name
-                                    .as_deref()
-                                    .is_some_and(|name| name.to_lowercase() == lower)
-                        }
-                        _ => true,
-                    };
+                let keep = match (workspace_raw, workspace_lower.as_deref()) {
+                    (Some(raw), Some(lower)) => {
+                        m.workspace_id.to_string() == raw
+                            || m.workspace_name
+                                .as_deref()
+                                .is_some_and(|name| name.to_lowercase() == lower)
+                    }
+                    _ => true,
+                };
                 if keep {
                     matched.push(m);
                     if matched.len() >= want {
@@ -4781,11 +6444,11 @@ pub async fn list_missions(
                 }
             }
             scanned += page_len;
-            if matched.len() >= want || page_len < PAGE || scanned >= MAX_SCAN {
-                if scanned >= MAX_SCAN && matched.len() < want {
+            if matched.len() >= want || page_len < PAGE || scanned >= MAX_CANDIDATES {
+                if scanned >= MAX_CANDIDATES && matched.len() < want {
                     tracing::warn!(
-                        "list_missions filter scan hit cap ({}); results may be incomplete",
-                        MAX_SCAN
+                        "list_missions workspace scan hit candidate cap ({}); results may be incomplete",
+                        MAX_CANDIDATES
                     );
                 }
                 break;
@@ -4805,13 +6468,44 @@ pub async fn list_missions(
         .into_iter()
         .map(|run| (run.mission_id, run))
         .collect();
-    let values = missions
+    let wait_starts =
+        user_wait_starts_for_runs(control.mission_store.as_ref(), active_runs.values()).await;
+    let (remote_handles, remote_outcomes) = remote_job_projection_inputs(&state).await;
+    let now = chrono::Utc::now();
+    let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
             let value = serde_json::to_value(&mission).unwrap_or(serde_json::Value::Null);
-            attach_execution_to_mission_value(value, &mission, active_runs.get(&mission.id))
+            let value = attach_execution_to_mission_value(
+                value,
+                &mission,
+                active_runs.get(&mission.id),
+                wait_starts
+                    .get(&mission.id)
+                    .and_then(|started| started.as_deref()),
+            );
+            attach_remote_job_to_mission_value(
+                value,
+                remote_job_projection(
+                    &remote_handles,
+                    &remote_outcomes,
+                    active_runs.get(&mission.id),
+                    mission.id,
+                    now,
+                ),
+            )
         })
         .collect();
+    for value in &mut values {
+        if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            if let Some(t) = machine_transfer::committed(&control.mission_store, id)
+                .await
+                .map_err(internal_error)?
+            {
+                machine_transfer::project(value, &t);
+            }
+        }
+    }
     Ok(Json(values))
 }
 
@@ -4837,24 +6531,45 @@ pub struct FleetHealth {
     pub disk_total: u64,
     pub disk_percent: f32,
     pub disk_level: crate::api::monitoring::DiskHealthLevel,
+    /// Canonical path whose backing filesystem is measured for local missions.
+    pub disk_path: String,
+    /// Non-secret filesystem identifier returned by statvfs.
+    pub disk_filesystem: String,
+    pub disk_free_gib: u64,
+    pub disk_required_gib: u64,
 }
 
 /// Admission preflight: `Some(reason)` when new missions must be refused
-/// because the root filesystem is critically full, or is at warn level while
+/// because the selected mission-workspace filesystem is critically full, or is at warn level while
 /// `DISK_ADMISSION_AT_WARN=1`. `DISK_ADMISSION_ENABLED=0` is the escape hatch.
-fn disk_admission_refusal() -> Option<String> {
+fn disk_admission_refusal(path: &std::path::Path) -> Option<String> {
     let enabled = std::env::var("DISK_ADMISSION_ENABLED")
         .map(|v| v.trim() != "0" && !v.trim().eq_ignore_ascii_case("false"))
         .unwrap_or(true);
     if !enabled {
         return None;
     }
-    let (used, total, percent) = crate::api::monitoring::current_disk_usage();
+    let usage = match crate::api::monitoring::disk_usage_for_path(path) {
+        Ok(usage) => usage,
+        Err(error) => {
+            return Some(format!(
+                "mission creation refused: cannot measure workspace filesystem at {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let used = usage.used;
+    let total = usage.total;
+    let percent = if total == 0 {
+        100.0
+    } else {
+        used as f32 / total as f32 * 100.0
+    };
     match crate::api::monitoring::DiskHealthLevel::from_percent(percent) {
         crate::api::monitoring::DiskHealthLevel::Critical => Some(format!(
-            "mission creation refused: disk critically full ({percent:.1}% used, {} GB free). \
-             Free space or raise DISK_CRITICAL_PCT, then retry.",
-            total.saturating_sub(used) / (1024 * 1024 * 1024)
+            "mission creation refused: disk critically full at {} (filesystem {}, \
+             {percent:.1}% used, {} GiB free). Free space or raise DISK_CRITICAL_PCT, then retry.",
+            usage.measured_path.display(), usage.filesystem, usage.available / (1 << 30)
         )),
         crate::api::monitoring::DiskHealthLevel::Warn
             if std::env::var("DISK_ADMISSION_AT_WARN")
@@ -4863,9 +6578,9 @@ fn disk_admission_refusal() -> Option<String> {
         {
             Some(format!(
                 "mission creation refused: disk above the admission warning threshold \
-                 ({percent:.1}% used, {} GB free). Wait for workspace GC, select a remote \
+                 at {} (filesystem {}, {percent:.1}% used, {} GiB free). Wait for workspace GC, select a remote \
                  node, or free space.",
-                total.saturating_sub(used) / (1024 * 1024 * 1024)
+                usage.measured_path.display(), usage.filesystem, usage.available / (1 << 30)
             ))
         }
         crate::api::monitoring::DiskHealthLevel::Warn => {
@@ -4879,17 +6594,35 @@ fn disk_admission_refusal() -> Option<String> {
     }
 }
 
+fn mission_disk_reserve_gib() -> u64 {
+    std::env::var("MISSION_DISK_EMERGENCY_RESERVE_GB")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(150)
+}
+
+fn mission_disk_default_estimate_gib() -> u64 {
+    std::env::var("MISSION_DISK_DEFAULT_ESTIMATE_GIB")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|estimate| (1..=512).contains(estimate))
+        .unwrap_or(64)
+}
+
 fn disk_estimate_refusal(
-    available_bytes: u64,
+    usage: &crate::api::monitoring::DiskUsage,
     estimated_gib: u64,
     reserve_gib: u64,
 ) -> Option<String> {
     let required_gib = estimated_gib.saturating_add(reserve_gib);
-    (available_bytes < required_gib.saturating_mul(1 << 30)).then(|| {
+    (usage.available < required_gib.saturating_mul(1 << 30)).then(|| {
         format!(
             "mission needs an estimated {estimated_gib} GiB scratch plus a {reserve_gib} GiB \
-             emergency floor, but only {} GiB is free; select a remote node or free space",
-            available_bytes / (1 << 30)
+             emergency floor ({required_gib} GiB required), but only {} GiB is free at {} \
+             (filesystem {}); select a remote node or free space",
+            usage.available / (1 << 30),
+            usage.measured_path.display(),
+            usage.filesystem
         )
     })
 }
@@ -4922,7 +6655,16 @@ pub async fn fleet_health(
         .map_err(internal_error)?;
 
     let cfg = &state.config;
-    let (disk_used, disk_total, disk_percent) = crate::api::monitoring::current_disk_usage();
+    let workspace_root = crate::workspace::configured_mission_workspace_root(&cfg.working_dir);
+    let disk =
+        crate::api::monitoring::disk_usage_for_path(&workspace_root).map_err(internal_error)?;
+    let disk_percent = if disk.total == 0 {
+        100.0
+    } else {
+        disk.used as f32 / disk.total as f32 * 100.0
+    };
+    let reserve_gib = mission_disk_reserve_gib();
+    let required_gib = mission_disk_default_estimate_gib().saturating_add(reserve_gib);
     Ok(Json(FleetHealth {
         status: if control_responsive { "ok" } else { "degraded" },
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -4932,10 +6674,14 @@ pub async fn fleet_health(
         missions,
         webhook_forwarder_configured: cfg.paloma_webhook_forward_url.is_some(),
         offload_configured: cfg.spark_arbiter_url.is_some() || cfg.spark_ssh_target.is_some(),
-        disk_used,
-        disk_total,
+        disk_used: disk.used,
+        disk_total: disk.total,
         disk_percent,
         disk_level: crate::api::monitoring::DiskHealthLevel::from_percent(disk_percent),
+        disk_path: disk.measured_path.to_string_lossy().to_string(),
+        disk_filesystem: disk.filesystem,
+        disk_free_gib: disk.available / (1 << 30),
+        disk_required_gib: required_gib,
     }))
 }
 
@@ -4958,6 +6704,12 @@ pub struct TrackSummary {
     pub desired_state: Option<String>,
     pub github_pr: Option<String>,
     pub next_check_at: Option<String>,
+    /// The plan's derived state for this track (`ready` / `executing` /
+    /// `waiting` / `blocked` / `satisfied` / `claim_only` / `cancelled`),
+    /// from the situation builder. `None` when the track is mission-only and
+    /// the project has no plan row for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5022,6 +6774,7 @@ pub async fn list_tracks(
                     desired_state: None,
                     github_pr: None,
                     next_check_at: None,
+                    derived_state: None,
                 }
             });
             entry.total += 1;
@@ -5055,10 +6808,39 @@ pub async fn list_tracks(
         offset += PAGE;
     }
 
-    let tracks = order
+    let mut tracks = order
         .into_iter()
         .filter_map(|k| groups.remove(&k))
         .collect::<Vec<_>>();
+
+    // Projection of the situation builder: the same derived state every
+    // other surface renders, looked up once per project.
+    let mut situations: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = std::collections::HashMap::new();
+    for summary in &mut tracks {
+        let (Some(project), Some(track)) = (summary.project.as_deref(), summary.track.as_deref())
+        else {
+            continue;
+        };
+        if !situations.contains_key(project) {
+            let situation =
+                crate::api::projects_overview::load_project_situation(&state, project).await;
+            situations.insert(
+                project.to_string(),
+                situation
+                    .items
+                    .into_iter()
+                    .map(|item| (item.key, item.derived_state.as_str().to_string()))
+                    .collect(),
+            );
+        }
+        summary.derived_state = situations
+            .get(project)
+            .and_then(|states| states.get(track))
+            .cloned();
+    }
     Ok(Json(tracks))
 }
 
@@ -5078,6 +6860,7 @@ async fn populate_activity(control: &ControlState, missions: &mut [Mission]) {
             return;
         }
     };
+    let now = chrono::Utc::now();
     for mission in missions.iter_mut() {
         if let Some((last_event, last_output)) = activity.get(&mission.id) {
             mission.activity.last_agent_event_at = last_event.clone();
@@ -5092,6 +6875,162 @@ async fn populate_activity(control: &ControlState, missions: &mut [Mission]) {
         .flatten()
         .max();
         mission.activity.last_activity_at = last_activity;
+
+        // Staleness is server-computed so consumers (LLM orchestrators
+        // especially) read a verdict word instead of doing timestamp math —
+        // in practice they don't, and idle workers go unnoticed for hours.
+        let idle_seconds = mission
+            .activity
+            .last_activity_at
+            .as_deref()
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|ts| (now - ts.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64);
+        mission.activity.idle_seconds = idle_seconds;
+        mission.activity.idle_for = idle_seconds.map(humanize_idle);
+        mission.activity.health_verdict = idle_seconds
+            .and_then(|idle| mission_health_verdict(mission.status, idle))
+            .map(str::to_string);
+    }
+}
+
+/// Render a duration in seconds as a compact human string ("45s", "12m",
+/// "2h30m", "16h", "3d"). Meant for LLM/UI consumption, not parsing.
+pub(crate) fn humanize_idle(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{}s", seconds);
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{}m", minutes);
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        let rem_minutes = minutes % 60;
+        if hours < 6 && rem_minutes > 0 {
+            return format!("{}h{:02}m", hours, rem_minutes);
+        }
+        return format!("{}h", hours);
+    }
+    format!("{}d", hours / 24)
+}
+
+/// Server-side staleness verdict for a mission given its status and idle time.
+/// Returns `None` for terminal statuses — a finished mission is not "stalled",
+/// however old it is. Thresholds are deliberately coarse: the point is to make
+/// "this worker has produced nothing for hours" jump out of a listing, not to
+/// diagnose precisely why.
+pub(crate) fn mission_health_verdict(
+    status: MissionStatus,
+    idle_seconds: u64,
+) -> Option<&'static str> {
+    const QUIET_AFTER: u64 = 300; // 5 min without events while active
+    const STALLED_AFTER: u64 = 1800; // 30 min: something is wrong
+    const QUEUE_STUCK_AFTER: u64 = 900; // pending that never dispatched
+    const BACKGROUND_STALLED_AFTER: u64 = 21_600; // 6h of background work
+
+    let verdict = match status {
+        MissionStatus::Active => {
+            if idle_seconds < QUIET_AFTER {
+                "working"
+            } else if idle_seconds < STALLED_AFTER {
+                "quiet"
+            } else {
+                "stalled"
+            }
+        }
+        MissionStatus::Pending => {
+            if idle_seconds < QUEUE_STUCK_AFTER {
+                "queued"
+            } else {
+                "stuck_queued"
+            }
+        }
+        MissionStatus::AwaitingUser | MissionStatus::Acknowledged => {
+            if idle_seconds < STALLED_AFTER {
+                "parked"
+            } else {
+                "stalled_parked"
+            }
+        }
+        MissionStatus::WaitingBackground => {
+            if idle_seconds < BACKGROUND_STALLED_AFTER {
+                "waiting_background"
+            } else {
+                "stalled_background"
+            }
+        }
+        MissionStatus::Paused => "paused",
+        MissionStatus::Completed
+        | MissionStatus::Failed
+        | MissionStatus::Interrupted
+        | MissionStatus::Blocked
+        | MissionStatus::NotFeasible => return None,
+    };
+    Some(verdict)
+}
+
+#[cfg(test)]
+mod health_verdict_tests {
+    use super::*;
+
+    #[test]
+    fn active_missions_go_working_quiet_stalled() {
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Active, 10),
+            Some("working")
+        );
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Active, 600),
+            Some("quiet")
+        );
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Active, 7200),
+            Some("stalled")
+        );
+    }
+
+    #[test]
+    fn parked_missions_stall_after_threshold() {
+        assert_eq!(
+            mission_health_verdict(MissionStatus::AwaitingUser, 60),
+            Some("parked")
+        );
+        // The A.3 incident shape: a worker sitting acknowledged for 16h must
+        // not read as healthy.
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Acknowledged, 16 * 3600),
+            Some("stalled_parked")
+        );
+    }
+
+    #[test]
+    fn terminal_missions_have_no_verdict() {
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Completed, 999_999),
+            None
+        );
+        assert_eq!(mission_health_verdict(MissionStatus::Failed, 0), None);
+    }
+
+    #[test]
+    fn pending_missions_flag_a_stuck_queue() {
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Pending, 60),
+            Some("queued")
+        );
+        assert_eq!(
+            mission_health_verdict(MissionStatus::Pending, 3600),
+            Some("stuck_queued")
+        );
+    }
+
+    #[test]
+    fn idle_durations_render_compactly() {
+        assert_eq!(humanize_idle(45), "45s");
+        assert_eq!(humanize_idle(12 * 60), "12m");
+        assert_eq!(humanize_idle(2 * 3600 + 30 * 60), "2h30m");
+        assert_eq!(humanize_idle(16 * 3600), "16h");
+        assert_eq!(humanize_idle(3 * 86_400), "3d");
     }
 }
 
@@ -5268,6 +7207,80 @@ async fn mission_search_recency_fingerprint(
 }
 
 /// Search missions with semantic-aware ranking.
+#[derive(Debug, serde::Deserialize)]
+pub struct ResolveMissionQuery {
+    /// A full mission UUID or an unambiguous leading fragment of one.
+    pub id: String,
+}
+
+/// Resolve the id humans actually have — the 8-character prefix dashboards,
+/// logs and transcripts display — into a full mission UUID.
+///
+/// Ambiguity is reported as a conflict listing the candidates rather than
+/// silently picking the newest: a controller acting on the wrong mission is
+/// far worse than one that has to ask again with more characters.
+pub async fn resolve_mission_id(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<ResolveMissionQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let raw = query.id.trim().to_ascii_lowercase();
+    if let Ok(id) = Uuid::parse_str(&raw) {
+        return Ok(Json(serde_json::json!({
+            "mission_id": id.to_string(),
+            "match": "exact",
+        })));
+    }
+    // Anything shorter is not worth resolving: at 4 hex characters a
+    // collision is already likely enough to be a nuisance, and a 1-character
+    // "prefix" would scan half the fleet.
+    if raw.len() < 4 || !raw.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "id must be a mission UUID or at least 4 hex characters of one".to_string(),
+        ));
+    }
+
+    let control = control_for_user(&state, &user).await;
+    // One more than we report, so "exactly one" is provably unambiguous.
+    let candidates = control
+        .mission_store
+        .find_missions_by_id_prefix(&raw, 11)
+        .await
+        .map_err(internal_error)?;
+
+    match candidates.len() {
+        0 => Err((StatusCode::NOT_FOUND, format!("no mission matches '{raw}'"))),
+        1 => Ok(Json(serde_json::json!({
+            "mission_id": candidates[0].id.to_string(),
+            "match": "prefix",
+        }))),
+        _ => {
+            let listed: Vec<serde_json::Value> = candidates
+                .iter()
+                .take(10)
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id.to_string(),
+                        "title": m.title,
+                        "status": m.status.to_string(),
+                        "updated_at": m.updated_at,
+                    })
+                })
+                .collect();
+            Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "ambiguous",
+                    "prefix": raw,
+                    "candidates": listed,
+                })
+                .to_string(),
+            ))
+        }
+    }
+}
+
 pub async fn search_missions(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -5471,11 +7484,44 @@ pub async fn get_mission(
                 .get_active_mission_run(mission.id)
                 .await
                 .map_err(internal_error)?;
+            let wait_started_at = match active_run.as_ref() {
+                Some(run) => user_wait_tool_started_at(control.mission_store.as_ref(), run).await,
+                None => None,
+            };
             let mut value = attach_execution_to_mission_value(
                 serde_json::to_value(&mission).map_err(internal_error)?,
                 &mission,
                 active_run.as_ref(),
+                wait_started_at.as_deref(),
             );
+            // Remote placement must be visible on the read model: the row's
+            // workspace/backend describe a local harness that a raw remote
+            // mission never runs.
+            let placement_run = match active_run.clone() {
+                Some(run) => Some(run),
+                None => control
+                    .mission_store
+                    .get_latest_mission_run(mission.id)
+                    .await
+                    .map_err(internal_error)?,
+            };
+            let (handles, outcomes) = remote_job_projection_inputs(&state).await;
+            value = attach_remote_job_to_mission_value(
+                value,
+                remote_job_projection(
+                    &handles,
+                    &outcomes,
+                    placement_run.as_ref(),
+                    mission.id,
+                    chrono::Utc::now(),
+                ),
+            );
+            if let Some(t) = machine_transfer::committed(&control.mission_store, id)
+                .await
+                .map_err(internal_error)?
+            {
+                machine_transfer::project(&mut value, &t);
+            }
             let host_configured =
                 state.config.spark_arbiter_url.is_some() || state.config.spark_ssh_target.is_some();
             let enabled = workspace
@@ -5498,8 +7544,359 @@ pub async fn get_mission(
             }
             Ok(Json(value))
         }
-        None => Err((StatusCode::NOT_FOUND, format!("Mission {} not found", id))),
+        None => {
+            // Cross-tenant read-only fallback. The PR-writer lease check is
+            // deliberately GLOBAL across mission stores, so a lease refusal can
+            // name a holder that lives in another tenant's store. Without this
+            // fallback that holder reads as 404 — indistinguishable from a
+            // ghost — and controllers deadlock instead of resuming/acking it
+            // (observed 2026-08-01 on the Verity two-phase controller). Serve a
+            // bounded projection: enough to see status/ownership, no transcript.
+            if let Some(value) = find_mission_projection_in_any_store(&state.control, id)
+                .await
+                .map_err(internal_error)?
+            {
+                return Ok(Json(value));
+            }
+            Err((StatusCode::NOT_FOUND, format!("Mission {} not found", id)))
+        }
     }
+}
+
+/// Locate a mission by id across every mission store (read-only) and return
+/// the bounded cross-tenant projection. The PR-writer lease check is global
+/// across stores, so lease holders must be inspectable across stores too —
+/// but only as a projection: no transcript, no control surface.
+async fn find_mission_projection_in_any_store(
+    control_hub: &ControlHub,
+    id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    let inventory = control_hub.mission_store_inventory().await?;
+    for store in inventory.live {
+        if let Some(mission) = store.get_mission(id).await? {
+            return Ok(Some(cross_tenant_mission_projection(
+                &mission.id.to_string(),
+                &mission.status,
+                mission.title.as_deref(),
+                Some(&mission.workspace_id.to_string()),
+                Some(&mission.backend),
+                &mission.created_at,
+                &mission.updated_at,
+            )));
+        }
+    }
+    for user in inventory.offline_file_users {
+        let store: Arc<dyn MissionStore> = Arc::new(
+            mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
+        );
+        if let Some(mission) = store.get_mission(id).await? {
+            return Ok(Some(cross_tenant_mission_projection(
+                &mission.id.to_string(),
+                &mission.status,
+                mission.title.as_deref(),
+                Some(&mission.workspace_id.to_string()),
+                Some(&mission.backend),
+                &mission.created_at,
+                &mission.updated_at,
+            )));
+        }
+    }
+    for path in inventory.offline_sqlite {
+        let found =
+            tokio::task::spawn_blocking(move || load_mission_projection_from_sqlite(&path, id))
+                .await
+                .map_err(|error| error.to_string())??;
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    Ok(None)
+}
+
+fn cross_tenant_mission_projection(
+    id: &str,
+    status: &MissionStatus,
+    title: Option<&str>,
+    workspace_id: Option<&str>,
+    backend: Option<&str>,
+    created_at: &str,
+    updated_at: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "status": status,
+        "title": title,
+        "workspace_id": workspace_id,
+        "backend": backend,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "cross_tenant": true,
+        "read_only": true,
+        "note": "mission belongs to another mission store; transcript and control operations are not exposed here",
+    })
+}
+
+fn collect_project_missions_from_sqlite(
+    path: &std::path::Path,
+    terminal_cutoff_rfc3339: &str,
+) -> Result<Vec<Mission>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let columns: std::collections::HashSet<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('missions')")
+        .and_then(|mut st| {
+            st.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .map_err(|error| error.to_string())?;
+    if !columns.contains("project") {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT id, status, title, workspace_id, backend, created_at, updated_at, \
+             project, track, intent, github_pr \
+             FROM missions WHERE project IS NOT NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut collected = Vec::new();
+    for row in rows {
+        let (
+            id,
+            status,
+            title,
+            workspace_id,
+            backend,
+            created_at,
+            updated_at,
+            project,
+            track,
+            intent,
+            github_pr,
+        ) = row.map_err(|error| error.to_string())?;
+        let Ok(id) = Uuid::parse_str(&id) else {
+            continue;
+        };
+        let status = serde_json::from_value::<MissionStatus>(serde_json::Value::String(status))
+            .unwrap_or(MissionStatus::Active);
+        let updated_at = updated_at.unwrap_or_default();
+        if (status.is_terminal() || status == MissionStatus::Acknowledged)
+            && updated_at.as_str() < terminal_cutoff_rfc3339
+        {
+            continue;
+        }
+        let mut mission: Mission = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "status": status,
+            "workspace_id": workspace_id
+                .as_deref()
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .unwrap_or_else(Uuid::nil),
+            "backend": backend.unwrap_or_default(),
+            "history": [],
+            "created_at": created_at.unwrap_or_default(),
+            "updated_at": updated_at,
+        }))
+        .map_err(|error| error.to_string())?;
+        mission.title = title;
+        mission.project.project = project;
+        mission.project.track = track;
+        mission.project.intent = intent;
+        mission.project.github_pr = github_pr;
+        collected.push(mission);
+    }
+    Ok(collected)
+}
+
+/// Read-only attention-horizon slice of one project tag from an offline store.
+fn collect_attention_missions_from_sqlite(
+    path: &std::path::Path,
+    project: &str,
+) -> Result<Vec<Mission>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let columns: std::collections::HashSet<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('missions')")
+        .and_then(|mut st| {
+            st.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .map_err(|error| error.to_string())?;
+    if !columns.contains("project") {
+        return Ok(Vec::new());
+    }
+    let optional = |name: &str| {
+        if columns.contains(name) {
+            name.to_string()
+        } else {
+            "NULL".into()
+        }
+    };
+    let sql = format!(
+        "SELECT id, status, title, workspace_id, backend, created_at, updated_at, \
+         project, track, intent, github_pr, {}, {}, {}, {} \
+         FROM missions WHERE project = ?1 AND status NOT IN ('acknowledged', 'completed')",
+        optional("tags"),
+        optional("awaiting_kind"),
+        optional("origin_session_id"),
+        optional("last_status_change_at")
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project], |row| {
+            let mut fields = Vec::new();
+            for index in 0..15 {
+                fields.push(row.get::<_, Option<String>>(index)?);
+            }
+            Ok(fields)
+        })
+        .map_err(|error| error.to_string())?;
+    let mut collected = Vec::new();
+    for row in rows {
+        let fields = row.map_err(|error| error.to_string())?;
+        let mut fields = fields.into_iter();
+        let id = fields.next().flatten().ok_or("missing mission id")?;
+        let status_raw = fields.next().flatten().ok_or("missing mission status")?;
+        let title = fields.next().flatten();
+        let workspace_id = fields.next().flatten();
+        let backend = fields.next().flatten();
+        let created_at = fields.next().flatten();
+        let updated_at = fields.next().flatten();
+        let project = fields.next().flatten();
+        let track = fields.next().flatten();
+        let intent = fields.next().flatten();
+        let github_pr = fields.next().flatten();
+        let tags_raw = fields.next().flatten();
+        let awaiting_kind_raw = fields.next().flatten();
+        let origin_session_id = fields.next().flatten();
+        let last_status_change_at = fields.next().flatten();
+        let id = Uuid::parse_str(&id).map_err(|error| error.to_string())?;
+        let status = serde_json::from_value::<MissionStatus>(serde_json::Value::String(status_raw))
+            .map_err(|error| error.to_string())?;
+        let awaiting_kind = awaiting_kind_raw
+            .map(|raw| {
+                serde_json::from_value::<AwaitingKind>(serde_json::Value::String(raw))
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        // A present-but-unparseable kind is a real inventory error (above).
+        // A NULL kind is the legacy pre-`awaiting_kind` shape, which the live
+        // store also carries as `None` and which operator attention treats as
+        // an unqualified page. Erroring here would make the whole project's
+        // evidence permanently unavailable for one old row.
+        if status == MissionStatus::AwaitingUser && awaiting_kind.is_none() {
+            tracing::debug!(
+                mission_id = %id,
+                "offline awaiting_user mission has no awaiting kind; treating as legacy"
+            );
+        }
+        let tags: Vec<String> = tags_raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        let mut mission: Mission = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "status": status,
+            "workspace_id": workspace_id
+                .as_deref()
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .unwrap_or_else(Uuid::nil),
+            "backend": backend.unwrap_or_default(),
+            "history": [],
+            "created_at": created_at.unwrap_or_default(),
+            "updated_at": updated_at.unwrap_or_default(),
+        }))
+        .map_err(|error| error.to_string())?;
+        mission.title = title;
+        mission.project.project = project;
+        mission.project.track = track;
+        mission.project.intent = intent;
+        mission.project.github_pr = github_pr;
+        mission.project.tags = tags;
+        mission.awaiting_kind = awaiting_kind;
+        mission.origin_session_id = origin_session_id;
+        mission.activity.last_status_change_at = last_status_change_at;
+        if crate::api::mission_store::default_attention_keeps(&mission) {
+            collected.push(mission);
+        }
+    }
+    Ok(collected)
+}
+
+/// Minimal read-only projection load from an offline sqlite store. Missing
+/// columns degrade to null instead of failing the lookup.
+fn load_mission_projection_from_sqlite(
+    path: &std::path::Path,
+    id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT status, title, workspace_id, backend, created_at, updated_at \
+             FROM missions WHERE id = ?1 LIMIT 1",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement
+        .query([id.to_string()])
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.next().map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let status: String = row.get(0).map_err(|error| error.to_string())?;
+    let status = serde_json::from_value::<MissionStatus>(serde_json::Value::String(status))
+        .unwrap_or(MissionStatus::Active);
+    let title: Option<String> = row.get(1).ok();
+    let workspace_id: Option<String> = row.get(2).ok();
+    let backend: Option<String> = row.get(3).ok();
+    let created_at: String = row.get(4).unwrap_or_default();
+    let updated_at: String = row.get(5).unwrap_or_default();
+    Ok(Some(cross_tenant_mission_projection(
+        &id.to_string(),
+        &status,
+        title.as_deref(),
+        workspace_id.as_deref(),
+        backend.as_deref(),
+        &created_at,
+        &updated_at,
+    )))
+}
+
+fn mission_goal_digest(mission: &Mission) -> serde_json::Value {
+    let objective = mission.goal_objective.as_deref().map(|text| {
+        let mut snippet: String = text.chars().take(1000).collect();
+        if text.chars().count() > 1000 {
+            snippet.push('…');
+        }
+        snippet
+    });
+    serde_json::json!({
+        "mission_mode": mission.mission_mode,
+        "goal_mode": mission.goal_mode,
+        "goal_objective": objective,
+    })
 }
 
 /// Compact, orchestrator-friendly view of a mission: status, last exchange,
@@ -5544,6 +7941,12 @@ pub async fn get_mission_digest(
         .rev()
         .find(|e| e.role == "assistant" && !e.content.trim().is_empty())
         .map(|e| truncate_chars(&e.content, 2000));
+    let terminal_verdict = mission
+        .history
+        .iter()
+        .rev()
+        .find(|entry| entry.role == "assistant" && !entry.content.trim().is_empty())
+        .and_then(|entry| terminal_verdict_from_content(&entry.content));
     let last_user = mission
         .history
         .iter()
@@ -5567,21 +7970,38 @@ pub async fn get_mission_digest(
             }
         }
     }
-    let execution = control
+    let latest_run = control
         .mission_store
-        .get_active_mission_run(mission.id)
+        .get_latest_mission_run(mission.id)
         .await
-        .map_err(internal_error)?
+        .map_err(internal_error)?;
+    let waiting_for_user_tool = latest_run
+        .as_ref()
+        .is_some_and(|run| run.execution_state == MissionExecutionState::WaitingUser);
+    let wait_started_at = match latest_run.as_ref() {
+        Some(run) => user_wait_tool_started_at(control.mission_store.as_ref(), run).await,
+        None => None,
+    };
+    let execution = latest_run
         .as_ref()
         .map(|run| mission_execution_projection(run, mission.status));
 
+    let goal = mission_goal_digest(&mission);
     Ok(Json(serde_json::json!({
         "id": mission.id,
         "title": mission.title,
         "status": mission.status,
         "awaiting_kind": mission.awaiting_kind.map(|k| k.as_str()),
+        "needs_operator": super::operator_attention::mission_needs_operator(
+            &mission,
+            waiting_for_user_tool,
+            wait_started_at.as_deref(),
+            chrono::Utc::now(),
+        ),
         "terminal_reason": mission.terminal_reason,
+        "terminal_evidence": mission.terminal_evidence,
         "short_description": mission.short_description,
+        "terminal_verdict": terminal_verdict,
         "backend": mission.backend,
         "model_override": mission.model_override,
         "model_effort": mission.model_effort,
@@ -5592,6 +8012,9 @@ pub async fn get_mission_digest(
         "updated_at": mission.updated_at,
         "acknowledged_at": (mission.status == MissionStatus::Acknowledged).then_some(mission.updated_at.clone()),
         "execution": execution,
+        "mission_mode": goal["mission_mode"],
+        "goal_mode": goal["goal_mode"],
+        "goal_objective": goal["goal_objective"],
         "history_len": mission.history.len(),
         "last_user_message": last_user,
         "last_assistant_message": last_assistant,
@@ -5708,6 +8131,12 @@ pub struct CreateMissionRequest {
     pub backend: Option<String>,
     /// Parent mission ID (for orchestrated worker missions)
     pub parent_mission_id: Option<Uuid>,
+    /// The attempt this mission replaces (a relay after a failure, a
+    /// backend handoff). The prior mission is tagged `superseded_by:<id>`
+    /// and acknowledged, so the board stops flagging it. Must be on the
+    /// same project.
+    #[serde(default)]
+    pub supersedes_mission_id: Option<Uuid>,
     /// Working directory override (for git worktrees etc.)
     pub working_directory: Option<String>,
     /// FLEET-001 scheduling hint: dispatch priority (higher = more important,
@@ -5722,8 +8151,14 @@ pub struct CreateMissionRequest {
     pub deadline: Option<chrono::DateTime<chrono::Utc>>,
     /// Project tagging: stable project identifier (e.g. "verity-core").
     pub project: Option<String>,
-    /// Project tagging: track / workstream within the project.
+    /// Project tagging: track / workstream within the project. Resolved
+    /// against the plan (key, alias, single PR ref) and absorbed as a new
+    /// `origin = absorbed` track when unknown.
     pub track: Option<String>,
+    /// Caller-supplied idempotency key for the dispatch. Keys the track lease
+    /// so a retried create cannot take a second lease; generated per mission
+    /// when absent.
+    pub idempotency_key: Option<String>,
     /// Project tagging: intent (e.g. "review_merge_pr").
     pub intent: Option<String>,
     /// Project tagging: associated GitHub PR ref (e.g. "owner/repo#123").
@@ -5736,6 +8171,9 @@ pub struct CreateMissionRequest {
     pub tags: Option<Vec<String>>,
     /// Track state, e.g. "waiting_ci" / "waiting_review" / "blocked_external".
     pub desired_state: Option<String>,
+    /// Acceptance contract declared (or revised) on the track by this dispatch.
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
     /// When the track should next be checked (RFC3339).
     pub next_check_at: Option<String>,
     /// Initial prompt for the mission. Stored as the mission's deferred goal:
@@ -5766,6 +8204,20 @@ pub struct CreateMissionRequest {
     /// can continue without admitting work that would cross the emergency
     /// reserve.
     pub estimated_disk_gib: Option<u64>,
+    /// Which system created this mission (e.g. "hermes" for the assistant
+    /// MCP). Clients group foreign-origin missions as workers of their owning
+    /// conversation instead of standalone rows.
+    pub origin: Option<String>,
+    /// External conversation that spawned this mission — the Hermes session id
+    /// when `origin` is "hermes". Only stored when `origin` is set.
+    pub origin_session_id: Option<String>,
+    /// Orb `@` chips: materialized into `.paloma/` before the harness starts.
+    #[serde(default)]
+    pub attachments: Option<Vec<crate::api::mission_payload::MissionAttachment>>,
+    /// `"client"` means the Orb desktop that created the mission runs the CLI.
+    /// The backend records the mission and does not start a harness.
+    #[serde(default)]
+    pub placement: Option<String>,
     /// Catch-all for unrecognized request fields. Serde ignores unknown fields
     /// by default, which has repeatedly hidden client bugs (a `prompt` sent
     /// before the field existed, a mistyped `target_mission_id`). Captured
@@ -5786,7 +8238,8 @@ where
 pub struct UpdateMissionSettingsRequest {
     /// Backend to use on the next turn ("opencode", "claudecode", "codex", etc.).
     pub backend: Option<String>,
-    /// Agent name. Omit to leave unchanged, null/empty string to clear.
+    /// Agent name. Omit to preserve on the same backend, or clear on a backend
+    /// switch. Explicit null/empty string also clears it.
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub agent: Option<Option<String>>,
     /// Model override. Omit to leave unchanged, null/empty string to clear.
@@ -5800,6 +8253,19 @@ pub struct UpdateMissionSettingsRequest {
     /// Config profile. Omit to leave unchanged, null/empty string to clear.
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub config_profile: Option<Option<String>>,
+    /// After a settings change on a Failed/Interrupted mission, queue a
+    /// resume on the new settings (default true). A handoff that leaves the
+    /// mission dead is the failure mode this exists to remove: the controller
+    /// changed the backend, the mission stayed `failed`, work stalled.
+    pub resume: Option<bool>,
+}
+
+/// Does a settings change on a mission in `previous` status queue a resume?
+/// Only terminal-but-resumable statuses; a live, paused or acknowledged
+/// mission is left exactly where it is.
+fn should_queue_resume(previous: MissionStatus, requested: Option<bool>) -> bool {
+    requested.unwrap_or(true)
+        && matches!(previous, MissionStatus::Failed | MissionStatus::Interrupted)
 }
 
 fn normalize_model_effort(raw: &str) -> Option<String> {
@@ -5809,6 +8275,9 @@ fn normalize_model_effort(raw: &str) -> Option<String> {
         "high" => Some("high".to_string()),
         "xhigh" => Some("xhigh".to_string()),
         "max" => Some("max".to_string()),
+        // Codex-only (gpt-6-astra, gpt-5.6-sol/terra): maximum reasoning with
+        // automatic task delegation.
+        "ultra" => Some("ultra".to_string()),
         _ => None,
     }
 }
@@ -5827,7 +8296,7 @@ fn normalize_model_effort_for_backend(backend: Option<&str>, raw: &str) -> Optio
 fn supported_model_efforts_for_backend(backend: Option<&str>) -> &'static str {
     match backend {
         Some("claudecode") => "low, medium, high, xhigh, max",
-        Some("codex") => "low, medium, high, xhigh, max",
+        Some("codex") => "low, medium, high, xhigh, max, ultra",
         _ => "none",
     }
 }
@@ -5837,7 +8306,7 @@ fn codex_fast_mode_model_supported(model: Option<&str>) -> bool {
         return false;
     };
     let model = model.rsplit('/').next().unwrap_or(model);
-    ["gpt-5.6", "gpt-5.5", "gpt-5.4"]
+    ["gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4"]
         .iter()
         .any(|prefix| model == *prefix || model.starts_with(&format!("{prefix}-")))
 }
@@ -5884,10 +8353,16 @@ fn normalize_model_override_for_backend(backend: Option<&str>, raw_model: &str) 
     if backend == Some("codex") && trimmed == "gpt-5.6" {
         return Some("gpt-5.6-sol".to_string());
     }
+    if backend == Some("codex") && trimmed == "gpt-6" {
+        return Some("gpt-6-astra".to_string());
+    }
     if backend != Some("opencode") {
         if let Some((_, model_id)) = trimmed.split_once('/') {
             if backend == Some("codex") && model_id == "gpt-5.6" {
                 return Some("gpt-5.6-sol".to_string());
+            }
+            if backend == Some("codex") && model_id == "gpt-6" {
+                return Some("gpt-6-astra".to_string());
             }
             return Some(model_id.to_string());
         }
@@ -5953,6 +8428,593 @@ fn apply_native_backend_agent_selector(
 static PR_WRITER_CREATE_LOCK: std::sync::LazyLock<Mutex<()>> =
     std::sync::LazyLock::new(|| Mutex::new(()));
 
+// Admission is deliberately a durable, filesystem-scoped lease rather than an
+// in-memory counter.  More than one control process can use the same mission
+// store and a restart must not forget work that is already consuming scratch.
+static DISK_ADMISSION_LOCK: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+struct DurableDiskAdmissionLockGuard {
+    _process_guard: tokio::sync::MutexGuard<'static, ()>,
+    file: std::fs::File,
+}
+
+impl Drop for DurableDiskAdmissionLockGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+async fn acquire_durable_disk_admission_lock(
+    config: &Config,
+) -> Result<DurableDiskAdmissionLockGuard, String> {
+    let process_guard = DISK_ADMISSION_LOCK.lock().await;
+    let lock_dir = config.working_dir.join(".sandboxed-sh").join("missions");
+    tokio::fs::create_dir_all(&lock_dir)
+        .await
+        .map_err(|error| format!("create disk admission lock directory: {error}"))?;
+    let lock_path = lock_dir.join(".disk-admission.lock");
+    let file = tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| format!("open {}: {error}", lock_path.display()))?;
+        fs2::FileExt::lock_exclusive(&file)
+            .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
+        Ok::<_, String>(file)
+    })
+    .await
+    .map_err(|error| format!("join disk admission lock task: {error}"))??;
+    Ok(DurableDiskAdmissionLockGuard {
+        _process_guard: process_guard,
+        file,
+    })
+}
+
+const DISK_RESERVATION_TAG_PREFIX: &str = "disk-reservation-v1:";
+
+/// Server-owned admission state.  This is intentionally separate from
+/// `MissionProject`: project metadata is user editable and consequently can
+/// never be an authority for resource accounting.  The file is written while
+/// holding the global admission lock and atomically replaced, so independent
+/// control processes observe a complete old or complete new ledger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiskReservation {
+    mission_id: Uuid,
+    filesystem: String,
+    estimated_bytes: u64,
+    /// Free bytes observed when the lease was granted.  This is a diagnostic
+    /// baseline, not an additional reservation; counting both consumed disk
+    /// and the full estimate would double-count the same work.
+    free_bytes_at_grant: u64,
+    /// Canonical mission directory whose actual usage consumes this lease.
+    /// Older records omit it and conservatively retain their full estimate.
+    #[serde(default)]
+    workspace_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DiskReservationLedger {
+    #[serde(default = "disk_reservation_ledger_version")]
+    version: u8,
+    #[serde(default)]
+    reservations: HashMap<Uuid, DiskReservation>,
+    /// Compatibility input for the immediately preceding ledger format.  The
+    /// placement decision has moved to the mission row, but an upgrade must
+    /// first transfer any remote (`false`) decisions rather than treating
+    /// those missions as conservative local work.  Do not serialize this
+    /// field again: once transferred, the row is the sole authority.
+    ///
+    /// The on-disk key was `requires_local_disk`.  The Rust field was renamed
+    /// during the migration, so deserialize both names.
+    #[serde(
+        default,
+        rename = "requires_local_disk",
+        alias = "legacy_requires_local_disk",
+        skip_serializing
+    )]
+    legacy_requires_local_disk: HashMap<Uuid, bool>,
+}
+
+const fn disk_reservation_ledger_version() -> u8 {
+    2
+}
+
+fn disk_reservation_ledger_path(config: &Config) -> PathBuf {
+    config
+        .working_dir
+        .join(".sandboxed-sh")
+        .join("missions")
+        .join("disk-reservations-v2.json")
+}
+
+fn read_disk_reservation_ledger(config: &Config) -> Result<DiskReservationLedger, String> {
+    let path = disk_reservation_ledger_path(config);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DiskReservationLedger {
+            version: disk_reservation_ledger_version(),
+            reservations: HashMap::new(),
+            legacy_requires_local_disk: HashMap::new(),
+        }),
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    }
+}
+
+fn write_disk_reservation_ledger(
+    config: &Config,
+    ledger: &DiskReservationLedger,
+) -> Result<(), String> {
+    let path = disk_reservation_ledger_path(config);
+    let parent = path.parent().expect("ledger path has parent");
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    let temp = parent.join(format!(".disk-reservations-v2.{}.tmp", Uuid::new_v4()));
+    let outcome = (|| -> Result<(), String> {
+        let bytes = serde_json::to_vec(ledger).map_err(|error| error.to_string())?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| format!("open {}: {error}", temp.display()))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("write {}: {error}", temp.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {}: {error}", temp.display()))?;
+        std::fs::rename(&temp, &path)
+            .map_err(|error| format!("rename {}: {error}", path.display()))?;
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| format!("sync {}: {error}", parent.display()))?;
+        Ok(())
+    })();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    outcome
+}
+
+/// Admission leases are server-owned durable state.  They used to share the
+/// free-form project-tag namespace, which let a project edit forge, erase, or
+/// transplant a lease.  Keep the compatibility reader below for records made
+/// by older servers, but never accept this reserved namespace from an API
+/// request.
+fn contains_internal_disk_reservation_tag(tags: &[String]) -> bool {
+    tags.iter()
+        .any(|tag| tag.trim().starts_with(DISK_RESERVATION_TAG_PREFIX))
+}
+
+/// Only missions that are actually running hold a scratch lease.
+/// Parked (`awaiting_user`, `paused`) and every terminal status release —
+/// those were the 2026-08-17 zombie majority (~18 TiB paper vs ~2 TiB free).
+fn mission_holds_disk_reservation(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Active | MissionStatus::Pending | MissionStatus::WaitingBackground
+    )
+}
+
+/// Hard admission budget: emergency floor + this candidate. Paper leases are
+/// not part of the hard gate — the 2026-08-17 ledger still charged ~5–18 TiB
+/// of `failed` / parked rows after deploy, so every create died while 2 TiB
+/// was actually free.
+fn disk_admission_hard_required_bytes(emergency: u64, candidate: u64) -> u64 {
+    emergency.saturating_add(candidate)
+}
+
+fn disk_admission_required_bytes(emergency: u64, reserved: u64, candidate: u64) -> u64 {
+    disk_admission_hard_required_bytes(emergency, candidate).saturating_add(reserved)
+}
+
+async fn reserved_disk_bytes_for_filesystem(
+    config: &Config,
+    filesystem: &str,
+    live_ids: &HashSet<Uuid>,
+) -> Result<u64, String> {
+    let ledger = read_disk_reservation_ledger(config)?;
+    Ok(ledger
+        .reservations
+        .values()
+        .filter(|reservation| {
+            reservation.filesystem == filesystem && live_ids.contains(&reservation.mission_id)
+        })
+        .map(disk_reservation_outstanding_bytes)
+        .fold(0u64, |sum, bytes| sum.saturating_add(bytes)))
+}
+
+/// The filesystem's free counter already includes bytes written by a running
+/// mission. Subtracting both those bytes and its full estimate would charge
+/// the same consumption twice.  A lease therefore retains only its estimated
+/// *remaining* peak after measuring its own workspace.  Measurement failure
+/// is conservative: keep the complete estimate.
+fn allocated_file_bytes(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // POSIX `st_blocks` is in 512-byte units and counts allocated
+        // storage, so sparse/reflinked files do not appear fully consumed.
+        metadata.blocks().saturating_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
+
+fn disk_reservation_outstanding_bytes(reservation: &DiskReservation) -> u64 {
+    let Some(path) = reservation.workspace_dir.as_deref() else {
+        return reservation.estimated_bytes;
+    };
+    let usage = walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .fold(0u64, |total, metadata| {
+            total.saturating_add(allocated_file_bytes(&metadata))
+        });
+    reservation.estimated_bytes.saturating_sub(usage)
+}
+
+fn nonterminal_missions_in_sqlite(
+    path: &std::path::Path,
+) -> Result<HashMap<Uuid, (Option<Uuid>, bool)>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let mut statement = connection
+        .prepare("SELECT id, status, workspace_id, COALESCE(requires_local_disk, 1) FROM missions")
+        .or_else(|_| connection.prepare("SELECT id, status, workspace_id, 1 FROM missions"))
+        .or_else(|_| connection.prepare("SELECT id, status, NULL AS workspace_id, 1 FROM missions"))
+        .map_err(|error| format!("query {}: {error}", path.display()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut missions = HashMap::new();
+    for row in rows {
+        let (id, status, workspace_id, requires_local_disk) =
+            row.map_err(|error| error.to_string())?;
+        let status = serde_json::from_value::<MissionStatus>(serde_json::Value::String(status))
+            .unwrap_or(MissionStatus::Failed);
+        if mission_holds_disk_reservation(status) {
+            let id = Uuid::parse_str(&id)
+                .map_err(|error| format!("parse mission id {id} in {}: {error}", path.display()))?;
+            let workspace_id = workspace_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|error| format!("parse workspace id in {}: {error}", path.display()))?;
+            missions.insert(id, (workspace_id, requires_local_disk != 0));
+        }
+    }
+    Ok(missions)
+}
+
+/// Transfer placement from the short-lived v2 lease-ledger authority into an
+/// offline SQLite mission store.  This runs under the global admission lock;
+/// the transaction means a crash leaves either the old ledger classification
+/// or the fully-updated mission rows, never a partially applied set.
+fn migrate_legacy_ledger_placement_in_sqlite(
+    path: &std::path::Path,
+    placement: &HashMap<Uuid, bool>,
+) -> Result<(), String> {
+    if placement.is_empty() {
+        return Ok(());
+    }
+    let mut connection = rusqlite::Connection::open(path)
+        .map_err(|error| format!("open {} for placement migration: {error}", path.display()))?;
+    let has_column = connection
+        .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'requires_local_disk'")
+        .and_then(|mut statement| statement.exists([]))
+        .map_err(|error| format!("inspect {} placement schema: {error}", path.display()))?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("start {} placement migration: {error}", path.display()))?;
+    if !has_column {
+        transaction
+            .execute(
+                "ALTER TABLE missions ADD COLUMN requires_local_disk INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .map_err(|error| format!("add {} placement column: {error}", path.display()))?;
+    }
+    for (&mission_id, &requires_local_disk) in placement {
+        transaction
+            .execute(
+                "UPDATE missions SET requires_local_disk = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    if requires_local_disk { 1i64 } else { 0i64 },
+                    mission_id.to_string()
+                ],
+            )
+            .map_err(|error| {
+                format!(
+                    "migrate placement for {mission_id} in {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("commit {} placement migration: {error}", path.display()))
+}
+
+/// Reconstruct the live lease set from authoritative mission state while the
+/// global admission lock is held.  The ledger supplies bytes; mission stores
+/// supply lifecycle truth.  Project tags are deliberately excluded: they are
+/// user-editable presentation metadata and can neither grant nor retain a
+/// lease after a project edit.
+async fn reconcile_disk_reservation_ledger_under_lock(
+    control_hub: &ControlHub,
+    config: &Config,
+) -> Result<HashSet<Uuid>, String> {
+    let inventory = control_hub.mission_store_inventory().await?;
+    let mut ledger = read_disk_reservation_ledger(config)?;
+    let legacy_placement = std::mem::take(&mut ledger.legacy_requires_local_disk);
+    // Mission rows are the lifecycle authority.  A process can crash after a
+    // row commits but before the separate, atomically-published ledger file is
+    // renamed.  Reconstructing a conservative lease for every such live row
+    // closes that crash window; the lock is retained from admission through
+    // row creation and ledger publication, so no concurrent admission can
+    // observe the intermediate state either.
+    let mut live_missions: HashMap<Uuid, (Option<Uuid>, bool)> = HashMap::new();
+    for store in inventory.live {
+        for mission in store.list_missions(usize::MAX, 0).await? {
+            if let Some(&requires_local_disk) = legacy_placement.get(&mission.id) {
+                if mission.requires_local_disk != requires_local_disk {
+                    store
+                        .set_mission_requires_local_disk(mission.id, requires_local_disk)
+                        .await?;
+                }
+            }
+            if mission_holds_disk_reservation(mission.status) {
+                live_missions.insert(
+                    mission.id,
+                    (
+                        Some(mission.workspace_id),
+                        legacy_placement
+                            .get(&mission.id)
+                            .copied()
+                            .unwrap_or(mission.requires_local_disk),
+                    ),
+                );
+            }
+        }
+    }
+    for user in inventory.offline_file_users {
+        let store: Arc<dyn MissionStore> = Arc::new(
+            mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user).await?,
+        );
+        for mission in store.list_missions(usize::MAX, 0).await? {
+            if let Some(&requires_local_disk) = legacy_placement.get(&mission.id) {
+                if mission.requires_local_disk != requires_local_disk {
+                    store
+                        .set_mission_requires_local_disk(mission.id, requires_local_disk)
+                        .await?;
+                }
+            }
+            if mission_holds_disk_reservation(mission.status) {
+                live_missions.insert(
+                    mission.id,
+                    (
+                        Some(mission.workspace_id),
+                        legacy_placement
+                            .get(&mission.id)
+                            .copied()
+                            .unwrap_or(mission.requires_local_disk),
+                    ),
+                );
+            }
+        }
+    }
+    for path in inventory.offline_sqlite {
+        let placement = legacy_placement.clone();
+        let missions = tokio::task::spawn_blocking(move || {
+            migrate_legacy_ledger_placement_in_sqlite(&path, &placement)?;
+            nonterminal_missions_in_sqlite(&path)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        for (id, placement) in missions {
+            live_missions.entry(id).or_insert(placement);
+        }
+    }
+    let mut changed = !legacy_placement.is_empty();
+    let before = ledger.reservations.len();
+    ledger
+        .reservations
+        .retain(|id, _| live_missions.contains_key(id));
+    changed |= ledger.reservations.len() != before;
+    for (&mission_id, &(workspace_id, requires_local_disk)) in &live_missions {
+        // Remote-node missions have an authoritative persisted placement
+        // record but no host-disk lease.  Never manufacture one on restart.
+        // An absent record predates placement persistence and is charged
+        // locally as the safe compatibility policy.
+        if !requires_local_disk {
+            continue;
+        }
+        if ledger.reservations.contains_key(&mission_id) {
+            continue;
+        }
+        // A very old SQLite schema may not carry workspace_id. Charge the
+        // default host conservatively rather than allowing a crash-created
+        // Pending mission to escape admission accounting.
+        let workspace_id = workspace_id.unwrap_or(workspace::DEFAULT_WORKSPACE_ID);
+        let workspace = control_hub
+            .workspaces
+            .get(workspace_id)
+            .await
+            .unwrap_or_else(|| workspace::Workspace::default_host(config.working_dir.clone()));
+        workspace::ensure_persisted_mission_root_is_available(&workspace, mission_id)
+            .map_err(|error| format!("verify persisted placement for {mission_id}: {error}"))?;
+        let root = workspace::mission_workspace_root_for_workspace(&workspace, mission_id);
+        let usage = crate::api::monitoring::disk_usage_for_path(&root).map_err(|error| {
+            format!(
+                "measure reconstructed mission filesystem {}: {error}",
+                root.display()
+            )
+        })?;
+        ledger.reservations.insert(
+            mission_id,
+            DiskReservation {
+                mission_id,
+                filesystem: usage.filesystem,
+                estimated_bytes: mission_disk_default_estimate_gib().saturating_mul(1 << 30),
+                free_bytes_at_grant: usage.available,
+                workspace_dir: Some(workspace::mission_workspace_dir_for_workspace(
+                    &workspace, mission_id,
+                )),
+            },
+        );
+        changed = true;
+    }
+    if changed {
+        write_disk_reservation_ledger(config, &ledger)?;
+    }
+    Ok(live_missions.keys().copied().collect())
+}
+
+/// Periodic / on-demand purge of dead leases. The workspace GC loop calls
+/// this even when directory GC is dry-run so an operator never has to edit
+/// `disk-reservations-v2.json` by hand.
+pub(crate) async fn sweep_stale_disk_reservations(
+    control_hub: &ControlHub,
+    config: &Config,
+) -> Result<(), String> {
+    let _guard = acquire_durable_disk_admission_lock(config).await?;
+    reconcile_disk_reservation_ledger_under_lock(control_hub, config).await?;
+    Ok(())
+}
+
+/// The caller must retain the returned lock through mission persistence and
+/// its reservation-tag write.  That makes admission, creation and durable
+/// reconstruction one atomic protocol across local control processes.
+async fn reserve_local_mission_disk(
+    control_hub: &ControlHub,
+    config: &Config,
+    workspace: &workspace::Workspace,
+    estimate_gib: u64,
+) -> Result<(DurableDiskAdmissionLockGuard, DiskReservation), String> {
+    let guard = acquire_durable_disk_admission_lock(config).await?;
+    let live_ids = match reconcile_disk_reservation_ledger_under_lock(control_hub, config).await {
+        Ok(ids) => ids,
+        Err(error) => {
+            // Paper accounting must never block a host that still has real
+            // free space. A reconcile failure used to leave the stale
+            // ledger as a hard refusal (~18 TiB reserved vs ~2 TiB free).
+            tracing::warn!(
+                %error,
+                "disk reservation reconcile failed; admitting on measured free space only"
+            );
+            HashSet::new()
+        }
+    };
+    let root = workspace::mission_workspace_root_for_workspace(workspace, Uuid::nil());
+    if let Some(reason) = disk_admission_refusal(&root) {
+        return Err(reason);
+    }
+    let usage = crate::api::monitoring::disk_usage_for_path(&root).map_err(|error| {
+        format!(
+            "mission creation refused: cannot measure workspace filesystem at {}: {error}",
+            root.display()
+        )
+    })?;
+    let reserved = reserved_disk_bytes_for_filesystem(config, &usage.filesystem, &live_ids)
+        .await
+        .unwrap_or(0);
+    let estimate = estimate_gib.saturating_mul(1 << 30);
+    let emergency = mission_disk_reserve_gib().saturating_mul(1 << 30);
+    let hard_required = disk_admission_hard_required_bytes(emergency, estimate);
+    if usage.available < hard_required {
+        return Err(format!(
+            "mission admission refused on filesystem {}: {} GiB free, {} GiB candidate estimate, {} GiB emergency reserve ({} GiB required)",
+            usage.filesystem,
+            usage.available / (1 << 30),
+            estimate_gib,
+            mission_disk_reserve_gib(),
+            hard_required / (1 << 30),
+        ));
+    }
+    if reserved > 0 && usage.available < hard_required.saturating_add(reserved) {
+        tracing::warn!(
+            filesystem = %usage.filesystem,
+            free_bytes = usage.available,
+            reserved_bytes = reserved,
+            candidate_bytes = estimate,
+            "paper scratch reservations exceed free space; admitting because measured disk is sufficient"
+        );
+    }
+    tracing::info!(
+        filesystem = %usage.filesystem,
+        free_bytes = usage.available,
+        reserved_bytes = reserved,
+        candidate_bytes = estimate,
+        required_bytes = hard_required,
+        "local mission disk admission reserved"
+    );
+    Ok((
+        guard,
+        DiskReservation {
+            mission_id: Uuid::nil(),
+            filesystem: usage.filesystem,
+            estimated_bytes: estimate,
+            free_bytes_at_grant: usage.available,
+            workspace_dir: None,
+        },
+    ))
+}
+
+/// Release a server-owned lease when a mission reaches a terminal state.  The
+/// lock is the same one used for admission, making a terminal transition and
+/// a concurrent create serialize across control processes.  A failed ledger
+/// write is deliberately surfaced to the caller rather than silently making
+/// capacity appear free.
+async fn release_local_mission_disk(config: &Config, mission_id: Uuid) -> Result<(), String> {
+    let _guard = acquire_durable_disk_admission_lock(config).await?;
+    let mut ledger = read_disk_reservation_ledger(config)?;
+    if ledger.reservations.remove(&mission_id).is_some() {
+        write_disk_reservation_ledger(config, &ledger)?;
+    }
+    Ok(())
+}
+
+async fn release_local_mission_disk_if_not_holding(
+    mission_store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    config: &Config,
+    mission_id: Uuid,
+) {
+    match mission_store.get_mission(mission_id).await {
+        Ok(Some(mission)) if mission_holds_disk_reservation(mission.status) => {}
+        Ok(_) => {
+            if let Err(error) = release_local_mission_disk(config, mission_id).await {
+                tracing::error!(
+                    mission = %mission_id,
+                    %error,
+                    "terminal mission lease cleanup failed after runner stop"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                mission = %mission_id,
+                %error,
+                "could not load mission to decide disk lease release"
+            );
+        }
+    }
+}
+
 struct DurablePrWriterLockGuard {
     _process_guard: tokio::sync::MutexGuard<'static, ()>,
     file: std::fs::File,
@@ -6001,7 +9063,7 @@ async fn acquire_durable_pr_writer_lock(
     })
 }
 
-fn canonical_github_pr(raw: &str) -> String {
+pub(crate) fn canonical_github_pr(raw: &str) -> String {
     let mut value = raw
         .trim()
         .split(['?', '#'])
@@ -6166,7 +9228,20 @@ fn normalize_mission_tags(tags: Option<&[String]>) -> Option<Vec<String>> {
     })
 }
 
-fn status_holds_pr_writer_lease(status: MissionStatus) -> bool {
+pub(crate) fn native_goal_holds_ownership(status: MissionStatus, reason: Option<&str>) -> bool {
+    status == MissionStatus::Blocked
+        && matches!(
+            reason,
+            Some(
+                "native_goal_stopped" | "codex_continuity_required" | "native_continuity_required"
+            )
+        )
+}
+
+fn status_holds_pr_writer_lease(status: MissionStatus, reason: Option<&str>) -> bool {
+    if native_goal_holds_ownership(status, reason) {
+        return true;
+    }
     matches!(
         status,
         MissionStatus::Pending
@@ -6175,6 +9250,68 @@ fn status_holds_pr_writer_lease(status: MissionStatus) -> bool {
             | MissionStatus::AwaitingUser
             | MissionStatus::Paused
     )
+}
+
+/// Grace window during which an `AwaitingUser` PR writer keeps its lease.
+///
+/// `AwaitingUser` is non-terminal on purpose — a writer waiting for a human
+/// reply must not lose its branch. But agent-created writers are often never
+/// opened in the dashboard, so the view-gated ack-promotion tick never
+/// archives them, and a finished writer can hold its PR lease indefinitely
+/// (phantom lease: observed 2026-08-01, a writer 13h idle in a tenant store
+/// blocked every replacement while reading 404 from another tenant). After
+/// this many seconds without any update, the lease check itself releases the
+/// holder by acknowledging it.
+pub(crate) fn pr_writer_awaiting_grace_secs() -> i64 {
+    std::env::var("PR_WRITER_AWAITING_GRACE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3600)
+}
+
+/// Whether an `AwaitingUser` writer's lease has lapsed. Unparseable
+/// timestamps keep the lease (fail closed on exclusivity, never on release).
+fn awaiting_pr_writer_lease_expired(updated_at: &str) -> bool {
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    let idle = chrono::Utc::now().signed_duration_since(updated.with_timezone(&chrono::Utc));
+    idle.num_seconds() > pr_writer_awaiting_grace_secs()
+}
+
+/// Gate a matched writer through the awaiting-grace policy. Fresh holders are
+/// returned as the lease; lapsed `AwaitingUser` holders are acknowledged in
+/// place (best effort) so the durable state converges with the release.
+async fn resolve_writer_lease_or_release(
+    store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+) -> Result<Option<PrWriterLease>, String> {
+    if mission.status == MissionStatus::AwaitingUser
+        && awaiting_pr_writer_lease_expired(&mission.updated_at)
+    {
+        tracing::info!(
+            mission_id = %mission.id,
+            updated_at = %mission.updated_at,
+            "releasing lapsed AwaitingUser PR-writer lease (auto-acknowledge)"
+        );
+        if let Err(error) = store
+            .update_mission_status(mission.id, MissionStatus::Acknowledged)
+            .await
+        {
+            // The holder could not be archived (read-only store, race). Keep
+            // treating the lease as released for this decision: the mission is
+            // provably idle past grace, and exclusivity failing open here only
+            // after a long idle window is the lesser risk than a permanent
+            // phantom lease.
+            tracing::warn!(
+                mission_id = %mission.id,
+                "failed to acknowledge lapsed PR-writer holder: {error}"
+            );
+        }
+        return Ok(None);
+    }
+    Ok(Some(pr_writer_lease(mission)))
 }
 
 fn mission_is_pr_writer(mission: &Mission) -> bool {
@@ -6227,6 +9364,54 @@ struct PrWriterLease {
     status: MissionStatus,
 }
 
+fn dispatch_identity_patch(
+    github_pr: Option<String>,
+    track: Option<String>,
+    title: Option<String>,
+    work_hint: Option<String>,
+    continue_identity: Option<crate::api::writer_recycle::WriterContinuation>,
+) -> crate::api::writer_recycle::WriterIdentityPatch {
+    let to_patch = |value: Option<String>| -> Option<Option<String>> {
+        value.map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    };
+    crate::api::writer_recycle::WriterIdentityPatch {
+        title: to_patch(title),
+        github_pr: to_patch(github_pr),
+        track: to_patch(track),
+        work_hint,
+        continue_identity,
+    }
+}
+
+fn writer_reuse_or_conflict(
+    mission: &Mission,
+    patch: &crate::api::writer_recycle::WriterIdentityPatch,
+) -> Result<crate::api::writer_recycle::WriterIdentity, (StatusCode, String)> {
+    use crate::api::writer_recycle::{apply_writer_reuse, WriterIdentity};
+    apply_writer_reuse(
+        &WriterIdentity {
+            project: mission.project.project.clone(),
+            title: mission.title.clone(),
+            github_pr: mission.project.github_pr.clone(),
+            track: mission.project.track.clone(),
+        },
+        patch,
+    )
+    .map_err(|err| {
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": err.error, "message": err.message}).to_string(),
+        )
+    })
+}
+
 fn pr_writer_lease(mission: &Mission) -> PrWriterLease {
     PrWriterLease {
         id: mission.id,
@@ -6239,51 +9424,56 @@ async fn find_existing_pr_writer(
     github_pr: &str,
     exclude_id: Option<Uuid>,
 ) -> Result<Option<PrWriterLease>, String> {
-    const PAGE_SIZE: usize = 200;
     let target = canonical_github_pr(github_pr);
-    let mut offset = 0;
-    loop {
-        let page = store.list_missions(PAGE_SIZE, offset).await?;
-        let page_len = page.len();
-        for mission in page {
-            if Some(mission.id) == exclude_id
-                || !status_holds_pr_writer_lease(mission.status)
-                || mission
-                    .project
-                    .github_pr
-                    .as_deref()
-                    .is_none_or(|value| canonical_github_pr(value) != target)
-            {
+    // Parked PR writers need the same stable inventory as execution owners.
+    // Concurrent metadata updates must not move a writer behind an OFFSET.
+    let page = store.list_missions(usize::MAX, 0).await?;
+    #[cfg(test)]
+    dispatch_admission_tests::after_ownership_page(&page);
+    for mission in page {
+        if Some(mission.id) == exclude_id
+            || !status_holds_pr_writer_lease(mission.status, mission.terminal_reason.as_deref())
+            || mission
+                .project
+                .github_pr
+                .as_deref()
+                .is_none_or(|value| canonical_github_pr(value) != target)
+        {
+            continue;
+        }
+        if mission_is_pr_writer(&mission) {
+            if let Some(lease) = resolve_writer_lease_or_release(store, &mission).await? {
+                return Ok(Some(lease));
+            }
+            continue;
+        }
+        // SQLite list queries intentionally omit history. Load the full
+        // mission before treating a legacy prompt-only writer as read-only.
+        if let Some(full) = store.get_mission(mission.id).await? {
+            let initial_prompt = store.get_initial_user_message(mission.id).await?;
+            if mission_is_pr_writer_with_prompt(&full, initial_prompt.as_deref()) {
+                if let Some(lease) = resolve_writer_lease_or_release(store, &full).await? {
+                    return Ok(Some(lease));
+                }
                 continue;
             }
-            if mission_is_pr_writer(&mission) {
-                return Ok(Some(pr_writer_lease(&mission)));
-            }
-            // SQLite list queries intentionally omit history. Load the full
-            // mission before treating a legacy prompt-only writer as read-only.
-            if let Some(full) = store.get_mission(mission.id).await? {
-                let initial_prompt = store.get_initial_user_message(mission.id).await?;
-                if mission_is_pr_writer_with_prompt(&full, initial_prompt.as_deref()) {
-                    return Ok(Some(pr_writer_lease(&full)));
-                }
-                // Scheduled missions can carry their only prompt in the
-                // durable deferred goal until dispatch. Treat that prompt as
-                // capability evidence before declaring this lease read-only.
-                if let Some(goal) = store.get_deferred_goal(mission.id).await? {
-                    // This is the mission's initial mandate, not a later
-                    // steering message. Explicit `pr-readonly` must therefore
-                    // continue to win over inferred write verbs in the goal.
-                    if mission_is_pr_writer_with_prompt(&full, Some(&goal)) {
-                        return Ok(Some(pr_writer_lease(&full)));
+            // Scheduled missions can carry their only prompt in the
+            // durable deferred goal until dispatch. Treat that prompt as
+            // capability evidence before declaring this lease read-only.
+            if let Some(goal) = store.get_deferred_goal(mission.id).await? {
+                // This is the mission's initial mandate, not a later
+                // steering message. Explicit `pr-readonly` must therefore
+                // continue to win over inferred write verbs in the goal.
+                if mission_is_pr_writer_with_prompt(&full, Some(&goal)) {
+                    if let Some(lease) = resolve_writer_lease_or_release(store, &full).await? {
+                        return Ok(Some(lease));
                     }
+                    continue;
                 }
             }
         }
-        if page_len < PAGE_SIZE {
-            return Ok(None);
-        }
-        offset += page_len;
     }
+    Ok(None)
 }
 
 fn find_existing_pr_writer_in_sqlite(
@@ -6346,13 +9536,15 @@ fn find_existing_pr_writer_in_sqlite(
         "NULL".to_string()
     };
     let query = format!(
-        "SELECT m.id, m.status, m.github_pr, {}, {}, {}, {}, {} \
+        "SELECT m.id, m.status, m.github_pr, {}, {}, {}, {}, {}, {}, {} \
          FROM missions m WHERE m.github_pr IS NOT NULL",
         optional_mission_column("intent"),
         optional_mission_column("tags"),
         optional_mission_column("deferred_goal"),
         first_prompt,
         first_prompt_file,
+        optional_mission_column("updated_at"),
+        optional_mission_column("terminal_reason"),
     );
     let mut statement = connection
         .prepare(&query)
@@ -6368,13 +9560,25 @@ fn find_existing_pr_writer_in_sqlite(
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })
         .map_err(|error| error.to_string())?;
     let target = canonical_github_pr(github_pr);
     for row in rows {
-        let (id, status, candidate_pr, intent, tags, deferred_goal, first_prompt, prompt_file) =
-            row.map_err(|error| error.to_string())?;
+        let (
+            id,
+            status,
+            candidate_pr,
+            intent,
+            tags,
+            deferred_goal,
+            first_prompt,
+            prompt_file,
+            updated_at,
+            terminal_reason,
+        ) = row.map_err(|error| error.to_string())?;
         let Ok(id) = Uuid::parse_str(&id) else {
             continue;
         };
@@ -6383,7 +9587,22 @@ fn find_existing_pr_writer_in_sqlite(
         }
         let status = serde_json::from_value::<MissionStatus>(serde_json::Value::String(status))
             .unwrap_or(MissionStatus::Active);
-        if !status_holds_pr_writer_lease(status) {
+        if !status_holds_pr_writer_lease(status, terminal_reason.as_deref()) {
+            continue;
+        }
+        // Offline stores are opened read-only, so a lapsed AwaitingUser writer
+        // cannot be acknowledged here — but it must not hold the lease either
+        // (same phantom-lease policy as the live path).
+        if status == MissionStatus::AwaitingUser
+            && updated_at
+                .as_deref()
+                .is_some_and(awaiting_pr_writer_lease_expired)
+        {
+            tracing::info!(
+                mission_id = %id,
+                store = %path.display(),
+                "ignoring lapsed AwaitingUser PR-writer lease in offline store"
+            );
             continue;
         }
         let tags: Vec<String> = tags
@@ -6421,6 +9640,37 @@ async fn find_existing_pr_writer_global(
     github_pr: &str,
     exclude_id: Option<Uuid>,
 ) -> Result<Option<PrWriterLease>, String> {
+    if let Some(owner) = execution_ownership::snapshot(control_hub)
+        .await?
+        .unresolved_pr_writer(github_pr, exclude_id)
+    {
+        return Ok(Some(owner));
+    }
+    // Cross-store admission can temporarily change or clear the stored PR.
+    // Until cleanup completes, neither the old nor proposed PR is available
+    // to another writer, including after a crash with a terminal status.
+    if let Some(state) = control_hub
+        .admission_state
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+    {
+        let target = canonical_github_pr(github_pr);
+        for (id, receipt) in state.projects.dispatch_admissions()? {
+            let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+            if Some(id) != exclude_id
+                && ["before", "after"].iter().any(|phase| {
+                    receipt[*phase]["project"]["github_pr"]
+                        .as_str()
+                        .is_some_and(|pr| canonical_github_pr(pr) == target)
+                })
+            {
+                return Ok(Some(PrWriterLease {
+                    id,
+                    status: MissionStatus::Active,
+                }));
+            }
+        }
+    }
     // Fail closed if any persisted store cannot be enumerated or read. A
     // partial cross-user scan cannot prove that a branch is writer-free.
     let inventory = control_hub.mission_store_inventory().await?;
@@ -6483,6 +9733,32 @@ async fn activate_mission_for_message(
     mission: &Mission,
     content: &str,
 ) -> Result<(), String> {
+    // Both sequential dequeue and parallel follow-up activation pass here.
+    // Retags are refused for the lifetime of the queue, so its mission identity
+    // remains the binding; validate that this binding still owns its track.
+    if let (Some(state), Some(slug), Some(track)) = (
+        control_hub
+            .admission_state
+            .get()
+            .and_then(std::sync::Weak::upgrade),
+        mission.project.project.as_deref(),
+        mission.project.track.as_deref(),
+    ) {
+        let writer = mission_is_pr_writer_in_store(store, mission).await?
+            || message_requests_pr_writer(mission, content);
+        let request = super::track_leases::lease_request(
+            slug,
+            track,
+            &mission.id.to_string(),
+            super::track_leases::lease_mode(
+                writer.then_some(true),
+                &mission.project.tags,
+                mission.project.intent.as_deref(),
+            ),
+            None,
+        );
+        state.projects.revalidate_track_lease(&request)?;
+    }
     // Keep the writer mutex until Active is persisted so a replacement writer
     // cannot race a terminal mission's message-based reactivation.
     let _pr_writer_guard =
@@ -6506,6 +9782,8 @@ async fn activate_mission_for_message(
                     .await?;
                 store.set_deferred_goal(mission.id, None).await?;
                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: None,
+                    execution: None,
                     mission_id: mission.id,
                     status: MissionStatus::Interrupted,
                     summary: Some(format!("{reason}: {error}")),
@@ -6519,7 +9797,15 @@ async fn activate_mission_for_message(
         store
             .update_mission_status(mission.id, MissionStatus::Active)
             .await?;
+        // The original create prompt stays in deferred_goal after first
+        // dispatch so a capacity-race retry can re-inject it while still
+        // Pending. Once a later operator message activates the mission,
+        // that stale prompt must not be re-dispatched (or concatenated onto)
+        // after the next failure.
+        let _ = store.set_deferred_goal(mission.id, None).await;
         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: None,
             mission_id: mission.id,
             status: MissionStatus::Active,
             summary: None,
@@ -6548,13 +9834,14 @@ async fn restore_mission_after_failed_run_acquisition(
     mission: &Mission,
 ) -> Result<(), String> {
     store
-        .update_mission_status_with_reason(
+        .restore_mission_status(
             mission.id,
-            mission.status,
-            mission.terminal_reason.as_deref(),
+            &crate::api::mission_store::MissionStatusSnapshot::capture(mission),
         )
         .await?;
     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution: None,
         mission_id: mission.id,
         status: mission.status,
         summary: Some("Run acquisition failed; prior mission status restored".to_string()),
@@ -6603,7 +9890,9 @@ async fn acquire_pr_writer_lease_for_message(
             .update_mission_project(
                 mission.id,
                 crate::api::mission_store::MissionProjectPatch {
-                    tags: Some(tags),
+                    tag_patch: Some(crate::api::mission_store::MissionTagPatch::capabilities(
+                        &tags,
+                    )),
                     ..Default::default()
                 },
             )
@@ -6626,7 +9915,9 @@ async fn rollback_message_writer_tag(
             .update_mission_project(
                 mission.id,
                 crate::api::mission_store::MissionProjectPatch {
-                    tags: Some(mission.project.tags.clone()),
+                    tag_patch: Some(crate::api::mission_store::MissionTagPatch::capabilities(
+                        &mission.project.tags,
+                    )),
                     ..Default::default()
                 },
             )
@@ -6634,14 +9925,442 @@ async fn rollback_message_writer_tag(
     }
 }
 
+/// Whether `session_id` names a real Hermes session, when that is checkable.
+///
+/// `None` means "could not check" — no `HERMES_STATE_DB` configured, or the
+/// database was unreadable — and the caller must treat the id as plausible.
+/// The distinction between "not found" and "could not ask" is load-bearing:
+/// refusing stamps whenever the check is unavailable would strip attribution
+/// on every deployment that runs without a Hermes state database.
+fn hermes_session_exists(session_id: &str) -> Option<bool> {
+    let path = super::projects_overview::hermes_state_db_path()?;
+    let connection =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .ok()
+}
+
+/// Window inside which an identical create is treated as a retry, not intent.
+///
+/// Measured 2026-08-05 on prod: seven groups of missions with the same title
+/// and the same origin session created 26–90 seconds apart, one of them a
+/// triple (`PR #2231 writer-fix v2`, three copies in 69 seconds). The shape is
+/// always the same — an agent calls `start_mission`, the answer is slow or the
+/// MCP transport errors, the agent retries, and a full duplicate mission runs
+/// to completion. Ten minutes comfortably covers every observed retry gap
+/// while staying far below the cadence at which a controller legitimately
+/// re-dispatches the same lane (hours).
+const CREATE_RETRY_WINDOW_SECS: i64 = 600;
+
+/// A recent, non-terminal mission that an identical create should coalesce to.
+///
+/// Conservative on purpose — all four must hold:
+/// * the incoming request carries an explicit, non-empty title that matches
+///   exactly (trimmed); auto-titled creates never coalesce,
+/// * `origin_session_id` matches exactly (including both absent),
+/// * the existing mission is **not terminal** — retrying a failed or
+///   completed mission with the same title is a legitimate re-dispatch,
+/// * the existing mission was created inside [`CREATE_RETRY_WINDOW_SECS`].
+///
+/// Scan errors return `None`: creating a duplicate is recoverable (that is
+/// today's behaviour), refusing a legitimate create is not.
+async fn find_recent_identical_mission(
+    mission_store: &Arc<dyn MissionStore>,
+    title: &str,
+    origin_session_id: Option<&str>,
+) -> Option<Mission> {
+    const PAGE: usize = 100;
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    let missions = mission_store.list_missions(PAGE, 0).await.ok()?;
+    missions.into_iter().find(|mission| {
+        // Coalesce only onto work that is genuinely still going to run. NOT
+        // simply `!is_terminal()`: `Acknowledged` and `AwaitingUser` are
+        // non-terminal but parked — answering a create with a parked mission
+        // would silently swallow a deliberate re-dispatch. An unlisted status
+        // falls through to "do not coalesce", which is today's behaviour
+        // (a duplicate runs) and therefore the safe failure direction.
+        let in_flight = matches!(
+            mission.status,
+            MissionStatus::Pending | MissionStatus::Active | MissionStatus::WaitingBackground
+        );
+        if !in_flight {
+            return false;
+        }
+        if mission.title.as_deref().map(str::trim) != Some(title) {
+            return false;
+        }
+        if mission.origin_session_id.as_deref() != origin_session_id {
+            return false;
+        }
+        chrono::DateTime::parse_from_rfc3339(&mission.created_at)
+            .map(|created| {
+                (now - created.with_timezone(&chrono::Utc)).num_seconds() < CREATE_RETRY_WINDOW_SECS
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// The model a turn about to be dispatched should actually use, persisting the
+/// choice so the UI and the harness agree.
+///
+/// A mission created before this deployment retired a model still carries that
+/// model in `model_override`. That field is current configuration, not
+/// transcript — it is what every client reads to say which model the *next*
+/// turn will use — so leaving it stale would show one model while another ran.
+/// Rewriting it here, on the mission that is dispatching right now, keeps the
+/// two the same on both a new turn and a plain refresh. Recorded events and
+/// completed turns are untouched, and a mission that is not dispatching is
+/// never rewritten. Every dispatch path (new turn, queued message, resume,
+/// remote) funnels through this, so they cannot diverge.
+///
+/// When the upgrade cannot be recorded this returns the stored model unchanged,
+/// which for a retired id the pre-harness guard in `mission_runner` then refuses
+/// to run. A turn that fails loudly is the intended outcome: it is better than
+/// running a retired model, and better than running a model no client reports.
+async fn model_for_dispatch(
+    mission_store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+) -> Option<String> {
+    let stored = mission.model_override.clone()?;
+    // Everything this deployment still runs — every Codex, Grok, OpenCode and
+    // current Claude selection — passes straight through. Only a retired id is
+    // touched, and only ever by replacing it with the current model of its own
+    // line, keeping any provider prefix (`anthropic/…`) the caller relies on.
+    let upgraded = crate::model_policy::current_claude_model(&stored);
+    if upgraded == stored {
+        return Some(stored);
+    }
+    let upgraded = upgraded.into_owned();
+    match mission_store
+        .update_mission_run_settings(
+            mission.id,
+            None,
+            None,
+            Some(Some(&upgraded)),
+            None,
+            None,
+            None,
+            // Settings writes also rewrite `session_id`. Passing the mission's
+            // own id back keeps the native harness session — a model upgrade
+            // must not cost the conversation its context.
+            mission.session_id.as_deref().unwrap_or(""),
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                mission_id = %mission.id,
+                from = %stored,
+                to = %upgraded,
+                "retired model upgraded for the next turn"
+            );
+            Some(upgraded)
+        }
+        Err(error) => {
+            // The upgrade could not be recorded. Hand back the stored id
+            // unchanged rather than a model no client would report: the
+            // pre-harness guard refuses to run a retired id, so this turn fails
+            // instead of quietly running either the wrong model or a retired
+            // one. The next dispatch retries the upgrade.
+            tracing::warn!(
+                mission_id = %mission.id,
+                from = %stored,
+                to = %upgraded,
+                %error,
+                "could not persist the model upgrade; this turn will be refused rather than run a retired model"
+            );
+            Some(stored)
+        }
+    }
+}
+
+/// Whether a mission in this status holds its project's single campaign slot.
+///
+/// Campaign missions are long-running per-project drivers; two of them racing
+/// on the same project duplicate work and fight over the same PRs. Anything
+/// that can still run (or be resumed) blocks a new campaign: `Pending`
+/// (created/queued), `Active`, `AwaitingUser`, `WaitingBackground`, and
+/// `Paused`. `Acknowledged` is archived and terminal-in-practice, so it does
+/// not hold the slot; a genuinely terminal status never does.
+fn campaign_slot_held_by(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Pending
+            | MissionStatus::Active
+            | MissionStatus::AwaitingUser
+            | MissionStatus::WaitingBackground
+            | MissionStatus::Paused
+    )
+}
+
+fn chatgpt_oauth_refresh_invalidated(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("refresh_token_invalidated") || t.contains("chatgpt oauth refresh failed")
+}
+
+async fn live_mission_on_workspace(
+    mission_store: &Arc<dyn MissionStore>,
+    workspace_id: Uuid,
+) -> Option<Mission> {
+    const PAGE: usize = 200;
+    mission_store
+        .list_missions(PAGE, 0)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|mission| {
+            mission.workspace_id == workspace_id && campaign_slot_held_by(mission.status)
+        })
+}
+
+async fn recent_codex_oauth_invalidation(mission_store: &Arc<dyn MissionStore>) -> Option<Mission> {
+    const PAGE: usize = 200;
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(6);
+    mission_store
+        .list_missions(PAGE, 0)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|mission| {
+            mission.backend == "codex"
+                && matches!(
+                    mission.status,
+                    MissionStatus::Failed | MissionStatus::Interrupted
+                )
+                && chatgpt_oauth_refresh_invalidated(
+                    mission.short_description.as_deref().unwrap_or(""),
+                )
+                && chrono::DateTime::parse_from_rfc3339(&mission.updated_at)
+                    .ok()
+                    .is_some_and(|at| at.with_timezone(&chrono::Utc) >= cutoff)
+        })
+}
+
+/// Find a non-terminal `track == "campaign"` mission for `project`, if any.
+/// Scan errors return `None` (a duplicate campaign is recoverable; refusing a
+/// legitimate create is not) — same failure direction as the retry coalescer.
+async fn find_open_campaign_mission(
+    mission_store: &Arc<dyn MissionStore>,
+    project: &str,
+) -> Option<Mission> {
+    const PAGE: usize = 200;
+    let filter = crate::api::mission_store::MissionFilter {
+        project: Some(project.to_string()),
+        track: Some("campaign".to_string()),
+        ..Default::default()
+    };
+    mission_store
+        .list_missions_filtered(&filter, PAGE, 0)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|mission| campaign_slot_held_by(mission.status))
+}
+
+/// Non-terminal missions currently held by a project — the live coordination
+/// footprint used to enforce the grant's `parallel_missions` cap and the
+/// per-(project, track) dedup. Mirrors `find_open_campaign_mission`'s "slot
+/// held" notion (`campaign_slot_held_by`) but across all tracks.
+/// The server-side dispatch gate for a project's operator status. `paused` and
+/// `archived` block a new mission (with the status code + structured error the
+/// handler returns); anything else (`active`, unknown) permits dispatch. Pure so
+/// the gate is unit-tested without a full handler.
+fn dispatch_gate_for_status(status: &str) -> Option<(StatusCode, &'static str)> {
+    match status {
+        "paused" => Some((StatusCode::LOCKED, "project_paused")),
+        "archived" => Some((StatusCode::CONFLICT, "project_archived")),
+        _ => None,
+    }
+}
+
+async fn nonterminal_missions_for_project(
+    mission_store: &Arc<dyn MissionStore>,
+    project: &str,
+) -> Vec<Mission> {
+    const PAGE: usize = 200;
+    let filter = crate::api::mission_store::MissionFilter {
+        project: Some(project.to_string()),
+        ..Default::default()
+    };
+    mission_store
+        .list_missions_filtered(&filter, PAGE, 0)
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|mission| campaign_slot_held_by(mission.status))
+        .collect()
+}
+
+/// Resolve or absorb the track for a freshly created mission and take its
+/// lease. On a held writer lease the new mission is durably interrupted
+/// (reason `track_owned`) and a 409 is returned; on a missing track under
+/// `SANDBOXED_TRACK_REQUIRED` the mission is interrupted with `track_required`
+/// and a 400 is returned. Returns the canonical track key.
+#[allow(clippy::too_many_arguments)]
+async fn bind_mission_to_track(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+    project: &str,
+    track: Option<&str>,
+    title: Option<&str>,
+    github_pr: Option<&str>,
+    intent: Option<&str>,
+    writer_flag: Option<bool>,
+    tags: &[String],
+    request_is_writer: bool,
+    idempotency_key: Option<&str>,
+    acceptance_criteria: &[String],
+) -> Result<String, (StatusCode, String)> {
+    use super::track_leases;
+    let mission_id = mission.id.to_string();
+    let requested = match track.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(track) => track.to_string(),
+        None if track_leases::track_required() => {
+            interrupt_new_mission(control, mission.id, "track_required").await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "track_required",
+                    "project": project,
+                    "message": "a project mission must name its track (the plan item it attempts); call get_situation and pass `track`",
+                })
+                .to_string(),
+            ));
+        }
+        None => {
+            let generated = track_leases::generated_track_key(&mission_id);
+            tracing::warn!(
+                mission_id = %mission_id,
+                project,
+                track = %generated,
+                "project mission dispatched without a track; absorbed under a generated key (compatibility window)"
+            );
+            generated
+        }
+    };
+    let pr = track_leases::pr_number(github_pr);
+    let outcome = state
+        .projects
+        .absorb_track(project, &requested, title, pr)
+        .map_err(internal_error)?;
+    if outcome.created || outcome.matched_by == "pr_ref" {
+        tracing::info!(
+            mission_id = %mission_id,
+            project,
+            requested = %requested,
+            track = %outcome.key,
+            matched_by = outcome.matched_by,
+            "mission track absorbed onto the plan"
+        );
+    }
+    let mode = if request_is_writer {
+        "writer"
+    } else {
+        track_leases::lease_mode(writer_flag, tags, intent)
+    };
+    // A dispatch may declare or revise the track's acceptance contract, but
+    // never a satisfied track's (planning rules apply).
+    if !acceptance_criteria.is_empty() {
+        if let Err(error) = state.projects.patch_track(
+            project,
+            &outcome.key,
+            None,
+            None,
+            None,
+            Some(acceptance_criteria),
+            None,
+        ) {
+            tracing::warn!(mission_id = %mission_id, project, track = %outcome.key, %error,
+                "could not declare acceptance criteria from dispatch");
+        }
+    }
+    let request =
+        track_leases::lease_request(project, &outcome.key, &mission_id, mode, idempotency_key);
+    match track_leases::acquire_locked(state, &request).await {
+        Ok(_) => Ok(outcome.key),
+        Err(super::projects_store::LeaseError::Store(error)) => {
+            interrupt_new_mission(control, mission.id, "track_lease_unavailable").await;
+            Err(internal_error(error))
+        }
+        Err(super::projects_store::LeaseError::NotFound) => Err(internal_error(format!(
+            "track '{}' of '{project}' vanished between absorption and lease",
+            outcome.key
+        ))),
+        Err(error @ super::projects_store::LeaseError::Owned { .. }) => {
+            interrupt_new_mission(control, mission.id, "track_owned").await;
+            Err((
+                StatusCode::CONFLICT,
+                track_leases::owned_body(project, &outcome.key, &error).to_string(),
+            ))
+        }
+    }
+}
+
+/// Durably interrupt a mission that lost an admission check after creation,
+/// so it can never receive a goal or become a writer.
+async fn interrupt_new_mission(control: &ControlState, mission_id: Uuid, reason: &str) {
+    if let Err(error) = control
+        .mission_store
+        .update_mission_status_with_reason(mission_id, MissionStatus::Interrupted, Some(reason))
+        .await
+    {
+        tracing::warn!(mission_id = %mission_id, %error, reason, "could not interrupt rejected mission");
+    }
+    let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution: None,
+        mission_id,
+        status: MissionStatus::Interrupted,
+        summary: Some(reason.to_string()),
+    });
+}
+
+// Coalescing a create must not acknowledge attachment selections that were
+// never saved on the existing mission. New context belongs in a follow-up.
+fn verify_coalesced_attachments(
+    config: &Config,
+    req: &CreateMissionRequest,
+    existing: &Mission,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
+        let saved = crate::api::mission_payload::read_sidecar(&config.working_dir, existing.id)
+            .map_err(internal_error)?;
+        if !saved.is_some_and(|p| p.attachments == *attachments && p.project == req.project) {
+            return Err((StatusCode::CONFLICT, format!("mission {} already exists with different or unavailable attachments; send the attachments as a follow-up or use a distinct title", existing.id)));
+        }
+    }
+    Ok(())
+}
+
 pub async fn create_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
-) -> Result<(axum::http::HeaderMap, Json<Mission>), (StatusCode, String)> {
+) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
+    create_mission_inner(State(state), Extension(user), body, false).await
+}
+
+pub(super) async fn create_mission_inner(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    body: Option<Json<CreateMissionRequest>>,
+    shared_side_workspace: bool,
+) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
-    let req = body.map(|b| b.0).unwrap_or(CreateMissionRequest {
+    let mut req = body.map(|b| b.0).unwrap_or(CreateMissionRequest {
         title: None,
         workspace_id: None,
         agent: None,
@@ -6651,15 +10370,18 @@ pub async fn create_mission(
         config_profile: None,
         backend: None,
         parent_mission_id: None,
+        supersedes_mission_id: None,
         working_directory: None,
         priority: None,
         not_before: None,
         deadline: None,
         project: None,
         track: None,
+        idempotency_key: None,
         intent: None,
         github_pr: None,
         writer: None,
+        acceptance_criteria: Vec::new(),
         tags: None,
         desired_state: None,
         next_check_at: None,
@@ -6669,8 +10391,63 @@ pub async fn create_mission(
         remote_command: None,
         remote_async: None,
         estimated_disk_gib: None,
+        origin: None,
+        origin_session_id: None,
+        attachments: None,
+        placement: None,
         extra: Default::default(),
     });
+
+    if let Some(prompt) = req.prompt.as_deref() {
+        crate::api::mission_payload::validate_user_content(prompt)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
+
+    if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
+        if req.remote_node_id.is_some()
+            && attachments
+                .iter()
+                .any(|item| item.kind != crate::api::mission_payload::AttachmentKind::Context)
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "remote launch attachments are not supported".into(),
+            ));
+        }
+        if req.project.as_deref().is_none_or(|p| p.trim().is_empty()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "attachments require a project".into(),
+            ));
+        }
+        crate::api::mission_payload::validate(&crate::api::mission_payload::MissionPayload {
+            attachments: attachments.clone(),
+            project: req.project.clone(),
+            controller_md: None,
+        })
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+
+    // Persist the roster slug, not a nickname. An inverted alias
+    // (`coldcard-rng-cracker` → `ec-defensive-research`) made Coldcard
+    // missions and STATE_SIGNATURE trailers unroutable.
+    if let Some(raw) = req
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty())
+        .map(str::to_string)
+    {
+        let canonical = super::projects_overview::canonicalize_project_slug(&raw);
+        if canonical != raw {
+            tracing::info!(
+                from = %raw,
+                to = %canonical,
+                "canonicalized mission project tag via routes.json alias"
+            );
+            req.project = Some(canonical);
+        }
+    }
 
     // Fail loud on unrecognized fields: log + surface in a response header so
     // a client bug (typo, field sent to the wrong endpoint) is observable
@@ -6686,6 +10463,278 @@ pub async fn create_mission(
         );
         if let Ok(value) = axum::http::HeaderValue::from_str(&joined) {
             headers.insert("x-ignored-fields", value);
+        }
+    }
+
+    // Retried dispatch: the caller's idempotency key already holds a live
+    // track lease. Answer with the mission that holds it instead of creating
+    // (and then interrupting) a duplicate.
+    if let Some(key) = req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        if let Ok(Some(lease)) = state.projects.lease_by_key(&format!("lease:{key}")) {
+            if let Ok(mission_id) = Uuid::parse_str(&lease.attempt_id) {
+                let control_state = control_for_user(&state, &user).await;
+                if let Ok(Some(existing)) =
+                    control_state.mission_store.get_mission(mission_id).await
+                {
+                    // A dispatch that already failed closed (for example a
+                    // rejected remote submission) is not the work the retry
+                    // asks for; only live or finished attempts coalesce.
+                    if existing.status != MissionStatus::Failed {
+                        verify_coalesced_attachments(&state.config, &req, &existing)?;
+                        tracing::info!(
+                            mission_id = %existing.id,
+                            idempotency_key = key,
+                            "create_mission coalesced onto the mission holding this dispatch key"
+                        );
+                        if let Ok(value) =
+                            axum::http::HeaderValue::from_str(&existing.id.to_string())
+                        {
+                            headers.insert("x-coalesced-with", value);
+                        }
+                        let value =
+                            mission_create_response(&state, &control_state, existing).await?;
+                        return Ok((headers, Json(value)));
+                    }
+                }
+            }
+        }
+    }
+
+    // Retry-shaped duplicate? Same explicit title, same origin session, an
+    // existing NON-terminal mission created moments ago: answer with that
+    // mission instead of running the work twice. The response carries a header
+    // so the caller can tell a coalesced answer from a fresh create; a client
+    // that genuinely wants a parallel duplicate retitles it.
+    if let Some(title) = req.title.as_deref().filter(|t| !t.trim().is_empty()) {
+        let control_state = control_for_user(&state, &user).await;
+        if let Some(existing) = find_recent_identical_mission(
+            &control_state.mission_store,
+            title,
+            req.origin_session_id.as_deref(),
+        )
+        .await
+        {
+            verify_coalesced_attachments(&state.config, &req, &existing)?;
+            tracing::info!(
+                mission_id = %existing.id,
+                title = %title,
+                "create_mission coalesced onto a recent identical mission \
+                 (retry-shaped duplicate)"
+            );
+            if let Ok(value) = axum::http::HeaderValue::from_str(&existing.id.to_string()) {
+                headers.insert("x-coalesced-with", value);
+            }
+            let value = mission_create_response(&state, &control_state, existing).await?;
+            return Ok((headers, Json(value)));
+        }
+    }
+
+    // Lineage guard: a child spawned by a mission that is parked on a remote
+    // build, on the same project/track, is a poller in disguise. Refuse it
+    // with the job id so the parent attaches or waits instead. Lineage is the
+    // explicit parent_mission_id, never origin_session_id (which sibling
+    // missions share).
+    if let (Some(parent_id), Some(project), Some(track)) = (
+        req.parent_mission_id,
+        req.project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        req.track
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        let control_state = control_for_user(&state, &user).await;
+        if let Ok(Some(parent)) = control_state.mission_store.get_mission(parent_id).await {
+            let same_project = parent
+                .project
+                .project
+                .as_deref()
+                .map(super::projects_overview::canonicalize_project_slug)
+                .is_some_and(|slug| {
+                    slug == super::projects_overview::canonicalize_project_slug(project)
+                });
+            let same_track = parent
+                .project
+                .track
+                .as_deref()
+                .map(super::projects_store::normalize_track_key)
+                .is_some_and(|key| key == super::projects_store::normalize_track_key(track));
+            if same_project && same_track {
+                if let Ok(Some(handle)) =
+                    crate::remote_node::job_ledger::current_remote_build_wait_handle(
+                        &state.config.working_dir,
+                        parent_id,
+                    )
+                    .await
+                {
+                    tracing::info!(
+                        parent_mission_id = %parent_id,
+                        job_id = %handle.job_id,
+                        project,
+                        track,
+                        "create_mission rejected: parent is waiting on a remote build for this track"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        serde_json::json!({
+                            "error": "BUILD_IN_PROGRESS",
+                            "job_id": handle.job_id,
+                            "node_id": handle.node_id,
+                            "parent_mission_id": parent_id,
+                            "message": "the parent mission already waits on a remote build for this track; do not spawn a helper to poll it — the parent is woken when the job ends, and re-running the same build command attaches to it",
+                        })
+                        .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Campaign uniqueness guard: at most one non-terminal campaign mission per
+    // project. Checked on the explicit request tags (project inherited from a
+    // bound conversation never carries track="campaign").
+    if let (Some(project), Some("campaign")) = (
+        req.project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        req.track
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        let control_state = control_for_user(&state, &user).await;
+        if let Some(existing) =
+            find_open_campaign_mission(&control_state.mission_store, project).await
+        {
+            tracing::info!(
+                mission_id = %existing.id,
+                project = %project,
+                "create_mission rejected: a non-terminal campaign mission already \
+                 exists for this project"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "campaign_exists",
+                    "mission_id": existing.id.to_string(),
+                })
+                .to_string(),
+            ));
+        }
+    }
+
+    // Native coordination guard (resilient — no external fleet daemon needed):
+    // enforce the project's declared `parallel_missions` cap, which was only
+    // advisory. This is the over-subscription filet that stops two controllers
+    // (or one launching cross-project) from piling missions onto a project past
+    // what its grant allows. Only bites when the grant sets a cap > 0 — projects
+    // without a cap are unaffected. (A per-(project, track) dedup is a
+    // deliberate follow-up: a track is sometimes legitimately shared by a
+    // writer+reviewer pair, so a hard dedup needs track-semantics confirmation
+    // before it can safely reject.)
+    if let Some(project) = req
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // `paused`/`archived` are now a real server-side dispatch gate, not just
+        // a board presentation: an operator who paused a project must not have a
+        // controller keep piling missions onto it. Gates on the authoritative
+        // roster status (`set_project_status`); the board-override pause is a
+        // separate presentation flag reconciled into status in a later phase.
+        if let Ok(Some(record)) = state.projects.get_project(project) {
+            if let Some((code, error)) = dispatch_gate_for_status(&record.status) {
+                tracing::info!(
+                    project,
+                    status = %record.status,
+                    "create_mission rejected: project status blocks dispatch"
+                );
+                return Err((code, serde_json::json!({ "error": error }).to_string()));
+            }
+        }
+
+        if let Ok(Some(grant)) = state.projects.get_grant(project) {
+            if let Some(cap) = grant.parallel_missions.filter(|&c| c > 0) {
+                let control_state = control_for_user(&state, &user).await;
+                let active =
+                    nonterminal_missions_for_project(&control_state.mission_store, project).await;
+                if active.len() as i64 >= cap {
+                    tracing::info!(
+                        project,
+                        cap,
+                        active = active.len(),
+                        "create_mission rejected: project is at its parallel_missions cap"
+                    );
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        serde_json::json!({
+                            "error": "parallel_missions_cap",
+                            "cap": cap,
+                            "active": active.len(),
+                        })
+                        .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // One live occupant per worktree. Lido E1 spawned a parallel Codex
+    // worker (`6f1e92b0`) on the same workspace as the existing writer;
+    // ChatGPT OAuth is single-use and the extra occupant also races the
+    // files. Sequential certify-after-repair is fine: the writer is terminal.
+    if let Some(ws_id) = req.workspace_id.filter(|_| !shared_side_workspace) {
+        let control_state = control_for_user(&state, &user).await;
+        if let Some(existing) = live_mission_on_workspace(&control_state.mission_store, ws_id).await
+        {
+            tracing::info!(
+                workspace_id = %ws_id,
+                existing = %existing.id,
+                "create_mission rejected: workspace already has a live mission"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "workspace_occupied",
+                    "mission_id": existing.id.to_string(),
+                    "title": existing.title,
+                    "message": "this worktree already has a live mission; wait for it or reuse that mission instead of launching a parallel worker",
+                })
+                .to_string(),
+            ));
+        }
+    }
+
+    if req
+        .backend
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|b| b.eq_ignore_ascii_case("codex"))
+    {
+        let control_state = control_for_user(&state, &user).await;
+        if let Some(failed) = recent_codex_oauth_invalidation(&control_state.mission_store).await {
+            tracing::info!(
+                failed = %failed.id,
+                "create_mission rejected: Codex ChatGPT OAuth refresh is invalidated"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "codex_oauth_invalidated",
+                    "mission_id": failed.id.to_string(),
+                    "message": "Codex ChatGPT OAuth refresh is invalidated (refresh_token_invalidated). Do not retry on backend=codex. Use claudecode, kimi, or glm on the existing worktree writer.",
+                })
+                .to_string(),
+            ));
         }
     }
 
@@ -6749,6 +10798,13 @@ pub async fn create_mission(
     if backend.is_none() {
         let registry = state.backend_registry.read().await;
         backend = Some(registry.default_id().to_string());
+    }
+
+    if backend.as_deref() == Some("codex") {
+        if let Some(prompt) = req.prompt.as_deref() {
+            crate::backend::codex::validate_goal_message(prompt)
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        }
     }
 
     // Model effort is supported for Codex and Claude Code missions.
@@ -6845,6 +10901,84 @@ pub async fn create_mission(
         }
     }
 
+    // Fail before persist when the chosen workspace cannot run the harness
+    // and cannot auto-install it. Coldcard twice launched Codex on
+    // `dgx-spark` (no CLI, no npm/bun); both missions died in minutes
+    // and the completion never reached the dedicated session.
+    //
+    // Remote-node missions execute on the selected node, not in the local
+    // workspace, so probing the local/container CLI would reject perfectly
+    // runnable work — skip the preflight for them.
+    let client_placement = client_placement::is_client_placement(req.placement.as_deref());
+    if client_placement
+        && req
+            .remote_node_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "placement client cannot target a remote node".into(),
+        ));
+    }
+    // A client placement executes on the Orb machine, same as a remote node:
+    // do not probe the backend host for the CLI.
+    let runs_locally = !client_placement
+        && req
+            .remote_node_id
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
+    if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
+    {
+        if matches!(backend_id, "codex" | "claudecode" | "gemini" | "grok") {
+            if let Some(workspace) = state.workspaces.get(ws_id).await {
+                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "gemini") {
+                    state
+                        .backend_configs
+                        .get(backend_id)
+                        .await
+                        .and_then(|config| {
+                            config
+                                .settings
+                                .get("cli_path")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        })
+                } else {
+                    None
+                };
+                let preflight = super::mission_runner::check_backend_prerequisites(
+                    &workspace,
+                    backend_id,
+                    cli_path.as_deref(),
+                )
+                .await;
+                if !preflight.available && !preflight.auto_install_possible {
+                    tracing::warn!(
+                        workspace_id = %ws_id,
+                        backend = backend_id,
+                        message = ?preflight.message,
+                        "create_mission rejected: harness unavailable in workspace"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        serde_json::json!({
+                            "error": "harness_unavailable",
+                            "backend": backend_id,
+                            "workspace_id": ws_id,
+                            "workspace_name": workspace.name,
+                            "missing": preflight.missing_dependencies,
+                            "message": preflight.message,
+                        })
+                        .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     // Writer creation is checked once before actor creation and again while
     // tagging the returned mission. Never hold this mutex while waiting on the
     // control actor: actor commands also acquire it when resuming writers.
@@ -6853,16 +10987,9 @@ pub async fn create_mission(
         .as_deref()
         .map(str::trim)
         .is_none_or(str::is_empty);
-    let effective_estimated_disk_gib = req.estimated_disk_gib.or_else(|| {
-        local_mission
-            .then(|| {
-                std::env::var("MISSION_DISK_DEFAULT_ESTIMATE_GIB")
-                    .ok()
-                    .and_then(|raw| raw.trim().parse::<u64>().ok())
-                    .filter(|estimate| (1..=512).contains(estimate))
-            })
-            .flatten()
-    });
+    let effective_estimated_disk_gib = req
+        .estimated_disk_gib
+        .or_else(|| local_mission.then(mission_disk_default_estimate_gib));
     if let Some(estimated_gib) = effective_estimated_disk_gib {
         if estimated_gib == 0 || estimated_gib > 512 {
             return Err((
@@ -6871,19 +10998,43 @@ pub async fn create_mission(
             ));
         }
         if local_mission {
-            let (used, total, _) = crate::api::monitoring::current_disk_usage();
-            let reserve_gib = std::env::var("MISSION_DISK_EMERGENCY_RESERVE_GB")
-                .ok()
-                .and_then(|raw| raw.trim().parse::<u64>().ok())
-                .unwrap_or(64);
+            let workspace = state
+                .workspaces
+                .get(workspace_id.unwrap_or(workspace::DEFAULT_WORKSPACE_ID))
+                .await
+                .unwrap_or_else(|| {
+                    workspace::Workspace::default_host(state.config.working_dir.clone())
+                });
+            let root = workspace::mission_workspace_root_for_workspace(&workspace, Uuid::nil());
+            let usage = crate::api::monitoring::disk_usage_for_path(&root).map_err(|error| {
+                (
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    format!("mission creation refused: cannot measure workspace filesystem at {}: {error}", root.display()),
+                )
+            })?;
             if let Some(reason) =
-                disk_estimate_refusal(total.saturating_sub(used), estimated_gib, reserve_gib)
+                disk_estimate_refusal(&usage, estimated_gib, mission_disk_reserve_gib())
             {
                 return Err((StatusCode::INSUFFICIENT_STORAGE, reason));
             }
         }
     }
     let mut normalized_request_tags = normalize_mission_tags(req.tags.as_deref());
+    if normalized_request_tags
+        .as_deref()
+        .is_some_and(contains_internal_disk_reservation_tag)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "disk-reservation-v1 tags are reserved internal admission state".to_string(),
+        ));
+    }
+    if client_placement {
+        let tags = normalized_request_tags.get_or_insert_with(Vec::new);
+        if !client_placement::is_tagged(tags) {
+            tags.push(client_placement::TAG.to_string());
+        }
+    }
     if let Some(estimated_gib) = effective_estimated_disk_gib {
         let tag = format!("disk-estimate-gib:{estimated_gib}");
         let tags = normalized_request_tags.get_or_insert_with(Vec::new);
@@ -6916,13 +11067,30 @@ pub async fn create_mission(
         .map(str::trim)
         .filter(|command| !command.is_empty())
         .map(str::to_string);
+    // Server-owned remote execution: the selected harness/model decide what
+    // runs on the node (an explicit raw `remote_command` stays supported).
+    // Planned before the mission exists so an unsupported selection is a
+    // clean 400, never a failed mission.
+    let mut remote_plan = match remote_node_id.as_deref() {
+        Some(_) => Some(
+            plan_remote_harness(
+                remote_command.as_deref(),
+                backend.as_deref().unwrap_or(""),
+                model_override.as_deref(),
+                req.prompt.as_deref(),
+            )
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?,
+        ),
+        None => None,
+    };
+    if let Some(RemoteHarnessPlan::Codex {
+        effort, fast_mode, ..
+    }) = remote_plan.as_mut()
+    {
+        *effort = model_effort.clone();
+        *fast_mode = req.fast_mode;
+    }
     if let Some(node_id) = remote_node_id.as_deref() {
-        if remote_command.is_none() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "remote_command is required when remote_node_id is set".to_string(),
-            ));
-        }
         if remote_dispatch_is_scheduled_for_future(
             Some(node_id),
             req.not_before,
@@ -6995,6 +11163,12 @@ pub async fn create_mission(
         }
     }
 
+    if let (Some(node_id), Some(plan)) = (remote_node_id.as_deref(), remote_plan.as_ref()) {
+        remote_grok::require_node_managed_auth(&state, node_id, plan)
+            .await
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    }
+
     let control = control_for_user(&state, &user).await;
     if request_needs_writer_lease {
         let _guard = acquire_durable_pr_writer_lock(&state.control)
@@ -7017,7 +11191,7 @@ pub async fn create_mission(
             }
         }
     }
-    control
+    if let Err(error) = control
         .cmd_tx
         .send(ControlCommand::CreateMission {
             title,
@@ -7036,13 +11210,68 @@ pub async fn create_mission(
                 deadline: req.deadline.map(|t| t.to_rfc3339()),
             },
             requires_local_disk: local_mission,
+            estimated_disk_gib: effective_estimated_disk_gib,
+            admission_tags: Vec::new(),
             respond: tx,
         })
         .await
-        .map_err(session_unavailable)?;
+    {
+        return Err(session_unavailable(error));
+    }
 
-    let mut mission = rx.await.map_err(recv_failed)?.map_err(internal_error)?;
+    let mut mission = match rx.await {
+        Ok(Ok(mission)) => mission,
+        Ok(Err(error)) => {
+            return Err(internal_error(error));
+        }
+        Err(error) => {
+            return Err(recv_failed(error));
+        }
+    };
 
+    // Match actor/sweep lock order before taking the PR-writer lock. The track
+    // conflict path may reconcile a terminal predecessor, so admission must
+    // remain serialized until the new lease and assignment are both persisted.
+    let admission_guard = DISPATCH_ADMISSION.lock().await;
+    let admission_file_guard = match dispatch_admission::durable_lock(&state.config).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            // The actor already persisted this candidate and its scratch
+            // reservation. It has received no prompt or writer assignment.
+            // Compensate directly: an actor roundtrip under admission can
+            // deadlock, and the durable admission file itself is unavailable.
+            let cleanup: Result<(), String> = async {
+                let reason = "dispatch_admission_unavailable";
+                control
+                    .mission_store
+                    .update_mission_status_with_reason(
+                        mission.id,
+                        MissionStatus::Interrupted,
+                        Some(reason),
+                    )
+                    .await?;
+                let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: None,
+                    execution: None,
+                    mission_id: mission.id,
+                    status: MissionStatus::Interrupted,
+                    summary: Some(reason.to_string()),
+                });
+                release_local_mission_disk(&state.config, mission.id).await
+            }
+            .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({
+                    "error": "dispatch_admission_unavailable",
+                    "mission_id": mission.id,
+                    "detail": error,
+                    "cleanup_error": cleanup.err(),
+                })
+                .to_string(),
+            ));
+        }
+    };
     // Close the preflight-to-create race under the store-only mutex. Exactly
     // one concurrent creator wins; a loser is durably interrupted before it
     // can receive a goal or become a writer.
@@ -7072,6 +11301,8 @@ pub async fn create_mission(
                 .await
                 .map_err(internal_error)?;
             let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: None,
                 mission_id: mission.id,
                 status: MissionStatus::Interrupted,
                 summary: Some(reason.to_string()),
@@ -7097,17 +11328,96 @@ pub async fn create_mission(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
-    let project = nonblank(&req.project);
-    let track = nonblank(&req.track);
+    // A mission dispatched from a bound conversation inherits that project
+    // when the caller did not name one. Agents omit it often — 11 of the 39
+    // missions created in one 12h window on prod carried no project at all —
+    // and an untagged mission is invisible to every project-scoped view:
+    // the health rollup, the state timeline, the writer-slot counts, and the
+    // inventory the controllers themselves query. Making the tag structural
+    // beats asking every dispatcher to remember it.
+    //
+    // An explicit value always wins, including a deliberate blank, which is
+    // how a caller says "this belongs to no project".
+    let project = match nonblank(&req.project) {
+        Some(explicit) => Some(
+            super::projects_overview::resolve_roster_slug(&state.projects, &explicit)
+                .ok()
+                .flatten()
+                .unwrap_or(explicit),
+        ),
+        None if req.project.is_some() => None,
+        None => req
+            .origin_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .and_then(|session| {
+                // A conversation rolls over into a continuation, and the
+                // binding names whichever id the operator declared — often
+                // several rollovers above this one. Walk up the ancestry,
+                // nearest first, so the closest binding wins.
+                let chain = match super::projects_overview::hermes_state_db_path() {
+                    Some(path) => super::session_chain::ancestry(&path, session),
+                    None => vec![session.to_string()],
+                };
+                chain.iter().find_map(|candidate| {
+                    match state.projects.project_for_session(candidate) {
+                        Ok(slug) => slug,
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = candidate,
+                                error = %error,
+                                "could not resolve a project for the origin session"
+                            );
+                            None
+                        }
+                    }
+                })
+            }),
+    };
+    let mut track = nonblank(&req.track);
     let intent = nonblank(&req.intent);
     let github_pr = nonblank(&req.github_pr);
     let desired_state = nonblank(&req.desired_state);
     let next_check_at = nonblank(&req.next_check_at);
     let mut tags = normalized_request_tags;
-    if req
-        .github_pr
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+    // Absorb at write time: a project mission always lands on a plan row
+    // (existing key / alias / single PR ref, else a new `absorbed` track) and
+    // takes a lease on it. A held writer lease interrupts this duplicate
+    // instead of letting two writers race on one track.
+    if let Some(project_slug) = project.as_deref() {
+        match bind_mission_to_track(
+            &state,
+            &control,
+            &mission,
+            project_slug,
+            track.as_deref(),
+            req.title.as_deref(),
+            github_pr.as_deref(),
+            intent.as_deref(),
+            req.writer,
+            tags.as_deref().unwrap_or(&[]),
+            request_is_writer,
+            req.idempotency_key.as_deref(),
+            &req.acceptance_criteria,
+        )
+        .await
+        {
+            Ok(canonical) => track = Some(canonical),
+            Err(response) => {
+                drop(pr_writer_guard);
+                return Err(response);
+            }
+        }
+    }
+    // Explicit capability governs track admission and harness permissions even
+    // without PR metadata. Persist it before deferred dispatch can re-infer
+    // authority from an initial prompt such as "verity-integration-b".
+    if req.writer.is_some()
+        || req
+            .github_pr
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
     {
         let capability = if request_is_writer {
             Some("pr-writer")
@@ -7124,6 +11434,23 @@ pub async fn create_mission(
             }
         }
     }
+    // Creation persisted the admission lease before replying. This later
+    // metadata patch must retain it, otherwise user tags could release it.
+    let durable_reservation_tags: Vec<String> = mission
+        .project
+        .tags
+        .iter()
+        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .cloned()
+        .collect();
+    if !durable_reservation_tags.is_empty() {
+        let requested = tags.get_or_insert_with(Vec::new);
+        for reservation in durable_reservation_tags {
+            if !requested.iter().any(|tag| tag == &reservation) {
+                requested.push(reservation);
+            }
+        }
+    }
     if project.is_some()
         || track.is_some()
         || intent.is_some()
@@ -7137,11 +11464,14 @@ pub async fn create_mission(
             .update_mission_project(
                 mission.id,
                 crate::api::mission_store::MissionProjectPatch {
+                    title: None,
                     project: project.clone().map(Some),
                     track: track.clone().map(Some),
                     intent: intent.clone().map(Some),
                     github_pr: github_pr.clone().map(Some),
                     tags: tags.clone(),
+                    preserve_updated_at: false,
+                    tag_patch: None,
                     desired_state: desired_state.clone().map(Some),
                     next_check_at: next_check_at.clone().map(Some),
                 },
@@ -7158,52 +11488,248 @@ pub async fn create_mission(
         if let Some(v) = tags {
             mission.project.tags = v;
         }
+        if let Err(error) = super::mission_horizon::supersede_prior_attempts(
+            control.mission_store.as_ref(),
+            &mission,
+        )
+        .await
+        {
+            tracing::warn!(
+                mission_id = %mission.id,
+                %error,
+                "could not absorb prior attempts on the same item"
+            );
+        }
+    }
+    if let Some(prior_id) = req.supersedes_mission_id {
+        if let Err(error) = super::mission_horizon::supersede_explicit(
+            control.mission_store.as_ref(),
+            &mission,
+            prior_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                mission_id = %mission.id,
+                %prior_id,
+                %error,
+                "supersedes_mission_id was not applied"
+            );
+        }
     }
     drop(pr_writer_guard);
+    drop(admission_file_guard);
+    drop(admission_guard);
+
+    // Creation origin ("hermes" + owning session id). Written once here so
+    // clients can group foreign-origin missions under their conversation.
+    if let Some(origin) = req
+        .origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut origin_session_id = req
+            .origin_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        // A fabricated session id is worse than none: it is BELIEVED. Measured
+        // 2026-08-06, a controller hand-passed "20260805_night_supervision" —
+        // valid in shape, existing nowhere — so the mission was invisible to
+        // ?origin_session_id=, its completion callback could pin nowhere, and
+        // the interruption that followed had no conversation to report into.
+        // When the Hermes state database is available, verify the session
+        // exists; an id that provably does not gets dropped with a warning,
+        // leaving the mission honestly unattributed and adoptable later.
+        // "Could not check" keeps the stamp — stripping attribution on every
+        // deployment without HERMES_STATE_DB would be the larger harm.
+        if let Some(session) = origin_session_id {
+            if hermes_session_exists(session) == Some(false) {
+                tracing::warn!(
+                    mission_id = %mission.id,
+                    origin_session_id = %session,
+                    "origin_session_id names no existing Hermes session; \
+                     leaving the mission unattributed instead of stamping a \
+                     fabricated id"
+                );
+                if let Ok(value) = axum::http::HeaderValue::from_str(session) {
+                    headers.insert("x-dropped-origin-session", value);
+                }
+                origin_session_id = None;
+            }
+        }
+        control
+            .mission_store
+            .set_mission_origin(mission.id, origin, origin_session_id)
+            .await
+            .map_err(internal_error)?;
+        mission.origin = Some(origin.to_string());
+        mission.origin_session_id = origin_session_id.map(str::to_string);
+    }
+
+    // Persist attachments before publishing the deferred-goal dispatch ticket.
+    // The scheduler can run at every await after set_deferred_goal.
+    if let Some(attachments) = req.attachments.as_ref().filter(|rows| !rows.is_empty()) {
+        let mut payload = crate::api::mission_payload::MissionPayload {
+            attachments: attachments.clone(),
+            project: mission.project.project.clone(),
+            controller_md: None,
+        };
+        if attachments
+            .iter()
+            .any(|row| row.kind == crate::api::mission_payload::AttachmentKind::Controller)
+        {
+            if let Some(project) = mission.project.project.as_deref() {
+                payload.controller_md = Some(
+                    super::projects_overview::controller_snapshot_markdown(&state, project).await,
+                );
+            }
+        }
+        if let Err(error) = crate::api::mission_payload::write_sidecar(
+            &state.config.working_dir,
+            mission.id,
+            &payload,
+        ) {
+            // A retry must not coalesce onto a half-created mission and report
+            // success while discarding both its prompt and attachments.
+            control
+                .mission_store
+                .update_mission_status_with_reason(
+                    mission.id,
+                    MissionStatus::Failed,
+                    Some("attachment_persistence_failed"),
+                )
+                .await
+                .map_err(internal_error)?;
+            state
+                .projects
+                .release_leases_for_attempt(&mission.id.to_string())
+                .map_err(internal_error)?;
+            release_local_mission_disk(&state.config, mission.id)
+                .await
+                .map_err(internal_error)?;
+            let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: None,
+                mission_id: mission.id,
+                status: MissionStatus::Failed,
+                summary: Some("attachment_persistence_failed".into()),
+            });
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("persist attachments: {error}"),
+            ));
+        }
+    }
 
     // Atomic create+start: stash the initial prompt as the deferred goal. The
     // FLEET-001 scheduler pass (every ~5s) dispatches pending missions with a
     // deferred goal as soon as parallel capacity allows, honoring `not_before`
     // when set. Unlike the old create-then-message pattern, this cannot be
     // dropped at capacity.
+    // The initial prompt, keyed by the id of its queued broadcast so a later
+    // non-queued event for the same message replaces it in live clients.
+    let mut initial_prompt: Option<(Uuid, String)> = None;
+    // A remote launch is owned by the node job from the moment it exists. A
+    // deferred goal is the FLEET-001 scheduler's dispatch ticket: for a
+    // remote mission it would make the mission eligible for a LOCAL harness
+    // during every await below (node placement, proxy-key mint, the node
+    // submit round-trip). Incident 620cdb74 (2026-09-20): the scheduler
+    // started a local runner for a typed dgx-spark launch while the submit
+    // was in flight, persisted the prompt a second time (source=scheduler),
+    // and left the remote job without its run lease. Remote prompts are
+    // persisted exactly once by `persist_remote_mission_prompt` instead.
+    let remote_launch = remote_node_id.is_some() && remote_plan.is_some();
     if let Some(prompt) = nonblank(&req.prompt) {
-        control
-            .mission_store
-            .set_deferred_goal(mission.id, Some(prompt.clone()))
-            .await
-            .map_err(internal_error)?;
+        // Canonicalise `/goal\n…` to the space form before storing: the
+        // deferred goal is later re-injected verbatim, and the backend goal
+        // drivers only recognise `/goal <objective>` with a space.
+        let prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
+        let prompt_event_id = Uuid::new_v4();
+        // Client placements keep the prompt out of the scheduler ticket.
+        // `get_scheduled_pending_missions` only returns rows that still have
+        // a deferred goal, and the stores also exclude `placement:client`.
+        if !remote_launch && !client_placement {
+            control
+                .mission_store
+                .set_deferred_goal(
+                    mission.id,
+                    Some(deferred_messages::encode(prompt_event_id, &prompt)),
+                )
+                .await
+                .map_err(internal_error)?;
+        }
+        // A `/goal …` prompt is a goal-mode mandate from the very first turn.
+        // Persist it here, synchronously on the same store that created the
+        // mission — the event-loop hook that also does this only sees events
+        // while a control session is pumping, so MCP/API creations could
+        // otherwise stay goal_mode=false forever.
+        if let Some(objective) = parse_goal_objective(&prompt) {
+            control
+                .mission_store
+                .update_mission_goal(mission.id, true, Some(&objective))
+                .await
+                .map_err(internal_error)?;
+            mission.goal_mode = true;
+            mission.goal_objective = Some(objective);
+        }
         // Surface the queued goal so UIs show it as pending until dispatch.
         let _ = control.events_tx.send(AgentEvent::UserMessage {
-            id: Uuid::new_v4(),
-            content: prompt,
+            id: prompt_event_id,
+            content: prompt.clone(),
             queued: true,
             mission_id: Some(mission.id),
             source: Some(format!("api:{}", user.id)),
         });
+        initial_prompt = Some((prompt_event_id, prompt));
     }
 
-    if let (Some(remote_node_id), Some(remote_command)) =
-        (remote_node_id.as_deref(), remote_command.as_deref())
+    if let (Some(remote_node_id), Some(remote_plan)) =
+        (remote_node_id.as_deref(), remote_plan.as_ref())
     {
         // All remote commands use the durable node job API. The legacy
         // synchronous `/execute` path has no cancellation handle if its HTTP
         // wait expires, so routing `remote_async=false` through it could orphan
         // a process on the node. The response contract here is unchanged: the
         // mission is returned Active while its durable poller owns completion.
-        let dispatch =
-            dispatch_remote_job(&state, &control, &mission, remote_node_id, remote_command).await;
+        //
+        // A raw remote mission never starts a local harness, so nothing else
+        // would ever persist its prompt: the queued broadcast above is
+        // deliberately dropped by the store until a runner starts the turn.
+        // Persist it here, before dispatch and before the response, so the
+        // mission's history and event replay carry the user's mandate even
+        // when dispatch fails.
+        let dispatch = match persist_remote_mission_prompt(
+            &control,
+            mission.id,
+            &user.id,
+            initial_prompt.take(),
+        )
+        .await
+        {
+            Ok(()) => {
+                dispatch_remote_job(&state, &control, &mission, remote_node_id, remote_plan).await
+            }
+            Err(message) => Err(message),
+        };
         match dispatch {
-            Ok(updated) => return Ok((headers, Json(updated))),
+            Ok(updated) => {
+                let value = mission_create_response(&state, &control, updated).await?;
+                return Ok((headers, Json(value)));
+            }
             Err(message) => {
                 let _ = control
                     .mission_store
                     .update_mission_status_with_reason(
                         mission.id,
                         MissionStatus::Failed,
-                        Some("remote_dispatch_failed"),
+                        Some(REMOTE_DISPATCH_FAILED),
                     )
                     .await;
                 let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: None,
+                    execution: None,
                     mission_id: mission.id,
                     status: MissionStatus::Failed,
                     summary: Some(message.clone()),
@@ -7213,7 +11739,57 @@ pub async fn create_mission(
         }
     }
 
-    Ok((headers, Json(mission)))
+    if client_placement {
+        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.take())
+            .await
+            .map_err(internal_error)?;
+        let value = mission_create_response(&state, &control, mission).await?;
+        return Ok((headers, Json(value)));
+    }
+
+    let value = mission_create_response(&state, &control, mission).await?;
+    Ok((headers, Json(value)))
+}
+
+/// Create/coalesce responses carry the same execution and remote placement
+/// projection as mission reads, so a client can render an honest state from
+/// the response alone (the Orb treats `remote_job.node_id`/`phase` as the
+/// authoritative placement of a typed remote launch).
+async fn mission_create_response(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: Mission,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let active_run = control
+        .mission_store
+        .get_active_mission_run(mission.id)
+        .await
+        .map_err(internal_error)?;
+    let placement_run = match active_run.clone() {
+        Some(run) => Some(run),
+        None => control
+            .mission_store
+            .get_latest_mission_run(mission.id)
+            .await
+            .map_err(internal_error)?,
+    };
+    let value = attach_execution_to_mission_value(
+        serde_json::to_value(&mission).map_err(internal_error)?,
+        &mission,
+        active_run.as_ref(),
+        None,
+    );
+    let (handles, outcomes) = remote_job_projection_inputs(state).await;
+    Ok(attach_remote_job_to_mission_value(
+        value,
+        remote_job_projection(
+            &handles,
+            &outcomes,
+            placement_run.as_ref(),
+            mission.id,
+            chrono::Utc::now(),
+        ),
+    ))
 }
 
 fn remote_dispatch_is_scheduled_for_future(
@@ -7271,6 +11847,8 @@ async fn dispatch_remote_mission_mvp(
         .update_mission_status(mission.id, MissionStatus::Active)
         .await?;
     let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution: None,
         mission_id: mission.id,
         status: MissionStatus::Active,
         summary: Some(format!("Dispatching to remote node '{}'", node.id)),
@@ -7291,10 +11869,12 @@ async fn dispatch_remote_mission_mvp(
     finalize_remote_mission(
         &owner,
         mission.id,
+        None,
         &node.id,
         success,
         content,
         "remote_node_mvp",
+        false,
     )
     .await?;
     state
@@ -7340,11 +11920,717 @@ impl RemoteMissionOwner {
         }
     }
 
+    /// Native streaming events have one persistence owner. Live events are
+    /// saved in broadcast order by the session logger; direct writes would
+    /// race queued deltas and place them after the canonical assistant message.
+    /// Recovery without a live session still needs durable events.
+    async fn publish_native(&self, event: AgentEvent) {
+        if self.events_tx.is_none() {
+            if let Some(id) = event.mission_id() {
+                let _ = self.mission_store.log_event(id, &event).await;
+            }
+        }
+        self.send(event);
+    }
+
     fn send(&self, event: AgentEvent) {
         if let Some(events_tx) = &self.events_tx {
             let _ = events_tx.send(event);
         }
     }
+}
+
+/// Harnesses a remote node can run for a typed launch. Nodes ship the
+/// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
+/// before the mission exists instead of being silently swapped.
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &["claudecode", "opencode", "grok", "codex"];
+
+/// Stable prefixes of the plain-text `400` bodies a typed remote launch can
+/// return before any mission exists. Clients match on the prefix, not the
+/// prose.
+pub(crate) const REMOTE_HARNESS_UNSUPPORTED: &str = "REMOTE_HARNESS_UNSUPPORTED";
+pub(crate) const REMOTE_PROMPT_REQUIRED: &str = "REMOTE_PROMPT_REQUIRED";
+pub(crate) const REMOTE_MODEL_REQUIRED: &str = "REMOTE_MODEL_REQUIRED";
+
+/// Capability block advertised on `GET /api/remote-nodes` so clients can tell
+/// a backend that plans typed launches server-side from one that still
+/// requires a raw `remote_command` (the field is absent there).
+pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCapabilities {
+    crate::remote_node::RemoteLaunchCapabilities {
+        typed: true,
+        requires_proxy_harnesses: vec!["claudecode".into(), "opencode".into(), "codex".into()],
+        harnesses: REMOTE_NODE_HARNESSES
+            .iter()
+            .map(|h| h.to_string())
+            .collect(),
+        raw_command: true,
+        proxy_url_configured: super::mission_runner::public_api_base_url_from_env().is_some(),
+        error_prefixes: vec![
+            REMOTE_HARNESS_UNSUPPORTED.to_string(),
+            REMOTE_PROMPT_REQUIRED.to_string(),
+            REMOTE_MODEL_REQUIRED.to_string(),
+            "REMOTE_GOAL_UNSUPPORTED".to_string(),
+            remote_grok::REMOTE_AUTH_REQUIRED.to_string(),
+        ],
+    }
+}
+
+/// What a remote mission will execute on its node, decided by the server
+/// from the client's selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteHarnessPlan {
+    Codex {
+        effort: Option<String>,
+        fast_mode: bool,
+        model: String,
+        prompt: String,
+        resume_session_id: Option<String>,
+    },
+    Grok {
+        model: Option<String>,
+        prompt: String,
+        resume_session_id: Option<String>,
+        new_session_id: Option<String>,
+    },
+    /// Explicit `remote_command` compatibility: runs verbatim, own auth.
+    Raw { command: String },
+    /// Claude Code CLI on the node, model routed through this core's proxy.
+    ClaudeCode {
+        model: Option<String>,
+        prompt: String,
+    },
+    /// OpenCode CLI on the node, model routed through this core's
+    /// OpenAI-compatible proxy endpoint.
+    OpenCode {
+        model: Option<String>,
+        prompt: String,
+        resume_session_id: Option<String>,
+    },
+}
+
+impl RemoteHarnessPlan {
+    pub(crate) fn uses_core_proxy(&self) -> bool {
+        matches!(
+            self,
+            RemoteHarnessPlan::ClaudeCode { .. }
+                | RemoteHarnessPlan::OpenCode { .. }
+                | RemoteHarnessPlan::Codex { .. }
+        )
+    }
+
+    pub(crate) fn label(&self) -> String {
+        match self {
+            RemoteHarnessPlan::Codex { model, .. } => format!("codex/{model}"),
+            RemoteHarnessPlan::Raw { .. } => "raw command".to_string(),
+            RemoteHarnessPlan::Grok { model, .. } => {
+                format!("grok/{}", model.as_deref().unwrap_or("node default model"))
+            }
+            RemoteHarnessPlan::ClaudeCode { model, .. } => format!(
+                "claudecode/{}",
+                model.as_deref().unwrap_or("node default model")
+            ),
+            RemoteHarnessPlan::OpenCode { model, .. } => format!(
+                "opencode/{}",
+                model.as_deref().unwrap_or("node default model")
+            ),
+        }
+    }
+}
+
+/// Decide the node execution for a remote launch. An explicit raw command
+/// wins (compatibility with scripted callers). Otherwise the selected
+/// backend must be one nodes can run and the prompt must be present; a
+/// selection nodes cannot honour is an explicit error naming what is
+/// supported, never a fallback to a different harness.
+pub(crate) fn plan_remote_harness(
+    remote_command: Option<&str>,
+    backend: &str,
+    model_override: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<RemoteHarnessPlan, String> {
+    if let Some(command) = remote_command.map(str::trim).filter(|c| !c.is_empty()) {
+        return Ok(RemoteHarnessPlan::Raw {
+            command: command.to_string(),
+        });
+    }
+    let prompt = prompt
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            format!("{REMOTE_PROMPT_REQUIRED}: a remote launch needs a prompt (or an explicit remote_command)")
+        })?
+        .to_string();
+    let model = model_override
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    match backend {
+        "codex" if prompt.starts_with("/goal") => Err("REMOTE_GOAL_UNSUPPORTED: remote Codex supports native exec sessions, but not app-server goals yet; use Codex on core for /goal".to_string()),
+        "codex" => Ok(RemoteHarnessPlan::Codex {
+            effort: None,
+            fast_mode: false,
+            model: model.ok_or_else(|| format!("{REMOTE_MODEL_REQUIRED}: a Codex remote launch needs model_override"))?,
+            prompt,
+            resume_session_id: None,
+        }),
+        "grok" => Ok(remote_grok::plan(model, prompt)),
+        "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
+            // Claude Code expects bare model ids.
+            model: model.map(|m| {
+                m.strip_prefix("anthropic/")
+                    .map(str::to_string)
+                    .unwrap_or(m)
+            }),
+            prompt,
+        }),
+        "opencode" => {
+            // A node has no authenticated default provider: the only model
+            // that can run there is the one this core registers and routes.
+            // The exact id is the provider map key; a client-supplied
+            // `builtin/` prefix is the local runner's argument shape, not
+            // part of the id.
+            let model = model
+                .map(|m| m.trim_start_matches("builtin/").to_string())
+                .filter(|m| !m.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "{REMOTE_MODEL_REQUIRED}: an OpenCode remote launch needs model_override (provider/model, e.g. xai/grok-4.6); nodes have no authenticated default model"
+                    )
+                })?;
+            Ok(RemoteHarnessPlan::OpenCode {
+                resume_session_id: None,
+                model: Some(model),
+                prompt,
+            })
+        }
+        other => Err(format!(
+            "{REMOTE_HARNESS_UNSUPPORTED}: backend '{other}' cannot run on remote nodes: only {} are installed there. \
+             Pick one of those, \
+             or pass an explicit remote_command.",
+            REMOTE_NODE_HARNESSES.join(" or ")
+        )),
+    }
+}
+
+/// Concrete node job for a plan: the shell command plus the environment the
+/// node injects into it (proxy URL/key never appear in the command line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteExecution {
+    pub(crate) managed_auth: Vec<String>,
+    pub(crate) command: String,
+    pub(crate) env: Option<HashMap<String, String>>,
+    pub(crate) label: String,
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Env var the node job receives the per-mission proxy key in. The OpenCode
+/// config references it (`{env:…}`) so neither the config nor the command
+/// line ever contains the secret.
+pub(crate) const REMOTE_PROXY_KEY_ENV: &str = "SANDBOXED_PROXY_API_KEY";
+/// OpenCode reads an inline JSON config from this env var (verified with the
+/// installed 1.18 CLI), so the job never writes into or overwrites a cwd
+/// `opencode.json`.
+pub(crate) const REMOTE_OPENCODE_CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+
+/// Prompts are positional CLI arguments; one starting with `-` would be
+/// parsed as an option (and yargs' `--` terminator swallows the message on
+/// `opencode run`, verified). A leading space is inert for the model and
+/// keeps the argument positional on every CLI version.
+fn positional_prompt(prompt: &str) -> String {
+    if prompt.starts_with('-') {
+        format!(" {prompt}")
+    } else {
+        prompt.to_string()
+    }
+}
+
+/// OpenCode on a node reaches this core exactly like a local OpenCode
+/// mission does: a `builtin` provider (`@ai-sdk/openai-compatible`, base URL
+/// `<core>/v1`) whose model map carries the exact requested id, so the proxy
+/// receives `xai/grok-4.6` (or any `provider/model`) unchanged and applies
+/// its own chain/passthrough resolution. The stock `openai` provider only
+/// advertises OpenAI's catalog and would reject non-GPT ids before any
+/// request.
+pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "builtin": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Builtin",
+                "models": { model: { "name": model } },
+                "options": {
+                    "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
+                    "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
+                }
+            }
+        }
+    })
+}
+
+/// `--model` argument for the node: `builtin/<exact id>` (the local runner's
+/// `opencode_model_argument` shape for proxy-routed models).
+fn remote_opencode_model_argument(model: &str) -> String {
+    match model.strip_prefix("builtin/") {
+        Some(_) => model.to_string(),
+        None => format!("builtin/{model}"),
+    }
+}
+
+pub(crate) fn remote_execution_for_plan(
+    plan: &RemoteHarnessPlan,
+    api_base_url: &str,
+    proxy_key: &str,
+) -> RemoteExecution {
+    let label = plan.label();
+    match plan {
+        RemoteHarnessPlan::Codex {
+            effort,
+            fast_mode,
+            model,
+            prompt,
+            resume_session_id,
+        } => {
+            let mut command = String::from(
+                "command -v codex >/dev/null 2>&1 || { echo 'codex is not installed on this node' >&2; exit 127; }; exec codex",
+            );
+            // CLI overrides keep configuration and credentials out of project files.
+            for setting in [
+                "model_provider=\"sandboxed\"".to_string(),
+                "model_providers.sandboxed.name=\"Sandboxed\"".to_string(),
+                format!(
+                    "model_providers.sandboxed.base_url={}",
+                    serde_json::to_string(&format!("{}/v1", api_base_url.trim_end_matches('/')))
+                        .unwrap()
+                ),
+                "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
+                format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
+            ] {
+                command.push_str(" -c ");
+                command.push_str(&shell_single_quote(&setting));
+            }
+            if let Some(effort) = effort {
+                command.push_str(" -c ");
+                command.push_str(&shell_single_quote(&format!(
+                    "model_reasoning_effort={}",
+                    serde_json::to_string(effort).unwrap()
+                )));
+            }
+            if *fast_mode {
+                command.push_str(" -c 'service_tier=\"fast\"'");
+            }
+            command.push_str(" exec");
+            if resume_session_id.is_some() {
+                command.push_str(" resume");
+            }
+            command.push_str(
+                " --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --model ",
+            );
+            command.push_str(&shell_single_quote(model));
+            command.push_str(" -- ");
+            if let Some(session) = resume_session_id {
+                command.push_str(&shell_single_quote(session));
+                command.push(' ');
+            }
+            command.push_str(&shell_single_quote(prompt));
+            RemoteExecution {
+                managed_auth: Vec::new(),
+                command,
+                label,
+                env: Some(HashMap::from([
+                    (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
+                    ("NO_COLOR".to_string(), "1".to_string()),
+                ])),
+            }
+        }
+        RemoteHarnessPlan::Grok {
+            model,
+            prompt,
+            resume_session_id,
+            new_session_id,
+        } => remote_grok::execution(
+            model.as_deref(),
+            prompt,
+            resume_session_id.as_deref(),
+            new_session_id.as_deref(),
+            label,
+        ),
+        RemoteHarnessPlan::Raw { command } => RemoteExecution {
+            managed_auth: Vec::new(),
+            command: command.clone(),
+            env: None,
+            label,
+        },
+        RemoteHarnessPlan::ClaudeCode { model, prompt } => {
+            let mut command = String::from(
+                "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
+                 claude -p --dangerously-skip-permissions",
+            );
+            if let Some(model) = model {
+                command.push_str(" --model ");
+                command.push_str(&shell_single_quote(model));
+            }
+            command.push(' ');
+            command.push_str(&shell_single_quote(&positional_prompt(prompt)));
+            let env = HashMap::from([
+                ("ANTHROPIC_BASE_URL".to_string(), api_base_url.to_string()),
+                ("ANTHROPIC_AUTH_TOKEN".to_string(), proxy_key.to_string()),
+                ("NO_COLOR".to_string(), "1".to_string()),
+                ("GH_NO_PAGER".to_string(), "1".to_string()),
+                ("GH_PROMPT_DISABLED".to_string(), "1".to_string()),
+            ]);
+            RemoteExecution {
+                managed_auth: Vec::new(),
+                command,
+                env: Some(env),
+                label,
+            }
+        }
+        RemoteHarnessPlan::OpenCode {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
+            // Inline config through OPENCODE_CONFIG_CONTENT: nothing is
+            // written into the job cwd (the node's per-mission directory,
+            // also its HOME), and nothing depends on the service user's home.
+            let mut command = String::from(
+                "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; \
+                 opencode run --format json",
+            );
+            let mut env = HashMap::from([
+                (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
+                ("NO_COLOR".to_string(), "1".to_string()),
+            ]);
+            // `plan_remote_harness` guarantees a model for OpenCode; the
+            // config registers exactly that id under `builtin`.
+            let model = model.as_deref().unwrap_or_default();
+            if let Some(session) = resume_session_id {
+                command.push_str(" --session ");
+                command.push_str(&shell_single_quote(session));
+            }
+            command.push_str(" --model ");
+            command.push_str(&shell_single_quote(&remote_opencode_model_argument(model)));
+            env.insert(
+                REMOTE_OPENCODE_CONFIG_ENV.to_string(),
+                remote_opencode_config(model, api_base_url).to_string(),
+            );
+            command.push(' ');
+            command.push_str(&shell_single_quote(&positional_prompt(prompt)));
+            RemoteExecution {
+                managed_auth: Vec::new(),
+                command,
+                env: Some(env),
+                label,
+            }
+        }
+    }
+}
+
+/// Name of the per-mission proxy key a typed remote launch mints. Keyed by
+/// mission so a re-attached observer or a boot sweep can retire it by name.
+pub(crate) fn remote_launch_key_name(mission_id: Uuid) -> String {
+    format!("remote-launch:{mission_id}")
+}
+
+/// Delete every proxy key minted for `mission_id`'s remote launches.
+pub(crate) async fn retire_remote_launch_keys(
+    proxy_keys: &super::proxy_keys::ProxyApiKeyStore,
+    mission_id: Uuid,
+) {
+    if let Err(error) = proxy_keys
+        .delete_named_except(&remote_launch_key_name(mission_id), None)
+        .await
+    {
+        tracing::warn!(%mission_id, %error, "remote launch proxy key retirement failed");
+    }
+}
+
+/// Boot sweep: a `remote-launch:*` key minted before `boot_cutoff` whose
+/// mission holds no ledger handle belongs to a launch of a previous process
+/// that never reached submission or whose observer already finished. No node
+/// job can still be using it (submission always follows the tentative ledger
+/// record). Keys minted after the cutoff belong to this process's launches
+/// and are left alone even when the ledger snapshot predates their handle.
+pub(crate) async fn retire_orphaned_remote_launch_keys(
+    proxy_keys: &super::proxy_keys::ProxyApiKeyStore,
+    handles: &[crate::remote_node::job_ledger::JobHandle],
+    boot_cutoff: chrono::DateTime<chrono::Utc>,
+) {
+    let live: HashSet<Uuid> = handles.iter().map(|handle| handle.mission_id).collect();
+    for key in proxy_keys.list().await {
+        let Some(mission_id) = key
+            .name
+            .strip_prefix("remote-launch:")
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            continue;
+        };
+        if key.created_at >= boot_cutoff {
+            continue;
+        }
+        if !live.contains(&mission_id) {
+            tracing::info!(%mission_id, key_id = %key.id, "retiring orphaned remote launch proxy key");
+            let _ = proxy_keys.delete(key.id).await;
+        }
+    }
+}
+
+/// Owner id of the run lease held by a raw remote mission job's poll loop.
+pub(crate) fn remote_job_lease_owner(job_id: Uuid) -> String {
+    format!("remote-job:{job_id}")
+}
+
+/// Whether a run lease belongs to a raw remote mission job observer.
+pub(crate) fn is_remote_mission_job_owner(owner_actor_id: &str) -> bool {
+    owner_actor_id.starts_with("remote-job:")
+}
+
+/// Scope label recorded on a remote job lease so placement survives in the
+/// durable run row after the ledger handle is retired.
+fn remote_job_lease_scope(node_id: &str) -> String {
+    format!("remote-node:{node_id}")
+}
+
+/// Persist the initial prompt of a raw remote mission as a real (non-queued)
+/// user message. Returns an error message shaped for the dispatch-failure
+/// path: a remote mission whose prompt cannot be persisted must not be
+/// dispatched, because nothing later would ever record what the user asked.
+async fn persist_remote_mission_prompt(
+    control: &ControlState,
+    mission_id: Uuid,
+    user_id: &str,
+    prompt: Option<(Uuid, String)>,
+) -> Result<(), String> {
+    let Some((id, content)) = prompt else {
+        return Ok(());
+    };
+    let event = AgentEvent::UserMessage {
+        id,
+        content,
+        queued: false,
+        mission_id: Some(mission_id),
+        source: Some(format!("api:{user_id}")),
+    };
+    control
+        .mission_store
+        .log_event(mission_id, &event)
+        .await
+        .map_err(|error| format!("remote mission prompt could not be persisted: {error}"))?;
+    let _ = control.events_tx.send(event);
+    Ok(())
+}
+
+/// Make an accepted raw remote mission job authoritative execution evidence.
+///
+/// Raw remote missions never start a local harness, so without this lease the
+/// mission is an Active row with no runner and no run — exactly what the
+/// stuck-mission watchdog repairs as an orphan (incident ab1792b4,
+/// 2026-09-20: the watchdog interrupted a freshly dispatched dgx-spark
+/// mission seven seconds after acceptance and the poll loop then cancelled
+/// the node job as if an operator had asked for it). The poll loop refreshes
+/// this lease on every successful observation and finishes it with the
+/// job's terminal reason.
+///
+/// Returns the lease when this job owns it. A lease owned by anyone else is
+/// left untouched; a mission that already left Active/Pending gets none.
+async fn ensure_remote_job_lease(
+    mission_store: &dyn MissionStore,
+    mission_id: Uuid,
+    job_id: Uuid,
+    node_id: &str,
+) -> Result<Option<MissionRun>, String> {
+    let owner_actor_id = remote_job_lease_owner(job_id);
+    if let Some(run) = mission_store.get_active_mission_run(mission_id).await? {
+        if run.owner_actor_id != owner_actor_id {
+            return Ok(None);
+        }
+        mission_store
+            .heartbeat_mission_run(
+                run.run_id,
+                run.generation,
+                MissionExecutionState::WaitingRemoteJob,
+                None,
+            )
+            .await?;
+        return mission_store.get_active_mission_run(mission_id).await;
+    }
+    let Some(mission) = mission_store.get_mission(mission_id).await? else {
+        return Ok(None);
+    };
+    if !matches!(
+        mission.status,
+        MissionStatus::Active | MissionStatus::Pending
+    ) {
+        return Ok(None);
+    }
+    let run = mission_store
+        .begin_mission_run(
+            mission_id,
+            &owner_actor_id,
+            Some(&remote_job_lease_scope(node_id)),
+        )
+        .await?;
+    mission_store
+        .heartbeat_mission_run(
+            run.run_id,
+            run.generation,
+            MissionExecutionState::WaitingRemoteJob,
+            None,
+        )
+        .await?;
+    mission_store.get_active_mission_run(mission_id).await
+}
+
+/// Finish the run lease held by `job_id`'s observer. Returns the settled run
+/// (for the terminal status event) when this job owned the lease.
+pub(crate) async fn finish_remote_job_lease(
+    mission_store: &dyn MissionStore,
+    mission_id: Uuid,
+    job_id: Uuid,
+    terminal_reason: &str,
+) -> Result<Option<MissionRun>, String> {
+    let Some(run) = mission_store.get_active_mission_run(mission_id).await? else {
+        return Ok(None);
+    };
+    if run.owner_actor_id != remote_job_lease_owner(job_id) {
+        return Ok(None);
+    }
+    mission_store
+        .finish_mission_run(run.run_id, run.generation, Some(terminal_reason))
+        .await?;
+    Ok(mission_store
+        .get_latest_mission_run(mission_id)
+        .await?
+        .filter(|latest| latest.run_id == run.run_id))
+}
+
+/// Placement metadata of a raw remote mission job for mission read models.
+///
+/// While the job is in flight the durable ledger handle is the source; after
+/// it is retired the run lease (owner `remote-job:<id>`, scope
+/// `remote-node:<id>`) still names the placement. The fleet monitor's bounded
+/// in-memory outcome adds the last node-reported state when it is known.
+/// `None` means the mission never dispatched a raw remote job.
+fn remote_job_projection(
+    handles: &[crate::remote_node::job_ledger::JobHandle],
+    outcomes: &[crate::remote_node::DispatchOutcome],
+    run: Option<&MissionRun>,
+    mission_id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<serde_json::Value> {
+    use crate::remote_node::job_ledger::JobHandleKind;
+    let handle = handles
+        .iter()
+        .filter(|handle| {
+            // Remote-build submissions also write tentative handles; those
+            // carry a validation identity and belong to a harness tool call,
+            // not to a raw remote mission.
+            handle.mission_id == mission_id
+                && (handle.kind == JobHandleKind::Mission
+                    || (handle.kind == JobHandleKind::Tentative && handle.identity.is_none()))
+        })
+        .max_by_key(|handle| (handle.submission_sequence, handle.started_at));
+    let lease = run.filter(|run| is_remote_mission_job_owner(&run.owner_actor_id));
+    let (job_id, node_id) = match (handle, lease) {
+        (Some(handle), _) => (handle.job_id, handle.node_id.clone()),
+        (None, Some(run)) => {
+            let job_id = run
+                .owner_actor_id
+                .strip_prefix("remote-job:")
+                .and_then(|id| Uuid::parse_str(id).ok())?;
+            let node_id = run
+                .scope_unit
+                .as_deref()
+                .and_then(|scope| scope.strip_prefix("remote-node:"))
+                .unwrap_or("unknown")
+                .to_string();
+            (job_id, node_id)
+        }
+        (None, None) => return None,
+    };
+    let outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.job_id == Some(job_id));
+    let last_proof = handle.and_then(|handle| match (handle.heartbeat_at, handle.accepted_at) {
+        (Some(heartbeat), Some(accepted)) => Some(heartbeat.max(accepted)),
+        (Some(heartbeat), None) => Some(heartbeat),
+        (None, accepted) => accepted,
+    });
+    let observed_age_secs =
+        last_proof.map(|proof| now.signed_duration_since(proof).num_seconds().max(0));
+    let phase = match handle {
+        Some(handle) if handle.kind == JobHandleKind::Tentative => "submit_ambiguous",
+        Some(handle) if handle.accepted_at.is_none() => "submit_ambiguous",
+        Some(_) => {
+            if observed_age_secs
+                .is_some_and(|age| age <= super::supervision::REMOTE_JOB_UNOBSERVED_SECS)
+            {
+                "observed"
+            } else {
+                "unobserved"
+            }
+        }
+        None => match lease {
+            Some(run) if run.execution_state.is_terminal() => "finished",
+            _ => "lease_only",
+        },
+    };
+    Some(serde_json::json!({
+        "job_id": job_id,
+        "node_id": node_id,
+        "phase": phase,
+        "node_state": outcome.map(|outcome| outcome.state.clone()),
+        "exit_code": outcome.and_then(|outcome| outcome.exit_code),
+        "error": outcome.and_then(|outcome| outcome.error.clone()),
+        "accepted_at": handle.and_then(|handle| handle.accepted_at),
+        "heartbeat_at": handle.and_then(|handle| handle.heartbeat_at),
+        "observed_age_secs": observed_age_secs,
+        "started_at": handle
+            .map(|handle| handle.started_at)
+            .or_else(|| outcome.map(|outcome| outcome.started_at)),
+        "finished_at": outcome.and_then(|outcome| outcome.finished_at),
+        "lease_state": lease.map(|run| run.execution_state),
+        "terminal_reason": lease.and_then(|run| run.terminal_reason.clone()),
+    }))
+}
+
+/// Ledger handles and recent fleet outcomes for [`remote_job_projection`].
+/// An unreadable ledger degrades to "no in-flight handle" for read models;
+/// liveness decisions never go through this path.
+async fn remote_job_projection_inputs(
+    state: &AppState,
+) -> (
+    Vec<crate::remote_node::job_ledger::JobHandle>,
+    Vec<crate::remote_node::DispatchOutcome>,
+) {
+    let handles = match crate::remote_node::job_ledger::load(&state.config.working_dir).await {
+        Ok(handles) => handles,
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "remote job ledger unreadable for mission read model"
+            );
+            Vec::new()
+        }
+    };
+    (handles, state.fleet.recent_outcomes(256))
+}
+
+fn attach_remote_job_to_mission_value(
+    mut value: serde_json::Value,
+    remote_job: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "remote_job".to_string(),
+            remote_job.unwrap_or(serde_json::Value::Null),
+        );
+    }
+    value
 }
 
 async fn remote_build_wait_owner(
@@ -7442,6 +12728,8 @@ pub(crate) async fn ensure_remote_build_wait(
             .update_mission_status(mission_id, MissionStatus::Active)
             .await?;
         owner.send(AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: None,
             mission_id,
             status: MissionStatus::Active,
             summary: Some(format!(
@@ -7576,6 +12864,13 @@ fn select_actor_run_lease(
     }
 }
 
+fn terminal_wake_must_wait_for_harness(
+    execution_state: MissionExecutionState,
+    actor_owns_run: bool,
+) -> bool {
+    execution_state != MissionExecutionState::WaitingRemoteJob && actor_owns_run
+}
+
 async fn deliver_remote_build_terminal_wake(
     state: &AppState,
     receipt: &crate::remote_node::job_ledger::RemoteJobReceipt,
@@ -7665,11 +12960,25 @@ async fn deliver_remote_build_terminal_wake(
     }
     if let Some(run) = active_run {
         if run.execution_state != MissionExecutionState::WaitingRemoteJob {
-            // The harness is still consuming the synchronous result. Let that
-            // turn finish rather than racing it with a second continuation.
-            return Ok(false);
-        }
-        if actor_run.is_none() {
+            if terminal_wake_must_wait_for_harness(run.execution_state, actor_run.is_some()) {
+                // The harness is still consuming the synchronous result. Let
+                // that turn finish rather than racing it with a continuation.
+                return Ok(false);
+            }
+            // The turn is gone but the parking heartbeat lost its race with
+            // finalization (observed on srv3: terminal receipt present while
+            // the durable run stayed `running` forever). The immutable remote
+            // receipt now owns the continuation, so repair the orphaned run
+            // before delivery instead of deferring the wake indefinitely.
+            owner
+                .mission_store
+                .finish_mission_run(
+                    run.run_id,
+                    run.generation,
+                    Some("remote_build_terminal_after_unparked_turn"),
+                )
+                .await?;
+        } else if actor_run.is_none() {
             owner
                 .mission_store
                 .finish_mission_run(
@@ -7702,7 +13011,11 @@ async fn deliver_remote_build_terminal_wake(
             .await
             .map_err(|_| "remote-build terminal control session unavailable".to_string())?;
         return match tokio::time::timeout(std::time::Duration::from_secs(10), response).await {
-            Ok(Ok(UserMessageAck::Queued | UserMessageAck::Delivered)) => Ok(true),
+            Ok(Ok(
+                UserMessageAck::Queued
+                | UserMessageAck::Delivered
+                | UserMessageAck::Continued { .. },
+            )) => Ok(true),
             Ok(Ok(UserMessageAck::Rejected(error))) => Err(error),
             Ok(Ok(UserMessageAck::Dropped)) => Ok(false),
             Ok(Err(_)) => Ok(false),
@@ -7757,6 +13070,7 @@ pub(crate) async fn deliver_pending_remote_build_wakes(state: &AppState) {
                 match crate::remote_node::job_ledger::mark_terminal_wake_suppressed(
                     &state.config.working_dir,
                     receipt.job_id,
+                    receipt.mission_id,
                     superseding_job_id,
                 )
                 .await
@@ -7815,6 +13129,7 @@ pub(crate) async fn deliver_pending_remote_build_wakes(state: &AppState) {
                 if let Err(error) = crate::remote_node::job_ledger::mark_terminal_wake_delivered(
                     &state.config.working_dir,
                     receipt.job_id,
+                    receipt.mission_id,
                 )
                 .await
                 {
@@ -7832,13 +13147,16 @@ pub(crate) async fn deliver_pending_remote_build_wakes(state: &AppState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_remote_mission(
     owner: &RemoteMissionOwner,
     mission_id: Uuid,
+    job_id: Option<Uuid>,
     node_id: &str,
     success: bool,
     content: String,
     status_reason: &str,
+    native_stream: bool,
 ) -> Result<(), String> {
     let event = AgentEvent::AssistantMessage {
         id: Uuid::new_v4(),
@@ -7854,8 +13172,12 @@ async fn finalize_remote_mission(
         resumable: !success,
         completion_evidence: None,
     };
-    let _ = owner.mission_store.log_event(mission_id, &event).await;
-    owner.send(event);
+    if native_stream {
+        owner.publish_native(event).await;
+    } else {
+        let _ = owner.mission_store.log_event(mission_id, &event).await;
+        owner.send(event);
+    }
     let status = if success {
         MissionStatus::Completed
     } else {
@@ -7865,7 +13187,30 @@ async fn finalize_remote_mission(
         .mission_store
         .update_mission_status_with_reason(mission_id, status, Some(status_reason))
         .await?;
+    // Settle the observer's run lease with the same reason so execution
+    // truth and presentation status agree; the terminal event carries it.
+    let execution = match job_id {
+        Some(job_id) => finish_remote_job_lease(
+            owner.mission_store.as_ref(),
+            mission_id,
+            job_id,
+            status_reason,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %mission_id,
+                %job_id,
+                %error,
+                "remote job run lease could not be finished after mission finalization"
+            );
+            None
+        }),
+        None => None,
+    };
     owner.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution,
         mission_id,
         status,
         summary: Some(format!("Remote node '{node_id}' finished")),
@@ -7877,12 +13222,27 @@ async fn finalize_remote_mission(
 /// node's job API, mark the mission Active immediately, and finalize it from
 /// a background poll loop. Unlike [`dispatch_remote_mission_mvp`], the create
 /// request does not block for the command's duration.
+/// Terminal reason of a remote launch whose dispatch failed or whose
+/// submitting process died before the node acceptance became durable.
+pub(crate) const REMOTE_DISPATCH_FAILED: &str = "remote_dispatch_failed";
+pub(crate) const REMOTE_DISPATCH_INTERRUPTED: &str = "remote_dispatch_interrupted";
+
+/// Dispatch a remote mission job with the run lease taken FIRST.
+///
+/// The lease (`owner remote-job:<job_id>`, state `waiting_remote_job`) is the
+/// durable ownership fence every local execution path checks:
+/// `begin_mission_run` refuses a second non-terminal run, so a targeted
+/// message, the FLEET-001 scheduler or a resume cannot start a local harness
+/// while placement, proxy-key minting and the node submit are awaiting.
+/// Taking it after the submit (the pre-620cdb74 order) left that whole window
+/// open. Every failure below settles the lease so a failed mission never
+/// keeps a phantom run; the ledger handle keeps owning a maybe-accepted job.
 async fn dispatch_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
     mission: &Mission,
     remote_node_id: &str,
-    remote_command: &str,
+    plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
     let node = crate::remote_node::placement_for_selected_node(
         &state.config.remote_nodes,
@@ -7891,6 +13251,109 @@ async fn dispatch_remote_job(
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "remote node placement unexpectedly returned local".to_string())?
     .clone();
+    let job_id = Uuid::new_v4();
+    match ensure_remote_job_lease(control.mission_store.as_ref(), mission.id, job_id, &node.id)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let owner = control
+                .mission_store
+                .get_active_mission_run(mission.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|run| run.owner_actor_id);
+            return Err(format!(
+                "remote job run lease for mission {} could not be taken before dispatch (execution already owned by {}); refusing to start a second execution",
+                mission.id,
+                owner.as_deref().unwrap_or("an unavailable mission state")
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "remote job run lease could not be acquired before dispatch: {error}"
+            ));
+        }
+    }
+    let dispatched = submit_leased_remote_job(state, control, mission, node, job_id, plan).await;
+    if dispatched.is_err() {
+        if let Err(error) = finish_remote_job_lease(
+            control.mission_store.as_ref(),
+            mission.id,
+            job_id,
+            REMOTE_DISPATCH_FAILED,
+        )
+        .await
+        {
+            tracing::warn!(
+                mission_id = %mission.id,
+                %job_id,
+                %error,
+                "remote job run lease could not be settled after a failed dispatch"
+            );
+        }
+    }
+    dispatched
+}
+
+/// The submit half of `dispatch_remote_job`; `job_id` already owns the
+/// mission's run lease.
+async fn submit_leased_remote_job(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+    node: crate::remote_node::RemoteNodeConfig,
+    job_id: Uuid,
+    plan: &RemoteHarnessPlan,
+) -> Result<Mission, String> {
+    let mut resolved_plan = plan.clone();
+    let prompt = match &mut resolved_plan {
+        RemoteHarnessPlan::Codex { prompt, .. }
+        | RemoteHarnessPlan::Grok { prompt, .. }
+        | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
+        RemoteHarnessPlan::Raw { .. } => None,
+    };
+    if let Some(prompt) = prompt {
+        if super::context_execution::has_mentions(prompt) {
+            let project = mission
+                .project
+                .project
+                .as_deref()
+                .ok_or("Context references require a project")?;
+            *prompt = super::context_execution::remote(state, project, &node, prompt).await?;
+        }
+    }
+    let plan = &resolved_plan;
+    let workspace_prefix =
+        if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
+            let root = t.destination_root.ok_or("Transferred workspace missing")?;
+            format!("cd -- {} || exit 78; ", shell_single_quote(&root))
+        } else {
+            fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
+        };
+    if let RemoteHarnessPlan::Grok {
+        new_session_id: Some(session_id),
+        resume_session_id: None,
+        ..
+    } = plan
+    {
+        let run = control
+            .mission_store
+            .get_active_mission_run(mission.id)
+            .await?
+            .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+            .ok_or("native Grok session allocation lost its run lease")?;
+        let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+        if !control
+            .mission_store
+            .update_mission_session_id(mission.id, session_id, "grok", Some(&fence))
+            .await?
+        {
+            return Err("native Grok session allocation rejected by run generation fence".into());
+        }
+    }
     let shared_token = std::env::var(&node.token_env)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -7900,7 +13363,6 @@ async fn dispatch_remote_job(
                 node.id, node.token_env
             )
         })?;
-    let job_id = Uuid::new_v4();
     let claims = crate::remote_node::LeaseClaims {
         mission_id: mission.id,
         node_id: node.id.clone(),
@@ -7910,15 +13372,53 @@ async fn dispatch_remote_job(
     };
     let lease_token = crate::remote_node::create_lease_token(&claims, &shared_token)
         .map_err(|e| e.to_string())?;
+    // A harness launch talks back to this core through the model proxy with
+    // a key minted for this mission only; the key travels in the job env,
+    // never in the logged command line. Raw commands carry their own auth.
+    // Minted last, after every other fallible pre-submit step, so each path
+    // below that can fail after this point retires it explicitly.
+    let (execution, proxy_key_id) = if plan.uses_core_proxy() {
+        let api_base_url = super::mission_runner::public_api_base_url_from_env()
+            .ok_or_else(|| {
+                "SANDBOXED_PUBLIC_URL is not configured; a remote harness launch needs a core URL the node can reach".to_string()
+            })?;
+        let key = state
+            .proxy_api_keys
+            .create(remote_launch_key_name(mission.id))
+            .await
+            .map_err(|error| format!("remote launch proxy key could not be minted: {error}"))?;
+        (
+            remote_execution_for_plan(plan, &api_base_url, &key.key),
+            Some(key.id),
+        )
+    } else {
+        (remote_execution_for_plan(plan, "", ""), None)
+    };
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
-            command: remote_command.to_string(),
+            command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,
-            env: None,
+            env: execution.env.clone(),
+            managed_auth: execution.managed_auth.clone(),
         },
+    };
+    let proxy_keys = Arc::clone(&state.proxy_api_keys);
+    // Key retirement: on every early failure below and when this process's
+    // observer finishes. A re-attached observer after restart retires by
+    // name (`retire_remote_launch_keys`), and the reconciler's first pass
+    // sweeps keys whose mission holds no ledger handle, so nothing relies on
+    // the periodic `cleanup_keys`.
+    let retire_proxy_key = {
+        let proxy_keys = Arc::clone(&proxy_keys);
+        let mission_id = mission.id;
+        move || async move {
+            if proxy_key_id.is_some() {
+                retire_remote_launch_keys(&proxy_keys, mission_id).await;
+            }
+        }
     };
 
     let client = crate::remote_node::RemoteNodeClient::default();
@@ -7927,7 +13427,7 @@ async fn dispatch_remote_job(
     // Record the generated id before the POST. If the process dies after the
     // node accepts but before the HTTP result is observed, restart recovery
     // still has enough information to cancel the maybe-accepted job.
-    crate::remote_node::job_ledger::record(
+    let tentative_recorded = crate::remote_node::job_ledger::record(
         &ledger_dir,
         crate::remote_node::job_ledger::JobHandle {
             mission_id: mission.id,
@@ -7944,8 +13444,13 @@ async fn dispatch_remote_job(
             wake_on_terminal: false,
         },
     )
-    .await
-    .map_err(|error| format!("remote job recovery handle could not be prepared: {error}"))?;
+    .await;
+    if let Err(error) = tentative_recorded {
+        retire_proxy_key().await;
+        return Err(format!(
+            "remote job recovery handle could not be prepared: {error}"
+        ));
+    }
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
         Err(crate::remote_node::RemoteNodeError::Request(message)) => {
@@ -7962,6 +13467,7 @@ async fn dispatch_remote_job(
                 submit_started_at,
                 ledger_dir,
             );
+            retire_proxy_key().await;
             return Err(format!(
                 "remote job submit outcome is ambiguous; cancellation is being reconciled: {message}"
             ));
@@ -7970,6 +13476,7 @@ async fn dispatch_remote_job(
             // A node HTTP rejection is definitive: the handler did not queue
             // the job, so this pre-submit handle can be discarded.
             crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+            retire_proxy_key().await;
             return Err(error.to_string());
         }
     };
@@ -8008,10 +13515,37 @@ async fn dispatch_remote_job(
             submit_started_at,
             state.config.working_dir.clone(),
         );
+        retire_proxy_key().await;
         return Err(format!(
             "remote job accepted but recovery handle could not be persisted: {err}"
         ));
     }
+
+    // Durable execution truth BEFORE the presentation status flips to Active.
+    // A raw remote mission has no local runner, so this lease (refreshed by
+    // the poll loop) and the ledger handle above are what the stuck-mission
+    // watchdog and startup recovery consult instead of the runner list. The
+    // ledger handle alone already fences liveness, so a lease failure is
+    // logged rather than treated as a dispatch failure.
+    let lease = match ensure_remote_job_lease(
+        control.mission_store.as_ref(),
+        mission.id,
+        job_id,
+        &node.id,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            tracing::warn!(
+                mission_id = %mission.id,
+                job_id = %job_id,
+                %error,
+                "remote job run lease could not be acquired; the ledger handle remains the liveness proof"
+            );
+            None
+        }
+    };
 
     if let Err(err) = control
         .mission_store
@@ -8036,6 +13570,7 @@ async fn dispatch_remote_job(
         let started_at = chrono::Utc::now();
         tokio::spawn(async move {
             poll_remote_job(
+                &ledger_dir,
                 poll_owner,
                 fleet,
                 client,
@@ -8046,16 +13581,18 @@ async fn dispatch_remote_job(
                 started_at,
             )
             .await;
-            crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+            retire_proxy_key().await;
         });
         return Err(err);
     }
     let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution: lease,
         mission_id: mission.id,
         status: MissionStatus::Active,
         summary: Some(format!(
-            "Dispatched job {} to remote node '{}'",
-            job_id, node.id
+            "Dispatched job {} to remote node '{}' ({}; node state: {})",
+            job_id, node.id, execution.label, accepted.state
         )),
     });
 
@@ -8083,6 +13620,7 @@ async fn dispatch_remote_job(
         move || {
             tokio::spawn(async move {
                 poll_remote_job(
+                    &ledger_dir,
                     poll_owner,
                     fleet,
                     client,
@@ -8093,9 +13631,7 @@ async fn dispatch_remote_job(
                     started_at,
                 )
                 .await;
-                // The poll loop only returns once the mission is finalized (or the
-                // job was cancelled/lost); the handle is no longer needed.
-                crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+                retire_proxy_key().await;
             });
         },
     )
@@ -8120,10 +13656,10 @@ async fn read_dispatched_mission_after_observer_start(
         .ok_or_else(|| format!("Mission {mission_id} disappeared after remote dispatch"))
 }
 
-/// Retry cancellation for a remote job that must not outlive its failed
-/// dispatch. The tentative ledger entry survives a process restart; this
-/// in-process observer removes it only after terminal state or authoritative
-/// 404, so a transient cancel failure cannot leak node capacity.
+/// Retry cancellation without treating a missing job record or node restart
+/// as terminal proof. An accepted request may outlive the observer or the
+/// node's current job database; retain its fence until execution is confirmed
+/// terminal and durable cleanup succeeds.
 fn spawn_untracked_remote_job_cancellation(
     fleet: Arc<crate::remote_node::FleetMonitor>,
     node: crate::remote_node::RemoteNodeConfig,
@@ -8133,64 +13669,100 @@ fn spawn_untracked_remote_job_cancellation(
     started_at: chrono::DateTime<chrono::Utc>,
     ledger_dir: std::path::PathBuf,
 ) {
-    tokio::spawn(async move {
-        let client = crate::remote_node::RemoteNodeClient::default();
-        loop {
+    tokio::spawn(observe_untracked_remote_job_cancellation(
+        fleet,
+        node,
+        shared_token,
+        mission_id,
+        job_id,
+        started_at,
+        ledger_dir,
+    ));
+}
+
+async fn observe_untracked_remote_job_cancellation(
+    fleet: Arc<crate::remote_node::FleetMonitor>,
+    node: crate::remote_node::RemoteNodeConfig,
+    shared_token: String,
+    mission_id: Uuid,
+    job_id: Uuid,
+    started_at: chrono::DateTime<chrono::Utc>,
+    ledger_dir: std::path::PathBuf,
+) {
+    let client = crate::remote_node::RemoteNodeClient::default();
+    let mut terminal: Option<crate::remote_node::NodeJobStatus> = None;
+    let mut consecutive_missing: u8 = 0;
+    loop {
+        if terminal.is_none() {
             if let Err(error) = client.cancel_job(&node, &shared_token, job_id).await {
-                if error.is_not_found() {
-                    crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
-                    return;
-                }
-                tracing::warn!(
-                    mission_id = %mission_id,
-                    node_id = %node.id,
-                    job_id = %job_id,
-                    ?error,
-                    "untracked remote job cancellation failed; retrying"
-                );
+                tracing::warn!(%mission_id, %job_id, node_id = %node.id, ?error,
+                    "untracked remote job cancellation failed; retaining fence and retrying");
             }
             match client.get_job(&node, &shared_token, job_id).await {
-                Ok(status)
-                    if matches!(
-                        status.state.as_str(),
-                        "succeeded" | "failed" | "cancelled" | "lost"
-                    ) =>
-                {
+                Ok(status) if crate::remote_node::job_state_confirms_termination(&status.state) => {
+                    consecutive_missing = 0;
+                    terminal = Some(status);
+                }
+                Err(error) if error.is_not_found() => {
+                    consecutive_missing = consecutive_missing.saturating_add(1);
+                    if consecutive_missing >= 10 {
+                        terminal = Some(crate::remote_node::missing_job_cancelled(
+                            mission_id, job_id,
+                        ));
+                    }
+                }
+                Ok(_) => consecutive_missing = 0,
+                Err(_) => {}
+            }
+        }
+        if let Some(status) = &terminal {
+            match crate::remote_node::job_ledger::finalize_with_artifacts(
+                &ledger_dir,
+                job_id,
+                &status.state,
+                status.exit_code,
+                status.artifacts.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
                     fleet.record_outcome(crate::remote_node::DispatchOutcome {
                         mission_id,
-                        node_id: node.id.clone(),
+                        node_id: node.id,
                         job_id: Some(job_id),
-                        state: status.state,
+                        state: status.state.clone(),
                         exit_code: status.exit_code,
-                        error: status.error,
+                        error: status.error.clone(),
                         started_at,
                         finished_at: Some(chrono::Utc::now()),
                     });
-                    crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
                     return;
                 }
-                Err(error) if error.is_not_found() => {
-                    crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
-                    return;
+                Err(error) => {
+                    tracing::warn!(%job_id, ?error, "remote cancellation cleanup failed; retaining terminal proof and retrying")
                 }
-                Ok(_) | Err(_) => {}
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
-    });
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 }
 
-/// Startup reconciliation for async remote jobs that were in flight when the
-/// previous process exited. For each persisted handle: if its mission is
-/// still Active in some live session's store, re-attach a poll loop (the
-/// node job is durable — jobs.db — so its result is recoverable); otherwise
-/// drop the stale handle. Handles whose node is no longer configured fail
-/// their mission explicitly rather than leaving it Active forever.
+/// Reattach observation/cancellation for persisted remote jobs after restart.
+/// Missing owners, configuration, credentials and stale observations are not
+/// terminal evidence: retain the durable ownership fence and retry recovery.
 pub fn spawn_remote_job_reconciler(state: Arc<AppState>) {
+    // Captured synchronously, before any request can be served: only proxy
+    // keys minted before this instant are boot leftovers. A launch minting
+    // its key between the ledger snapshot and the key listing below is a
+    // live launch of THIS process and must keep its key.
+    let boot_cutoff = chrono::Utc::now();
     tokio::spawn(async move {
         // Let control sessions boot before touching their stores.
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         let working_dir = state.config.working_dir.clone();
+        // The leaked-key sweep runs once, after the first SUCCESSFUL ledger
+        // read (an unreadable first pass must not skip it forever).
+        let mut sweep_done = false;
         // Job ids a poll loop was already re-attached for (or that were
         // finalized), so retry passes never double-attach.
         let mut settled: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
@@ -8210,6 +13782,14 @@ pub fn spawn_remote_job_reconciler(state: Arc<AppState>) {
                     continue;
                 }
             };
+            if !sweep_done {
+                // Sweep leaked launch keys once per boot, against the FULL
+                // ledger (every mission with any handle keeps its key), and
+                // before the empty-ledger early return below.
+                retire_orphaned_remote_launch_keys(&state.proxy_api_keys, &handles, boot_cutoff)
+                    .await;
+                sweep_done = true;
+            }
             let pending: Vec<_> = handles
                 .into_iter()
                 .filter(|h| !settled.contains(&h.job_id))
@@ -8251,6 +13831,92 @@ pub fn spawn_remote_job_reconciler(state: Arc<AppState>) {
     });
 }
 
+/// The store that persists `mission_id`, live session first, then an offline
+/// persisted store. `None` when no store knows the mission (yet).
+async fn find_remote_mission_owner(
+    state: &Arc<AppState>,
+    mission_id: Uuid,
+) -> Option<(RemoteMissionOwner, MissionStatus)> {
+    for session in state.control.all_sessions().await {
+        if let Ok(Some(mission)) = session.mission_store.get_mission(mission_id).await {
+            return Some((RemoteMissionOwner::live(&session), mission.status));
+        }
+    }
+    match super::mission_workspace_gc::persisted_mission_store(state.as_ref(), mission_id).await {
+        Ok(Some((store, status))) => Some((RemoteMissionOwner::offline(store), status)),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(
+                %mission_id,
+                ?err,
+                "remote job persisted owner lookup failed; will retry"
+            );
+            None
+        }
+    }
+}
+
+/// Settle a raw remote launch whose submitting process died between taking
+/// the run lease and persisting node acceptance. Ownership stays with the
+/// tentative ledger handle (its cancellation observer) — only the mission's
+/// own lease and presentation are closed, and only when this job owns them
+/// or no one does. A lease held by anyone else is left untouched.
+async fn settle_interrupted_remote_launch(state: &Arc<AppState>, mission_id: Uuid, job_id: Uuid) {
+    let Some((owner, status)) = find_remote_mission_owner(state, mission_id).await else {
+        tracing::info!(%mission_id, %job_id, "interrupted remote launch kept: owning mission not found; will retry");
+        return;
+    };
+    let store = owner.mission_store.as_ref();
+    match store.get_active_mission_run(mission_id).await {
+        Ok(Some(run)) if run.owner_actor_id == remote_job_lease_owner(job_id) => {
+            if let Err(error) =
+                finish_remote_job_lease(store, mission_id, job_id, REMOTE_DISPATCH_INTERRUPTED)
+                    .await
+            {
+                tracing::warn!(%mission_id, %job_id, %error, "interrupted remote launch lease could not be settled; will retry");
+                return;
+            }
+        }
+        Ok(Some(run)) => {
+            tracing::info!(%mission_id, %job_id, owner = %run.owner_actor_id, "interrupted remote launch: mission run owned elsewhere; leaving it");
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%mission_id, %job_id, %error, "interrupted remote launch: run ownership unreadable; will retry");
+            return;
+        }
+    }
+    if !matches!(status, MissionStatus::Pending | MissionStatus::Active) {
+        return;
+    }
+    let _ = store.set_deferred_goal(mission_id, None).await;
+    match store
+        .update_mission_status_with_reason(
+            mission_id,
+            MissionStatus::Failed,
+            Some(REMOTE_DISPATCH_INTERRUPTED),
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::warn!(%mission_id, %job_id, "remote launch interrupted before node acceptance was durable; mission failed, job cancellation reconciling");
+            owner.send(AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: None,
+                mission_id,
+                status: MissionStatus::Failed,
+                summary: Some(format!(
+                    "Remote launch interrupted before node acceptance of job {job_id} was durable; cancellation is being reconciled"
+                )),
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%mission_id, %job_id, %error, "interrupted remote launch status could not be persisted; will retry");
+        }
+    }
+}
+
 async fn reconcile_pending_handles(
     state: &Arc<AppState>,
     working_dir: &std::path::Path,
@@ -8277,6 +13943,19 @@ async fn reconcile_pending_handles(
                             handle.started_at,
                             working_dir.to_path_buf(),
                         );
+                        // A raw remote launch (no validation identity) whose
+                        // submit never became durable: its mission holds the
+                        // pre-submit run lease and no deferred goal, so no
+                        // local runner can ever pick it up — but nothing
+                        // else would settle it either.
+                        if handle.identity.is_none() {
+                            settle_interrupted_remote_launch(
+                                state,
+                                handle.mission_id,
+                                handle.job_id,
+                            )
+                            .await;
+                        }
                     }
                     _ => {
                         tracing::warn!(
@@ -8295,6 +13974,7 @@ async fn reconcile_pending_handles(
                     if let Err(error) = crate::remote_node::job_ledger::require_terminal_wake(
                         working_dir,
                         handle.job_id,
+                        handle.mission_id,
                     )
                     .await
                     {
@@ -8345,41 +14025,7 @@ async fn reconcile_pending_handles(
             // Reattach even when the owner has not booted a control session:
             // durable node work must still be observed/cancelled while an
             // OAuth user remains offline after restart.
-            let mut owning: Option<(RemoteMissionOwner, MissionStatus)> = None;
-            for session in state.control.all_sessions().await {
-                if let Ok(Some(mission)) =
-                    session.mission_store.get_mission(handle.mission_id).await
-                {
-                    owning = Some((RemoteMissionOwner::live(&session), mission.status));
-                    break;
-                }
-            }
-            if owning.is_none() {
-                match super::mission_workspace_gc::persisted_mission_store(
-                    state.as_ref(),
-                    handle.mission_id,
-                )
-                .await
-                {
-                    Ok(Some((store, status))) => {
-                        tracing::info!(
-                            mission_id = %handle.mission_id,
-                            job_id = %handle.job_id,
-                            "re-attaching remote job for offline persisted owner"
-                        );
-                        owning = Some((RemoteMissionOwner::offline(store), status));
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(
-                            mission_id = %handle.mission_id,
-                            job_id = %handle.job_id,
-                            ?err,
-                            "remote job persisted owner lookup failed; will retry"
-                        );
-                    }
-                }
-            }
+            let owning = find_remote_mission_owner(state, handle.mission_id).await;
             let Some((owner, mission_status)) = owning else {
                 tracing::info!(
                     mission_id = %handle.mission_id,
@@ -8404,8 +14050,10 @@ async fn reconcile_pending_handles(
                     settled.insert(handle.job_id);
                     let fleet = Arc::clone(&state.fleet);
                     let ledger_dir = working_dir.to_path_buf();
+                    let proxy_keys = Arc::clone(&state.proxy_api_keys);
                     tokio::spawn(async move {
                         poll_remote_job(
+                            &ledger_dir,
                             owner,
                             fleet,
                             crate::remote_node::RemoteNodeClient::default(),
@@ -8416,38 +14064,20 @@ async fn reconcile_pending_handles(
                             handle.started_at,
                         )
                         .await;
-                        crate::remote_node::job_ledger::remove(&ledger_dir, handle.job_id).await;
+                        retire_remote_launch_keys(&proxy_keys, handle.mission_id).await;
                     });
                 }
                 _ => {
-                    if !should_finalize_remote_job(Some(mission_status)) {
-                        tracing::warn!(
-                            mission_id = %handle.mission_id,
-                            job_id = %handle.job_id,
-                            node = %handle.node_id,
-                            %mission_status,
-                            "inactive remote job handle retained: cancellation node unavailable"
-                        );
-                        continue;
-                    }
                     tracing::warn!(
                         mission_id = %handle.mission_id,
+                        job_id = %handle.job_id,
                         node = %handle.node_id,
-                        "remote job's node no longer configured; failing mission"
+                        %mission_status,
+                        "remote job handle retained: recovery node config/token unavailable"
                     );
-                    let _ = owner
-                        .mission_store
-                        .update_mission_status(handle.mission_id, MissionStatus::Failed)
-                        .await;
-                    owner.send(AgentEvent::MissionStatusChanged {
-                        mission_id: handle.mission_id,
-                        status: MissionStatus::Failed,
-                        summary: Some(
-                            "remote_node_lost: node unconfigured after restart".to_string(),
-                        ),
-                    });
-                    crate::remote_node::job_ledger::remove(working_dir, handle.job_id).await;
-                    settled.insert(handle.job_id);
+                    // Neither configuration loss nor the mission's presentation
+                    // status proves that the accepted node process has stopped.
+                    // Leave this job pending so recovery retries observation.
                 }
             }
         }
@@ -8469,17 +14099,19 @@ async fn poll_recovered_remote_build(
 ) {
     let working_dir = state.config.working_dir.clone();
     let client = crate::remote_node::RemoteNodeClient::default();
+    let mut terminal: Option<crate::remote_node::NodeJobStatus> = None;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        match client.get_job(&node, &shared_token, job_id).await {
-            Ok(status)
-                if matches!(
-                    status.state.as_str(),
-                    "succeeded" | "failed" | "cancelled" | "lost"
-                ) =>
-            {
+        let observation = match &terminal {
+            Some(status) => Ok(status.clone()),
+            None => client.get_job(&node, &shared_token, job_id).await,
+        };
+        match observation {
+            Ok(status) if crate::remote_node::job_state_confirms_termination(&status.state) => {
+                terminal = Some(status.clone());
                 let terminal_state = status.state.clone();
                 let terminal_exit_code = status.exit_code;
+                let terminal_artifacts = status.artifacts.clone();
                 state
                     .fleet
                     .record_outcome(crate::remote_node::DispatchOutcome {
@@ -8492,11 +14124,12 @@ async fn poll_recovered_remote_build(
                         started_at,
                         finished_at: Some(chrono::Utc::now()),
                     });
-                match crate::remote_node::job_ledger::finalize(
+                match crate::remote_node::job_ledger::finalize_with_artifacts(
                     &working_dir,
                     job_id,
                     &terminal_state,
                     terminal_exit_code,
+                    terminal_artifacts,
                 )
                 .await
                 {
@@ -8537,6 +14170,7 @@ async fn poll_recovered_remote_build(
 /// the same path as the synchronous dispatch.
 #[allow(clippy::too_many_arguments)]
 async fn poll_remote_job(
+    ledger_dir: &std::path::Path,
     owner: RemoteMissionOwner,
     fleet: Arc<crate::remote_node::FleetMonitor>,
     client: crate::remote_node::RemoteNodeClient,
@@ -8560,10 +14194,32 @@ async fn poll_remote_job(
             finished_at: terminal.then(chrono::Utc::now),
         }
     };
+    let mut grok =
+        remote_grok::NativeGrokObserver::attach(&owner, &node.id, mission_id, job_id).await;
     let mut last_state = "queued".to_string();
     let mut failures = 0u32;
+    // Once received, terminal proof survives a subsequent observation outage
+    // while mission/ledger persistence is retried.
+    let mut terminal_observation: Option<crate::remote_node::NodeJobStatus> = None;
+    // The preserved-status terminal note is durable once; retries of the
+    // ledger cleanup must not duplicate it.
+    let mut preserved_terminal_noted = false;
+    // Stream only incremental logs between the existing status/lease checks.
+    // A delayed network request must not cause a burst of catch-up polls.
+    let mut log_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    log_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_status_check: Option<std::time::Instant> = None;
     loop {
-        tokio::time::sleep(POLL_INTERVAL).await;
+        log_tick.tick().await;
+        if last_status_check.is_some_and(|at| at.elapsed() < POLL_INTERVAL) {
+            if failures == 0 && terminal_observation.is_none() {
+                if let Some(observer) = grok.as_mut() {
+                    observer.pump(&client, &node, &shared_token).await;
+                }
+            }
+            continue;
+        }
+        last_status_check = Some(std::time::Instant::now());
 
         // Honor external mission cancellation when trivially observable: if
         // an operator moved the mission out of Active (cancel/interrupt/pause),
@@ -8593,7 +14249,11 @@ async fn poll_remote_job(
             }
         }
 
-        match client.get_job(&node, &shared_token, job_id).await {
+        let observation = match &terminal_observation {
+            Some(status) => Ok(status.clone()),
+            None => client.get_job(&node, &shared_token, job_id).await,
+        };
+        match observation {
             Err(err) => {
                 failures += 1;
                 if failures >= MAX_CONSECUTIVE_FAILURES {
@@ -8618,28 +14278,43 @@ async fn poll_remote_job(
                     let _ = finalize_remote_mission(
                         &owner,
                         mission_id,
+                        Some(job_id),
                         &node.id,
                         false,
                         content,
                         "remote_node_lost",
+                        grok.is_some(),
                     )
                     .await;
-                    fleet.record_outcome(outcome("lost", None, Some(err.to_string()), true));
+                    fleet.record_outcome(outcome(
+                        "unreachable",
+                        None,
+                        Some(err.to_string()),
+                        false,
+                    ));
                     // Finalization moves the mission out of Active. Keep the
                     // durable handle and continue: the next iteration enters
-                    // the cancellation-aware path, and wrappers only remove
-                    // the ledger entry after a terminal node response.
+                    // the cancellation-aware path. This loop retires the ledger
+                    // entry only after confirmed termination and durable cleanup.
                     failures = 0;
                     continue;
                 }
             }
             Ok(status) => {
                 failures = 0;
-                let terminal = matches!(
-                    status.state.as_str(),
-                    "succeeded" | "failed" | "cancelled" | "lost"
-                );
+                let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
+                if let Some(observer) = grok.as_mut() {
+                    observer.pump(&client, &node, &shared_token).await;
+                    observer
+                        .check_startup(&status, &client, &node, &shared_token)
+                        .await;
+                    if terminal && !observer.caught_up() {
+                        terminal_observation = Some(status.clone());
+                        continue;
+                    }
+                }
                 if terminal {
+                    terminal_observation = Some(status.clone());
                     let success = status.state == "succeeded";
                     let content = format!(
                         "Remote node '{}' job {} finished with state '{}' (exit {:?}){}\n\nlog tail:\n{}",
@@ -8654,16 +14329,29 @@ async fn poll_remote_job(
                             .unwrap_or_default(),
                         status.log_tail.as_deref().unwrap_or("(empty)"),
                     );
+                    let (success, content, status_reason) = if let Some(observer) = grok.as_mut() {
+                        let verdict = observer.verdict(&status, &node.id).await;
+                        (verdict.success, verdict.content, verdict.status_reason)
+                    } else {
+                        (success, content, "remote_node_job")
+                    };
                     if should_finalize_remote_job(inactive_status) {
-                        let _ = finalize_remote_mission(
+                        if let Err(error) = finalize_remote_mission(
                             &owner,
                             mission_id,
+                            Some(job_id),
                             &node.id,
                             success,
                             content,
-                            "remote_node_job",
+                            status_reason,
+                            grok.is_some(),
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::warn!(%mission_id, %job_id, %error,
+                                "remote terminal mission persistence failed; retaining ownership and retrying");
+                            continue;
+                        }
                     } else {
                         tracing::info!(
                             mission_id = %mission_id,
@@ -8672,6 +14360,77 @@ async fn poll_remote_job(
                             state = %status.state,
                             "remote job reached a terminal state after operator interruption; preserving mission status"
                         );
+                        // The status is preserved, but the outcome must still
+                        // be visible in the mission's durable history; the
+                        // incident mission had no record at all of what
+                        // happened to its node job. Log once, then settle
+                        // the observer's lease with the node's verdict.
+                        if !preserved_terminal_noted {
+                            let note = AgentEvent::AssistantMessage {
+                                id: Uuid::new_v4(),
+                                content: format!(
+                                    "Remote node '{}' job {} reached state '{}' (exit {:?}) after the mission left Active ({}); the mission status is preserved.{}\n\nlog tail:\n{}",
+                                    node.id,
+                                    job_id,
+                                    status.state,
+                                    status.exit_code,
+                                    inactive_status
+                                        .map(|status| status.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    status
+                                        .error
+                                        .as_deref()
+                                        .map(|e| format!("\nerror: {e}"))
+                                        .unwrap_or_default(),
+                                    status.log_tail.as_deref().unwrap_or("(empty)"),
+                                ),
+                                success: true,
+                                cost_cents: 0,
+                                cost_source: crate::agents::CostSource::Unknown,
+                                usage: None,
+                                model: None,
+                                model_normalized: None,
+                                mission_id: Some(mission_id),
+                                shared_files: None,
+                                resumable: false,
+                                completion_evidence: None,
+                            };
+                            if let Err(error) =
+                                owner.mission_store.log_event(mission_id, &note).await
+                            {
+                                tracing::warn!(%mission_id, %job_id, %error,
+                                    "remote terminal note persistence failed; retaining ownership and retrying");
+                                continue;
+                            }
+                            owner.send(note);
+                            preserved_terminal_noted = true;
+                        }
+                        if let Err(error) = finish_remote_job_lease(
+                            owner.mission_store.as_ref(),
+                            mission_id,
+                            job_id,
+                            &format!("remote_job_{}", status.state),
+                        )
+                        .await
+                        {
+                            tracing::warn!(%mission_id, %job_id, %error,
+                                "remote job run lease could not be finished after preserved interruption");
+                        }
+                    }
+                    if let Err(error) = crate::remote_node::job_ledger::finalize_with_artifacts(
+                        ledger_dir,
+                        job_id,
+                        &status.state,
+                        status.exit_code,
+                        status.artifacts.clone(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(%mission_id, %job_id, %error,
+                            "remote terminal cleanup failed; retaining ownership and retrying");
+                        #[cfg(test)]
+                        dispatch_admission_tests::notify_wait(job_id, "remote_cleanup_failed");
+                        continue;
                     }
                     fleet.record_outcome(outcome(
                         &status.state,
@@ -8681,27 +14440,73 @@ async fn poll_remote_job(
                     ));
                     return;
                 }
+                // A successful non-terminal observation is the liveness proof
+                // the watchdog and startup recovery consult: refresh both the
+                // durable ledger handle and the mission's run lease. Either
+                // one being fresh is enough, so a single failed write cannot
+                // orphan a live job.
+                if let Err(error) =
+                    crate::remote_node::job_ledger::heartbeat(ledger_dir, job_id).await
+                {
+                    tracing::warn!(%mission_id, %job_id, %error,
+                        "remote job ledger heartbeat failed; run lease heartbeat still proves liveness");
+                }
+                if inactive_status.is_none() {
+                    if let Err(error) = ensure_remote_job_lease(
+                        owner.mission_store.as_ref(),
+                        mission_id,
+                        job_id,
+                        &node.id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%mission_id, %job_id, %error,
+                            "remote job run lease heartbeat failed; ledger heartbeat still proves liveness");
+                    }
+                }
                 if status.state != last_state {
-                    // Sparse progress note: only on job state changes.
-                    let event = AgentEvent::AssistantMessage {
-                        id: Uuid::new_v4(),
-                        content: format!(
-                            "Remote job {} on node '{}' is now {}",
-                            job_id, node.id, status.state
-                        ),
-                        success: true,
-                        cost_cents: 0,
-                        cost_source: crate::agents::CostSource::Unknown,
-                        usage: None,
-                        model: None,
-                        model_normalized: None,
-                        mission_id: Some(mission_id),
-                        shared_files: None,
-                        resumable: false,
-                        completion_evidence: None,
-                    };
-                    let _ = owner.mission_store.log_event(mission_id, &event).await;
-                    owner.send(event);
+                    if grok.is_some() {
+                        tracing::debug!(%mission_id, %job_id, node = %node.id,
+                            state = %status.state, "native remote job state changed");
+                        owner
+                            .publish_native(AgentEvent::MissionStatusChanged {
+                                completion: None,
+                                execution: owner
+                                    .mission_store
+                                    .get_latest_mission_run(mission_id)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                mission_id,
+                                status: inactive_status.unwrap_or(MissionStatus::Active),
+                                summary: Some(format!(
+                                    "Remote node '{}' is {}",
+                                    node.id, status.state
+                                )),
+                            })
+                            .await;
+                    } else {
+                        // Sparse progress note: only on job state changes.
+                        let event = AgentEvent::AssistantMessage {
+                            id: Uuid::new_v4(),
+                            content: format!(
+                                "Remote job {} on node '{}' is now {}",
+                                job_id, node.id, status.state
+                            ),
+                            success: true,
+                            cost_cents: 0,
+                            cost_source: crate::agents::CostSource::Unknown,
+                            usage: None,
+                            model: None,
+                            model_normalized: None,
+                            mission_id: Some(mission_id),
+                            shared_files: None,
+                            resumable: false,
+                            completion_evidence: None,
+                        };
+                        let _ = owner.mission_store.log_event(mission_id, &event).await;
+                        owner.send(event);
+                    }
                     fleet.record_outcome(outcome(&status.state, None, None, false));
                     last_state = status.state.clone();
                 }
@@ -8735,7 +14540,95 @@ pub struct UpdateMissionProjectRequest {
     pub next_check_at: Option<Option<String>>,
 }
 
+/// Whether this patch could change the mission's PR-writer status.
+///
+/// `becomes_writer` is derived entirely from `github_pr`, `writer`, `intent`
+/// and `tags`. A patch carrying none of them leaves writer status exactly as it
+/// was, so there is no transition to arbitrate — and re-running the lease check
+/// anyway can only reject an edit over a state the mission was already in.
+///
+/// That is not hypothetical: retagging a mission's project returned 409 forever
+/// whenever some *other* mission held the writer lease for the PR this one
+/// happens to reference, which made 32 missions permanently unmaintainable.
+fn patch_can_change_writer_status(req: &UpdateMissionProjectRequest) -> bool {
+    req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some() || req.tags.is_some()
+}
+
 /// Set or update project tagging metadata for a mission.
+#[derive(Debug, Deserialize)]
+pub struct UpdateMissionOriginRequest {
+    /// Creating system, e.g. "hermes".
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Conversation the mission belongs to.
+    #[serde(default)]
+    pub origin_session_id: Option<String>,
+}
+
+/// Attach an existing mission to a conversation.
+///
+/// Origin was write-once at creation, so every mission created before the
+/// column existed — or by a caller that did not declare one — was
+/// permanently unattributable. This is what makes that history recoverable.
+pub async fn update_mission_origin(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateMissionOriginRequest>,
+) -> Result<Json<Mission>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let origin = req
+        .origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("hermes");
+    let session = req
+        .origin_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(session) = session {
+        // Same shape the assistant MCP validates, so a value that would be
+        // rejected at creation cannot be smuggled in through the patch.
+        if session.len() > 128
+            || !session
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "origin_session_id must be 1-128 chars of [A-Za-z0-9._:-]".to_string(),
+            ));
+        }
+    }
+    // Existence first: the memory and file stores answer a missing mission
+    // with a plain Err, which `internal_error` would surface as a 500 — a
+    // caller backfilling origins in bulk needs "this one is gone" to read as
+    // 404, not as a server fault it should retry.
+    if control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, format!("mission {id} not found")));
+    }
+    control
+        .mission_store
+        .set_mission_origin(id, origin, session)
+        .await
+        .map_err(internal_error)?;
+    let mission = control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::NOT_FOUND, format!("mission {id} not found")))?;
+    Ok(Json(mission))
+}
+
 pub async fn update_mission_project(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -8743,12 +14636,48 @@ pub async fn update_mission_project(
     Json(req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    let (respond, result) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::UpdateProject {
+            mission_id: id,
+            user,
+            request: req,
+            respond,
+        })
+        .await
+        .map_err(session_unavailable)?;
+    #[cfg(test)]
+    dispatch_admission_tests::notify_wait(id, "project");
+    result.await.map_err(recv_failed)?.map(Json)
+}
+
+async fn update_mission_project_locked(
+    actor_busy: bool,
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateMissionProjectRequest>,
+) -> Result<Json<Mission>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    dispatch_admission::recover_dispatch(&state, &control.mission_store, id)
+        .await
+        .map_err(|error| {
+            if error.contains("dispatch_recovery_required") {
+                (StatusCode::CONFLICT, error)
+            } else {
+                internal_error(error)
+            }
+        })?;
     let current = control
         .mission_store
         .get_mission(id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+
+    // Read before the normalize step below consumes `req`'s fields.
+    let could_change_writer_status = patch_can_change_writer_status(&req);
 
     // Normalize: blank string patches clear the field; tags are trimmed.
     let normalize = |patch: Option<Option<String>>| -> Option<Option<String>> {
@@ -8763,7 +14692,19 @@ pub async fn update_mission_project(
             })
         })
     };
-    let project = normalize(req.project);
+    let project = normalize(req.project).map(|inner| {
+        inner.map(|raw| {
+            let canonical = crate::api::projects_overview::canonicalize_project_slug(&raw);
+            if canonical != raw {
+                tracing::info!(
+                    from = %raw,
+                    to = %canonical,
+                    "canonicalized mission project patch via routes.json alias"
+                );
+            }
+            canonical
+        })
+    });
     let track = normalize(req.track);
     let intent = normalize(req.intent);
     let github_pr = normalize(req.github_pr);
@@ -8775,6 +14716,15 @@ pub async fn update_mission_project(
             .filter(|t| !t.is_empty())
             .collect()
     });
+    if tags
+        .as_deref()
+        .is_some_and(contains_internal_disk_reservation_tag)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "disk-reservation-v1 tags are reserved internal admission state".to_string(),
+        ));
+    }
 
     let effective_string = |patch: &Option<Option<String>>, current: &Option<String>| {
         patch.clone().unwrap_or_else(|| current.clone())
@@ -8782,6 +14732,24 @@ pub async fn update_mission_project(
     let effective_github_pr = effective_string(&github_pr, &current.project.github_pr);
     let effective_intent = effective_string(&intent, &current.project.intent);
     let mut effective_tags = tags.clone().unwrap_or_else(|| current.project.tags.clone());
+    // Compatibility: old releases persisted leases in project tags.  A
+    // project edit may not drop or replace one of those records while the
+    // migration reader still reconstructs it.
+    let durable_reservation_tags: Vec<String> = current
+        .project
+        .tags
+        .iter()
+        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .cloned()
+        .collect();
+    for reservation in &durable_reservation_tags {
+        if !effective_tags.iter().any(|tag| tag == reservation) {
+            effective_tags.push(reservation.clone());
+        }
+    }
+    if tags.is_some() {
+        tags = Some(effective_tags.clone());
+    }
     let deferred_goal = control
         .mission_store
         .get_deferred_goal(id)
@@ -8806,19 +14774,20 @@ pub async fn update_mission_project(
             Some(goal),
         )
     });
-    let becomes_writer = effective_github_pr.is_some()
-        && (initial_prompt_requests_writer || deferred_goal_requests_writer);
+    // Writer capability governs tracks even when PR metadata is absent.
+    // Explicit promotion must replace a read-only tag before lease_mode sees it.
+    let becomes_writer = initial_prompt_requests_writer || deferred_goal_requests_writer;
     if becomes_writer {
         effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
         effective_tags.push("pr-writer".to_string());
         tags = Some(effective_tags.clone());
-    } else if effective_github_pr.is_some() && req.writer == Some(false) {
+    } else if req.writer == Some(false) {
         effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
         effective_tags.push("pr-readonly".to_string());
         tags = Some(effective_tags.clone());
     }
 
-    let writer_guard = if becomes_writer {
+    let writer_guard = if becomes_writer && could_change_writer_status {
         Some(
             acquire_durable_pr_writer_lock(&state.control)
                 .await
@@ -8846,22 +14815,131 @@ pub async fn update_mission_project(
         }
     }
 
-    control
+    // Track move: resolve/absorb the new key, take its lease, release the
+    // old ones. A held writer lease is a 409 and the patch is not applied.
+    let effective_project = effective_string(&project, &current.project.project);
+    let effective_track = effective_string(&track, &current.project.track);
+    if effective_project != current.project.project
+        || effective_track != current.project.track
+        || effective_github_pr != current.project.github_pr
+        || effective_tags != current.project.tags
+        || effective_intent != current.project.intent
+    {
+        dispatch_admission::require_quiescent(&state, &control.mission_store, &current, actor_busy)
+            .await
+            .map_err(|error| (StatusCode::CONFLICT, error))?;
+    }
+    let track_changed = track.is_some() || project.is_some() || could_change_writer_status;
+    let mut lease_request = None;
+    let track = if let (true, Some(slug), Some(key)) = (
+        track_changed,
+        effective_project.as_deref(),
+        effective_track.as_deref(),
+    ) {
+        let pr = super::track_leases::pr_number(effective_github_pr.as_deref());
+        let outcome = state
+            .projects
+            .absorb_track(slug, key, current.title.as_deref(), pr)
+            .map_err(internal_error)?;
+        let mode = if becomes_writer {
+            "writer"
+        } else {
+            super::track_leases::lease_mode(
+                req.writer,
+                &effective_tags,
+                effective_intent.as_deref(),
+            )
+        };
+        let request = super::track_leases::lease_request(
+            slug,
+            &outcome.key,
+            &id.to_string(),
+            mode,
+            Some(&format!("project-edit:{}", Uuid::new_v4())),
+        );
+        lease_request = Some(request);
+        Some(Some(outcome.key))
+    } else {
+        track
+    };
+
+    let patch = crate::api::mission_store::MissionProjectPatch {
+        preserve_updated_at: false,
+        title: None,
+        project,
+        track,
+        intent,
+        github_pr,
+        tags: None,
+        tag_patch: tags.as_ref().map(|tags| {
+            crate::api::mission_store::MissionTagPatch::between(&current.project.tags, tags)
+        }),
+        desired_state,
+        next_check_at,
+    };
+    let mut after = current.project.clone();
+    if let Some(value) = &patch.project {
+        after.project = value.clone();
+    }
+    if let Some(value) = &patch.track {
+        after.track = value.clone();
+    }
+    if let Some(value) = &patch.intent {
+        after.intent = value.clone();
+    }
+    if let Some(value) = &patch.github_pr {
+        after.github_pr = value.clone();
+    }
+    if let Some(value) = &patch.desired_state {
+        after.desired_state = value.clone();
+    }
+    if let Some(value) = &patch.next_check_at {
+        after.next_check_at = value.clone();
+    }
+    if let Some(delta) = &patch.tag_patch {
+        delta.apply(&mut after.tags);
+    }
+    if track_changed {
+        // Recovery compares only fields owned by this edit. The metadata write
+        // is atomic; after a crash it either committed or still names `before`.
+        // Unrelated tag additions must not prevent that decision.
+        let journal = serde_json::json!({"phase": "project-edit",
+            "before": {"project": current.project}, "after": {"project": after}});
+        state
+            .projects
+            .begin_dispatch_admission(&id.to_string(), &journal, lease_request.as_ref())
+            .map_err(|error| match (&lease_request, &error) {
+                (Some(request), super::projects_store::LeaseError::Owned { .. }) => (
+                    StatusCode::CONFLICT,
+                    super::track_leases::owned_body(&request.slug, &request.track, &error)
+                        .to_string(),
+                ),
+                _ => internal_error(error.to_string()),
+            })?;
+    }
+    let persisted = control
         .mission_store
-        .update_mission_project(
-            id,
-            crate::api::mission_store::MissionProjectPatch {
-                project,
-                track,
-                intent,
-                github_pr,
-                tags,
-                desired_state,
-                next_check_at,
-            },
-        )
-        .await
-        .map_err(internal_error)?;
+        .update_mission_project(id, patch)
+        .await;
+    if let Err(error) = persisted {
+        if track_changed {
+            // Keep the receipt when compensation itself fails, so sweep or
+            // restart retries the exact provisional claim instead of renewing it.
+            dispatch_admission::finish_project_edit(&state, &control.mission_store, id, false)
+                .await
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
+    #[cfg(test)]
+    dispatch_admission_tests::crash_checkpoint("project_edit_after_metadata");
+    if track_changed {
+        if let Err(error) =
+            dispatch_admission::finish_project_edit(&state, &control.mission_store, id, true).await
+        {
+            tracing::error!(mission_id = %id, %error, "Committed project edit cleanup is journaled for retry");
+        }
+    }
 
     let updated = control
         .mission_store
@@ -8878,7 +14956,7 @@ pub async fn update_mission_settings(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMissionSettingsRequest>,
-) -> Result<Json<Mission>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let current = control
         .mission_store
@@ -8886,6 +14964,7 @@ pub async fn update_mission_settings(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+    let previous_status = current.status;
 
     let backend = req.backend.as_ref().and_then(|backend| {
         let trimmed = backend.trim();
@@ -8910,7 +14989,13 @@ pub async fn update_mission_settings(
         }
     }
 
-    let agent = normalize_string_patch(req.agent);
+    let mut agent = normalize_string_patch(req.agent);
+    // Agent names belong to a harness just as model IDs do. Do not carry an
+    // OpenCode agent such as `build` into native Claude's --agent option.
+    // Explicit agent choices (including custom native agents) remain intact.
+    if backend_changed && agent.is_none() {
+        agent = Some(None);
+    }
     let mut model_override = normalize_string_patch(req.model_override);
     let mut model_effort = normalize_string_patch(req.model_effort);
     let mut fast_mode = req.fast_mode;
@@ -8980,11 +15065,32 @@ pub async fn update_mission_settings(
     }
 
     let mut effective_model = match &model_override {
+        // Explicitly requested: validated below, and refused if retired.
         Some(Some(model)) => normalize_model_override_for_backend(Some(&effective_backend), model),
         Some(None) => None,
-        None => current.model_override.as_deref().and_then(|model| {
-            normalize_model_override_for_backend(Some(&effective_backend), model)
-        }),
+        // Carried forward from the mission. A mission stored before a model was
+        // retired must not be stuck — blocking an unrelated settings change
+        // (effort, agent, backend) because of an old stored model would be a
+        // worse failure than the stale model itself. Migrate it to the current
+        // model of its line for the next turn instead; the transcript and the
+        // recorded history of what already ran are untouched.
+        None => current
+            .model_override
+            .as_deref()
+            .and_then(|model| normalize_model_override_for_backend(Some(&effective_backend), model))
+            .map(|model| {
+                if let Some(replacement) = crate::model_policy::retired_claude_model(&model) {
+                    tracing::info!(
+                        mission_id = %id,
+                        from = %model,
+                        to = %replacement,
+                        "migrating retired Claude model for the next turn"
+                    );
+                    replacement.to_string()
+                } else {
+                    model
+                }
+            }),
     };
     if let Some(ref model) = effective_model {
         if model_override.as_ref().and_then(|value| value.as_ref()) != Some(model) {
@@ -9036,7 +15142,7 @@ pub async fn update_mission_settings(
         .await
         .map_err(session_unavailable)?;
 
-    rx.await.map_err(recv_failed)?.map(Json).map_err(|e| {
+    let mission = rx.await.map_err(recv_failed)?.map_err(|e| {
         if e.contains("not found") {
             (StatusCode::NOT_FOUND, e)
         } else if e.contains("running") {
@@ -9044,7 +15150,45 @@ pub async fn update_mission_settings(
         } else {
             internal_error(e)
         }
-    })
+    })?;
+
+    // The settings write is durable at this point. A handoff on a dead
+    // mission continues it on the new settings; the handoff user message
+    // was logged by the command handler, so the resumed turn sees it. A
+    // resume refusal is reported, never turned into an error.
+    let mut body = serde_json::to_value(&mission).map_err(internal_error)?;
+    if should_queue_resume(previous_status, req.resume) {
+        let (tx, rx) = oneshot::channel();
+        let queued = match control
+            .cmd_tx
+            .send(ControlCommand::ResumeMission {
+                content: None,
+                mission_id: id,
+                clean_workspace: false,
+                skip_message: false,
+                respond: tx,
+            })
+            .await
+        {
+            Ok(()) => rx
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map(|_| ())),
+            Err(e) => Err(e.to_string()),
+        };
+        match queued {
+            Ok(()) => {
+                tracing::info!(mission_id = %id, previous = ?previous_status, "settings handoff resumed the mission");
+                body["resume_queued"] = serde_json::Value::Bool(true);
+            }
+            Err(error) => {
+                tracing::warn!(mission_id = %id, %error, "settings handoff could not resume the mission");
+                body["resume_queued"] = serde_json::Value::Bool(false);
+                body["resume_warning"] = serde_json::Value::String(error);
+            }
+        }
+    }
+    Ok(Json(body))
 }
 
 /// Load/switch to a mission.
@@ -9098,6 +15242,8 @@ pub async fn mark_mission_opened(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
     if newly_set.is_some() {
         let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: None,
             mission_id: id,
             status: mission.status,
             summary: None,
@@ -9107,6 +15253,145 @@ pub async fn mark_mission_opened(
 }
 
 /// Set mission status (completed/failed).
+async fn mission_is_client_placed(control: &ControlState, id: Uuid) -> Result<bool, String> {
+    let Some(mission) = control.mission_store.get_mission(id).await? else {
+        return Ok(false);
+    };
+    Ok(client_placement::is_tagged(&mission.project.tags))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientTranscriptRequest {
+    pub run_id: Option<Uuid>,
+    pub generation: Option<u64>,
+    pub id: Uuid,
+    /// `user` or `assistant`.
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientStatusRequest {
+    pub run_id: Option<Uuid>,
+    pub generation: Option<u64>,
+    pub status: String,
+}
+
+/// Append one transcript row for a mission the Orb client is executing.
+/// Refused for every other mission so this cannot inject history into a
+/// backend-owned run.
+pub async fn append_client_transcript(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ClientTranscriptRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let content = req.content.trim().to_string();
+    if content.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "content is required".into()));
+    }
+    let control = control_for_user(&state, &user).await;
+    if !mission_is_client_placed(&control, id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "transcript append is only for client-placed missions".into(),
+        ));
+    }
+    machine_transfer::check_client_receipt(&control, id, req.run_id, req.generation).await?;
+    let event = match req.role.as_str() {
+        "user" => AgentEvent::UserMessage {
+            id: req.id,
+            content,
+            queued: false,
+            mission_id: Some(id),
+            source: Some(format!("orb-client:{}", user.id)),
+        },
+        "assistant" => AgentEvent::AssistantMessage {
+            id: req.run_id.unwrap_or(req.id),
+            content,
+            success: true,
+            cost_cents: 0,
+            cost_source: crate::agents::CostSource::Unknown,
+            usage: None,
+            model: None,
+            model_normalized: None,
+            mission_id: Some(id),
+            shared_files: None,
+            resumable: false,
+            completion_evidence: None,
+        },
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "role must be user or assistant".into(),
+            ))
+        }
+    };
+    control
+        .mission_store
+        .log_event(id, &event)
+        .await
+        .map_err(internal_error)?;
+    let _ = control.events_tx.send(event);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Terminal status for a client-placed mission. Does not start a runner.
+pub async fn set_client_mission_status(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ClientStatusRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let status = match req.status.as_str() {
+        "completed" => MissionStatus::Completed,
+        "failed" => MissionStatus::Failed,
+        "interrupted" => MissionStatus::Interrupted,
+        "awaiting_user" => MissionStatus::AwaitingUser,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unsupported client status {other}"),
+            ))
+        }
+    };
+    let control = control_for_user(&state, &user).await;
+    if !mission_is_client_placed(&control, id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "status updates of this kind are only for client-placed missions".into(),
+        ));
+    }
+    let run =
+        machine_transfer::check_client_receipt(&control, id, req.run_id, req.generation).await?;
+    control
+        .mission_store
+        .update_mission_status_with_reason(id, status, Some("client_runner"))
+        .await
+        .map_err(internal_error)?;
+    if let Some(run) = run {
+        control
+            .mission_store
+            .finish_mission_run(run.run_id, run.generation, Some("client_runner"))
+            .await
+            .map_err(internal_error)?;
+    }
+    let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+        completion: None,
+        execution: None,
+        mission_id: id,
+        status,
+        summary: Some("client_runner".into()),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn set_mission_status(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -9595,9 +15880,15 @@ pub async fn get_mission_events(
             .await
             .map_err(internal_error)?
     } else {
+        // No cursor: default to the NEWEST `limit` events (the tail), returned
+        // ascending within the page — i.e. behave as `before_seq=MAX`. "Latest
+        // activity" is the overwhelmingly common need (dashboards, debugging a
+        // live mission), so paging from the oldest row by default is a footgun.
+        // Callers that genuinely want a forward replay from the start pass
+        // `since_seq=0` explicitly, which is handled above and is unaffected.
         control
             .mission_store
-            .get_events(mission_id, types.as_deref(), query.limit, None)
+            .get_events_before(mission_id, i64::MAX, types.as_deref(), query.limit)
             .await
             .map_err(internal_error)?
     };
@@ -9697,6 +15988,11 @@ pub async fn get_mission_events(
 pub struct AlertsFeedQuery {
     /// Comma-separated mission statuses to keep (e.g. `awaiting_user,failed`).
     pub statuses: Option<String>,
+    /// When true, keep only alerts that are themselves a current operator
+    /// page (`awaiting_user` or live AskUserQuestion). Current-state: the
+    /// mission must still `needs_operator` now. The handler walks the raw
+    /// status-event feed until `limit` matches so a sparse page is not empty.
+    pub needs_operator: Option<bool>,
     /// Timestamp cursor: return alerts strictly older than this.
     pub before: Option<String>,
     pub limit: Option<usize>,
@@ -9729,6 +16025,79 @@ pub struct AlertsFeedResponse {
     pub next_cursor: Option<String>,
 }
 
+fn telegram_delivery_for_status(
+    telegram_alerts: &[crate::api::mission_store::TelegramAlert],
+    mission_id: Uuid,
+    status: &str,
+) -> Option<AlertFeedDelivery> {
+    let class = format!("mission_{status}");
+    telegram_alerts
+        .iter()
+        .find(|alert| {
+            alert.mission_id == Some(mission_id)
+                && alert
+                    .event_kind
+                    .split(':')
+                    .next()
+                    .unwrap_or(&alert.event_kind)
+                    == class
+        })
+        .map(|alert| AlertFeedDelivery {
+            channel: "telegram",
+            status: alert.status.clone(),
+            sent_at: alert.sent_at.clone(),
+            acknowledged_at: alert.acknowledged_at.clone(),
+            last_error: alert.last_error.clone(),
+        })
+}
+
+/// Synthesize a current-state alert for a live AskUserQuestion so Needs You
+/// does not depend on the mission's (possibly ancient) `active` status event
+/// still sitting inside the historical scan window.
+fn live_wait_alert_entry(
+    mission_id: Uuid,
+    summary: mission_store::MissionSummary,
+    wait_started_at: Option<&str>,
+    now: &str,
+    delivery: Option<AlertFeedDelivery>,
+) -> AlertFeedEntry {
+    AlertFeedEntry {
+        mission_id,
+        status: "active".to_string(),
+        summary: "Waiting for user input".to_string(),
+        timestamp: wait_started_at.unwrap_or(now).to_string(),
+        mission: Some(summary),
+        delivery,
+    }
+}
+
+fn refresh_summary_for_waiting_user(
+    summary: &mut mission_store::MissionSummary,
+    waiting_for_user_tool: bool,
+    wait_started_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if !waiting_for_user_tool {
+        return;
+    }
+    let parsed_status = serde_json::from_value(serde_json::Value::String(summary.status.clone()))
+        .unwrap_or(MissionStatus::Active);
+    summary.needs_operator = super::operator_attention::needs_operator(
+        &super::operator_attention::OperatorAttentionInput {
+            status: parsed_status,
+            awaiting_kind: summary.awaiting_kind.as_deref(),
+            has_origin_session: summary
+                .origin_session_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty()),
+            updated_at: &summary.updated_at,
+            waiting_for_user_tool: true,
+            wait_started_at,
+        },
+        now,
+    );
+}
+
 /// Cross-mission feed of status-change alerts, newest first. Source of truth
 /// is `mission_events` (`mission_status_changed`), decorated best-effort with
 /// mission summaries and Telegram delivery state.
@@ -9739,85 +16108,192 @@ pub async fn get_alerts_feed(
 ) -> Result<Json<AlertsFeedResponse>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-
-    let events = control
-        .mission_store
-        .get_status_events_global(query.before.as_deref(), limit)
-        .await
-        .map_err(internal_error)?;
-
-    // Cursor comes from the raw (unfiltered) page so pagination never stalls
-    // even when a status filter empties a page.
-    let next_cursor = if events.len() == limit {
-        events.last().map(|e| e.timestamp.clone())
-    } else {
-        None
-    };
-
+    let needs_operator_only = query.needs_operator == Some(true);
     let wanted: Option<Vec<String>> = query.statuses.as_deref().map(|s| {
         s.split(',')
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
             .collect()
     });
-
-    let mut entries: Vec<AlertFeedEntry> = events
-        .into_iter()
-        .filter_map(|e| {
-            let status = e.metadata.get("status")?.as_str()?.to_string();
-            if let Some(wanted) = &wanted {
-                if !wanted.contains(&status) {
-                    return None;
-                }
-            }
-            Some(AlertFeedEntry {
-                mission_id: e.mission_id,
-                status,
-                summary: e.content,
-                timestamp: e.timestamp,
-                mission: None,
-                delivery: None,
-            })
-        })
-        .collect();
-
-    let mission_ids: Vec<Uuid> = {
-        let mut ids: Vec<Uuid> = entries.iter().map(|e| e.mission_id).collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    };
-
-    let summaries = control
+    let active_runs = control
         .mission_store
-        .get_mission_summaries(&mission_ids)
-        .await
-        .map_err(internal_error)?;
-    let telegram_alerts = control
-        .mission_store
-        .list_telegram_alerts_for_missions(&mission_ids)
+        .list_active_mission_runs()
         .await
         .unwrap_or_default();
+    let waiting_user_waits =
+        user_wait_starts_for_runs(control.mission_store.as_ref(), &active_runs).await;
+    let now = chrono::Utc::now();
 
-    for entry in &mut entries {
-        entry.mission = summaries.get(&entry.mission_id).cloned();
-        // Loose join: telegram_alerts has no FK to the event row; match the
-        // alert class (`mission_<status>` before any `:` suffix). The list is
-        // ordered created_at DESC, so the first match is the most recent.
-        let class = format!("mission_{}", entry.status);
-        entry.delivery = telegram_alerts
-            .iter()
-            .find(|a| {
-                a.mission_id == Some(entry.mission_id)
-                    && a.event_kind.split(':').next().unwrap_or(&a.event_kind) == class
+    // `needs_operator` is sparse, so walk raw pages until we fill `limit`
+    // (or exhaust) instead of returning an empty 30-row window.
+    const MAX_OPERATOR_PAGES: usize = 10;
+    let max_pages = if needs_operator_only {
+        MAX_OPERATOR_PAGES
+    } else {
+        1
+    };
+    let mut before = query.before.clone();
+    let mut entries: Vec<AlertFeedEntry> = Vec::new();
+    let mut next_cursor = None;
+    let mut seen_ids: HashSet<Uuid> = HashSet::new();
+    let mut seeded_live: HashSet<Uuid> = HashSet::new();
+    let mut summaries: HashMap<Uuid, mission_store::MissionSummary> = HashMap::new();
+    let mut telegram_alerts = Vec::new();
+
+    // Current live waits belong on the first Needs You page even when the
+    // mission's last status event is older than the historical window.
+    if needs_operator_only && query.before.is_none() && !waiting_user_waits.is_empty() {
+        let live_ids: Vec<Uuid> = waiting_user_waits.keys().copied().collect();
+        let fetched = control
+            .mission_store
+            .get_mission_summaries(&live_ids)
+            .await
+            .map_err(internal_error)?;
+        summaries.extend(fetched);
+        telegram_alerts.extend(
+            control
+                .mission_store
+                .list_telegram_alerts_for_missions(&live_ids)
+                .await
+                .unwrap_or_default(),
+        );
+        let now_rfc = now.to_rfc3339();
+        for (mission_id, started_at) in &waiting_user_waits {
+            if let Some(wanted) = &wanted {
+                if !wanted.iter().any(|status| status == "active") {
+                    continue;
+                }
+            }
+            let Some(summary) = summaries.get_mut(mission_id) else {
+                continue;
+            };
+            refresh_summary_for_waiting_user(summary, true, started_at.as_deref(), now);
+            if !summary.needs_operator {
+                continue;
+            }
+            entries.push(live_wait_alert_entry(
+                *mission_id,
+                summary.clone(),
+                started_at.as_deref(),
+                &now_rfc,
+                telegram_delivery_for_status(&telegram_alerts, *mission_id, "awaiting_user")
+                    .or_else(|| {
+                        telegram_delivery_for_status(&telegram_alerts, *mission_id, "active")
+                    }),
+            ));
+            seeded_live.insert(*mission_id);
+            seen_ids.insert(*mission_id);
+        }
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    }
+
+    for _ in 0..max_pages {
+        let events = control
+            .mission_store
+            .get_status_events_global(before.as_deref(), limit)
+            .await
+            .map_err(internal_error)?;
+        let page_len = events.len();
+        next_cursor = if page_len == limit {
+            events.last().map(|e| e.timestamp.clone())
+        } else {
+            None
+        };
+
+        let mut page: Vec<AlertFeedEntry> = events
+            .into_iter()
+            .filter_map(|e| {
+                let status = e.metadata.get("status")?.as_str()?.to_string();
+                if let Some(wanted) = &wanted {
+                    if !wanted.contains(&status) {
+                        return None;
+                    }
+                }
+                Some(AlertFeedEntry {
+                    mission_id: e.mission_id,
+                    status,
+                    summary: e.content,
+                    timestamp: e.timestamp,
+                    mission: None,
+                    delivery: None,
+                })
             })
-            .map(|a| AlertFeedDelivery {
-                channel: "telegram",
-                status: a.status.clone(),
-                sent_at: a.sent_at.clone(),
-                acknowledged_at: a.acknowledged_at.clone(),
-                last_error: a.last_error.clone(),
+            .collect();
+
+        let new_ids: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = page
+                .iter()
+                .map(|e| e.mission_id)
+                .filter(|id| seen_ids.insert(*id))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        if !new_ids.is_empty() {
+            let fetched = control
+                .mission_store
+                .get_mission_summaries(&new_ids)
+                .await
+                .map_err(internal_error)?;
+            summaries.extend(fetched);
+            telegram_alerts.extend(
+                control
+                    .mission_store
+                    .list_telegram_alerts_for_missions(&new_ids)
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+
+        for entry in &mut page {
+            if let Some(summary) = summaries.get_mut(&entry.mission_id) {
+                let waiting = waiting_user_waits.contains_key(&entry.mission_id);
+                refresh_summary_for_waiting_user(
+                    summary,
+                    waiting,
+                    waiting_user_waits
+                        .get(&entry.mission_id)
+                        .and_then(|started| started.as_deref()),
+                    now,
+                );
+                entry.mission = Some(summary.clone());
+            }
+            entry.delivery =
+                telegram_delivery_for_status(&telegram_alerts, entry.mission_id, &entry.status);
+        }
+
+        if needs_operator_only {
+            page.retain(|entry| {
+                if seeded_live.contains(&entry.mission_id) {
+                    return false;
+                }
+                super::operator_attention::alert_event_is_operator_page(
+                    &entry.status,
+                    entry
+                        .mission
+                        .as_ref()
+                        .is_some_and(|summary| summary.needs_operator),
+                    waiting_user_waits.contains_key(&entry.mission_id),
+                )
             });
+        }
+        entries.extend(page);
+        if entries.len() >= limit || next_cursor.is_none() {
+            break;
+        }
+        before = next_cursor.clone();
+    }
+    let truncated = entries.len() > limit;
+    let had_more_raw = next_cursor.is_some();
+    entries.truncate(limit);
+    // After a filter walk, leftover matches sit on the truncated tail of
+    // this page. Point the cursor at the last *kept* event so Load older
+    // does not skip them (the raw-page cursor would).
+    if needs_operator_only && (truncated || (entries.len() == limit && had_more_raw)) {
+        if let Some(last) = entries.last() {
+            next_cursor = Some(last.timestamp.clone());
+        }
     }
 
     Ok(Json(AlertsFeedResponse {
@@ -10095,7 +16571,7 @@ pub async fn get_mission_snapshot(
         .find(|info| info.mission_id == mission_id);
     let execution = control
         .mission_store
-        .get_active_mission_run(mission_id)
+        .get_latest_mission_run(mission_id)
         .await
         .map_err(internal_error)?
         .as_ref()
@@ -10189,6 +16665,18 @@ pub async fn cancel_mission(
     let (tx, rx) = oneshot::channel();
 
     let control = control_for_user(&state, &user).await;
+    if mission_is_client_placed(&control, mission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Stop this mission on its Orb computer so termination can be confirmed".into(),
+        ));
+    }
+    machine_transfer::guard(&control.mission_store, mission_id)
+        .await
+        .map_err(internal_error)?;
     control
         .cmd_tx
         .send(ControlCommand::CancelMission {
@@ -10216,6 +16704,9 @@ async fn finish_detached_run_for_cancel(
     let Some(run) = mission_store.get_active_mission_run(mission_id).await? else {
         return Ok(false);
     };
+    if run.owner_actor_id.starts_with("orb-client:") {
+        return Err("Orb must confirm native termination before releasing this run".into());
+    }
     mission_store
         .heartbeat_mission_run(
             run.run_id,
@@ -10257,6 +16748,15 @@ pub async fn pause_mission(
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let actor = resolve_actor(body.and_then(|b| b.0.actor), &user);
     let control = control_for_user(&state, &user).await;
+    if mission_is_client_placed(&control, mission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Stop this mission on its Orb computer".into(),
+        ));
+    }
     let mission = control
         .mission_store
         .get_mission(mission_id)
@@ -10403,6 +16903,7 @@ pub async fn clone_mission(
         config_profile: source.config_profile.clone(),
         backend: overrides.backend.or_else(|| Some(source.backend.clone())),
         parent_mission_id,
+        supersedes_mission_id: None,
         working_directory: source.working_directory.clone(),
         priority: None,
         not_before: None,
@@ -10411,9 +16912,11 @@ pub async fn clone_mission(
         // grouped under the same project/track/intent.
         project: source.project.project.clone(),
         track: source.project.track.clone(),
+        idempotency_key: None,
         intent: source.project.intent.clone(),
         github_pr: source.project.github_pr.clone(),
         writer: None,
+        acceptance_criteria: Vec::new(),
         tags: if source.project.tags.is_empty() {
             None
         } else {
@@ -10427,11 +16930,20 @@ pub async fn clone_mission(
         remote_command: None,
         remote_async: None,
         estimated_disk_gib: None,
+        // A clone is the same work retried, so it belongs to the same
+        // conversation. Dropping the origin here orphaned the retry: it
+        // vanished from the worker strip of the session that asked for it.
+        origin: source.origin.clone(),
+        origin_session_id: source.origin_session_id.clone(),
+        attachments: None,
+        placement: None,
         extra: Default::default(),
     };
 
-    let (_headers, cloned) = create_mission(State(state), Extension(user), Some(Json(req))).await?;
-    let clone_id = cloned.0.id;
+    let (_headers, Json(cloned)) =
+        create_mission(State(state), Extension(user), Some(Json(req))).await?;
+    let cloned: Mission = serde_json::from_value(cloned).map_err(internal_error)?;
+    let clone_id = cloned.id;
 
     // Optionally seed the clone with the source's conversation history
     // (retry-with-context). `control` still holds the store handle after the
@@ -10453,12 +16965,16 @@ pub async fn clone_mission(
         "FLEET-002 mission cloned"
     );
 
-    Ok(cloned)
+    Ok(Json(cloned))
 }
 
 /// Request body for resuming a mission
 #[derive(Debug, Deserialize, Default)]
 pub struct ResumeMissionRequest {
+    /// Explicit same-work assertion, checked against stored identity before dispatch.
+    #[serde(default)]
+    pub continue_identity: Option<crate::api::writer_recycle::WriterContinuation>,
+
     /// If true, clean the mission's work directory before resuming
     #[serde(default)]
     pub clean_workspace: bool,
@@ -10469,6 +16985,16 @@ pub struct ResumeMissionRequest {
     /// Optional attribution override (e.g. `"system:fleet-watcher"`).
     #[serde(default)]
     pub actor: Option<String>,
+    /// Required when the resume retasks the writer onto different work.
+    #[serde(default)]
+    pub github_pr: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Optional objective for the resumed turn; used to detect silent recycle.
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 /// Resume an interrupted mission.
@@ -10479,32 +17005,106 @@ pub async fn resume_mission(
     Path(mission_id): Path<Uuid>,
     body: Option<Json<ResumeMissionRequest>>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
-    let (clean_workspace, skip_message, actor_override) = body
-        .map(|b| {
-            let r = b.0;
-            (r.clean_workspace, r.skip_message, r.actor)
-        })
-        .unwrap_or((false, false, None));
-    let actor = resolve_actor(actor_override, &user);
+    let request = body.map(|b| b.0).unwrap_or_default();
+    if let Some(content) = request.content.as_deref() {
+        crate::api::mission_payload::validate_user_content(content)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
+    let clean_workspace = request.clean_workspace;
+    let skip_message = request.skip_message;
+    let actor = resolve_actor(request.actor.clone(), &user);
 
     let control = control_for_user(&state, &user).await;
+    machine_transfer::guard(&control.mission_store, mission_id)
+        .await
+        .map_err(internal_error)?;
+    if mission_is_client_placed(&control, mission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "this mission runs on the Orb client; resume it there".into(),
+        ));
+    }
     tracing::info!(mission_id = %mission_id, actor = %actor, "FLEET-004 mission resume requested");
+
+    if let Some(placement) = remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mission_id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        if request.clean_workspace
+            || request.skip_message
+            || request.github_pr.is_some()
+            || request.track.is_some()
+            || request.title.is_some()
+            || request.continue_identity.is_some()
+        {
+            return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for workspace or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
+        }
+        return remote_grok::continue_on_node(
+            &state,
+            &control,
+            &actor,
+            mission_id,
+            placement,
+            request.content,
+            None,
+        )
+        .await
+        .map(Json);
+    }
 
     let outcome: Result<Mission, (StatusCode, String)> = async {
         let (tx, rx) = oneshot::channel();
         control
             .cmd_tx
-            .send(ControlCommand::ResumeMission {
-                mission_id,
-                clean_workspace,
-                skip_message,
-                respond: tx,
+            .send(ControlCommand::AdmitDispatch {
+                admission: Box::new(DispatchAdmission {
+                    internal_work_hint: None,
+                    state: state.clone(),
+                    store: control.mission_store.clone(),
+                    patch: dispatch_identity_patch(
+                        request.github_pr,
+                        request.track,
+                        request.title,
+                        request.content,
+                        request.continue_identity,
+                    ),
+                }),
+                command: Box::new(ControlCommand::ResumeMission {
+                    content: None,
+                    mission_id,
+                    clean_workspace,
+                    skip_message,
+                    respond: tx,
+                }),
             })
             .await
             .map_err(session_unavailable)?;
-        rx.await
-            .map_err(recv_failed)?
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))
+        #[cfg(test)]
+        dispatch_admission_tests::notify_wait(mission_id, "enqueued");
+        rx.await.map_err(recv_failed)?.map_err(|e| {
+            let conflict = e.contains("writer_identity_stale")
+                || e.contains("continue_identity")
+                || e.contains("assignment_busy")
+                || e.contains("writer lease")
+                || e.contains("track_owned")
+                || e.contains("dispatch_recovery_required")
+                || e.contains("writer_reuse_requires_retag");
+            (
+                if conflict {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                e,
+            )
+        })
     }
     .await;
 
@@ -10681,9 +17281,32 @@ async fn cleanup_mission_workspace_dirs_for_delete(
     let mut deleted_dirs = Vec::new();
     for mission in missions {
         let Some(ws) = workspaces.get(mission.workspace_id).await else {
-            continue;
+            // Do not finalize the database deletion when the workspace that
+            // owns a mission's persisted placement cannot be consulted.  A
+            // relocated directory may still exist on a temporarily missing
+            // volume, and treating that as an already-clean workspace would
+            // orphan it permanently.
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "Cannot verify workspace placement for mission {} because workspace {} is unavailable",
+                    mission.id, mission.workspace_id
+                ),
+            ));
         };
-        let dir = workspace::mission_workspace_dir_for_root(&ws.path, mission.id);
+        workspace::ensure_persisted_mission_root_is_available(&ws, mission.id).map_err(
+            |error| {
+                tracing::warn!(mission_id = %mission.id, %error, "refusing to delete workspace with unavailable persisted root");
+                (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Cannot delete mission {}: persisted mission workspace root is unavailable: {}",
+                        mission.id, error
+                    ),
+                )
+            },
+        )?;
+        let dir = workspace::mission_workspace_dir_for_workspace(&ws, mission.id);
         if !dir.exists() {
             continue;
         }
@@ -10856,7 +17479,22 @@ fn stored_event_to_agent_event(event: &mission_store::StoredEvent) -> Option<Age
                 .as_deref()
                 .and_then(|id| Uuid::parse_str(id).ok())
                 .unwrap_or_else(Uuid::new_v4),
-            content: event.content.clone(),
+            content: if event
+                .metadata
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                == Some("scheduler")
+            {
+                let messages = event
+                    .metadata
+                    .get("messages")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                deferred_messages::wrap(&event.content, messages)
+            } else {
+                event.content.clone()
+            },
             queued: false,
             mission_id,
             source: event
@@ -10987,6 +17625,16 @@ fn stored_event_to_agent_event(event: &mission_store::StoredEvent) -> Option<Age
                 .and_then(|v| v.as_str())
                 .and_then(|s| serde_json::from_value::<MissionStatus>(serde_json::json!(s)).ok())?;
             Some(AgentEvent::MissionStatusChanged {
+                completion: event
+                    .metadata
+                    .get("completion")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+                execution: event
+                    .metadata
+                    .get("execution")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
                 mission_id: event.mission_id,
                 status,
                 summary: None,
@@ -11366,7 +18014,7 @@ pub async fn stream(
                             }
                             let outbound = text_op_events_for_stream(ev, &mut text_op_buffers);
                             for ev in outbound {
-                                match serde_json::to_string(&ev) {
+                                match deferred_messages::stream_payload(&ev) {
                                     Ok(payload) => {
                                         metrics.record_sse_chunk(payload.len());
                                         metrics.record_broadcast(ev.mission_id());
@@ -11448,7 +18096,7 @@ pub async fn stream(
                             // length closely enough for p50/p99 use.
                             let outbound = text_op_events_for_stream(ev, &mut text_op_buffers);
                             for ev in outbound {
-                                match serde_json::to_string(&ev) {
+                                match deferred_messages::stream_payload(&ev) {
                                     Ok(payload) => {
                                         metrics.record_sse_chunk(payload.len());
                                         metrics.record_broadcast(ev.mission_id());
@@ -11548,7 +18196,123 @@ fn webhook_forwardable_status(status: MissionStatus) -> bool {
     )
 }
 
+async fn current_callback_snapshot(
+    store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    status: MissionStatus,
+) -> Option<(Option<MissionRun>, MissionCompletionSnapshot)> {
+    let before = store.get_mission(mission_id).await.ok().flatten()?;
+    if before.status != status {
+        return None;
+    }
+    let run = store.get_latest_mission_run(mission_id).await.ok()?;
+    let events = store
+        .get_events_before(
+            mission_id,
+            i64::MAX,
+            Some(&["mission_status_changed"]),
+            Some(16),
+        )
+        .await
+        .ok()?;
+    let event = events.into_iter().rev().find(|event| {
+        event
+            .metadata
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            == Some(status.to_string().as_str())
+            && before
+                .activity
+                .last_status_change_at
+                .as_ref()
+                .is_none_or(|changed| event.timestamp >= *changed)
+    });
+    let (captured, completion) = match (run.as_ref(), event) {
+        (Some(run), Some(event)) => {
+            let captured: Option<MissionRun> = event
+                .metadata
+                .get("execution")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            let completion: Option<MissionCompletionSnapshot> = event
+                .metadata
+                .get("completion")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            match (captured, completion) {
+                (Some(captured), Some(completion))
+                    if captured.run_id == run.run_id && captured.generation == run.generation =>
+                {
+                    (Some(captured), completion)
+                }
+                (None, None) => (
+                    None,
+                    MissionCompletionSnapshot {
+                        result_summary: (!event.content.trim().is_empty()).then_some(event.content),
+                        terminal_reason: before.terminal_reason.clone(),
+                        terminal_evidence: before.terminal_evidence.clone(),
+                    },
+                ),
+                _ => return None,
+            }
+        }
+        (Some(_), None) if before.terminal_reason.as_deref() == Some("server_shutdown") => (
+            None,
+            MissionCompletionSnapshot {
+                // Startup/drain intentionally persist this status without a
+                // terminal event. Preserve its unbound outage notification.
+                result_summary: None,
+                terminal_reason: before.terminal_reason.clone(),
+                terminal_evidence: before.terminal_evidence.clone(),
+            },
+        ),
+        (Some(_), None) => return None, // exact event may still be in the logger queue
+        (None, event) => (
+            None,
+            MissionCompletionSnapshot {
+                result_summary: event
+                    .and_then(|event| (!event.content.trim().is_empty()).then_some(event.content)),
+                terminal_reason: before.terminal_reason.clone(),
+                terminal_evidence: before.terminal_evidence.clone(),
+            },
+        ),
+    };
+    let after = store.get_mission(mission_id).await.ok().flatten()?;
+    let checked_run = store.get_latest_mission_run(mission_id).await.ok()?;
+    if before.updated_at != after.updated_at
+        || after.status != status
+        || run.as_ref().map(|r| (r.run_id, r.generation))
+            != checked_run.as_ref().map(|r| (r.run_id, r.generation))
+        || run
+            .as_ref()
+            .is_some_and(|run| run.started_at > before.updated_at)
+    {
+        return None;
+    }
+    Some((captured, completion))
+}
+
+async fn callback_snapshot(
+    store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    status: MissionStatus,
+    execution: Option<MissionRun>,
+    completion: Option<MissionCompletionSnapshot>,
+    reconcile_current: bool,
+) -> (Option<MissionRun>, Option<MissionCompletionSnapshot>) {
+    if reconcile_current {
+        match current_callback_snapshot(store, mission_id, status).await {
+            Some((run, completion)) => (run, Some(completion)),
+            None => (None, None),
+        }
+    } else {
+        (execution, completion)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn paloma_webhook_forwarder_loop(
+    app_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
     mut events_rx: broadcast::Receiver<AgentEvent>,
     mission_store: Arc<dyn MissionStore>,
     workspaces: workspace::SharedWorkspaceStore,
@@ -11558,243 +18322,466 @@ async fn paloma_webhook_forwarder_loop(
     http: reqwest::Client,
 ) {
     tracing::info!(webhook_url = %url, "Paloma mission-status webhook forwarder started");
-    // Track the last status seen per mission (for ALL transitions, not just
-    // forwardable ones) so we forward a status only when it actually CHANGED.
-    // This drops the re-emit `mark_mission_opened` broadcasts (it re-sends the
-    // current, unchanged status on first view) while still forwarding a genuine
-    // re-entry into a state. Single-task loop → a plain map needs no locking.
-    let mut last_status: std::collections::HashMap<Uuid, MissionStatus> =
-        std::collections::HashMap::new();
+    // The dedupe record is DURABLE and success-gated: a marker means "this
+    // status has been fully processed" — trivially on observation for
+    // non-forwardable statuses, only after a successful POST for forwardable
+    // ones. That closes the two loss windows the in-memory map had: a restart
+    // blanking history, and delivery failure counting as delivery. Divergence
+    // store-vs-marker is exactly the set of undelivered transitions, and the
+    // sweep retries them until they land.
+    let markers = super::webhook_markers::MarkerStore::load(&working_dir);
+    let first_boot = !markers.loaded_from_disk;
+    let markers = Arc::new(tokio::sync::Mutex::new(markers));
+    if first_boot {
+        // Adopt current history without forwarding any of it: pre-feature
+        // missions have long-settled statuses, and replaying them as fresh
+        // events would flood every bound conversation exactly once.
+        let mut adopted = 0usize;
+        let mut offset = 0usize;
+        let mut guard = markers.lock().await;
+        while offset < 5_000 {
+            let page = match mission_store.list_missions(500, offset).await {
+                Ok(page) => page,
+                Err(_) => break,
+            };
+            if page.is_empty() {
+                break;
+            }
+            let len = page.len();
+            for mission in page {
+                guard.set(mission.id, mission.status);
+                adopted += 1;
+            }
+            if len < 500 {
+                break;
+            }
+            offset += 500;
+        }
+        drop(guard);
+        tracing::info!(
+            adopted,
+            "webhook markers: first boot, adopted current mission statuses"
+        );
+    }
+    // Transitions currently being POSTed, so the sweep cannot double-send what
+    // the broadcast arm already has in flight (and vice versa).
+    let in_flight: Arc<tokio::sync::Mutex<std::collections::HashSet<(Uuid, MissionStatus)>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     // Bound concurrent in-flight callbacks (each does a get_mission + HTTP POST).
     let sem = Arc::new(tokio::sync::Semaphore::new(8));
     // Process-monotonic sequence so the consumer can order events and dedupe
     // (at-least-once delivery: a single logical event keeps one `event_id`
     // across retries). Resets on restart — `event_id` is the durable key.
     let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // One forwarding path shared by the live broadcast arm and the
+    // reconcile sweep below, so a transition can never be forwardable in
+    // one and skipped by the other.
+    let http_c = http.clone();
+    let url_c = url.clone();
+    let secret_c = secret.clone();
+    let mission_store_c = Arc::clone(&mission_store);
+    let workspaces_c = workspaces.clone();
+    let working_dir_c = working_dir.clone();
+    let sem_c = Arc::clone(&sem);
+    let sequence_c = Arc::clone(&sequence);
+    let markers_c = Arc::clone(&markers);
+    let in_flight_c = Arc::clone(&in_flight);
+    let forward = move |mission_id: Uuid,
+                        status: MissionStatus,
+                        old_status: Option<MissionStatus>,
+                        event_execution: Option<MissionRun>,
+                        event_completion: Option<MissionCompletionSnapshot>,
+                        reconcile_current: bool| {
+        let app_state = app_state.clone();
+        let http = http_c.clone();
+        let url = url_c.clone();
+        let secret = secret_c.clone();
+        let mission_store = Arc::clone(&mission_store_c);
+        let workspaces = workspaces_c.clone();
+        let working_dir = working_dir_c.clone();
+        let sem = Arc::clone(&sem_c);
+        let sequence = Arc::clone(&sequence_c);
+        let markers = Arc::clone(&markers_c);
+        let in_flight = Arc::clone(&in_flight_c);
+        // Stable per-logical-event identity for idempotent consumers.
+        let event_id = Uuid::new_v4();
+        let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        // The mission load + POST run in a spawned, concurrency-bounded
+        // task so neither a slow DB read nor a slow webhook can stall the
+        // caller.
+        tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let mission = mission_store.get_mission(mission_id).await.ok().flatten();
+            let title = mission
+                .as_ref()
+                .and_then(|mission| mission.title.clone())
+                .unwrap_or_else(|| mission_id.to_string());
+            let project = mission.as_ref().map(|m| &m.project);
+            // Live events can only carry producer-captured identity. In
+            // particular, an unbound historical event must not adopt a later
+            // generation just because that generation reached the same status.
+            let (run, completion) = callback_snapshot(
+                &mission_store,
+                mission_id,
+                status,
+                event_execution,
+                event_completion,
+                reconcile_current,
+            )
+            .await;
+            if reconcile_current && completion.is_none() {
+                // Keep the marker pending until the precise event is persisted.
+                in_flight.lock().await.remove(&(mission_id, status));
+                return;
+            }
+            let mut remote_jobs = crate::remote_node::job_ledger::load(&working_dir)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|handle| handle.mission_id == mission_id)
+                .map(|handle| {
+                    serde_json::json!({
+                        "job_id": handle.job_id,
+                        "node_id": handle.node_id,
+                        "kind": handle.kind,
+                        "accepted_at": handle.accepted_at,
+                        "heartbeat_at": handle.heartbeat_at,
+                        "identity": handle.identity,
+                    })
+                })
+                .collect::<Vec<_>>();
+            remote_jobs.extend(
+                crate::remote_node::job_ledger::terminal_receipts_for_mission(
+                    &working_dir,
+                    mission_id,
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .take(16)
+                .map(|receipt| {
+                    serde_json::json!({
+                        "job_id": receipt.job_id,
+                        "node_id": receipt.node_id,
+                        "kind": "remote_build_receipt",
+                        "state": receipt.state,
+                        "started_at": receipt.started_at,
+                        "finished_at": receipt.finished_at,
+                        "exit_status": receipt.exit_status,
+                        "identity": receipt.identity,
+                        "artifacts": receipt.artifacts,
+                    })
+                }),
+            );
+            let terminal_reason = if completion.is_some() || run.is_some() {
+                completion
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.terminal_reason.as_deref())
+            } else {
+                mission
+                    .as_ref()
+                    .and_then(|mission| mission.terminal_reason.as_deref())
+            };
+            let terminal_evidence = if completion.is_some() || run.is_some() {
+                completion
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.terminal_evidence.as_deref())
+            } else {
+                mission
+                    .as_ref()
+                    .and_then(|mission| mission.terminal_evidence.as_deref())
+            };
+            let recommended_action = match terminal_reason {
+                Some("server_shutdown" | "orphan_no_runner") => "resume_once",
+                Some("native_goal_stopped") => "resolve_stop_then_resume",
+                Some("codex_continuity_required" | "native_continuity_required") => {
+                    "reconcile_native_session_before_resume"
+                }
+                Some("auth_error") => "disable_provider_and_reroute",
+                Some("rate_limited" | "capacity_limited") => "reroute_or_queue",
+                Some("watchdog_stalled" | "cancelled") => "inspect_artifacts",
+                _ if status == MissionStatus::Interrupted => "reconcile_then_resume",
+                _ if status == MissionStatus::Failed => "classify_failure",
+                _ if status == MissionStatus::AwaitingUser => "inspect_result",
+                _ => "notify",
+            };
+            // Resolve workspace_name from the registry (the store row
+            // usually leaves it null), so the payload is self-contained.
+            let workspace_name = match mission.as_ref() {
+                Some(m) => match m.workspace_name.clone() {
+                    Some(name) => Some(name),
+                    None => workspaces.get(m.workspace_id).await.map(|ws| ws.name),
+                },
+                None => None,
+            };
+            // The mission's ACTUAL final output — not just status metadata — so
+            // a mission-backed delegation returns a real work product to the
+            // delegating Hermes agent (the fold prefers `result_summary`).
+            // Fetched only for terminal (forwardable) transitions; best-effort.
+            let result_summary: Option<String> = if completion.is_some() || run.is_some() {
+                completion
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.result_summary.clone())
+            } else if webhook_forwardable_status(status) {
+                mission_store
+                    .latest_assistant_text(mission_id)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let wake = mission
+                .as_ref()
+                .map(|m| super::mission_horizon::wake_fields_for_mission(m, &working_dir));
+            let body = serde_json::json!({
+                // Idempotency / ordering (P#6): consumers dedupe on
+                // `event_id` and may order by `sequence`.
+                "event_id": event_id,
+                // The mission's final assistant output on terminal transitions.
+                "result_summary": result_summary,
+                "sequence": seq,
+                "mission_id": mission_id,
+                "old_status": old_status,
+                "status": status,
+                // Event-type mirror of `status` so consumers with
+                // route-level event filters (e.g. the Hermes webhook
+                // platform reads `payload.type`) can drop unwanted
+                // transitions like `acknowledged` before spawning an
+                // agent run.
+                "type": status,
+                "title": title,
+                "short_description": mission
+                    .as_ref()
+                    .and_then(|m| m.short_description.clone()),
+                "workspace_id": mission.as_ref().map(|m| m.workspace_id),
+                "workspace_name": workspace_name,
+                "backend": mission.as_ref().map(|m| m.backend.clone()),
+                "terminal_reason": terminal_reason,
+                // What the terminating guard OBSERVED. Without it, consumers
+                // invent causes: "transport bug", "GitHub is disabled",
+                // "pool needs re-provisioning" — all measured this week.
+                "terminal_evidence": terminal_evidence,
+                "resumable": matches!(status, MissionStatus::Interrupted | MissionStatus::Failed | MissionStatus::Blocked),
+                "recommended_action": recommended_action,
+                "execution": run.as_ref().map(|run| serde_json::json!({
+                    "run_id": run.run_id,
+                    "generation": run.generation,
+                    "state": run.execution_state,
+                    "heartbeat_at": run.heartbeat_at,
+                    "scope_unit": run.scope_unit,
+                })),
+                "remote_jobs": remote_jobs,
+                "updated_at": mission.as_ref().map(|m| m.updated_at.clone()),
+                // When the status itself last changed (P#5) — the most
+                // relevant staleness anchor for a status-change webhook.
+                "last_status_change_at": mission
+                    .as_ref()
+                    .and_then(|m| m.activity.last_status_change_at.clone()),
+                // Project tagging so Paloma can route by project/track/
+                // intent/PR instead of parsing titles.
+                "project": project.and_then(|p| p.project.clone()),
+                "track": project.and_then(|p| p.track.clone()),
+                "intent": project.and_then(|p| p.intent.clone()),
+                "github_pr": project.and_then(|p| p.github_pr.clone()),
+                "tags": project.map(|p| p.tags.clone()).unwrap_or_default(),
+                // Creation provenance. Without these, a status webhook
+                // lands in an isolated consumer session with no way
+                // back to the conversation that started the mission —
+                // results then sit acknowledged and unreported. The
+                // consumer routes the completion into `origin_session`.
+                //
+                // TRUST: `origin_session` is a routing HINT, not
+                // authority. It is declared by the creating client and
+                // the MCP transport carries no per-call session
+                // context to verify it against, so a delivery handler
+                // MUST confirm the target conversation actually
+                // references this mission_id before delivering there,
+                // and fall back to its default notification path
+                // otherwise.
+                "origin": mission.as_ref().and_then(|m| m.origin.clone()),
+                "origin_session": mission
+                    .as_ref()
+                    .and_then(|m| m.origin_session_id.clone()),
+                // Producer-resolved wake tip: the bound project conversation
+                // if one exists, else the creating origin. Hermes prefers
+                // this over opening an isolated webhook session.
+                "wake_session": wake.as_ref().and_then(|w| w.session.clone()),
+                "wake_source": wake.as_ref().map(|w| w.source),
+                // Track state so a watchdog can tell "intentionally
+                // waiting (CI/review/external)" from "no worker = stuck".
+                "desired_state": project.and_then(|p| p.desired_state.clone()),
+                "next_check_at": project.and_then(|p| p.next_check_at.clone()),
+                // For awaiting_user, whether the agent needs a decision
+                // or is just waiting to be acked/merged.
+                "awaiting_kind": mission
+                    .as_ref()
+                    .and_then(|m| m.awaiting_kind)
+                    .map(|k| k.as_str()),
+            });
+
+            // Serialize once so the signature is computed over the
+            // exact bytes sent (consumers verify HMAC over the raw
+            // body, e.g. the Hermes webhook platform's GitHub-style
+            // `X-Hub-Signature-256` check).
+            let payload = match serde_json::to_vec(&body) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        "Failed to serialize Paloma webhook payload: {}",
+                        err
+                    );
+                    return;
+                }
+            };
+            let signature = secret.as_ref().and_then(|secret| {
+                use hmac::{Hmac, Mac};
+                let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+                mac.update(&payload);
+                Some(format!(
+                    "sha256={}",
+                    hex::encode(mac.finalize().into_bytes())
+                ))
+            });
+
+            // At-least-once: retry transient failures with the SAME
+            // event_id so the consumer can dedupe. Bounded so a dead
+            // endpoint can't pile up tasks.
+            const MAX_ATTEMPTS: u32 = 3;
+            for attempt in 1..=MAX_ATTEMPTS {
+                let mut request = http
+                    .post(&url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(payload.clone());
+                if let Some(signature) = signature.as_deref() {
+                    request = request.header("X-Hub-Signature-256", signature);
+                }
+                match request.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        // Only a delivered event earns its durable marker. An
+                        // exhausted retry leaves it unset, so the 60s sweep
+                        // re-sends until the consumer is reachable again.
+                        markers.lock().await.set(mission_id, status);
+                        if webhook_forwardable_status(status) {
+                            if let Some(slug) = mission
+                                .as_ref()
+                                .and_then(|m| m.project.project.clone())
+                                .filter(|slug| !slug.is_empty())
+                            {
+                                if let Some(state) =
+                                    app_state.get().and_then(std::sync::Weak::upgrade)
+                                {
+                                    tokio::spawn(async move {
+                                        super::project_controller::wake_controller_for_slug(
+                                            state, &slug,
+                                        )
+                                        .await;
+                                    });
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Ok(resp) => {
+                        tracing::warn!(
+                            mission_id = %mission_id,
+                            webhook_url = %url,
+                            attempt,
+                            status = %resp.status(),
+                            "Paloma webhook returned non-success status"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            mission_id = %mission_id,
+                            webhook_url = %url,
+                            attempt,
+                            "Failed to forward Paloma mission status webhook: {}",
+                            err
+                        );
+                    }
+                }
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                        .await;
+                }
+            }
+            in_flight.lock().await.remove(&(mission_id, status));
+        });
+    };
+    // The broadcast channel is lossy under bursts, and not every status
+    // writer broadcasts. Measured 2026-08-06: mission 45e54e0b reached
+    // awaiting_user and acknowledged at 09:35:42Z, its origin conversation
+    // was adopted and waiting, and neither transition was ever forwarded --
+    // no lag warning, nothing to retry, the conversation simply never woke.
+    // The sweep reconciles from the store: any mission whose CURRENT status
+    // is forwardable, differs from what we last forwarded, and changed
+    // recently is forwarded now. Older divergences are adopted silently so
+    // a fresh map after restart cannot replay history.
+    let mut reconcile = tokio::time::interval(std::time::Duration::from_secs(60));
+    reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match events_rx.recv().await {
-            Ok(AgentEvent::MissionStatusChanged {
-                mission_id, status, ..
-            }) => {
-                // `insert` returns the prior value; forward only on a real change.
-                let old_status = last_status.insert(mission_id, status);
-                let changed = old_status != Some(status);
-                if !changed || !webhook_forwardable_status(status) {
+        let recv = tokio::select! {
+            result = events_rx.recv() => Some(result),
+            _ = reconcile.tick() => None,
+        };
+        let Some(result) = recv else {
+            let missions = match mission_store.list_missions(400, 0).await {
+                Ok(missions) => missions,
+                Err(_) => continue,
+            };
+            for mission in missions {
+                let status = mission.status;
+                let prior = markers.lock().await.get(mission.id);
+                if prior == Some(status) {
                     continue;
                 }
-
-                // Stable per-logical-event identity for idempotent consumers.
-                let event_id = Uuid::new_v4();
-                let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-                // Everything else (the mission load + POST) runs in a spawned,
-                // concurrency-bounded task so neither a slow DB read nor a slow
-                // webhook can stall the broadcast receiver and lag-drop events.
-                let http = http.clone();
-                let url = url.clone();
-                let secret = secret.clone();
-                let mission_store = Arc::clone(&mission_store);
-                let workspaces = workspaces.clone();
-                let working_dir = working_dir.clone();
-                let sem = Arc::clone(&sem);
-                tokio::spawn(async move {
-                    let _permit = sem.acquire_owned().await;
-                    let mission = mission_store.get_mission(mission_id).await.ok().flatten();
-                    let title = mission
-                        .as_ref()
-                        .and_then(|mission| mission.title.clone())
-                        .unwrap_or_else(|| mission_id.to_string());
-                    let project = mission.as_ref().map(|m| &m.project);
-                    let run = mission_store
-                        .get_active_mission_run(mission_id)
-                        .await
-                        .ok()
-                        .flatten();
-                    let mut remote_jobs = crate::remote_node::job_ledger::load(&working_dir)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|handle| handle.mission_id == mission_id)
-                        .map(|handle| {
-                            serde_json::json!({
-                                "job_id": handle.job_id,
-                                "node_id": handle.node_id,
-                                "kind": handle.kind,
-                                "accepted_at": handle.accepted_at,
-                                "heartbeat_at": handle.heartbeat_at,
-                                "identity": handle.identity,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    remote_jobs.extend(
-                        crate::remote_node::job_ledger::terminal_receipts_for_mission(
-                            &working_dir,
-                            mission_id,
-                        )
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .rev()
-                        .take(16)
-                        .map(|receipt| {
-                            serde_json::json!({
-                                "job_id": receipt.job_id,
-                                "node_id": receipt.node_id,
-                                "kind": "remote_build_receipt",
-                                "state": receipt.state,
-                                "started_at": receipt.started_at,
-                                "finished_at": receipt.finished_at,
-                                "exit_status": receipt.exit_status,
-                                "identity": receipt.identity,
-                            })
-                        }),
-                    );
-                    let terminal_reason = mission
-                        .as_ref()
-                        .and_then(|mission| mission.terminal_reason.as_deref());
-                    let recommended_action = match terminal_reason {
-                        Some("server_shutdown" | "orphan_no_runner") => "resume_once",
-                        Some("auth_error") => "disable_provider_and_reroute",
-                        Some("rate_limited" | "capacity_limited") => "reroute_or_queue",
-                        Some("watchdog_stalled" | "cancelled") => "inspect_artifacts",
-                        _ if status == MissionStatus::Interrupted => "reconcile_then_resume",
-                        _ if status == MissionStatus::Failed => "classify_failure",
-                        _ if status == MissionStatus::AwaitingUser => "inspect_result",
-                        _ => "notify",
-                    };
-                    // Resolve workspace_name from the registry (the store row
-                    // usually leaves it null), so the payload is self-contained.
-                    let workspace_name = match mission.as_ref() {
-                        Some(m) => match m.workspace_name.clone() {
-                            Some(name) => Some(name),
-                            None => workspaces.get(m.workspace_id).await.map(|ws| ws.name),
-                        },
-                        None => None,
-                    };
-                    let body = serde_json::json!({
-                        // Idempotency / ordering (P#6): consumers dedupe on
-                        // `event_id` and may order by `sequence`.
-                        "event_id": event_id,
-                        "sequence": seq,
-                        "mission_id": mission_id,
-                        "old_status": old_status,
-                        "status": status,
-                        // Event-type mirror of `status` so consumers with
-                        // route-level event filters (e.g. the Hermes webhook
-                        // platform reads `payload.type`) can drop unwanted
-                        // transitions like `acknowledged` before spawning an
-                        // agent run.
-                        "type": status,
-                        "title": title,
-                        "short_description": mission
-                            .as_ref()
-                            .and_then(|m| m.short_description.clone()),
-                        "workspace_id": mission.as_ref().map(|m| m.workspace_id),
-                        "workspace_name": workspace_name,
-                        "backend": mission.as_ref().map(|m| m.backend.clone()),
-                        "terminal_reason": terminal_reason,
-                        "resumable": matches!(status, MissionStatus::Interrupted | MissionStatus::Failed | MissionStatus::Blocked),
-                        "recommended_action": recommended_action,
-                        "execution": run.as_ref().map(|run| serde_json::json!({
-                            "run_id": run.run_id,
-                            "generation": run.generation,
-                            "state": run.execution_state,
-                            "heartbeat_at": run.heartbeat_at,
-                            "scope_unit": run.scope_unit,
-                        })),
-                        "remote_jobs": remote_jobs,
-                        "updated_at": mission.as_ref().map(|m| m.updated_at.clone()),
-                        // When the status itself last changed (P#5) — the most
-                        // relevant staleness anchor for a status-change webhook.
-                        "last_status_change_at": mission
-                            .as_ref()
-                            .and_then(|m| m.activity.last_status_change_at.clone()),
-                        // Project tagging so Paloma can route by project/track/
-                        // intent/PR instead of parsing titles.
-                        "project": project.and_then(|p| p.project.clone()),
-                        "track": project.and_then(|p| p.track.clone()),
-                        "intent": project.and_then(|p| p.intent.clone()),
-                        "github_pr": project.and_then(|p| p.github_pr.clone()),
-                        "tags": project.map(|p| p.tags.clone()).unwrap_or_default(),
-                        // Track state so a watchdog can tell "intentionally
-                        // waiting (CI/review/external)" from "no worker = stuck".
-                        "desired_state": project.and_then(|p| p.desired_state.clone()),
-                        "next_check_at": project.and_then(|p| p.next_check_at.clone()),
-                        // For awaiting_user, whether the agent needs a decision
-                        // or is just waiting to be acked/merged.
-                        "awaiting_kind": mission
-                            .as_ref()
-                            .and_then(|m| m.awaiting_kind)
-                            .map(|k| k.as_str()),
-                    });
-
-                    // Serialize once so the signature is computed over the
-                    // exact bytes sent (consumers verify HMAC over the raw
-                    // body, e.g. the Hermes webhook platform's GitHub-style
-                    // `X-Hub-Signature-256` check).
-                    let payload = match serde_json::to_vec(&body) {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            tracing::warn!(
-                                mission_id = %mission_id,
-                                "Failed to serialize Paloma webhook payload: {}",
-                                err
-                            );
-                            return;
-                        }
-                    };
-                    let signature = secret.as_ref().and_then(|secret| {
-                        use hmac::{Hmac, Mac};
-                        let mut mac =
-                            Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).ok()?;
-                        mac.update(&payload);
-                        Some(format!(
-                            "sha256={}",
-                            hex::encode(mac.finalize().into_bytes())
-                        ))
-                    });
-
-                    // At-least-once: retry transient failures with the SAME
-                    // event_id so the consumer can dedupe. Bounded so a dead
-                    // endpoint can't pile up tasks.
-                    const MAX_ATTEMPTS: u32 = 3;
-                    for attempt in 1..=MAX_ATTEMPTS {
-                        let mut request = http
-                            .post(&url)
-                            .header(reqwest::header::CONTENT_TYPE, "application/json")
-                            .body(payload.clone());
-                        if let Some(signature) = signature.as_deref() {
-                            request = request.header("X-Hub-Signature-256", signature);
-                        }
-                        match request.send().await {
-                            Ok(resp) if resp.status().is_success() => break,
-                            Ok(resp) => {
-                                tracing::warn!(
-                                    mission_id = %mission_id,
-                                    webhook_url = %url,
-                                    attempt,
-                                    status = %resp.status(),
-                                    "Paloma webhook returned non-success status"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    mission_id = %mission_id,
-                                    webhook_url = %url,
-                                    attempt,
-                                    "Failed to forward Paloma mission status webhook: {}",
-                                    err
-                                );
-                            }
-                        }
-                        if attempt < MAX_ATTEMPTS {
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                250 * attempt as u64,
-                            ))
-                            .await;
-                        }
-                    }
-                });
+                if !webhook_forwardable_status(status) {
+                    // Nothing to deliver; recording it keeps re-entry
+                    // detection exact (A -> B -> A must forward A again).
+                    markers.lock().await.set(mission.id, status);
+                    continue;
+                }
+                if !in_flight.lock().await.insert((mission.id, status)) {
+                    continue;
+                }
+                // No recency window: the marker file is the durable authority,
+                // so a divergence IS an undelivered transition, however old --
+                // that is the whole lossless-across-outages property. First
+                // boot cannot replay history because adoption above marked it.
+                tracing::info!(
+                    mission_id = %mission.id,
+                    ?status,
+                    "webhook reconcile: forwarding a status transition the \
+                     broadcast never delivered"
+                );
+                forward(mission.id, status, prior, None, None, true);
+            }
+            continue;
+        };
+        match result {
+            Ok(AgentEvent::MissionStatusChanged {
+                mission_id,
+                status,
+                execution,
+                completion,
+                ..
+            }) => {
+                let old_status = markers.lock().await.get(mission_id);
+                if old_status == Some(status) {
+                    continue;
+                }
+                if !webhook_forwardable_status(status) {
+                    markers.lock().await.set(mission_id, status);
+                    continue;
+                }
+                if !in_flight.lock().await.insert((mission_id, status)) {
+                    continue;
+                }
+                forward(mission_id, status, old_status, execution, completion, false);
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(dropped)) => {
@@ -11892,6 +18879,7 @@ fn spawn_control_session(
         current_tree: Arc::clone(&current_tree),
         progress: Arc::clone(&progress),
         running_missions: Arc::clone(&running_missions),
+        assignment_owners: Arc::new(RwLock::new(HashSet::new())),
         max_parallel,
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
@@ -11910,6 +18898,7 @@ fn spawn_control_session(
         .filter(|url| !url.is_empty())
     {
         tokio::spawn(paloma_webhook_forwarder_loop(
+            control_hub.admission_state.clone(),
             events_tx.subscribe(),
             Arc::clone(&state.mission_store),
             workspaces.clone(),
@@ -11939,7 +18928,7 @@ fn spawn_control_session(
 
     // Spawn the main control actor
     tokio::spawn(control_actor_loop(
-        control_hub,
+        control_hub.clone(),
         config.clone(),
         root_agent,
         mcp,
@@ -11960,6 +18949,7 @@ fn spawn_control_session(
         secrets,
         user_id,
         Arc::clone(&background_tasks),
+        Arc::clone(&state.assignment_owners),
     ));
 
     // Recover missions stopped by the previous backend process. Graceful
@@ -11969,8 +18959,9 @@ fn spawn_control_session(
         let store = Arc::clone(&state.mission_store);
         let tx = events_tx.clone();
         let cmd = state.cmd_tx.clone();
+        let startup_at = chrono::Utc::now();
         tokio::spawn(async move {
-            recover_server_shutdown_missions(store, tx, cmd).await;
+            recover_server_shutdown_missions(store, tx, cmd, control_hub, startup_at).await;
         });
     }
 
@@ -12003,6 +18994,7 @@ fn spawn_control_session(
             events_tx.clone(),
             Arc::clone(&tool_hub),
             workspaces.clone(),
+            config.working_dir.clone(),
         ));
         tokio::spawn(ack_promotion_loop(
             Arc::clone(&state.mission_store),
@@ -12312,22 +19304,6 @@ async fn automation_scheduler_loop(
                 },
                 DurableJobTerminal(Uuid),
             }
-            let schedule = match &automation.trigger {
-                TriggerType::Interval { seconds } => ScheduleKind::Interval(*seconds),
-                TriggerType::Cron {
-                    expression,
-                    timezone,
-                } => ScheduleKind::Cron {
-                    expression: expression.clone(),
-                    timezone: timezone.clone(),
-                },
-                TriggerType::Webhook { .. } => continue,
-                TriggerType::AgentFinished => continue,
-                TriggerType::Telegram { .. } => continue,
-                TriggerType::DurableJobTerminal { job_id } => {
-                    ScheduleKind::DurableJobTerminal(*job_id)
-                }
-            };
 
             let mission = match mission_store.get_mission(automation.mission_id).await {
                 Ok(Some(mission)) => mission,
@@ -12349,6 +19325,27 @@ async fn automation_scheduler_loop(
                     continue;
                 }
             };
+
+            if matches!(automation.trigger, TriggerType::AgentFinished)
+                && mission_is_terminal_for_goal_loop(mission.status)
+            {
+                tracing::info!(
+                    "Disabling agent_finished automation {} — host mission {} is {:?}",
+                    automation.id,
+                    mission.id,
+                    mission.status
+                );
+                let mut updated = automation.clone();
+                updated.active = false;
+                if let Err(e) = mission_store.update_automation(updated).await {
+                    tracing::warn!(
+                        "Failed to disable automation {} after host mission ended: {}",
+                        automation.id,
+                        e
+                    );
+                }
+                continue;
+            }
 
             let consecutive_failures =
                 consecutive_failure_count_for_automation(&mission_store, &automation).await;
@@ -12387,6 +19384,23 @@ async fn automation_scheduler_loop(
                 }
                 continue;
             }
+
+            let schedule = match &automation.trigger {
+                TriggerType::Interval { seconds } => ScheduleKind::Interval(*seconds),
+                TriggerType::Cron {
+                    expression,
+                    timezone,
+                } => ScheduleKind::Cron {
+                    expression: expression.clone(),
+                    timezone: timezone.clone(),
+                },
+                TriggerType::Webhook { .. } => continue,
+                TriggerType::AgentFinished => continue,
+                TriggerType::Telegram { .. } => continue,
+                TriggerType::DurableJobTerminal { job_id } => {
+                    ScheduleKind::DurableJobTerminal(*job_id)
+                }
+            };
 
             // Check if it's time to trigger based on schedule type.
             let should_trigger = match &schedule {
@@ -13166,6 +20180,13 @@ fn mission_status_for_terminal_reason(
         }
         TerminalReason::TurnComplete => None,
         TerminalReason::Completed => Some((MissionStatus::Completed, "completed")),
+        TerminalReason::NativeGoalStopped => Some((MissionStatus::Blocked, "native_goal_stopped")),
+        TerminalReason::CodexContinuityRequired => {
+            Some((MissionStatus::Blocked, "codex_continuity_required"))
+        }
+        TerminalReason::NativeContinuityRequired => {
+            Some((MissionStatus::Blocked, "native_continuity_required"))
+        }
         TerminalReason::Cancelled => Some((MissionStatus::Interrupted, "cancelled")),
         TerminalReason::ServerShutdown => Some((MissionStatus::Interrupted, "server_shutdown")),
         TerminalReason::MaxIterations => Some((MissionStatus::Blocked, "max_iterations")),
@@ -13242,6 +20263,15 @@ fn mission_status_summary_for_terminal_reason(reason: TerminalReason) -> Option<
     match reason {
         TerminalReason::TurnComplete | TerminalReason::Completed => None,
         TerminalReason::MaxIterations => Some("Reached iteration limit".to_string()),
+        TerminalReason::NativeGoalStopped => {
+            Some("Native goal stopped — resume after external steering".to_string())
+        }
+        TerminalReason::CodexContinuityRequired => {
+            Some("Native Codex history requires reconciliation before resume".into())
+        }
+        TerminalReason::NativeContinuityRequired => {
+            Some("Native session requires reconciliation before resume".into())
+        }
         TerminalReason::Cancelled => Some("Cancelled by user".to_string()),
         TerminalReason::ServerShutdown => {
             Some("Paused for server restart — click Resume to continue".to_string())
@@ -13256,12 +20286,24 @@ fn mission_status_summary_for_terminal_reason(reason: TerminalReason) -> Option<
 }
 
 fn parse_goal_objective(message: &str) -> Option<String> {
-    message
-        .trim_start()
-        .strip_prefix("/goal ")
-        .map(str::trim)
-        .filter(|objective| !objective.is_empty())
-        .map(ToString::to_string)
+    // Accept any whitespace after the command ("/goal x", "/goal\nx"), but
+    // not other slash commands sharing the prefix ("/goals").
+    let rest = message.trim_start().strip_prefix("/goal")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let objective = rest.trim();
+    (!objective.is_empty()).then(|| objective.to_string())
+}
+
+/// Canonical `/goal <objective>` form for a goal message, or `None` when the
+/// message is not a goal command. The backend goal drivers (codex
+/// `parse_goal_prefix`, grok, opencode) only recognise the space-separated
+/// form, while `parse_goal_objective` accepts any whitespace after the
+/// command — normalising at the choke points keeps every downstream parser in
+/// agreement without teaching each one about `/goal\n`.
+fn canonical_goal_message(message: &str) -> Option<String> {
+    parse_goal_objective(message).map(|objective| format!("/goal {objective}"))
 }
 
 /// If the turn ended with `LlmError` or `AuthError` but the agent produced
@@ -13442,6 +20484,145 @@ fn is_transport_failure_evidence(evidence: &crate::agents::CompletionEvidence) -
     )
 }
 
+fn is_grok_acp_transport_failure(result: &crate::agents::AgentResult) -> bool {
+    result
+        .data
+        .as_ref()
+        .and_then(|data| data.get("grok_acp_transport_failure"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+const GROK_TRANSPORT_RECOVERY_RESERVED: &str = "Grok ACP transport recovery reserved (1/1 for this mission). Reconcile the existing checkout and jobs before continuing; automatic recovery will not repeat.";
+
+async fn grok_transport_recovery_was_reserved(
+    store: &dyn MissionStore,
+    mission_id: Uuid,
+) -> Result<bool, String> {
+    // Page only messages/errors, not a bounded tail that could forget an old
+    // attempt. Include legacy recovery messages when upgrading an actor.
+    let mut offset = 0;
+    loop {
+        let events = store
+            .get_events(
+                mission_id,
+                Some(&["user_message", "error"]),
+                Some(100),
+                Some(offset),
+            )
+            .await?;
+        if events.iter().any(|event| {
+            (event.event_type == "error" && event.content == GROK_TRANSPORT_RECOVERY_RESERVED)
+                || (event.event_type == "user_message"
+                    && event.metadata.get("source").and_then(|v| v.as_str())
+                        == Some("transport_auto_resume"))
+        }) {
+            return Ok(true);
+        }
+        if events.len() < 100 {
+            return Ok(false);
+        }
+        offset += events.len();
+    }
+}
+
+/// Shared by the serial and parallel completion paths in the single control
+/// actor. Grok gets one recovery per mission, deliberately stricter than a
+/// budget reset at each new checkpoint. Persist the reservation before queueing
+/// so an actor restart (or a crash between reservation and queueing) cannot
+/// replay the same incident. Other backends retain their existing three tries.
+async fn reserve_transport_auto_resume(
+    store: &dyn MissionStore,
+    attempts: &mut HashMap<Uuid, u8>,
+    mission_id: Uuid,
+    grok_acp: bool,
+    cancellation_requested: bool,
+) -> bool {
+    if cancellation_requested {
+        return false;
+    }
+    let count = attempts.entry(mission_id).or_insert(0);
+    if *count >= if grok_acp { 1 } else { 3 } {
+        return false;
+    }
+    *count += 1;
+    if !grok_acp {
+        return true;
+    }
+
+    let reserve = async {
+        if grok_transport_recovery_was_reserved(store, mission_id).await? {
+            return Ok(false);
+        }
+        // Queued UserMessage events intentionally are not persisted. Record
+        // the reservation as an error diagnostic instead of falsely claiming
+        // that a recovery message has already started executing.
+        store
+            .log_event(
+                mission_id,
+                &AgentEvent::Error {
+                    message: GROK_TRANSPORT_RECOVERY_RESERVED.to_string(),
+                    mission_id: Some(mission_id),
+                    resumable: true,
+                },
+            )
+            .await?;
+        if !grok_transport_recovery_was_reserved(store, mission_id).await? {
+            return Err("mission store did not persist the Grok recovery reservation".to_string());
+        }
+        Ok(true)
+    }
+    .await;
+    match reserve {
+        Ok(reserved) => reserved,
+        Err(error) => {
+            tracing::warn!(%mission_id, %error, "Grok transport recovery withheld: durable budget unavailable");
+            false
+        }
+    }
+}
+
+const TRANSPORT_AUTO_RESUME_PROMPT: &str = "The previous turn ended because its provider transport disconnected. Reconcile the current workspace, remote jobs, and repository head, then resume the same task. Do not duplicate an accepted job or create a replacement writer.";
+
+const CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT: &str = "The previous ChatGPT UI turn failed to start. Repeat the original user request exactly. Do not reconcile git, PRs, Lean, remote jobs, or repository head.";
+
+/// ChatGPT UI turns send only the queued message as the prompt. Replaying the
+/// coding-worker reconcilation stub after a profile lock made Pro lane A on
+/// eip-8282 return a Lean campaign verdict instead of the original rewrite.
+fn transport_auto_resume_message(
+    backend: Option<&str>,
+    original_user_message: Option<&str>,
+) -> String {
+    if backend == Some("chatgpt_ui") {
+        if let Some(original) = original_user_message
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return original.to_string();
+        }
+        return CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT.to_string();
+    }
+    TRANSPORT_AUTO_RESUME_PROMPT.to_string()
+}
+
+async fn transport_auto_resume_message_for_mission(
+    store: &dyn MissionStore,
+    mission_id: Uuid,
+) -> String {
+    let backend = store
+        .get_mission(mission_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mission| mission.backend);
+    let original = store
+        .get_initial_user_message(mission_id)
+        .await
+        .ok()
+        .flatten();
+    transport_auto_resume_message(backend.as_deref(), original.as_deref())
+}
+
 fn is_bare_llm_error_output(output: &str) -> bool {
     if looks_like_structured_provider_error(output) {
         return true;
@@ -13534,7 +20715,10 @@ async fn maybe_finalize_terminal_mission(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
+    live_background_tasks: usize,
     terminal_reason: Option<TerminalReason>,
+    // What the terminating guard observed, from AgentResult::terminal_evidence.
+    terminal_evidence: Option<&str>,
     completion_confidence: Option<crate::agents::CompletionConfidence>,
     complete_turn_without_follow_up: bool,
     // The just-completed turn's assistant output, if available. Used to classify
@@ -13546,9 +20730,32 @@ async fn maybe_finalize_terminal_mission(
     let Some(reason) = terminal_reason else {
         return;
     };
-    let Some((new_status, terminal_reason_str)) =
+    let transportish = final_output.or(terminal_evidence).is_some_and(|text| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("pending tool")
+            || lower.contains("not replayed")
+            || lower.contains("stream closed before mission")
+            || lower.contains("codex app-server stream closed")
+    });
+    let mapped = if live_background_tasks > 0
+        && matches!(
+            reason,
+            TerminalReason::TurnComplete | TerminalReason::Completed | TerminalReason::LlmError
+        ) {
+        // Claude Code can emit its terminal result before descendants of a
+        // `run_in_background` Bash call release the PTY. The bounded teardown
+        // then SIGKILLs the lingering CLI process, which historically changed
+        // a healthy parked mission into Failed and invited a controller retry
+        // while the build was still running. The shared registry is the
+        // authoritative evidence that useful work remains live: park the
+        // mission and let bg-autoresume deliver the receipt when it completes.
+        Some((MissionStatus::WaitingBackground, "background_jobs_running"))
+    } else if transportish && matches!(reason, TerminalReason::LlmError) {
+        Some((MissionStatus::Interrupted, "transport"))
+    } else {
         mission_status_for_terminal_reason(reason, complete_turn_without_follow_up)
-    else {
+    };
+    let Some((new_status, terminal_reason_str)) = mapped else {
         tracing::debug!(
             mission_id = %mission_id,
             reason = ?reason,
@@ -13662,6 +20869,21 @@ async fn maybe_finalize_terminal_mission(
                 None
             };
 
+            if let Some(evidence) = terminal_evidence.filter(|e| !e.trim().is_empty()) {
+                // Best-effort by contract: failing to record evidence must
+                // never turn into failing to terminate.
+                if let Err(e) = mission_store
+                    .set_terminal_evidence(mission_id, evidence)
+                    .await
+                {
+                    tracing::warn!(mission_id = %mission_id, "failed to record terminal evidence: {e}");
+                }
+            }
+            let execution = mission_store
+                .get_latest_mission_run(mission_id)
+                .await
+                .ok()
+                .flatten();
             if let Err(e) = mission_store
                 .update_mission_status_with_reason(
                     mission_id,
@@ -13701,10 +20923,28 @@ async fn maybe_finalize_terminal_mission(
                     new_status,
                 );
                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: Some(MissionCompletionSnapshot {
+                        result_summary: final_output.map(str::to_owned),
+                        terminal_reason: Some(terminal_reason_str.to_owned()),
+                        terminal_evidence: terminal_evidence.map(str::to_owned),
+                    }),
+                    execution,
                     mission_id,
                     status: new_status,
                     summary: mission_status_summary_for_terminal_reason(reason),
                 });
+
+                // Broadcast delivery is best-effort. Mirror the explicit
+                // SetMissionStatus path and schedule teardown directly so a
+                // finalizer cannot leak detached WorkspaceExec scopes when
+                // the scope-reaper listener is lagged or attached to another
+                // per-user control channel. The delayed status recheck still
+                // preserves missions promoted to WaitingBackground.
+                super::scope_reaper::schedule_mission_scope_teardown(
+                    Arc::clone(mission_store),
+                    mission_id,
+                    new_status,
+                );
 
                 // Stall-guard: orchestrators that park in awaiting_user with no
                 // wakeup armed can't resume themselves — arm a bounded fallback.
@@ -13819,13 +21059,14 @@ async fn agent_finished_automation_messages(
             false
         };
 
-        if stop_policy_matches_status(
-            &automation.stop_policy,
-            mission.status,
-            consecutive_failures,
-            has_fired,
-        )
-        .await
+        if mission_is_terminal_for_goal_loop(mission.status)
+            || stop_policy_matches_status(
+                &automation.stop_policy,
+                mission.status,
+                consecutive_failures,
+                has_fired,
+            )
+            .await
         {
             tracing::info!(
                 "Disabling agent_finished automation {} due to stop policy {:?} (mission {} status {:?})",
@@ -14019,6 +21260,7 @@ async fn control_actor_loop(
     // Shared registry of in-flight Claude Code background shell tasks. Written
     // here from the `ToolResult` event arm; read by the auto-resume watcher.
     background_tasks: super::mission_runner::BackgroundTaskRegistry,
+    assignment_owners: Arc<RwLock<HashSet<Uuid>>>,
 ) {
     // A process-local actor cannot reattach a harness JoinHandle after restart.
     // Close any inherited execution lease before accepting new work; durable
@@ -14027,6 +21269,11 @@ async fn control_actor_loop(
     // below re-drives task-mode missions (assistant-mode missions remain idle).
     if let Ok(inherited_runs) = mission_store.list_active_mission_runs().await {
         for run in inherited_runs {
+            // Orb owns this native process. A Core restart cannot prove it
+            // stopped; retain its fence until the computer confirms termination.
+            if run.owner_actor_id.starts_with("orb-client:") {
+                continue;
+            }
             if run.execution_state == MissionExecutionState::WaitingRemoteJob {
                 let mission_status = match mission_store.get_mission(run.mission_id).await {
                     Ok(Some(mission)) => mission.status,
@@ -14197,10 +21444,13 @@ async fn control_actor_loop(
     // messages (re-injected as commands above) rely on this same guard: the
     // first occurrence runs, any later duplicate is dropped.
     let mut accepted_user_message_ids: HashSet<Uuid> = HashSet::new();
+    // Alias membership follows the outer acceptance bit. Rejection/release
+    // removes that bit, so constituent IDs cannot suppress a legitimate retry.
+    let mut accepted_user_message_batches: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     // One bounded same-mission retry for structured transport failures. Auth,
     // quota/capacity, source failures, stalls, and loops are deliberately not
     // eligible. Writer leases are re-acquired by the normal start path.
-    let mut transport_auto_resumed_missions: HashSet<Uuid> = HashSet::new();
+    let mut transport_auto_resumed_missions: HashMap<Uuid, u8> = HashMap::new();
     // Track subtasks for the main runner
     let mut main_runner_subtasks: Vec<super::mission_runner::SubtaskInfo> = Vec::new();
     // Track number of in-flight tool calls on the main runner so the stall
@@ -14217,6 +21467,7 @@ async fn control_actor_loop(
     // and `Stop` becomes a no-op. After this deadline we force-abort
     // the JoinHandle and clean up the in-memory state.
     let mut runner_force_clear_deadline: Option<tokio::time::Instant> = None;
+    let mut runner_force_abort_requested = false;
     const RUNNER_FORCE_CLEAR_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Correlate Bash `tool_call_id` -> command string so that when the matching
@@ -14389,8 +21640,47 @@ async fn control_actor_loop(
         working_directory: Option<&str>,
         scheduling: crate::api::mission_store::MissionScheduling,
     ) -> Result<Mission, String> {
+        create_new_mission_with_title_and_placement(
+            mission_store,
+            title,
+            workspace_id,
+            agent,
+            model_override,
+            model_effort,
+            fast_mode,
+            backend,
+            config_profile,
+            parent_mission_id,
+            working_directory,
+            true,
+            scheduling,
+            None,
+        )
+        .await
+    }
+
+    /// Persist placement authority with the Pending mission row.  The
+    /// admission ledger is only a byte lease and must never decide whether a
+    /// restarted mission is local or remote.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_new_mission_with_title_and_placement(
+        mission_store: &Arc<dyn MissionStore>,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        fast_mode: bool,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+        requires_local_disk: bool,
+        scheduling: crate::api::mission_store::MissionScheduling,
+        assigned_id: Option<Uuid>,
+    ) -> Result<Mission, String> {
         let mut mission = mission_store
-            .create_mission_with_parent(
+            .create_mission_with_parent_and_placement(
                 title,
                 workspace_id,
                 agent,
@@ -14401,6 +21691,8 @@ async fn control_actor_loop(
                 config_profile,
                 parent_mission_id,
                 working_directory,
+                requires_local_disk,
+                assigned_id,
             )
             .await?;
         // FLEET-001: persist scheduling metadata as a focused follow-up write so
@@ -14422,6 +21714,12 @@ async fn control_actor_loop(
         clean_workspace: bool,
     ) -> Result<(Mission, String), String> {
         let mission = load_mission_record(mission_store, mission_id).await?;
+
+        if let Some(placement) =
+            remote_grok::placement(&config.working_dir, mission_store, mission_id).await?
+        {
+            return Err(remote_grok::local_resume_refusal(&mission, &placement));
+        }
 
         // Check if mission can be resumed. Paused remains Paused until the
         // actor has acquired the durable writer lock and accepted the resume.
@@ -14461,10 +21759,48 @@ async fn control_actor_loop(
             let _ = std::fs::remove_file(runtime_file);
         }
 
-        Ok((mission, INTERRUPTED_RESUME_PROMPT.to_string()))
+        let prompt = if mission.backend == "codex" && mission.goal_mode {
+            mission
+                .goal_objective
+                .as_ref()
+                .map(|objective| format!("/goal {objective}"))
+        } else {
+            None
+        }
+        .unwrap_or_else(|| INTERRUPTED_RESUME_PROMPT.to_string());
+        Ok((mission, prompt))
     }
 
     loop {
+        let mut owners = HashSet::new();
+        if running.is_some() {
+            owners.extend(running_mission_id);
+        }
+        let current_id = *current_mission.read().await;
+        owners.extend(
+            queue
+                .iter()
+                .filter_map(|entry| entry.3.or(running_mission_id).or(current_id)),
+        );
+        owners.extend(
+            parallel_runners
+                .iter()
+                .filter(|(_, runner)| {
+                    runner.is_running()
+                        || !runner.queue.is_empty()
+                        || runner.inflight_message().is_some()
+                })
+                .map(|(id, _)| *id),
+        );
+        owners.extend(
+            background_tasks
+                .read()
+                .await
+                .iter()
+                .filter(|(_, tasks)| !tasks.is_empty())
+                .map(|(id, _)| *id),
+        );
+        *assignment_owners.write().await = owners;
         // Persist the pending queue whenever it changes so a restart doesn't
         // lose queued messages. Debounced by snapshot comparison — the DB is
         // written only when the queue actually changed (no per-iteration churn
@@ -14593,12 +21929,26 @@ async fn control_actor_loop(
                         && state != MissionExecutionState::WaitingRemoteJob
                         && live_registered_tools == 0
                     {
-                        if backend_id.as_deref() == Some("chatgpt_ui") {
-                            tracing::debug!(
+                        let owned = match mission_store.get_mission(run.mission_id).await {
+                            Ok(Some(mission)) => skip_idle_registered_liveness_interrupt(
+                                backend_id.as_deref(),
+                                mission.origin.as_deref(),
+                                mission.origin_session_id.as_deref(),
+                                &mission.project.tags,
+                            ),
+                            _ => skip_idle_registered_liveness_interrupt(
+                                backend_id.as_deref(),
+                                None,
+                                None,
+                                &[],
+                            ),
+                        };
+                        if owned {
+                            tracing::warn!(
                                 mission_id = %run.mission_id,
                                 run_id = %run.run_id,
                                 idle_secs,
-                                "Keeping ChatGPT UI run alive until its managed absolute timeout"
+                                "Registered-liveness interrupt: control-owned mission idle — NOT interrupting"
                             );
                             continue;
                         }
@@ -14631,9 +21981,158 @@ async fn control_actor_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
+                // Reject remote messages before admission can retag or reactivate
+                // the mission. The actual node continuation is the resume route.
+                let message_target = match &cmd {
+                    ControlCommand::UserMessage { target_mission_id, .. } => *target_mission_id,
+                    ControlCommand::AdmitDispatch { command, .. } => match command.as_ref() {
+                        ControlCommand::UserMessage { target_mission_id, .. } => *target_mission_id,
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(mid) = message_target {
+                    if let Err(error) = remote_grok::reject_local_followup(&config.working_dir, &mission_store, mid).await {
+                        let rejected = match cmd {
+                            ControlCommand::AdmitDispatch { command, .. } => *command,
+                            command => command,
+                        };
+                        if let ControlCommand::UserMessage { respond, .. } = rejected {
+                            let _ = respond.send(UserMessageAck::Rejected(error));
+                        }
+                        continue;
+                    }
+                }
+
+                // Internal wakes also need current track ownership. They carry
+                // no controller assertion or retag, but use the same admission
+                // and rollback boundary as HTTP dispatch.
+                let cmd = if matches!(&cmd, ControlCommand::UserMessage { target_mission_id: Some(_), .. } | ControlCommand::ResumeMission { .. }) {
+                    if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                        let work_hint = match &cmd { ControlCommand::UserMessage { content, .. } => Some(content.clone()), _ => None };
+                        ControlCommand::AdmitDispatch {
+                            admission: Box::new(DispatchAdmission {
+                                state,
+                                store: mission_store.clone(),
+                                // Internal control messages are not retasks;
+                                // do not run prose recycle inference on them.
+                                patch: Default::default(),
+                                internal_work_hint: work_hint,
+                            }),
+                            command: Box::new(cmd),
+                        }
+                    } else { cmd }
+                } else { cmd };
+                #[cfg(test)]
+                if let ControlCommand::AdmitDispatch { command, .. } = &cmd {
+                    let id = match command.as_ref() {
+                        ControlCommand::UserMessage { target_mission_id, .. } => *target_mission_id,
+                        ControlCommand::ResumeMission { mission_id, .. } => Some(*mission_id),
+                        _ => None,
+                    };
+                    if let Some(id) = id { dispatch_admission_tests::notify_wait(id, "actor"); }
+                }
+                let admission_guard = DISPATCH_ADMISSION.lock().await;
+                let (cmd, _admission_guard) = match cmd {
+                    ControlCommand::AdmitDispatch { admission, command } => {
+                        // Deduplication is an admission decision too: a retry
+                        // cannot smuggle a new assignment into an accepted id.
+                        if let ControlCommand::UserMessage { id, target_mission_id, .. } = command.as_ref() {
+                            let pending_in_queue = queue.iter().any(|entry| control_message_contains_id(entry.0, &entry.1, entry.4.as_deref(), *id))
+                                || parallel_runners.values().any(|runner| runner.queue.iter().any(|entry| control_message_contains_id(entry.id, &entry.content, entry.source.as_deref(), *id)));
+                            let consumed = recovered_consumed_user_messages.values().any(|entry| control_message_contains_id(entry.id, &entry.content, entry.source.as_deref(), *id))
+                                || parallel_runners.values().any(|runner| runner.inflight_message().is_some_and(|entry| control_message_contains_id(entry.id, &entry.content, entry.source.as_deref(), *id)));
+                            let pending_deferred = if let Some(mid) = target_mission_id {
+                                match mission_store.get_mission(*mid).await {
+                                    Ok(Some(mission)) if mission.status == MissionStatus::Pending => {
+                                        mission_store.get_deferred_goal(*mid).await.ok().flatten()
+                                            .is_some_and(|goal| deferred_messages::decode(&goal).1.iter().any(|(message_id, _)| message_id == id))
+                                    }
+                                    _ => false,
+                                }
+                            } else { false };
+                            let pending = pending_in_queue || pending_deferred;
+                            let accepted = accepted_user_message_ids.contains(id)
+                                || accepted_user_message_batches.iter().any(|(outer, ids)| accepted_user_message_ids.contains(outer) && ids.contains(id));
+                            // Completed runners leave the live snapshot. Their durable
+                            // transcript still owns both the outer ID and constituent
+                            // scheduler IDs across later control-session restarts.
+                            let delivered_history = if !pending && !consumed && !accepted {
+                                if let Some(mid) = target_mission_id {
+                                    match mission_store.get_events(*mid, Some(&["user_message"]), None, None).await {
+                                        Ok(events) => events.iter().filter(|event| event.metadata.get("queued").and_then(|value| value.as_bool()) != Some(true)).any(|event| {
+                                            event.event_id.as_deref().and_then(|value| Uuid::parse_str(value).ok()) == Some(*id)
+                                                || (event.metadata.get("source").and_then(|value| value.as_str()) == Some("scheduler")
+                                                    && event.metadata.get("messages").and_then(|value| serde_json::from_value::<Vec<(Uuid, String)>>(value.clone()).ok())
+                                                        .is_some_and(|messages| messages.iter().any(|(message_id, _)| message_id == id)))
+                                        }),
+                                        Err(error) => {
+                                            if let ControlCommand::UserMessage { respond, .. } = *command {
+                                                let _ = respond.send(UserMessageAck::Rejected(format!("failed to check prior message receipts: {error}")));
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                } else { false }
+                            } else { false };
+                            if pending || consumed || delivered_history || accepted {
+                                if let ControlCommand::UserMessage { respond, .. } = *command {
+                                    let _ = respond.send(if pending { UserMessageAck::Queued } else { UserMessageAck::Delivered });
+                                }
+                                continue;
+                            }
+                        }
+                        let target = match command.as_ref() {
+                            ControlCommand::UserMessage { target_mission_id, .. } => *target_mission_id,
+                            ControlCommand::ResumeMission { mission_id, .. } => Some(*mission_id),
+                            _ => None,
+                        };
+                        let busy = target.is_some_and(|id| running_mission_id == Some(id)
+                            || parallel_runners.contains_key(&id)
+                            || queue_has_pending_target_mission(&queue, id)
+                            || queue.iter().any(|entry| entry.3.is_none()));
+                        let busy = busy || if let Some(id) = target {
+                            background_tasks.read().await.get(&id).is_some_and(|tasks| !tasks.is_empty())
+                        } else { false };
+                        let actor_before = serde_json::json!({
+                            "user_id": session_user_id,
+                            "current_mission": *current_mission.read().await,
+                            "history": history,
+                        });
+                        match dispatch_admission::admit_dispatch_with_lifetime(*admission, *command, admission_guard, busy, Some(actor_before)).await {
+                            Some(cmd) => (cmd, None),
+                            None => continue,
+                        }
+                    }
+                    cmd => (cmd, Some(admission_guard)),
+                };
                 match cmd {
+                    ControlCommand::UpdateProject { mission_id, user, request, respond } => {
+                        let busy = running_mission_id == Some(mission_id)
+                            || parallel_runners.contains_key(&mission_id)
+                            || queue_has_pending_target_mission(&queue, mission_id)
+                            || queue.iter().any(|entry| entry.3.is_none())
+                            || background_tasks.read().await.get(&mission_id).is_some_and(|tasks| !tasks.is_empty());
+                        let result = if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                            match dispatch_admission::durable_lock(&state.config).await {
+                                Ok(_file_guard) => update_mission_project_locked(busy, State(state), Extension(user), Path(mission_id), Json(request)).await.map(|Json(m)| m),
+                                Err(error) => Err(internal_error(error)),
+                            }
+                        } else {
+                            Err((StatusCode::SERVICE_UNAVAILABLE, "Admission state unavailable".into()))
+                        };
+                        let _ = respond.send(result);
+                    }
+                    ControlCommand::AdmitDispatch { .. } => unreachable!("nested admission"),
                     ControlCommand::UserMessage { id, content, agent: msg_agent, target_mission_id, strict, source, respond } => {
-                        if recovered_consumed_user_messages.contains_key(&id) {
+                        if let Some(mid) = target_mission_id {
+                            if let Err(error) = remote_grok::reject_local_followup(&config.working_dir, &mission_store, mid).await {
+                                let _ = respond.send(UserMessageAck::Rejected(error));
+                                continue;
+                            }
+                        }
+
+                        if recovered_consumed_user_messages.values().any(|entry| control_message_contains_id(entry.id, &entry.content, entry.source.as_deref(), id)) {
                             // The previous actor had already started this exact
                             // deterministic delivery. Its run was interrupted
                             // during startup recovery, so acknowledge the retry
@@ -14650,6 +22149,10 @@ async fn control_actor_loop(
                                 UserMessageAck::Delivered
                             });
                             continue;
+                        }
+
+                        if source.as_deref() == Some("scheduler") {
+                            accepted_user_message_batches.insert(id, deferred_messages::decode(&content).1.into_iter().map(|(id, _)| id).collect());
                         }
 
                         // Smart routing: decide where to send this message based on target_mission_id
@@ -14713,7 +22216,32 @@ async fn control_actor_loop(
                         // loop. Non-grok backends and non-/goal messages fall
                         // through unchanged. See `api/grok_goal.rs`.
                         let goal_target_mission = effective_target.or(main_mission_id);
-                        let mut content = content;
+                        if target_mission_id.is_none() {
+                            if let Some(mid) = goal_target_mission {
+                                if let Err(error) = remote_grok::reject_local_followup(&config.working_dir, &mission_store, mid).await {
+                                    accepted_user_message_ids.remove(&id);
+                                    let _ = respond.send(UserMessageAck::Rejected(error));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Only scheduler-owned envelopes are transport metadata.
+                        // Direct operator text that resembles one stays literal.
+                        let (mut content, deferred_parts) = if source.as_deref() == Some("scheduler") {
+                            deferred_messages::decode(&content)
+                        } else { (content, Vec::new()) };
+                        // Canonicalise `/goal\n…` to the space form at the single
+                        // entry point, so every downstream space-only parser (the
+                        // grok kickoff below, the mission_runner dispatch paths,
+                        // the codex/opencode goal drivers) sees the same goal
+                        // command. Strict (control-plane) messages are never goal
+                        // commands and stay byte-exact.
+                        if !strict {
+                            if let Some(canonical) = canonical_goal_message(&content) {
+                                content = canonical;
+                            }
+                        }
                         // Strict (control-plane) messages are system-generated and must
                         // never be reinterpreted as a `/goal` kickoff — skip the rewrite.
                         if !strict {
@@ -14740,6 +22268,7 @@ async fn control_actor_loop(
                                 }
                             }
                         }
+                        let content = deferred_messages::wrap(&content, deferred_parts);
 
                         // Reject paused targets before writer capability is
                         // acquired. Retagging a paused read-only audit for a
@@ -14806,12 +22335,11 @@ async fn control_actor_loop(
                                                 .await
                                                 .ok()
                                                 .flatten();
-                                            let combined = match previous_goal.as_deref() {
-                                                Some(prev) if !prev.is_empty() => {
-                                                    format!("{prev}\n{content}")
-                                                }
-                                                _ => content.clone(),
-                                            };
+                                            let combined = deferred_goal_for_incoming_message(
+                                                m.status,
+                                                previous_goal.as_deref(),
+                                                &if source.as_deref() == Some("scheduler") { content.clone() } else { deferred_messages::encode(id, &content) },
+                                            );
                                             if let Err(e) = mission_store
                                                 .set_deferred_goal(tid, Some(combined))
                                                 .await
@@ -15101,15 +22629,41 @@ async fn control_actor_loop(
                                         .await
                                         .ok()
                                         .flatten();
-                                    let combined = match previous_goal.as_deref() {
-                                        Some(prev) if !prev.is_empty() => {
-                                            format!("{prev}\n{content}")
-                                        }
-                                        _ => content.clone(),
-                                    };
+                                    let combined = deferred_goal_for_incoming_message(
+                                        mission.status,
+                                        previous_goal.as_deref(),
+                                        &if source.as_deref() == Some("scheduler") { content.clone() } else { deferred_messages::encode(id, &content) },
+                                    );
                                     match mission_store.set_deferred_goal(tid, Some(combined)).await
                                     {
                                         Ok(()) => {
+                                            if follow_up_should_requeue_as_pending(mission.status) {
+                                                if let Err(error) = mission_store
+                                                    .update_mission_status(
+                                                        tid,
+                                                        MissionStatus::Pending,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        mission_id = %tid,
+                                                        "At capacity: stashed follow-up but could not requeue as pending: {error}"
+                                                    );
+                                                } else {
+                                                    let _ = events_tx.send(
+                                                        AgentEvent::MissionStatusChanged {
+                                                            completion: None,
+                                                            execution: None,
+                                                            mission_id: tid,
+                                                            status: MissionStatus::Pending,
+                                                            summary: Some(
+                                                                "Operator follow-up queued until a runner slot is free"
+                                                                    .to_string(),
+                                                            ),
+                                                        },
+                                                    );
+                                                }
+                                            }
                                             tracing::info!(
                                                 mission_id = %tid,
                                                 max_parallel,
@@ -15195,10 +22749,11 @@ async fn control_actor_loop(
                                                 Some(mission.backend.clone()),
                                                 mission.session_id.clone(),
                                                 mission.config_profile.clone(),
-                                                mission.model_override.clone(),
+                                                model_for_dispatch(&mission_store, &mission).await,
                                                 mission.model_effort.clone(),
                                                 mission.fast_mode,
                                             );
+                                            runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                             runner.working_directory = mission.working_directory.clone();
                                             runner.user_id = Some(session_user_id.clone());
                                             // Load existing history
@@ -15654,7 +23209,7 @@ async fn control_actor_loop(
                                 // Use the mission ID that was captured when message was queued
                                 // This prevents race conditions where current_mission changes between queueing and execution
                                 let mission_id = msg_target_mid;
-                                let (workspace_id, model_override, model_effort, fast_mode, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
+                                let (workspace_id, model_override, model_effort, fast_mode, mission_agent, backend_id, session_id, mission_config_profile, pr_readonly) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => {
                                             if let Err(error) = activate_mission_for_message(
@@ -15679,13 +23234,14 @@ async fn control_actor_loop(
                                             }
                                             (
                                                 Some(mission.workspace_id),
-                                                mission.model_override.clone(),
+                                                model_for_dispatch(&mission_store, &mission).await,
                                                 mission.model_effort.clone(),
                                                 mission.fast_mode,
                                                 mission.agent.clone(),
                                                 Some(mission.backend.clone()),
                                                 mission.session_id.clone(),
                                                 mission.config_profile.clone(),
+                                                mission.project.tags.iter().any(|tag| tag == "pr-readonly"),
                                             )
                                         }
                                         Ok(None) => {
@@ -15693,7 +23249,7 @@ async fn control_actor_loop(
                                                 "Mission {} not found while resolving workspace",
                                                 mid
                                             );
-                                            (None, None, None, false, None, None, None, None)
+                                            (None, None, None, false, None, None, None, None, false)
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -15701,11 +23257,11 @@ async fn control_actor_loop(
                                                 mid,
                                                 e
                                             );
-                                            (None, None, None, false, None, None, None, None)
+                                            (None, None, None, false, None, None, None, None, false)
                                         }
                                     }
                                 } else {
-                                    (None, None, None, false, None, None, None, None)
+                                    (None, None, None, false, None, None, None, None, false)
                                 };
                                 // Per-message agent overrides mission agent
                                 let agent_override = per_msg_agent.or(mission_agent);
@@ -15765,8 +23321,11 @@ async fn control_actor_loop(
                                         continue;
                                     }
                                 };
+                                let turn_mission_store = mission_store.clone();
+                                let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
                                 running = Some(tokio::spawn(async move {
-                                    let result = run_single_control_turn(
+                                    let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
+                                        turn_mission_store,
                                         cfg,
                                         agent,
                                         mcp_ref,
@@ -15777,7 +23336,7 @@ async fn control_actor_loop(
                                         status_ref,
                                         cancel,
                                         hist_snapshot,
-                                        msg.clone(),
+                                        if msg_source.as_deref() == Some("scheduler") { deferred_messages::strip(&msg) } else { msg.clone() },
                                         Some(mission_ctrl),
                                         tree_ref,
                                         progress_ref,
@@ -15792,7 +23351,8 @@ async fn control_actor_loop(
                                         false, // force_session_resume: regular message, not a resume
                                         mission_config_profile,
                                         Some(user_id_for_turn),
-                                    )
+                                        pr_readonly,
+                                    ))
                                     .await;
                                     (mid, msg, result)
                                 }));
@@ -15886,16 +23446,37 @@ async fn control_actor_loop(
                             }
                         }
                     }
-                    ControlCommand::CreateMission { title, workspace_id, agent, model_override, model_effort, fast_mode, backend, config_profile, parent_mission_id, working_directory, scheduling, requires_local_disk, respond } => {
+                    ControlCommand::CreateMission { title, workspace_id, agent, model_override, model_effort, fast_mode, backend, config_profile, parent_mission_id, working_directory, scheduling, requires_local_disk, estimated_disk_gib, admission_tags, respond } => {
+                        // Resolve once for both admission and the durable lease record.
+                        // Keeping this value outside the conditional is important: the
+                        // lease must name the exact workspace that was admitted, rather
+                        // than reconstructing a possibly different default later.
+                        let workspace = workspaces
+                            .get(workspace_id.unwrap_or(workspace::DEFAULT_WORKSPACE_ID))
+                            .await
+                            .unwrap_or_else(|| workspace::Workspace::default_host(config.working_dir.clone()));
                         // Disk preflight: refuse new missions when the root
                         // filesystem is critically full instead of letting
                         // workers die mid-flight on ENOSPC. Actor-level so
                         // the HTTP, Ask and Telegram entrypoints are all
                         // covered by this single gate.
+                        let mut reservation_guard = None;
+                        let mut reservation = None;
                         if requires_local_disk {
-                            if let Some(refusal) = disk_admission_refusal() {
-                                let _ = respond.send(Err(refusal));
-                                continue;
+                            match reserve_local_mission_disk(
+                                &control_hub,
+                                &config,
+                                &workspace,
+                                estimated_disk_gib.unwrap_or_else(mission_disk_default_estimate_gib),
+                            ).await {
+                                Ok((guard, candidate)) => {
+                                    reservation_guard = Some(guard);
+                                    reservation = Some(candidate);
+                                }
+                                Err(error) => {
+                                    let _ = respond.send(Err(error));
+                                    continue;
+                                }
                             }
                         }
                         // First persist current mission history
@@ -15907,8 +23488,45 @@ async fn control_actor_loop(
                         )
                         .await;
 
+                        // Publish the lease before the mission row so a crash
+                        // cannot reconstruct a custom estimate as the default.
+                        let assigned_id = Uuid::new_v4();
+                        if reservation_guard.is_none() {
+                            match acquire_durable_disk_admission_lock(&config).await {
+                                Ok(guard) => reservation_guard = Some(guard),
+                                Err(error) => {
+                                    let _ = respond.send(Err(format!(
+                                        "mission creation rolled back: acquire placement ledger lock: {error}"
+                                    )));
+                                    continue;
+                                }
+                            }
+                        }
+                        let mut ledger = match read_disk_reservation_ledger(&config) {
+                            Ok(ledger) => ledger,
+                            Err(error) => {
+                                let _ = respond.send(Err(format!(
+                                    "mission creation rolled back: read disk admission ledger: {error}"
+                                )));
+                                continue;
+                            }
+                        };
+                        if let Some(mut candidate) = reservation.take() {
+                            candidate.mission_id = assigned_id;
+                            candidate.workspace_dir = Some(
+                                workspace::mission_workspace_dir_for_workspace(&workspace, assigned_id),
+                            );
+                            ledger.reservations.insert(assigned_id, candidate);
+                            if let Err(error) = write_disk_reservation_ledger(&config, &ledger) {
+                                let _ = respond.send(Err(format!(
+                                    "mission creation rolled back: persist disk placement ledger: {error}"
+                                )));
+                                continue;
+                            }
+                        }
+
                         // Create a new mission with optional title, workspace, agent, and backend
-                        match create_new_mission_with_title(
+                        match create_new_mission_with_title_and_placement(
                             &mission_store,
                             title.as_deref(),
                             workspace_id,
@@ -15920,10 +23538,47 @@ async fn control_actor_loop(
                             config_profile.as_deref(),
                             parent_mission_id,
                             working_directory.as_deref(),
+                            requires_local_disk,
                             scheduling,
+                            Some(assigned_id),
                         )
                         .await {
-                            Ok(mission) => {
+                            Ok(mut mission) => {
+                                // Project tags are user-editable and are not admission
+                                // state.  Persist any ordinary tags independently.
+                                let tags = admission_tags;
+                                if !tags.is_empty() {
+                                    if let Err(error) = mission_store.update_mission_project(
+                                        mission.id,
+                                        crate::api::mission_store::MissionProjectPatch {
+                                            tags: Some(tags),
+                                            ..Default::default()
+                                        },
+                                    ).await {
+                                        let _ = mission_store.update_mission_status(
+                                            mission.id,
+                                            MissionStatus::Failed,
+                                        ).await;
+                                        let _ = respond.send(Err(format!(
+                                            "mission creation rolled back: persist mission project metadata: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                    match mission_store.get_mission(mission.id).await {
+                                        Ok(Some(updated)) => mission = updated,
+                                        Ok(None) => {
+                                            let _ = respond.send(Err("mission creation rolled back: mission disappeared while persisting disk admission reservation".to_string()));
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            let _ = respond.send(Err(format!("mission creation rolled back: reload mission metadata: {error}")));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // Explicitly drop after durable write, rather than relying on
+                                // scope order if this branch grows a later await.
+                                drop(reservation_guard.take());
                                 history.clear();
                                 *current_mission.write().await = Some(mission.id);
 
@@ -15951,6 +23606,24 @@ async fn control_actor_loop(
                         }
                     }
                     ControlCommand::SetMissionStatus { id, status: new_status, respond } => {
+                        // A completion callback can race the 10s background-task
+                        // reconciler. Controllers often acknowledge immediately;
+                        // without this guard they can archive the mission before
+                        // AwaitingUser is promoted to WaitingBackground, then a
+                        // follow-up starts a second harness in the same scope and
+                        // kills the still-running build tree. Fail closed while
+                        // the in-memory registry has any live task for this mission.
+                        let background_task_count = background_tasks
+                            .read()
+                            .await
+                            .get(&id)
+                            .map_or(0, std::collections::HashMap::len);
+                        if background_tasks_block_ack(new_status, background_task_count) {
+                            let _ = respond.send(Err(format!(
+                                "mission {id} cannot be acknowledged while background tasks are live"
+                            )));
+                            continue;
+                        }
                         let current_id = *current_mission.read().await;
                         if current_id == Some(id) {
                             if let Some(tree) = current_tree.read().await.clone() {
@@ -15965,6 +23638,16 @@ async fn control_actor_loop(
                             .update_mission_status(id, new_status)
                             .await;
                         if result.is_ok() {
+                            let runner_active = running_mission_id == Some(id)
+                                || parallel_runners
+                                    .get(&id)
+                                    .is_some_and(|runner| runner.is_running());
+                            if !mission_holds_disk_reservation(new_status) && !runner_active {
+                                if let Err(error) = release_local_mission_disk(&config, id).await {
+                                    tracing::error!(mission = %id, %error,
+                                        "terminal mission lease cleanup failed; retaining conservative admission state");
+                                }
+                            }
                             maybe_schedule_mission_metadata_refresh_for_status(
                                 &mission_store,
                                 &events_tx,
@@ -15972,15 +23655,32 @@ async fn control_actor_loop(
                                 new_status,
                             );
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                completion: None,
+                                execution: None,
                                 mission_id: id,
                                 status: new_status,
                                 summary: None,
                             });
+                            // Broadcast delivery is best-effort. Also schedule
+                            // the same guarded cleanup directly so an
+                            // acknowledged mission cannot leave a forked
+                            // dbus/MCP child pinning its transient scope.
+                            super::scope_reaper::schedule_mission_scope_teardown(
+                                Arc::clone(&mission_store),
+                                id,
+                                new_status,
+                            );
                         }
                         let _ = respond.send(result);
                     }
                     ControlCommand::SetMissionTitle { id, title, respond } => {
-                        let result = mission_store.update_mission_title(id, &title).await;
+                        let result = async {
+                            let _file_guard = dispatch_admission::durable_lock(&config).await?;
+                            if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                dispatch_admission::recover_dispatch(&state, &mission_store, id).await?;
+                            }
+                            mission_store.update_mission_title(id, &title).await
+                        }.await;
                         if result.is_ok() {
                             let _ = events_tx.send(AgentEvent::MissionTitleChanged {
                                 mission_id: id,
@@ -16020,10 +23720,9 @@ async fn control_actor_loop(
                         // handoff context below when the backend changed).
                         // Long-lived missions (orchestrators, /goal loops)
                         // rarely stop, so the previous hard refusal made them
-                        // effectively unswitchable. The fresh session id this
-                        // writes is also fine mid-run: every backend falls
-                        // back to a fresh/continued session when the stored id
-                        // is not loadable.
+                        // effectively unswitchable. Session identities are
+                        // retained per backend; failed native resume requires
+                        // recovery rather than silently creating a new session.
                         if main_running || parallel_running {
                             tracing::info!(
                                 mission_id = %id,
@@ -16170,10 +23869,11 @@ async fn control_actor_loop(
                                 Some(mission.backend.clone()),
                                 mission.session_id.clone(),
                                 mission.config_profile.clone(),
-                                mission.model_override.clone(),
+                                model_for_dispatch(&mission_store, &mission).await,
                                 mission.model_effort.clone(),
                                 mission.fast_mode,
                             );
+                            runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                             runner.working_directory = mission.working_directory.clone();
                             runner.user_id = Some(session_user_id.clone());
 
@@ -16313,6 +24013,8 @@ async fn control_actor_loop(
                                     tracing::warn!("Failed to cancel child mission {}: {}", child.id, e);
                                 } else {
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        completion: None,
+                                        execution: None,
                                         mission_id: child.id,
                                         status: MissionStatus::Interrupted,
                                         summary: None,
@@ -16410,9 +24112,14 @@ async fn control_actor_loop(
                                 // success so cleanup loops do not trip their
                                 // circuit breaker by cancelling twice.
                                 match mission_store.get_mission(mission_id).await {
-                                    Ok(Some(mission)) if mission.status == MissionStatus::Interrupted
-                                        || mission.status.is_terminal()
-                                        || mission.status == MissionStatus::Acknowledged =>
+                                    // Blocked is terminal for scheduling, but a
+                                    // parked native goal still owns its track.
+                                    // Explicit cancellation must transition it
+                                    // through the no-runner cancellation path.
+                                    Ok(Some(mission)) if matches!(mission.status,
+                                        MissionStatus::Completed | MissionStatus::Failed
+                                        | MissionStatus::Interrupted | MissionStatus::NotFeasible
+                                        | MissionStatus::Acknowledged) =>
                                     {
                                         if let Err(error) = finish_detached_run_for_cancel(
                                             &mission_store,
@@ -16454,6 +24161,8 @@ async fn control_actor_loop(
                                             .await;
                                         let _ = events_tx.send(
                                             AgentEvent::MissionStatusChanged {
+                                                completion: None,
+                                                execution: None,
                                                 mission_id,
                                                 status: MissionStatus::Interrupted,
                                                 summary: None,
@@ -16556,6 +24265,8 @@ async fn control_actor_loop(
                                     )
                                     .await;
                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                    completion: None,
+                                    execution: None,
                                     mission_id,
                                     status: MissionStatus::Paused,
                                     summary: None,
@@ -16569,6 +24280,10 @@ async fn control_actor_loop(
                                 )));
                             }
                         }
+                    }
+                    #[cfg(test)]
+                    ControlCommand::InspectActorContext { respond } => {
+                        let _ = respond.send((*current_mission.read().await, history.clone()));
                     }
                     ControlCommand::ListRunning { respond } => {
                         // Return info about currently running missions
@@ -16673,7 +24388,7 @@ async fn control_actor_loop(
                         );
                         let _ = respond.send(actor_run);
                     }
-                    ControlCommand::ResumeMission { mission_id, clean_workspace, skip_message, respond } => {
+                    ControlCommand::ResumeMission { mission_id, clean_workspace, skip_message, content, respond } => {
                         // Resumable terminal writers do not hold a lease, so a replacement
                         // writer may have been created since this mission stopped. Serialize
                         // the availability check with create/project updates and keep the
@@ -16696,7 +24411,8 @@ async fn control_actor_loop(
                             clean_workspace,
                         )
                         .await {
-                            Ok((mission, resume_prompt)) => {
+                            Ok((mission, default_resume_prompt)) => {
+                                let resume_prompt = content.unwrap_or(default_resume_prompt);
                                 if let Err(error) = ensure_pr_writer_resume_is_exclusive(
                                     &control_hub,
                                     &mission_store,
@@ -16742,6 +24458,8 @@ async fn control_actor_loop(
                                                 .await;
                                             let _ = events_tx.send(
                                                 AgentEvent::MissionStatusChanged {
+                                                    completion: None,
+                                                    execution: None,
                                                     mission_id,
                                                     status: MissionStatus::Interrupted,
                                                     summary: None,
@@ -16799,10 +24517,11 @@ async fn control_actor_loop(
                                         Some(mission.backend.clone()),
                                         mission.session_id.clone(),
                                         mission.config_profile.clone(),
-                                        mission.model_override.clone(),
+                                        model_for_dispatch(&mission_store, &mission).await,
                                         mission.model_effort.clone(),
                                         mission.fast_mode,
                                     );
+                                    runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                     runner.working_directory = mission.working_directory.clone();
                                     runner.user_id = Some(session_user_id.clone());
                                     for entry in &mission.history {
@@ -16850,6 +24569,8 @@ async fn control_actor_loop(
                                         MissionStatus::Active,
                                     );
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        completion: None,
+                                        execution: None,
                                         mission_id,
                                         status: MissionStatus::Active,
                                         summary: None,
@@ -16893,6 +24614,9 @@ async fn control_actor_loop(
                                 )
                                 .await;
 
+                                let previous_mission = *current_mission.read().await;
+                                let previous_history = history.clone();
+
                                 // Load the mission's history into current state
                                 history = mission.history.iter()
                                     .map(|e| (e.role.clone(), e.content.clone()))
@@ -16904,7 +24628,10 @@ async fn control_actor_loop(
                                     .update_mission_status(mission_id, MissionStatus::Active)
                                     .await
                                 {
-                                    tracing::warn!("Failed to resume mission {}: {}", mission_id, e);
+                                    history = previous_history;
+                                    *current_mission.write().await = previous_mission;
+                                    let _ = respond.send(Err(format!("Failed to resume mission {mission_id}: {e}")));
+                                    continue;
                                 } else {
                                     if mission.status == MissionStatus::Paused {
                                         let _ = mission_store
@@ -16919,6 +24646,8 @@ async fn control_actor_loop(
                                     );
                                     // Send status changed event so UI updates
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        completion: None,
+                                        execution: None,
                                         mission_id,
                                         status: MissionStatus::Active,
                                         summary: None,
@@ -16927,8 +24656,9 @@ async fn control_actor_loop(
 
                                 // Queue the resume prompt as a message (no per-message agent override)
                                 // Skip if the caller just wants to update the status (e.g., before sending a custom message)
+                                let resume_message_id = Uuid::new_v4();
                                 if !skip_message {
-                                    let msg_id = Uuid::new_v4();
+                                    let msg_id = resume_message_id;
                                     queue.push_back((
                                         msg_id,
                                         resume_prompt,
@@ -16936,6 +24666,26 @@ async fn control_actor_loop(
                                         Some(mission_id),
                                         Some("system:resume".to_string()),
                                     ));
+                                }
+
+                                // Persist acceptance before a dequeue can erase
+                                // the only durable copy of the custom prompt.
+                                if !skip_message {
+                                    if let Err(error) = persist_control_queue_if_changed(
+                                        &mission_store, &session_user_id, &queue, &parallel_runners,
+                                        &recovered_consumed_user_messages, &mut last_persisted_queue,
+                                    ).await {
+                                        queue.retain(|(queued_id, ..)| *queued_id != resume_message_id);
+                                        history = previous_history;
+                                        *current_mission.write().await = previous_mission;
+                                        let rollback = restore_mission_after_failed_run_acquisition(&mission_store, &events_tx, &mission).await;
+                                        let error = match rollback {
+                                            Ok(()) => error,
+                                            Err(rollback) => format!("{error}; status recovery required: {rollback}"),
+                                        };
+                                        let _ = respond.send(Err(format!("Failed to persist resumed mission queue: {error}")));
+                                        continue;
+                                    }
                                 }
 
                                 // Start execution if not already running
@@ -16961,9 +24711,13 @@ async fn control_actor_loop(
                                                 msg_target_mid,
                                                 msg_source,
                                             ));
-                                            let _ = respond.send(Err(format!(
-                                                "Failed to persist resumed mission queue: {error}"
-                                            )));
+                                            // Enqueue already committed. Keep the
+                                            // accepted prompt and its new identity;
+                                            // this is queued work, not a rejection.
+                                            tracing::warn!(%error, "Resumed prompt remains durably queued after dequeue failure");
+                                            let mut accepted = mission.clone();
+                                            accepted.status = MissionStatus::Active;
+                                            let _ = respond.send(Ok(accepted));
                                             continue;
                                         }
                                         let target_mid = msg_target_mid.unwrap_or(mission_id);
@@ -16993,13 +24747,14 @@ async fn control_actor_loop(
                                         let progress_ref = Arc::clone(&progress);
                                         let workspace_id = Some(mission.workspace_id);
                                         let backend_id = Some(mission.backend.clone());
-                                        let model_override = mission.model_override.clone();
+                                        let model_override = model_for_dispatch(&mission_store, &mission).await;
                                         let model_effort = mission.model_effort.clone();
                                         let fast_mode = mission.fast_mode;
                                         // Resume uses mission agent (no per-message override for resumes)
                                         let agent_override = mission.agent.clone();
                                         let session_id = mission.session_id.clone();
                                         let mission_config_profile = mission.config_profile.clone();
+                                        let pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                         running_cancel = Some(cancel.clone());
                                         // Capture which mission this task is working on (the resumed mission)
                                         running_mission_id = Some(mission_id);
@@ -17023,14 +24778,34 @@ async fn control_actor_loop(
                                                 running_cancel = None;
                                                 running_mission_id = None;
                                                 running_backend_id = None;
+                                                history = previous_history;
+                                                *current_mission.write().await = previous_mission;
+                                                let error = match restore_mission_after_failed_run_acquisition(
+                                                    &mission_store, &events_tx, &mission,
+                                                ).await {
+                                                    Ok(()) => error,
+                                                    Err(rollback) => format!("{error}; status recovery required: {rollback}"),
+                                                };
+                                                // No runner was started. Compensate the shared
+                                                // Running presentation before returning rejection.
+                                                set_and_emit_status(
+                                                    &status,
+                                                    &events_tx,
+                                                    ControlRunState::Idle,
+                                                    queue.len(),
+                                                    None,
+                                                ).await;
                                                 let _ = respond.send(Err(format!(
                                                     "Failed to acquire mission run lease: {error}"
                                                 )));
                                                 continue;
                                             }
                                         };
+                                        let turn_mission_store = mission_store.clone();
+                                        let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
                                         running = Some(tokio::spawn(async move {
-                                            let result = run_single_control_turn(
+                                            let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
+                                                turn_mission_store,
                                                 cfg,
                                                 agent,
                                                 mcp_ref,
@@ -17041,7 +24816,7 @@ async fn control_actor_loop(
                                                 status_ref,
                                                 cancel,
                                                 hist_snapshot,
-                                                msg.clone(),
+                                                if msg_source.as_deref() == Some("scheduler") { deferred_messages::strip(&msg) } else { msg.clone() },
                                                 Some(mission_ctrl),
                                                 tree_ref,
                                                 progress_ref,
@@ -17056,7 +24831,8 @@ async fn control_actor_loop(
                                                 true, // force_session_resume: this is a resume operation
                                                 mission_config_profile,
                                                 Some(user_id_for_turn),
-                                            )
+                                                pr_readonly,
+                                            ))
                                             .await;
                                             (mid, msg, result)
                                         }));
@@ -17404,6 +25180,9 @@ async fn control_actor_loop(
                                 }
                             }
 
+                            // Capture the actor-owned generation before any status-write await.
+                            let execution = running_run.as_ref().filter(|run| run.mission_id == id).cloned()
+                                .or_else(|| parallel_runners.get(&id).and_then(|runner| runner.durable_run.clone()));
                             if mission_store
                                 .update_mission_status(id, new_status)
                                 .await
@@ -17436,6 +25215,12 @@ async fn control_actor_loop(
                                 }
 
                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                    completion: Some(MissionCompletionSnapshot {
+                                        result_summary: summary.clone(),
+                                        terminal_reason: None,
+                                        terminal_evidence: None,
+                                    }),
+                                    execution,
                                     mission_id: id,
                                     status: new_status,
                                     summary,
@@ -17451,13 +25236,20 @@ async fn control_actor_loop(
                     Some(handle) => Some(handle.await),
                     None => None
                 }
-            }, if running.is_some() => {
+            }, if running.is_some() && !runner_force_abort_requested => {
                 if let Some(res) = finished {
                     // Save the running mission ID before clearing it - we need it for persist and auto-complete
                     // (current_mission can change if user clicks "New Mission" while task was running)
                     let completed_mission_id = running_mission_id;
+                    let completed_cancellation_requested = running_cancel
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled);
                     running = None;
                     running_cancel = None;
+                    if let Some(mid) = running_mission_id {
+                        release_local_mission_disk_if_not_holding(&mission_store, &config, mid)
+                            .await;
+                    }
                     running_mission_id = None;
                     running_backend_id = None;
                     main_runner_activity = None;
@@ -17466,8 +25258,10 @@ async fn control_actor_loop(
                     // Runner cleared itself; cancel the force-clear watchdog.
                     runner_force_clear_deadline = None;
                     let mut completed_terminal_reason = None;
+                    let mut completed_terminal_evidence = None;
                     let mut completed_completion_confidence = None;
                     let mut completed_transport_failure = false;
+                    let mut completed_grok_acp_transport_failure = false;
                     let mut completed_waiting_remote_job = false;
                     // Captured for the post-turn `grok_goal` sentinel hook (see
                     // `post_turn_handle_grok_goal`), which runs after this
@@ -17480,10 +25274,13 @@ async fn control_actor_loop(
                             let completion_evidence =
                                 completion_evidence_for_agent_result(&agent_result);
                             completed_terminal_reason = agent_result.terminal_reason;
+                            completed_terminal_evidence = agent_result.terminal_evidence.clone();
                             completed_completion_confidence =
                                 Some(completion_evidence.completion_confidence);
                             completed_transport_failure =
                                 is_transport_failure_evidence(&completion_evidence);
+                            completed_grok_acp_transport_failure =
+                                is_grok_acp_transport_failure(&agent_result);
                             completed_agent_output = agent_result.output.clone();
                             if let Some(run) = running_run.take() {
                                 completed_waiting_remote_job =
@@ -17530,6 +25327,8 @@ async fn control_actor_loop(
                                         tracing::warn!(mission_id = %run.mission_id, %error, "Failed to keep remote-wait mission active");
                                     } else {
                                         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                            completion: None,
+                                            execution: None,
                                             mission_id: run.mission_id,
                                             status: MissionStatus::Active,
                                             summary: Some("Waiting for durable remote validation".to_string()),
@@ -17602,7 +25401,13 @@ async fn control_actor_loop(
                                     &mission_store,
                                     &events_tx,
                                     mission_id,
+                                    background_tasks
+                                        .read()
+                                        .await
+                                        .get(&mission_id)
+                                        .map_or(0, std::collections::HashMap::len),
                                     agent_result.terminal_reason,
+                                    agent_result.terminal_evidence.as_deref(),
                                     Some(completion_evidence.completion_confidence),
                                     false,
                                     Some(agent_result.output.as_str()),
@@ -17637,7 +25442,7 @@ async fn control_actor_loop(
                                     workspaces
                                         .get(wsid)
                                         .await
-                                        .map(|w| crate::workspace::mission_workspace_dir_for_root(&w.path, mid))
+                                        .map(|w| crate::workspace::mission_workspace_dir_for_workspace(&w, mid))
                                         .unwrap_or_else(|| config.working_dir.clone())
                                 } else {
                                     config.working_dir.clone()
@@ -17754,6 +25559,8 @@ async fn control_actor_loop(
                                         MissionStatus::Failed,
                                     );
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        completion: None,
+                                        execution: None,
                                         mission_id,
                                         status: MissionStatus::Failed,
                                         summary: Some("Task execution failed unexpectedly".to_string()),
@@ -17777,10 +25584,20 @@ async fn control_actor_loop(
                     if !completed_waiting_remote_job {
                         if let Some(mission_id) = completed_mission_id {
                         if completed_transport_failure
-                            && transport_auto_resumed_missions.insert(mission_id)
                             && !queue_has_pending_target_mission(&queue, mission_id)
+                            && reserve_transport_auto_resume(
+                                mission_store.as_ref(),
+                                &mut transport_auto_resumed_missions,
+                                mission_id,
+                                completed_grok_acp_transport_failure,
+                                completed_cancellation_requested,
+                            ).await
                         {
-                            let resume_message = "The previous turn ended because its provider transport disconnected. Reconcile the current workspace, remote jobs, and repository head, then resume the same task. Do not duplicate an accepted job or create a replacement writer.".to_string();
+                            let resume_message = transport_auto_resume_message_for_mission(
+                                mission_store.as_ref(),
+                                mission_id,
+                            )
+                            .await;
                             let activation = activate_mission_id_for_message(
                                 &control_hub,
                                 &mission_store,
@@ -17793,7 +25610,7 @@ async fn control_actor_loop(
                                 Ok(()) => {
                                     tracing::info!(
                                         %mission_id,
-                                        "Auto-resuming mission once after structured transport failure"
+                                        "Auto-resuming mission after structured transport failure"
                                     );
                                     queue.push_back((
                                         Uuid::new_v4(),
@@ -17818,9 +25635,10 @@ async fn control_actor_loop(
                                 }
                             }
                         }
-                        let is_transient_infra_failure = matches!(
+                        let suppress_finished_automation = matches!(
                             completed_terminal_reason,
-                            Some(TerminalReason::AuthError)
+                            Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired)
+                                | Some(TerminalReason::AuthError)
                                 | Some(TerminalReason::RateLimited)
                                 | Some(TerminalReason::CapacityLimited)
                         ) || completed_transport_failure;
@@ -17838,7 +25656,7 @@ async fn control_actor_loop(
                         // otherwise the existing hook would still fire the
                         // continuation. Skipped on transient infra failures
                         // for the same reason regular automations are.
-                        if !is_transient_infra_failure {
+                        if !suppress_finished_automation {
                             post_turn_handle_grok_goal(
                                 &mission_store,
                                 &events_tx,
@@ -17848,7 +25666,7 @@ async fn control_actor_loop(
                             )
                             .await;
                         }
-                        if !already_queued_for_mission && !is_transient_infra_failure {
+                        if !already_queued_for_mission && !suppress_finished_automation {
                             // Small delay so the UI can display the completion before restarting.
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             let messages = agent_finished_automation_messages(
@@ -17866,7 +25684,13 @@ async fn control_actor_loop(
                                 &mission_store,
                                 &events_tx,
                                 mission_id,
+                                background_tasks
+                                    .read()
+                                    .await
+                                    .get(&mission_id)
+                                    .map_or(0, std::collections::HashMap::len),
                                 completed_terminal_reason,
+                                completed_terminal_evidence.as_deref(),
                                 completed_completion_confidence,
                                 true,
                                 Some(completed_agent_output.as_str()),
@@ -18052,24 +25876,25 @@ async fn control_actor_loop(
                     // Use the mission ID that was captured when message was queued.
                     // This prevents races where current_mission changes between
                     // queueing and execution.
-                    let (workspace_id, model_override, model_effort, fast_mode, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
+                    let (workspace_id, model_override, model_effort, fast_mode, mission_agent, backend_id, session_id, mission_config_profile, pr_readonly) = if let Some(mid) = mission_id {
                         match mission_store.get_mission(mid).await {
                             Ok(Some(mission)) => (
                                 Some(mission.workspace_id),
-                                mission.model_override.clone(),
+                                model_for_dispatch(&mission_store, &mission).await,
                                 mission.model_effort.clone(),
                                 mission.fast_mode,
                                 mission.agent.clone(),
                                 Some(mission.backend.clone()),
                                 mission.session_id.clone(),
                                 mission.config_profile.clone(),
+                                mission.project.tags.iter().any(|tag| tag == "pr-readonly"),
                             ),
                             Ok(None) => {
                                 tracing::warn!(
                                     "Mission {} not found while resolving workspace",
                                     mid
                                 );
-                                (None, None, None, false, None, None, None, None)
+                                (None, None, None, false, None, None, None, None, false)
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -18077,11 +25902,11 @@ async fn control_actor_loop(
                                     mid,
                                     e
                                 );
-                                (None, None, None, false, None, None, None, None)
+                                (None, None, None, false, None, None, None, None, false)
                             }
                         }
                     } else {
-                        (None, None, None, false, None, None, None, None)
+                        (None, None, None, false, None, None, None, None, false)
                     };
                     // Per-message agent overrides mission agent
                     let agent_override = per_msg_agent.or(mission_agent);
@@ -18094,8 +25919,11 @@ async fn control_actor_loop(
                     main_runner_active_tool_calls
                         .store(0, std::sync::atomic::Ordering::Relaxed);
                     let user_id_for_turn = session_user_id.clone();
+                    let turn_mission_store = mission_store.clone();
+                    let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
                     running = Some(tokio::spawn(async move {
-                        let result = run_single_control_turn(
+                        let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
+                            turn_mission_store,
                             cfg,
                             agent,
                             mcp_ref,
@@ -18106,7 +25934,7 @@ async fn control_actor_loop(
                             status_ref,
                             cancel,
                             hist_snapshot,
-                            msg.clone(),
+                            if msg_source.as_deref() == Some("scheduler") { deferred_messages::strip(&msg) } else { msg.clone() },
                             Some(mission_ctrl),
                             tree_ref,
                             progress_ref,
@@ -18121,7 +25949,8 @@ async fn control_actor_loop(
                             false, // force_session_resume: continuation turn, not a resume
                             mission_config_profile,
                             Some(user_id_for_turn),
-                        )
+                            pr_readonly,
+                        ))
                         .await;
                         (mid, msg, result)
                     }));
@@ -18139,17 +25968,18 @@ async fn control_actor_loop(
                             mission_id = %mission_id,
                             "Force-aborting stuck parallel runner after cancellation grace period"
                         );
+                        let kill_reason = cancel_timeout_interrupt_reason();
                         runner
                             .finish_durable_run(
                                 &mission_store,
-                                Some("force_killed_after_cancel_timeout"),
+                                Some(kill_reason),
                             )
                             .await;
                         if let Err(error) = mission_store
                             .update_mission_status_with_reason(
                                 *mission_id,
                                 MissionStatus::Interrupted,
-                                Some("force_killed_after_cancel_timeout"),
+                                Some(kill_reason),
                             )
                             .await
                         {
@@ -18165,6 +25995,8 @@ async fn control_actor_loop(
                                 MissionStatus::Interrupted,
                             );
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                completion: None,
+                                execution: None,
                                 mission_id: *mission_id,
                                 status: MissionStatus::Interrupted,
                                 summary: Some(
@@ -18225,6 +26057,8 @@ async fn control_actor_loop(
                                     tracing::warn!(mission_id = %mission_id, %error, "Failed to keep parallel remote-wait mission active");
                                 } else {
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        completion: None,
+                                        execution: None,
                                         mission_id: *mission_id,
                                         status: MissionStatus::Active,
                                         summary: Some("Waiting for durable remote validation".to_string()),
@@ -18259,7 +26093,7 @@ async fn control_actor_loop(
                                     workspaces
                                         .get(wsid)
                                         .await
-                                        .map(|w| crate::workspace::mission_workspace_dir_for_root(&w.path, *mission_id))
+                                        .map(|w| crate::workspace::mission_workspace_dir_for_workspace(&w, *mission_id))
                                         .unwrap_or_else(|| config.working_dir.clone())
                                 } else {
                                     config.working_dir.clone()
@@ -18352,27 +26186,39 @@ async fn control_actor_loop(
                             // Check if we should enqueue agent_finished automations.
                             // Skip for transient infrastructure failures (auth, rate limit,
                             // capacity) to avoid noisy retry loops.
-                            let is_transient_infra_failure = matches!(
+                            let suppress_finished_automation = matches!(
                                 result.terminal_reason,
-                                Some(TerminalReason::AuthError)
+                                Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired)
+                                    | Some(TerminalReason::AuthError)
                                     | Some(TerminalReason::RateLimited)
                                     | Some(TerminalReason::CapacityLimited)
                             ) || is_transport_failure_evidence(&completion_evidence);
                             let cancellation_requested = runner.cancellation_requested();
                             let was_queue_empty = runner.queue.is_empty();
-                            if is_transient_infra_failure
+                            if suppress_finished_automation
                                 && is_transport_failure_evidence(&completion_evidence)
                                 && !cancellation_requested
                                 && was_queue_empty
-                                && transport_auto_resumed_missions.insert(*mission_id)
+                                && reserve_transport_auto_resume(
+                                    mission_store.as_ref(),
+                                    &mut transport_auto_resumed_missions,
+                                    *mission_id,
+                                    is_grok_acp_transport_failure(&result),
+                                    cancellation_requested,
+                                ).await
                             {
                                 tracing::info!(
                                     mission_id = %mission_id,
-                                    "Auto-resuming parallel mission once after structured transport failure"
+                                    "Auto-resuming parallel mission after structured transport failure"
                                 );
+                                let resume_message = transport_auto_resume_message_for_mission(
+                                    mission_store.as_ref(),
+                                    *mission_id,
+                                )
+                                .await;
                                 runner.queue_message(
                                     Uuid::new_v4(),
-                                    "The previous turn ended because its provider transport disconnected. Reconcile the current workspace, remote jobs, and repository head, then resume the same task. Do not duplicate an accepted job or create a replacement writer.".to_string(),
+                                    resume_message,
                                     None,
                                     Some("transport_auto_resume".to_string()),
                                 );
@@ -18383,7 +26229,7 @@ async fn control_actor_loop(
                             // so a terminal sentinel disables the loop on this
                             // turn rather than after one extra continuation
                             // fire. (See `post_turn_handle_grok_goal`.)
-                            if !is_transient_infra_failure {
+                            if !suppress_finished_automation {
                                 post_turn_handle_grok_goal(
                                     &mission_store,
                                     &events_tx,
@@ -18394,7 +26240,7 @@ async fn control_actor_loop(
                                 .await;
                             }
                             if was_queue_empty
-                                && !is_transient_infra_failure
+                                && !suppress_finished_automation
                                 && !cancellation_requested
                             {
                                 // Small delay so the UI can display the completion before restarting.
@@ -18426,10 +26272,16 @@ async fn control_actor_loop(
 
                             // Always try to start next queued message (if any)
                             if !runner.is_running() {
-                                // Refresh session_id from the store in case a
-                                // SessionIdUpdate event hasn't been processed yet
-                                // (race between the events_rx and sleep poll arms).
+                                // Refresh settings together with their backend-specific
+                                // session identity before the next turn. The in-flight
+                                // turn retains its original settings.
                                 if let Ok(Some(m)) = mission_store.get_mission(*mission_id).await {
+                                    runner.backend_id = m.backend;
+                                    runner.agent_override = m.agent;
+                                    runner.model_override = m.model_override;
+                                    runner.model_effort = m.model_effort;
+                                    runner.fast_mode = m.fast_mode;
+                                    runner.config_profile = m.config_profile;
                                     if m.session_id != runner.session_id {
                                         tracing::debug!(
                                             mission_id = %mission_id,
@@ -18465,7 +26317,6 @@ async fn control_actor_loop(
                                             mission_id: Some(*mission_id),
                                             resumable: true,
                                         });
-                                        completed_missions.push(*mission_id);
                                         continue;
                                     }
                                 }
@@ -18508,7 +26359,13 @@ async fn control_actor_loop(
                                         &mission_store,
                                         &events_tx,
                                         *mission_id,
+                                        background_tasks
+                                            .read()
+                                            .await
+                                            .get(mission_id)
+                                            .map_or(0, std::collections::HashMap::len),
                                         result.terminal_reason,
+                                        result.terminal_evidence.as_deref(),
                                         Some(completion_evidence.completion_confidence),
                                         true,
                                         Some(result.output.as_str()),
@@ -18536,6 +26393,7 @@ async fn control_actor_loop(
                 // Remove completed runners and clean up their desktop sessions
                 for mid in completed_missions {
                     parallel_runners.remove(&mid);
+                    release_local_mission_disk_if_not_holding(&mission_store, &config, mid).await;
                     close_mission_desktop_sessions(
                         &mission_store,
                         mid,
@@ -18575,6 +26433,7 @@ async fn control_actor_loop(
                         config.max_parallel_missions,
                     );
                     board::scheduler_pass(
+                        Some(&control_hub),
                         &mission_store,
                         &self_cmd_tx,
                         &snapshot,
@@ -18630,6 +26489,8 @@ async fn control_actor_loop(
                                             MissionStatus::Failed,
                                         );
                                         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                            completion: None,
+                                            execution: None,
                                             mission_id: m.id,
                                             status: MissionStatus::Failed,
                                             summary: Some(
@@ -18667,7 +26528,43 @@ async fn control_actor_loop(
                                 {
                                     let mission_id = next.id;
                                     let priority = next.scheduling.priority;
-                                    if let Ok(Some(goal)) =
+                                    // A non-terminal run means another owner
+                                    // (a remote job observer, a runner that has
+                                    // not settled yet) already executes this
+                                    // mission. Dispatching a local runner on
+                                    // top of it would either be rejected by
+                                    // the run lease or, worse, duplicate the
+                                    // prompt. Fail closed on a store error too.
+                                    let execution_unowned = match mission_store
+                                        .get_active_mission_run(mission_id)
+                                        .await
+                                    {
+                                        Ok(None) => true,
+                                        Ok(Some(run)) => {
+                                            tracing::warn!(
+                                                mission_id = %mission_id,
+                                                owner = %run.owner_actor_id,
+                                                state = ?run.execution_state,
+                                                "Scheduler: mission execution is already owned; not starting a local runner"
+                                            );
+                                            scheduler_inflight.insert(
+                                                mission_id,
+                                                tokio::time::Instant::now(),
+                                            );
+                                            false
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                mission_id = %mission_id,
+                                                "Scheduler: run ownership unreadable; deferring dispatch: {e}"
+                                            );
+                                            false
+                                        }
+                                    };
+                                    if !execution_unowned {
+                                        // Skip this pass; the cooldown record
+                                        // (or the next pass) re-evaluates.
+                                    } else if let Ok(Some(goal)) =
                                         mission_store.get_deferred_goal(mission_id).await
                                     {
                                         // Deliberately do NOT clear the goal here. The
@@ -18730,14 +26627,37 @@ async fn control_actor_loop(
                 }
             }, if runner_force_clear_deadline.is_some() && running.is_some() => {
                 let stuck_mid = running_mission_id;
+                let still_progressing = !runner_force_abort_requested && (main_runner_active_tool_calls
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    > 0
+                    || main_runner_last_activity.elapsed()
+                        < super::controller_honesty::CANCEL_TIMEOUT_FRESH_PROGRESS);
+                if still_progressing {
+                    tracing::info!(
+                        mission_id = ?stuck_mid,
+                        "Deferring cancel-timeout force-clear: runner still has fresh progress"
+                    );
+                    runner_force_clear_deadline = Some(
+                        tokio::time::Instant::now() + RUNNER_FORCE_CLEAR_GRACE,
+                    );
+                } else {
                 tracing::warn!(
                     mission_id = ?stuck_mid,
                     "Force-aborting stuck runner: cancel fired but JoinHandle never resolved within {}s",
                     RUNNER_FORCE_CLEAR_GRACE.as_secs()
                 );
-                if let Some(handle) = running.take() {
-                    handle.abort();
+                if let Some(handle) = running.as_ref() {
+                    if !handle.is_finished() {
+                        handle.abort();
+                        runner_force_abort_requested = true;
+                        runner_force_clear_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+                        // Preserve the runner and its durable ownership until
+                        // the abort finishes; continue servicing refusals.
+                        continue;
+                    }
                 }
+                running = None;
+                runner_force_abort_requested = false;
                 running_cancel = None;
                 running_mission_id = None;
                 running_backend_id = None;
@@ -18750,14 +26670,22 @@ async fn control_actor_loop(
                         .finish_mission_run(
                             run.run_id,
                             run.generation,
-                            Some("force_killed_after_cancel_timeout"),
+                            Some(cancel_timeout_interrupt_reason()),
                         )
                         .await;
                 }
                 if let Some(mid) = stuck_mid {
                     // Mark mission as Interrupted so it stays resumable.
+                    // During a deploy drain this must stay `server_shutdown`
+                    // — overwriting it with force_killed strands the writer
+                    // (startup recovery and reconcile only resume restart
+                    // reasons).
                     if let Err(e) = mission_store
-                        .update_mission_status(mid, MissionStatus::Interrupted)
+                        .update_mission_status_with_reason(
+                            mid,
+                            MissionStatus::Interrupted,
+                            Some(cancel_timeout_interrupt_reason()),
+                        )
                         .await
                     {
                         tracing::warn!(
@@ -18773,6 +26701,8 @@ async fn control_actor_loop(
                             MissionStatus::Interrupted,
                         );
                         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                            completion: None,
+                            execution: None,
                             mission_id: mid,
                             status: MissionStatus::Interrupted,
                             summary: Some(
@@ -18800,6 +26730,7 @@ async fn control_actor_loop(
                         &config.working_dir,
                     )
                     .await;
+                }
                 }
             }
             // Update last_activity for runners when we receive events for them
@@ -19376,28 +27307,20 @@ async fn control_actor_loop(
                         }
                     }
 
-                    // Handle session ID updates for backends that generate their own IDs.
-                    if let AgentEvent::SessionIdUpdate { mission_id, session_id } = &event {
-                        if let Err(err) = mission_store
-                            .update_mission_session_id(*mission_id, session_id)
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to update session ID for mission {}: {}",
-                                mission_id,
-                                err
-                            );
-                        } else {
-                            tracing::debug!(
-                                mission_id = %mission_id,
-                                session_id = %session_id,
-                                "Updated mission session ID from backend"
-                            );
-                        }
-                        // Also update the parallel runner's cached session_id so the
-                        // next turn picks up the new value instead of the stale one.
-                        if let Some(runner) = parallel_runners.get_mut(mission_id) {
-                            runner.session_id = Some(session_id.clone());
+                    // Only an update from the latest acquired generation may
+                    // mutate durable identity or the parallel runner cache.
+                    if let AgentEvent::SessionIdUpdate { mission_id, session_id, backend, run } = &event {
+                        match mission_store.update_mission_session_id(*mission_id, session_id, backend, run.as_ref()).await {
+                            Ok(true) => {
+                                if let Some(runner) = parallel_runners.get_mut(mission_id) {
+                                    let cached_run = runner.durable_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                                    if runner.backend_id == *backend && cached_run == *run {
+                                        runner.session_id = Some(session_id.clone());
+                                    }
+                                }
+                            }
+                            Ok(false) => tracing::debug!(mission_id = %mission_id, "Ignored stale or unattributed native session update"),
+                            Err(err) => tracing::warn!(mission_id = %mission_id, %err, "Failed to persist native session update"),
                         }
                     }
 
@@ -19406,10 +27329,12 @@ async fn control_actor_loop(
                     if let AgentEvent::UserMessage {
                         content,
                         mission_id: Some(mid),
+                        source,
                         ..
                     } = &event
                     {
-                        if let Some(objective) = parse_goal_objective(content) {
+                        let prompt = if source.as_deref() == Some("scheduler") { deferred_messages::strip(content) } else { content.clone() };
+                        if let Some(objective) = parse_goal_objective(&prompt) {
                             if let Err(err) = mission_store
                                 .update_mission_goal(*mid, true, Some(&objective))
                                 .await
@@ -19451,6 +27376,7 @@ async fn control_actor_loop(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_single_control_turn(
+    mission_store: Arc<dyn MissionStore>,
     mut config: Config,
     _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -19476,7 +27402,24 @@ async fn run_single_control_turn(
     force_session_resume: bool,
     mission_config_profile: Option<String>,
     boss_user_id: Option<String>,
+    pr_readonly: bool,
 ) -> crate::agents::AgentResult {
+    #[cfg(test)]
+    if let Some(mid) = mission_id {
+        if let Some(result) = dispatch_admission_tests::native_goal_fixture(
+            &config,
+            &workspaces,
+            Some(&mission_store),
+            mid,
+            &user_message,
+            events_tx.clone(),
+            cancel.clone(),
+        )
+        .await
+        {
+            return result;
+        }
+    }
     let is_claudecode = backend_id.as_deref() == Some("claudecode");
     let is_codex = backend_id.as_deref() == Some("codex");
     // Get config profile: mission's config_profile takes priority over workspace's
@@ -19537,7 +27480,7 @@ async fn run_single_control_turn(
         // Get library for skill syncing
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
-        let dir = match Box::pin(workspace::prepare_mission_workspace_with_skills_backend(
+        let prepared = Box::pin(workspace::prepare_mission_workspace_with_skills_backend(
             &mut ws,
             &mcp,
             lib_ref,
@@ -19547,13 +27490,17 @@ async fn run_single_control_turn(
             effective_config_profile.as_deref(),
             boss_user_id.as_deref(),
             Some(&config.working_dir),
+            !pr_readonly,
         ))
-        .await
-        {
+        .await;
+        let dir = match workspace::require_verified_mission_workspace(prepared) {
             Ok(dir) => dir,
             Err(e) => {
-                tracing::warn!("Failed to prepare mission workspace: {}", e);
-                ws.path.clone()
+                // The persisted mission root is a placement capability, not
+                // a hint. Do not run an Ask/control turn in the workspace
+                // root if its selected filesystem cannot be verified.
+                tracing::warn!(mission_id = %mid, error = %e, "refusing control turn without its verified mission workspace");
+                return crate::agents::AgentResult::failure(e.to_string(), 0);
             }
         };
         (dir, Some(ws))
@@ -19564,6 +27511,25 @@ async fn run_single_control_turn(
                 config.working_dir.clone(),
             )),
         )
+    };
+
+    let user_message = if let Some(mid) = mission_id {
+        match crate::api::mission_payload::materialize_turn(
+            &config.working_dir,
+            &working_dir_path,
+            mid,
+            &user_message,
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                return crate::agents::AgentResult::failure(
+                    format!("materialize attachments: {error}"),
+                    0,
+                )
+            }
+        }
+    } else {
+        user_message
     };
 
     if let Some(ws) = runtime_workspace.as_ref() {
@@ -19621,6 +27587,9 @@ async fn run_single_control_turn(
         &user_message,
     ));
     convo.push_str("\n\nInstructions:\n- Respond to the CURRENT user request. The conversation history is context only: do not resume or continue earlier tasks from it unless the current request asks you to.\n- Use available tools as needed.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n");
+    if pr_readonly {
+        convo.push_str("\nPR READ-ONLY CAPABILITY (server-enforced): inspect and run verification only. Do not edit tracked files, commit, push, comment, resolve threads, approve, close, or merge. End with exactly one explicit terminal line: `VERDICT: CLEAN`, `VERDICT: BLOCKED`, or `VERDICT: INFRA_BLOCKED`. Git/gh mutation commands are disabled.\n");
+    }
     let _task = match crate::task::Task::new(convo.clone(), Some(1000)) {
         Ok(t) => t,
         Err(e) => {
@@ -19665,6 +27634,7 @@ async fn run_single_control_turn(
             use crate::api::runners::HarnessRunner as _;
             Box::pin(crate::api::runners::ClaudeCodeRunner.run_turn(
                 crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: &user_message,
@@ -19696,14 +27666,14 @@ async fn run_single_control_turn(
             };
             let is_continuation =
                 force_session_resume || history.iter().any(|(role, _)| role == "assistant");
-            let grok_message_owned: String = if user_message.trim_start().starts_with("/goal ") {
-                user_message.clone()
-            } else {
-                convo.clone()
+            let grok_message_owned: String = match canonical_goal_message(&user_message) {
+                Some(goal) => goal,
+                None => convo.clone(),
             };
             use crate::api::runners::HarnessRunner as _;
             Box::pin(
                 crate::api::runners::GrokRunner.run_turn(crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: &grok_message_owned,
@@ -19736,10 +27706,9 @@ async fn run_single_control_turn(
             // reach the codex backend; the wrapped `convo` buries the prefix
             // and breaks `parse_goal_prefix`. Mirror the same routing the
             // mission_runner dispatch uses.
-            let codex_message_owned: String = if user_message.trim_start().starts_with("/goal ") {
-                user_message.clone()
-            } else {
-                convo.clone()
+            let codex_message_owned: String = match canonical_goal_message(&user_message) {
+                Some(goal) => goal,
+                None => convo.clone(),
             };
             let codex_message: &str = codex_message_owned.as_str();
             // Shared rotation wrapper: identical account rotation + usage-cap
@@ -19752,6 +27721,7 @@ async fn run_single_control_turn(
             use crate::api::runners::HarnessRunner as _;
             Box::pin(
                 crate::api::runners::CodexRunner.run_turn(crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: codex_message,
@@ -19778,6 +27748,7 @@ async fn run_single_control_turn(
             use crate::api::runners::HarnessRunner as _;
             Box::pin(
                 crate::api::runners::GeminiRunner.run_turn(crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: &convo,
@@ -19804,6 +27775,7 @@ async fn run_single_control_turn(
             use crate::api::runners::HarnessRunner as _;
             Box::pin(
                 crate::api::runners::ChatGptUiRunner.run_turn(crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     // The browser always starts a fresh chat, so include the
@@ -19870,16 +27842,18 @@ async fn run_single_control_turn(
             // mission that only has the Claude-Code UUID placeholder),
             // keep using `convo` so the model still gets a history-aware
             // prompt.
-            let is_goal_mode = user_message.trim_start().starts_with("/goal ");
-            let opencode_message_owned: String =
-                if is_goal_mode || (opencode_is_continuation && has_opencode_session) {
-                    user_message.clone()
-                } else {
-                    convo.clone()
-                };
+            let canonical_goal = canonical_goal_message(&user_message);
+            let opencode_message_owned: String = if let Some(goal) = canonical_goal {
+                goal
+            } else if opencode_is_continuation && has_opencode_session {
+                user_message.clone()
+            } else {
+                convo.clone()
+            };
             use crate::api::runners::HarnessRunner as _;
             Box::pin(crate::api::runners::OpenCodeRunner.run_turn(
                 crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: &opencode_message_owned,
@@ -22759,6 +30733,279 @@ pub async fn telegram_webhook_receiver(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_settings_handoff_resumes_only_dead_missions() {
+        use super::{should_queue_resume, MissionStatus};
+        assert!(should_queue_resume(MissionStatus::Failed, None));
+        assert!(should_queue_resume(MissionStatus::Interrupted, Some(true)));
+        assert!(!should_queue_resume(MissionStatus::Failed, Some(false)));
+        assert!(!should_queue_resume(MissionStatus::Active, None));
+        assert!(!should_queue_resume(MissionStatus::Paused, None));
+        assert!(!should_queue_resume(MissionStatus::Acknowledged, None));
+        assert!(!should_queue_resume(MissionStatus::Completed, None));
+    }
+
+    #[test]
+    fn registered_liveness_interrupt_skips_hermes_tagged_writer() {
+        assert!(super::skip_idle_registered_liveness_interrupt(
+            Some("codex"),
+            None,
+            None,
+            &["origin:hermes-assistant".to_string()],
+        ));
+        assert!(super::skip_idle_registered_liveness_interrupt(
+            Some("chatgpt_ui"),
+            None,
+            None,
+            &[],
+        ));
+        assert!(!super::skip_idle_registered_liveness_interrupt(
+            Some("codex"),
+            None,
+            None,
+            &[],
+        ));
+    }
+
+    mod fabricated_origin {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        /// The measured incident: "20260805_night_supervision" — valid in
+        /// shape, existing nowhere.
+        #[test]
+        fn an_unconfigured_state_db_means_could_not_check() {
+            // Serialised via a scoped env var: no HERMES_STATE_DB → None,
+            // never Some(false) — stripping attribution on deployments
+            // without the database would be the larger harm.
+            let _guard = ENV_LOCK.lock().unwrap();
+            let previous = std::env::var("HERMES_STATE_DB").ok();
+            std::env::remove_var("HERMES_STATE_DB");
+            assert_eq!(super::super::hermes_session_exists("any"), None);
+            if let Some(value) = previous {
+                std::env::set_var("HERMES_STATE_DB", value);
+            }
+        }
+
+        #[test]
+        fn a_real_db_answers_true_and_false() {
+            let _guard = ENV_LOCK.lock().unwrap();
+            let dir = tempfile::tempdir().expect("tmp");
+            let path = dir.path().join("state.db");
+            let connection = rusqlite::Connection::open(&path).expect("open");
+            connection
+                .execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)", [])
+                .expect("schema");
+            connection
+                .execute(
+                    "INSERT INTO sessions (id) VALUES ('20260805_093524_88112a')",
+                    [],
+                )
+                .expect("insert");
+            drop(connection);
+            let previous = std::env::var("HERMES_STATE_DB").ok();
+            std::env::set_var("HERMES_STATE_DB", &path);
+
+            assert_eq!(
+                super::super::hermes_session_exists("20260805_093524_88112a"),
+                Some(true)
+            );
+            assert_eq!(
+                super::super::hermes_session_exists("20260805_night_supervision"),
+                Some(false)
+            );
+
+            match previous {
+                Some(value) => std::env::set_var("HERMES_STATE_DB", value),
+                None => std::env::remove_var("HERMES_STATE_DB"),
+            }
+        }
+    }
+
+    mod create_idempotency {
+        use crate::api::control::MissionStatus;
+        use crate::api::mission_store::{InMemoryMissionStore, Mission, MissionStore};
+        use std::sync::Arc;
+
+        async fn store_with(
+            title: &str,
+            origin: Option<&str>,
+            status: MissionStatus,
+        ) -> (Arc<dyn MissionStore>, Mission) {
+            let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+            let mission = store
+                .create_mission(Some(title), None, None, None, None, None, None)
+                .await
+                .expect("create");
+            if let Some(origin) = origin {
+                store
+                    .set_mission_origin(mission.id, "hermes", Some(origin))
+                    .await
+                    .expect("origin");
+            }
+            store
+                .update_mission_status(mission.id, status)
+                .await
+                .expect("status");
+            (store, mission)
+        }
+
+        /// The measured incident: `fix(ci)` created twice 30 seconds apart,
+        /// same (absent) origin, first copy still working.
+        #[tokio::test]
+        async fn a_retry_shaped_duplicate_coalesces() {
+            let (store, first) = store_with(
+                "fix(ci): mechanical Lean warning cleanup",
+                None,
+                MissionStatus::Active,
+            )
+            .await;
+            let found = super::super::find_recent_identical_mission(
+                &store,
+                "fix(ci): mechanical Lean warning cleanup",
+                None,
+            )
+            .await;
+            assert_eq!(found.map(|m| m.id), Some(first.id));
+        }
+
+        #[tokio::test]
+        async fn a_different_title_does_not_coalesce() {
+            let (store, _) = store_with("lane A", None, MissionStatus::Active).await;
+            assert!(
+                super::super::find_recent_identical_mission(&store, "lane B", None)
+                    .await
+                    .is_none()
+            );
+        }
+
+        /// Same title from a DIFFERENT conversation is parallel work, not a
+        /// retry — two controllers may legitimately race the same lane name.
+        #[tokio::test]
+        async fn a_different_origin_does_not_coalesce() {
+            let (store, _) = store_with(
+                "lane A",
+                Some("20260805_093524_88112a"),
+                MissionStatus::Active,
+            )
+            .await;
+            assert!(super::super::find_recent_identical_mission(
+                &store,
+                "lane A",
+                Some("20260805_152329_6058d9"),
+            )
+            .await
+            .is_none());
+        }
+
+        #[tokio::test]
+        async fn a_matching_origin_coalesces() {
+            let (store, first) = store_with(
+                "lane A",
+                Some("20260805_093524_88112a"),
+                MissionStatus::Active,
+            )
+            .await;
+            let found = super::super::find_recent_identical_mission(
+                &store,
+                "lane A",
+                Some("20260805_093524_88112a"),
+            )
+            .await;
+            assert_eq!(found.map(|m| m.id), Some(first.id));
+        }
+
+        /// Re-dispatching a lane whose previous run finished, failed, or is
+        /// merely PARKED is intent, not a retry artifact. `Acknowledged` and
+        /// `AwaitingUser` are non-terminal but will not run again on their
+        /// own — coalescing onto them would swallow the new dispatch.
+        #[tokio::test]
+        async fn a_settled_or_parked_mission_does_not_coalesce() {
+            for status in [
+                MissionStatus::Completed,
+                MissionStatus::Failed,
+                MissionStatus::Interrupted,
+                MissionStatus::Acknowledged,
+                MissionStatus::AwaitingUser,
+            ] {
+                let (store, _) = store_with("lane A", None, status).await;
+                assert!(
+                    super::super::find_recent_identical_mission(&store, "lane A", None)
+                        .await
+                        .is_none(),
+                    "a {status:?} mission must not absorb a new create"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn whitespace_variants_of_the_title_still_match() {
+            let (store, first) = store_with("lane A", None, MissionStatus::Active).await;
+            let found =
+                super::super::find_recent_identical_mission(&store, "  lane A  ", None).await;
+            assert_eq!(found.map(|m| m.id), Some(first.id));
+        }
+
+        #[tokio::test]
+        async fn an_empty_title_never_coalesces() {
+            let (store, _) = store_with("lane A", None, MissionStatus::Active).await;
+            assert!(
+                super::super::find_recent_identical_mission(&store, "   ", None)
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_goal_objective_tolerates_whitespace_variants() {
+        assert_eq!(
+            parse_goal_objective("/goal write the docs").as_deref(),
+            Some("write the docs")
+        );
+        assert_eq!(
+            parse_goal_objective("/goal\nMulti-line objective\nwith details").as_deref(),
+            Some("Multi-line objective\nwith details")
+        );
+        assert_eq!(
+            parse_goal_objective("  /goal   spaced   ").as_deref(),
+            Some("spaced")
+        );
+        assert!(parse_goal_objective("/goal").is_none());
+        assert!(parse_goal_objective("/goal   ").is_none());
+        assert!(parse_goal_objective("/goals are nice").is_none());
+        assert!(parse_goal_objective("plain message").is_none());
+    }
+
+    #[test]
+    fn canonical_goal_message_normalises_to_space_form() {
+        // Backend goal drivers only recognise "/goal <objective>"; every
+        // whitespace variant must canonicalise to that form.
+        assert_eq!(
+            canonical_goal_message("/goal ship it").as_deref(),
+            Some("/goal ship it")
+        );
+        assert_eq!(
+            canonical_goal_message("/goal\nMulti-line objective\nwith details").as_deref(),
+            Some("/goal Multi-line objective\nwith details")
+        );
+        assert!(canonical_goal_message("/goals are nice").is_none());
+        assert!(canonical_goal_message("plain message").is_none());
+    }
+
+    #[test]
+    fn awaiting_writer_lease_grace_policy() {
+        use super::awaiting_pr_writer_lease_expired;
+        // Fresh AwaitingUser writers keep their lease.
+        let fresh = chrono::Utc::now().to_rfc3339();
+        assert!(!awaiting_pr_writer_lease_expired(&fresh));
+        // A writer idle far past the grace window releases it.
+        let stale = (chrono::Utc::now() - chrono::Duration::hours(13)).to_rfc3339();
+        assert!(awaiting_pr_writer_lease_expired(&stale));
+        // Unparseable timestamps fail closed on exclusivity (lease held).
+        assert!(!awaiting_pr_writer_lease_expired("not-a-timestamp"));
+        assert!(!awaiting_pr_writer_lease_expired(""));
+    }
+
     use super::*;
     use crate::api::mission_store::{MissionMode, MissionProjectPatch};
     use std::sync::Arc;
@@ -22774,11 +31021,31 @@ mod tests {
 
     #[test]
     fn disk_estimate_preserves_emergency_free_space() {
-        assert!(disk_estimate_refusal(100 << 30, 20, 64).is_none());
-        let refusal = disk_estimate_refusal(80 << 30, 20, 64).unwrap();
+        let usage = crate::api::monitoring::DiskUsage {
+            measured_path: "/srv/sandboxed-storage".into(),
+            filesystem: "statvfs:test".to_string(),
+            used: 0,
+            total: 100 << 30,
+            available: 100 << 30,
+        };
+        assert!(disk_estimate_refusal(&usage, 20, 64).is_none());
+        // Equality is admitted: the emergency reserve remains exactly intact.
+        let exact = crate::api::monitoring::DiskUsage {
+            available: 84 << 30,
+            total: 84 << 30,
+            ..usage.clone()
+        };
+        assert!(disk_estimate_refusal(&exact, 20, 64).is_none());
+        let low = crate::api::monitoring::DiskUsage {
+            available: 80 << 30,
+            total: 80 << 30,
+            ..usage
+        };
+        let refusal = disk_estimate_refusal(&low, 20, 64).unwrap();
         assert!(refusal.contains("20 GiB scratch"));
         assert!(refusal.contains("64 GiB"));
         assert!(refusal.contains("80 GiB is free"));
+        assert!(refusal.contains("/srv/sandboxed-storage"));
     }
 
     #[test]
@@ -22913,6 +31180,22 @@ mod tests {
     }
 
     #[test]
+    fn remote_terminal_wake_repairs_an_unparked_orphan_only() {
+        assert!(terminal_wake_must_wait_for_harness(
+            MissionExecutionState::Running,
+            true
+        ));
+        assert!(!terminal_wake_must_wait_for_harness(
+            MissionExecutionState::Running,
+            false
+        ));
+        assert!(!terminal_wake_must_wait_for_harness(
+            MissionExecutionState::WaitingRemoteJob,
+            true
+        ));
+    }
+
+    #[test]
     fn only_fresh_accepted_remote_builds_prove_liveness() {
         let now = chrono::Utc::now();
         let mut handle = crate::remote_node::job_ledger::JobHandle {
@@ -22993,9 +31276,13 @@ mod tests {
             mission_has_unresolved_remote_build(dir.path(), synchronous_mission_id).await,
             "a synchronous waiter must keep its mission continuation recoverable"
         );
-        crate::remote_node::job_ledger::require_terminal_wake(dir.path(), synchronous_job_id)
-            .await
-            .unwrap();
+        crate::remote_node::job_ledger::require_terminal_wake(
+            dir.path(),
+            synchronous_job_id,
+            synchronous_mission_id,
+        )
+        .await
+        .unwrap();
         assert!(mission_has_unresolved_remote_build(dir.path(), synchronous_mission_id).await);
 
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -23061,6 +31348,11 @@ mod tests {
                 disk_reservation_bytes: 0,
                 kind: crate::remote_node::job_ledger::JobHandleKind::RemoteBuild,
                 identity: Some(crate::remote_node::job_ledger::RemoteJobIdentity {
+                    version: 0,
+                    base_tree_sha: None,
+                    builder_image_digest: None,
+                    build_protocol_version: None,
+                    behavior_env_digest: None,
                     repository: "https://example.invalid/repo.git".to_string(),
                     commit: "abc123".to_string(),
                     cwd_rel_known: true,
@@ -23171,6 +31463,11 @@ mod tests {
                 disk_reservation_bytes: 0,
                 kind: crate::remote_node::job_ledger::JobHandleKind::RemoteBuild,
                 identity: Some(crate::remote_node::job_ledger::RemoteJobIdentity {
+                    version: 0,
+                    base_tree_sha: None,
+                    builder_image_digest: None,
+                    build_protocol_version: None,
+                    behavior_env_digest: None,
                     repository: "https://example.invalid/repo.git".to_string(),
                     commit: "def456".to_string(),
                     cwd_rel_known: true,
@@ -23642,6 +31939,97 @@ mod tests {
         assert!(mission_is_pr_writer_in_store(&store, &projected)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn attention_inventory_rejects_partial_store_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("visible worker"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                mission.id,
+                MissionProjectPatch {
+                    project: Some(Some("eip-8282".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..5001 {
+            store
+                .create_mission(
+                    Some("unrelated newer work"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let keys = vec!["eip-8282".to_string()];
+        let inventory = |paths| MissionStoreInventory {
+            live: vec![store.clone()],
+            offline_sqlite: paths,
+            offline_file_users: vec![],
+            base_dir: dir.path().to_path_buf(),
+        };
+        let complete = ControlHub::collect_attention_inventory(inventory(vec![]), &keys)
+            .await
+            .unwrap();
+        assert_eq!(complete.len(), 1);
+        let unavailable = dir.path().join("missing.db");
+        let partial =
+            ControlHub::collect_attention_inventory(inventory(vec![unavailable]), &keys).await;
+        assert!(
+            partial.is_err(),
+            "successful live rows cannot hide an unavailable offline store"
+        );
+    }
+
+    #[test]
+    fn offline_attention_preserves_decision_and_grace_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missions.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE missions (id TEXT, status TEXT, title TEXT, workspace_id TEXT, backend TEXT, created_at TEXT, updated_at TEXT, project TEXT, track TEXT, intent TEXT, github_pr TEXT, awaiting_kind TEXT, origin_session_id TEXT, last_status_change_at TEXT);").unwrap();
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let recent = now.to_rfc3339();
+        let expired = (now - chrono::Duration::hours(1)).to_rfc3339();
+        db.execute("INSERT INTO missions(id,status,project,awaiting_kind,origin_session_id,last_status_change_at,updated_at) VALUES (?1,'awaiting_user','eip-8282','decision','hermes-session',?2,?3)", rusqlite::params![id,recent,expired]).unwrap();
+        let rows = collect_attention_missions_from_sqlite(&path, "eip-8282").unwrap();
+        assert_eq!(rows[0].awaiting_kind, Some(AwaitingKind::Decision));
+        assert_eq!(rows[0].origin_session_id.as_deref(), Some("hermes-session"));
+        assert!(!crate::api::operator_attention::mission_needs_operator(
+            &rows[0], false, None, now
+        ));
+        db.execute("UPDATE missions SET last_status_change_at=?1", [&expired])
+            .unwrap();
+        let rows = collect_attention_missions_from_sqlite(&path, "eip-8282").unwrap();
+        assert!(crate::api::operator_attention::mission_needs_operator(
+            &rows[0], false, None, now
+        ));
+        // Legacy rows predate `awaiting_kind`: they are kept (as the live
+        // store keeps `None`), not treated as an inventory failure.
+        db.execute("UPDATE missions SET awaiting_kind=NULL", [])
+            .unwrap();
+        let rows = collect_attention_missions_from_sqlite(&path, "eip-8282").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].awaiting_kind, None);
+        assert!(!crate::api::operator_attention::mission_needs_operator(
+            &rows[0], false, None, now
+        ));
+        // A present but unknown kind is still an error.
+        db.execute("UPDATE missions SET awaiting_kind='bogus'", [])
+            .unwrap();
+        assert!(collect_attention_missions_from_sqlite(&path, "eip-8282").is_err());
     }
 
     #[test]
@@ -24405,6 +32793,96 @@ mod tests {
         assert!(store.get_mission(worker.id).await.unwrap().is_some());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_refuses_changed_persisted_filesystem_until_identity_is_restored() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let storage = temp.path().join("relocated-storage");
+        std::fs::create_dir_all(&storage).expect("storage should be created");
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("relocated mission"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission should be created");
+        let mission_dir = workspace::mission_workspace_dir_for_root(&storage, mission.id);
+        std::fs::create_dir_all(&mission_dir).expect("mission directory should be created");
+
+        let registry_dir = temp.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&registry_dir).expect("registry directory should be created");
+        let registry_path = registry_dir.join("mission-workspace-roots.json");
+        let actual_identity = workspace::filesystem_identity(&storage).unwrap();
+        std::fs::write(
+            &registry_path,
+            serde_json::json!({ mission.id.to_string(): {
+                "path": storage,
+                "filesystem_identity": actual_identity
+            }})
+            .to_string(),
+        )
+        .expect("registry should be written");
+
+        // A completely unavailable persisted root must leave both the
+        // checkout and its database record intact.
+        let unavailable_storage = temp.path().join("temporarily-unmounted-storage");
+        std::fs::rename(&storage, &unavailable_storage).expect("storage should disappear");
+        let error = cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, mission.id, &[])
+            .await
+            .expect_err("deletion must fail closed for an unavailable filesystem");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(store.get_mission(mission.id).await.unwrap().is_some());
+        assert!(unavailable_storage
+            .join("workspaces")
+            .join(mission_dir.file_name().unwrap())
+            .exists());
+        std::fs::rename(&unavailable_storage, &storage).expect("storage should be restored");
+
+        // An unmount can also leave the mountpoint path behind on a different
+        // filesystem. That identity mismatch is equally unsafe to delete.
+        std::fs::write(
+            &registry_path,
+            serde_json::json!({ mission.id.to_string(): {
+                "path": storage,
+                "filesystem_identity": "dev:changed-after-unmount"
+            }})
+            .to_string(),
+        )
+        .expect("mismatched registry should be written");
+        let error = cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, mission.id, &[])
+            .await
+            .expect_err("deletion must fail closed for a replaced filesystem");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(store.get_mission(mission.id).await.unwrap().is_some());
+        assert!(mission_dir.exists());
+
+        std::fs::write(
+            &registry_path,
+            serde_json::json!({ mission.id.to_string(): {
+                "path": storage,
+                "filesystem_identity": actual_identity
+            }})
+            .to_string(),
+        )
+        .expect("restored registry should be written");
+
+        cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, mission.id, &[])
+            .await
+            .expect("deletion should proceed after the original filesystem is restored");
+        delete_mission_with_children(&store, mission.id, &[])
+            .await
+            .expect("database record should delete only after verified cleanup");
+        assert!(!mission_dir.exists());
+        assert!(store.get_mission(mission.id).await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn cleanup_stale_active_missions_once_keeps_recent_active_mission_active() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -24435,6 +32913,97 @@ mod tests {
             .expect("mission lookup should succeed")
             .expect("mission should exist");
         assert_eq!(stored.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_active_missions_once_skips_hermes_tagged_writer() {
+        let inner = Arc::new(mission_store::InMemoryMissionStore::new());
+        let store: Arc<dyn MissionStore> = inner.clone();
+        let mission = store
+            .create_mission(
+                Some("Grok 4.6 — repair Verity PR #2332"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission should be created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("mission should become active");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    preserve_updated_at: false,
+                    tag_patch: None,
+                    title: None,
+                    project: None,
+                    track: None,
+                    intent: None,
+                    github_pr: None,
+                    tags: Some(vec!["origin:hermes-assistant".to_string()]),
+                    desired_state: None,
+                    next_check_at: None,
+                },
+            )
+            .await
+            .expect("tags should apply");
+        let stale_at = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        inner
+            .test_set_updated_at(mission.id, stale_at)
+            .await
+            .expect("updated_at should backdate");
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        cleanup_stale_active_missions_once(&store, 2, &events_tx, &cmd_tx).await;
+
+        let stored = store
+            .get_mission(mission.id)
+            .await
+            .expect("mission lookup should succeed")
+            .expect("mission should exist");
+        assert_eq!(stored.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_active_missions_once_closes_untagged_stale_mission() {
+        let inner = Arc::new(mission_store::InMemoryMissionStore::new());
+        let store: Arc<dyn MissionStore> = inner.clone();
+        let mission = store
+            .create_mission(Some("untagged worker"), None, None, None, None, None, None)
+            .await
+            .expect("mission should be created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("mission should become active");
+        let stale_at = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        inner
+            .test_set_updated_at(mission.id, stale_at)
+            .await
+            .expect("updated_at should backdate");
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ControlCommand::CancelMission { respond, .. }) = cmd_rx.recv().await {
+                let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
+            }
+        });
+        cleanup_stale_active_missions_once(&store, 2, &events_tx, &cmd_tx).await;
+
+        let stored = store
+            .get_mission(mission.id)
+            .await
+            .expect("mission lookup should succeed")
+            .expect("mission should exist");
+        assert_eq!(stored.status, MissionStatus::Completed);
     }
 
     #[test]
@@ -26596,6 +35165,31 @@ And the report:
     }
 
     #[test]
+    fn terminal_verdict_prefers_explicit_blocked_over_optimistic_body() {
+        let content = "Final decision: **BLOCKED** on exact head abc.\n\nAll existing builds pass.";
+        assert_eq!(terminal_verdict_from_content(content), Some("blocked"));
+        assert_eq!(
+            terminal_verdict_description("blocked"),
+            "VERDICT: BLOCKED — exact-head review reported unresolved blockers."
+        );
+    }
+
+    #[test]
+    fn terminal_verdict_does_not_treat_historical_mentions_as_current() {
+        let content =
+            "Review complete. The prior certifier was BLOCKED, but this head still needs analysis.";
+        assert_eq!(terminal_verdict_from_content(content), None);
+    }
+
+    #[test]
+    fn terminal_verdict_recognizes_clean_contract() {
+        assert_eq!(
+            terminal_verdict_from_content("VERDICT: CLEAN\nExact head verified."),
+            Some("clean")
+        );
+    }
+
+    #[test]
     fn test_extract_short_description_from_history_skips_fenced_code_blocks() {
         let history = vec![(
             "user".to_string(),
@@ -26728,6 +35322,35 @@ And the report:
     }
 
     #[test]
+    fn test_normalize_model_override_for_backend_maps_muse_spark_onto_meta() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("opencode"), "muse-spark-1.2"),
+            Some("meta/muse-spark-1.2".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("opencode"), "muse/muse-spark-1.2"),
+            Some("meta/muse-spark-1.2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_model_override_for_backend_maps_bare_grok_onto_xai() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("opencode"), "grok-4.6"),
+            Some("xai/grok-4.6".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("opencode"), "xai/grok-4.6"),
+            Some("xai/grok-4.6".to_string())
+        );
+        // Native grok backend keeps the bare CLI id.
+        assert_eq!(
+            normalize_model_override_for_backend(Some("grok"), "grok-4.6"),
+            Some("grok-4.6".to_string())
+        );
+    }
+
+    #[test]
     fn test_normalize_model_override_for_backend_strips_provider_prefix_for_non_opencode() {
         assert_eq!(
             normalize_model_override_for_backend(Some("codex"), "openai/gpt-5-codex"),
@@ -26783,6 +35406,15 @@ And the report:
             normalize_model_override_for_backend(Some("codex"), "openai/gpt-5.6"),
             Some("gpt-5.6-sol".to_string())
         );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "gpt-6"),
+            Some("gpt-6-astra".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "openai/gpt-6"),
+            Some("gpt-6-astra".to_string())
+        );
+        assert_eq!(resolve_codex_default_model(), "gpt-6-astra");
         assert_eq!(
             normalize_model_override_for_backend(Some("opencode"), "openai/gpt-5.6"),
             Some("openai/gpt-5.6".to_string())
@@ -26940,8 +35572,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -26950,6 +35584,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
         let weak = Mission {
             id: Uuid::new_v4(),
@@ -26977,8 +35613,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -26987,6 +35625,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let strong_score = mission_search_relevance_score(
@@ -27029,8 +35669,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -27039,6 +35681,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let score = mission_search_relevance_score(
@@ -27078,8 +35722,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -27088,6 +35734,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let score = mission_search_relevance_score(
@@ -27127,8 +35775,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -27137,6 +35787,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let score = mission_search_relevance_score(
@@ -27176,8 +35828,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -27186,6 +35840,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
 
         let score = mission_search_relevance_score(
@@ -27309,8 +35965,10 @@ And the report:
             desktop_sessions: Vec::new(),
             session_id: None,
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id: None,
             working_directory: None,
+            requires_local_disk: true,
             mission_mode: MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -27319,6 +35977,8 @@ And the report:
             project: Default::default(),
             activity: Default::default(),
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
         let before = mission_search_freshness_key(
             &[MissionSearchCandidate {
@@ -27786,6 +36446,65 @@ Investigate <service/> failures.
     }
 
     #[test]
+    fn scheduler_batch_recovery_retains_all_ids_without_serializing_aliases() {
+        let outer = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let content = deferred_messages::join(
+            &deferred_messages::encode(a, "same"),
+            &deferred_messages::encode(b, "same"),
+        );
+        for inflight in [false, true] {
+            let entry = QueuedMessage {
+                id: outer,
+                content: content.clone(),
+                agent: None,
+                mission_id: Some(Uuid::new_v4()),
+                source: Some("scheduler".into()),
+                inflight,
+            };
+            let (pending, consumed) = partition_restored_control_messages(vec![entry]);
+            let restored = pending.first().or_else(|| consumed.first()).unwrap();
+            for id in [outer, a, b] {
+                assert!(control_message_contains_id(
+                    restored.id,
+                    &restored.content,
+                    restored.source.as_deref(),
+                    id
+                ));
+            }
+            // User prose resembling an internal envelope never owns another ID.
+            assert!(!control_message_contains_id(
+                outer,
+                &content,
+                Some("api:test"),
+                a
+            ));
+            let queue = pending
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.id,
+                        entry.content,
+                        entry.agent,
+                        entry.mission_id,
+                        entry.source,
+                    )
+                })
+                .collect();
+            let recovered = consumed
+                .into_iter()
+                .map(|entry| (entry.id, entry))
+                .collect();
+            let serialized = serialize_queue_snapshot(&queue, &HashMap::new(), &recovered);
+            let rows: Vec<QueuedMessage> = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, outer);
+            assert_eq!(rows[0].inflight, inflight);
+        }
+    }
+
+    #[test]
     fn test_accept_user_message_id_rejects_duplicate_retry_id() {
         let message_id = Uuid::new_v4();
         let mut accepted = HashSet::new();
@@ -27862,6 +36581,22 @@ Investigate <service/> failures.
     }
 
     #[test]
+    fn deferred_goal_replaces_stale_prompt_on_failed_follow_up() {
+        let original = "You are GPT-5.6 Pro with web search. Research…";
+        let follow_up = "retry now, chatgpt ui is fixed";
+        assert_eq!(
+            deferred_goal_for_incoming_message(MissionStatus::Failed, Some(original), follow_up),
+            follow_up
+        );
+        assert_eq!(
+            deferred_goal_for_incoming_message(MissionStatus::Pending, Some(original), follow_up),
+            format!("{original}\n{follow_up}")
+        );
+        assert!(follow_up_should_requeue_as_pending(MissionStatus::Failed));
+        assert!(!follow_up_should_requeue_as_pending(MissionStatus::Pending));
+    }
+
+    #[test]
     fn message_activates_mission_includes_waiting_background() {
         // A resume delivered while background jobs are still live lands on a
         // WaitingBackground mission; it must be activation-eligible so the flip
@@ -27886,6 +36621,13 @@ Investigate <service/> failures.
         // until the user resumes it), so they are not activation-eligible here.
         assert!(!message_activates_mission(MissionStatus::Active));
         assert!(!message_activates_mission(MissionStatus::Paused));
+    }
+
+    #[test]
+    fn acknowledgement_is_blocked_while_background_tasks_are_registered() {
+        assert!(background_tasks_block_ack(MissionStatus::Acknowledged, 1));
+        assert!(!background_tasks_block_ack(MissionStatus::Acknowledged, 0));
+        assert!(!background_tasks_block_ack(MissionStatus::Active, 1));
     }
 
     #[test]
@@ -28007,6 +36749,413 @@ Investigate <service/> failures.
     }
 
     #[test]
+    fn remote_harness_plan_is_explicit_about_node_support() {
+        // Explicit raw command wins regardless of backend.
+        assert_eq!(
+            plan_remote_harness(Some(" hostname "), "grok", None, Some("p")).unwrap(),
+            RemoteHarnessPlan::Raw {
+                command: "hostname".into()
+            }
+        );
+        assert_eq!(
+            plan_remote_harness(
+                None,
+                "claudecode",
+                Some("anthropic/claude-opus-5"),
+                Some("do it")
+            )
+            .unwrap(),
+            RemoteHarnessPlan::ClaudeCode {
+                model: Some("claude-opus-5".into()),
+                prompt: "do it".into()
+            }
+        );
+        assert_eq!(
+            plan_remote_harness(None, "opencode", Some("xai/grok-4.6"), Some("do it")).unwrap(),
+            RemoteHarnessPlan::OpenCode {
+                resume_session_id: None,
+                model: Some("xai/grok-4.6".into()),
+                prompt: "do it".into()
+            }
+        );
+        assert_eq!(
+            plan_remote_harness(
+                None,
+                "opencode",
+                Some("builtin/xai/grok-4.6"),
+                Some("do it")
+            )
+            .unwrap(),
+            RemoteHarnessPlan::OpenCode {
+                resume_session_id: None,
+                model: Some("xai/grok-4.6".into()),
+                prompt: "do it".into()
+            }
+        );
+        let no_model = plan_remote_harness(None, "opencode", None, Some("do it"))
+            .expect_err("opencode needs a routed model");
+        assert!(
+            no_model.starts_with("REMOTE_MODEL_REQUIRED: "),
+            "{no_model}"
+        );
+        let rejected = plan_remote_harness(None, "unknown", Some("grok-4.6"), Some("do it"))
+            .expect_err("unknown harness");
+        assert!(
+            rejected.starts_with("REMOTE_HARNESS_UNSUPPORTED: "),
+            "{rejected}"
+        );
+        assert!(rejected.contains("'unknown'"), "{rejected}");
+        assert!(rejected.contains("claudecode or opencode"), "{rejected}");
+        let no_prompt =
+            plan_remote_harness(None, "claudecode", None, Some("   ")).expect_err("prompt");
+        assert!(
+            no_prompt.starts_with("REMOTE_PROMPT_REQUIRED: "),
+            "{no_prompt}"
+        );
+    }
+
+    #[test]
+    fn remote_codex_uses_native_cli_and_secret_env_for_launch_and_resume() {
+        let plan = plan_remote_harness(
+            None,
+            "codex",
+            Some("openai/gpt-5.4"),
+            Some("say 'hi'; $(false)"),
+        )
+        .unwrap();
+        assert!(plan.uses_core_proxy());
+        let execution =
+            remote_execution_for_plan(&plan, "https://core.example/", "secret-test-key");
+        assert!(!execution.command.contains("secret-test-key"));
+        assert!(execution.command.contains("exec codex"));
+        assert!(execution.command.contains("wire_api=\"responses\""));
+        assert!(execution.command.contains("https://core.example/v1"));
+        assert!(execution
+            .command
+            .contains(&shell_single_quote("say 'hi'; $(false)")));
+        assert_eq!(
+            execution.env.unwrap()[REMOTE_PROXY_KEY_ENV],
+            "secret-test-key"
+        );
+        let resume = RemoteHarnessPlan::Codex {
+            effort: Some("high".into()),
+            fast_mode: true,
+            model: "openai/gpt-5.4".into(),
+            prompt: "continue".into(),
+            resume_session_id: Some("thread-123".into()),
+        };
+        let execution =
+            remote_execution_for_plan(&resume, "https://core.example", "secret-test-key");
+        assert!(execution.command.contains("exec resume --json"));
+        assert!(execution
+            .command
+            .contains("model_reasoning_effort=\"high\""));
+        assert!(execution.command.contains("service_tier=\"fast\""));
+        assert!(
+            plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test"))
+                .unwrap_err()
+                .starts_with("REMOTE_GOAL_UNSUPPORTED")
+        );
+        assert!(execution.command.ends_with("-- 'thread-123' 'continue'"));
+        assert!(plan_remote_harness(None, "codex", None, Some("do it"))
+            .unwrap_err()
+            .starts_with(REMOTE_MODEL_REQUIRED));
+    }
+
+    #[test]
+    fn remote_execution_routes_selected_model_through_core_proxy_env() {
+        let plan = RemoteHarnessPlan::ClaudeCode {
+            model: Some("claude-opus-5".into()),
+            prompt: "say 'hi'".into(),
+        };
+        let exec = remote_execution_for_plan(&plan, "https://core.example", "sk-proxy-abc");
+        assert!(
+            exec.command
+                .contains("claude -p --dangerously-skip-permissions --model 'claude-opus-5' "),
+            "{}",
+            exec.command
+        );
+        // Single quotes inside the prompt are shell-escaped.
+        assert!(
+            exec.command.ends_with(&shell_single_quote("say 'hi'")),
+            "{}",
+            exec.command
+        );
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+        assert!(!exec.command.contains("sk-proxy-abc"));
+        let env = exec.env.unwrap();
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "https://core.example");
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "sk-proxy-abc");
+        assert_eq!(exec.label, "claudecode/claude-opus-5");
+
+        let plan = RemoteHarnessPlan::OpenCode {
+            resume_session_id: None,
+            model: Some("xai/grok-4.6".into()),
+            prompt: "build".into(),
+        };
+        let exec = remote_execution_for_plan(&plan, "https://core.example/", "sk-proxy-abc");
+        assert!(
+            exec.command
+                .contains("opencode run --format json --model 'builtin/xai/grok-4.6' 'build'"),
+            "{}",
+            exec.command
+        );
+        assert!(!exec.command.contains("opencode.json"), "{}", exec.command);
+        assert!(!exec.command.contains("sk-proxy-abc"));
+        let env = exec.env.unwrap();
+        assert_eq!(env[REMOTE_PROXY_KEY_ENV], "sk-proxy-abc");
+        let config: serde_json::Value =
+            serde_json::from_str(&env[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
+        assert_eq!(
+            config["provider"]["builtin"]["options"]["baseURL"],
+            "https://core.example/v1"
+        );
+        assert_eq!(
+            config["provider"]["builtin"]["options"]["apiKey"],
+            "{env:SANDBOXED_PROXY_API_KEY}"
+        );
+        assert_eq!(
+            config["provider"]["builtin"]["models"]["xai/grok-4.6"]["name"],
+            "xai/grok-4.6"
+        );
+        assert!(!env[REMOTE_OPENCODE_CONFIG_ENV].contains("sk-proxy-abc"));
+        // Map key and --model agree even when the client sent `builtin/`,
+        // and a leading-dash prompt stays positional.
+        let plan = plan_remote_harness(None, "opencode", Some("builtin/xai/grok-4.6"), Some("-x"))
+            .unwrap();
+        let exec = remote_execution_for_plan(&plan, "https://core.example", "k");
+        assert!(
+            exec.command
+                .contains("--model 'builtin/xai/grok-4.6' ' -x'"),
+            "{}",
+            exec.command
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&exec.env.unwrap()[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
+        assert!(config["provider"]["builtin"]["models"]["xai/grok-4.6"].is_object());
+        let plan = RemoteHarnessPlan::ClaudeCode {
+            model: None,
+            prompt: "--help".into(),
+        };
+        assert!(remote_execution_for_plan(&plan, "u", "k")
+            .command
+            .ends_with("' --help'"));
+
+        let raw = remote_execution_for_plan(
+            &RemoteHarnessPlan::Raw {
+                command: "hostname".into(),
+            },
+            "",
+            "",
+        );
+        assert_eq!(raw.env, None);
+        assert_eq!(raw.command, "hostname");
+    }
+
+    #[tokio::test]
+    async fn boot_key_sweep_removes_old_orphans_and_keeps_new_process_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            super::super::proxy_keys::ProxyApiKeyStore::new(dir.path().join("keys.json")).await;
+        let old_orphan = Uuid::new_v4();
+        let old_live = Uuid::new_v4();
+        let unrelated = store.create("dashboard-key".into()).await.unwrap();
+        store
+            .create(remote_launch_key_name(old_orphan))
+            .await
+            .unwrap();
+        store
+            .create(remote_launch_key_name(old_live))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let boot_cutoff = chrono::Utc::now();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // A launch of this process, minted after the cutoff, absent from
+        // the (empty) ledger snapshot because its handle is not written yet.
+        let fresh = Uuid::new_v4();
+        store.create(remote_launch_key_name(fresh)).await.unwrap();
+        let live_handle = crate::remote_node::job_ledger::JobHandle {
+            mission_id: old_live,
+            node_id: "dgx-spark".into(),
+            job_id: Uuid::new_v4(),
+            started_at: boot_cutoff,
+            submission_sequence: 0,
+            accepted_at: Some(boot_cutoff),
+            heartbeat_at: None,
+            disk_reservation_bytes: 0,
+            kind: crate::remote_node::job_ledger::JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        };
+        retire_orphaned_remote_launch_keys(&store, std::slice::from_ref(&live_handle), boot_cutoff)
+            .await;
+        let mut names: Vec<String> = store.list().await.into_iter().map(|k| k.name).collect();
+        names.sort();
+        let mut expected = vec![
+            unrelated.name.clone(),
+            remote_launch_key_name(old_live),
+            remote_launch_key_name(fresh),
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
+        // Empty ledger: only the pre-cutoff orphan goes; the fresh key stays.
+        retire_orphaned_remote_launch_keys(&store, &[], boot_cutoff).await;
+        let mut names: Vec<String> = store.list().await.into_iter().map(|k| k.name).collect();
+        names.sort();
+        let mut expected = vec![unrelated.name, remote_launch_key_name(fresh)];
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    /// Bounded real-CLI resolution proof (no paid inference): the installed
+    /// OpenCode, configured exactly as a node job is (inline
+    /// `OPENCODE_CONFIG_CONTENT`, cwd = HOME = scratch dir, key only in env),
+    /// must send the exact requested model id and the env key to the
+    /// proxy-shaped endpoint. A local mock answers one canned streamed
+    /// completion. Skipped when the CLI is not installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_opencode_execution_resolves_model_against_mock_proxy() {
+        if !std::process::Command::new("bash")
+            .args(["-lc", "command -v opencode"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            eprintln!("opencode CLI not installed; skipping mock-proxy fixture");
+            return;
+        }
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let seen = seen.clone();
+                move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        let model = body["model"].as_str().unwrap_or_default().to_string();
+                        let auth = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        seen.lock().unwrap().push((model.clone(), auth));
+                        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+                            format!(
+                                "data: {}\n\n",
+                                serde_json::json!({
+                                    "id": "c1", "object": "chat.completion.chunk", "created": 1,
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                                })
+                            )
+                        };
+                        let body = format!(
+                            "{}{}data: [DONE]\n\n",
+                            chunk(
+                                serde_json::json!({"role": "assistant", "content": "ok"}),
+                                None
+                            ),
+                            chunk(serde_json::json!({}), Some("stop"))
+                        );
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            body,
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let plan =
+            plan_remote_harness(None, "opencode", Some("xai/grok-4.6"), Some("say ok")).unwrap();
+        let exec = remote_execution_for_plan(&plan, &base, "sk-proxy-fixture-key");
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = tokio::process::Command::new("bash");
+        // The node runs the command verbatim under `bash -lc`; a `timeout`
+        // prefix would turn the leading `command -v` builtin into a program
+        // lookup. The tokio timeout below bounds the run instead.
+        command
+            .arg("-lc")
+            .arg(&exec.command)
+            .kill_on_drop(true)
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", dir.path())
+            .env("LANG", "C.UTF-8")
+            .envs(exec.env.clone().unwrap());
+        let output = tokio::time::timeout(std::time::Duration::from_secs(170), command.output())
+            .await
+            .expect("opencode run must finish")
+            .unwrap();
+        server.abort();
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            output.status.success(),
+            "status={:?} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!seen.is_empty(), "the CLI never called the proxy endpoint");
+        for (model, auth) in &seen {
+            assert_eq!(model, "xai/grok-4.6");
+            assert_eq!(auth, "Bearer sk-proxy-fixture-key");
+        }
+        assert!(String::from_utf8_lossy(&output.stdout).contains("\"ok\""));
+    }
+
+    /// Bounded real-CLI fixture (no inference, no cost): the installed
+    /// OpenCode must accept the per-job config and list the exact proxy
+    /// model id under the `builtin` provider from a cwd that is also HOME,
+    /// the way node jobs run. Skipped when the CLI is not installed.
+    #[test]
+    fn remote_opencode_config_is_accepted_by_installed_cli_catalog() {
+        let Ok(output) = std::process::Command::new("bash")
+            .args(["-lc", "command -v opencode"])
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            eprintln!("opencode CLI not installed; skipping catalog fixture");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let listed = std::process::Command::new("bash")
+            .args(["-lc", "timeout 120 opencode models builtin"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", dir.path())
+            .env("LANG", "C.UTF-8")
+            .env(
+                REMOTE_OPENCODE_CONFIG_ENV,
+                remote_opencode_config("xai/grok-4.6", "http://127.0.0.1:9").to_string(),
+            )
+            .env(REMOTE_PROXY_KEY_ENV, "phony-fixture-key")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        assert!(
+            listed.status.success()
+                && stdout
+                    .lines()
+                    .any(|line| line.trim() == "builtin/xai/grok-4.6"),
+            "status={:?} stdout={stdout} stderr={}",
+            listed.status,
+            String::from_utf8_lossy(&listed.stderr)
+        );
+    }
+
+    #[test]
     fn remote_terminal_result_preserves_operator_selected_status() {
         assert!(should_finalize_remote_job(None));
         assert!(should_finalize_remote_job(Some(MissionStatus::Active)));
@@ -28064,16 +37213,28 @@ Investigate <service/> failures.
         finalize_remote_mission(
             &owner,
             mission.id,
+            None,
             "node-a",
             true,
             "remote result".to_string(),
             "remote_node_job",
+            true,
         )
         .await
         .unwrap();
 
         let finalized = store.get_mission(mission.id).await.unwrap().unwrap();
         assert_eq!(finalized.status, MissionStatus::Completed);
+        let events = store
+            .get_events(mission.id, Some(&["assistant_message"]), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "offline native finalization remains durable"
+        );
+        assert_eq!(events[0].content, "remote result");
     }
 
     #[test]
@@ -28149,6 +37310,463 @@ Investigate <service/> failures.
     }
 
     #[tokio::test]
+    async fn terminal_callback_identity_never_infers_unbound_live_event_from_same_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "unbound")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .update_mission_status(mission.id, MissionStatus::Active)
+                .await
+                .unwrap();
+            let run = store
+                .begin_mission_run(mission.id, "test", None)
+                .await
+                .unwrap();
+            store
+                .finish_mission_run(run.run_id, run.generation, None)
+                .await
+                .unwrap();
+            store
+                .update_mission_status_with_reason(
+                    mission.id,
+                    MissionStatus::Blocked,
+                    Some("second reason"),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .update_mission_history(
+                mission.id,
+                &[MissionHistoryEntry {
+                    role: "assistant".into(),
+                    content: "second result".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let (execution, completion) = callback_snapshot(
+            &store,
+            mission.id,
+            MissionStatus::Blocked,
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert!(execution.is_none());
+        assert!(completion.is_none());
+        assert!(
+            current_callback_snapshot(&store, mission.id, MissionStatus::Blocked)
+                .await
+                .is_none(),
+            "history text alone is not a generation receipt"
+        );
+        store
+            .update_mission_status_with_reason(
+                mission.id,
+                MissionStatus::Interrupted,
+                Some("server_shutdown"),
+            )
+            .await
+            .unwrap();
+        let (outage_run, outage) = callback_snapshot(
+            &store,
+            mission.id,
+            MissionStatus::Interrupted,
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert!(outage_run.is_none());
+        assert_eq!(
+            outage.unwrap().terminal_reason.as_deref(),
+            Some("server_shutdown")
+        );
+        store
+            .update_mission_status_with_reason(
+                mission.id,
+                MissionStatus::Blocked,
+                Some("second reason"),
+            )
+            .await
+            .unwrap();
+        store
+            .log_event(
+                mission.id,
+                &AgentEvent::MissionStatusChanged {
+                    execution: None,
+                    completion: None,
+                    mission_id: mission.id,
+                    status: MissionStatus::Blocked,
+                    summary: Some("legacy current status".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let (legacy_run, legacy_outcome) =
+            callback_snapshot(&store, mission.id, MissionStatus::Blocked, None, None, true).await;
+        assert!(legacy_run.is_none());
+        assert_eq!(
+            legacy_outcome.unwrap().result_summary.as_deref(),
+            Some("legacy current status")
+        );
+        store
+            .log_event(
+                mission.id,
+                &AgentEvent::MissionStatusChanged {
+                    execution: store.get_latest_mission_run(mission.id).await.unwrap(),
+                    completion: Some(MissionCompletionSnapshot {
+                        result_summary: Some("second result".into()),
+                        terminal_reason: Some("second reason".into()),
+                        terminal_evidence: None,
+                    }),
+                    mission_id: mission.id,
+                    status: MissionStatus::Blocked,
+                    summary: None,
+                },
+            )
+            .await
+            .unwrap();
+        // Only the explicitly current reconciliation observation may acquire
+        // the current generation. It is never treated as the old live event.
+        let (execution, completion) =
+            callback_snapshot(&store, mission.id, MissionStatus::Blocked, None, None, true).await;
+        assert_eq!(execution.unwrap().generation, 2);
+        assert_eq!(
+            completion.unwrap().result_summary.as_deref(),
+            Some("second result")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_identity_reaches_http_after_release_and_delayed_successor() {
+        for resume_before_delivery in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = Arc::new(
+                mission_store::SqliteMissionStore::new(dir.path().join("db"), "http-callback")
+                    .await
+                    .unwrap(),
+            );
+            let mission = store
+                .create_mission(None, None, None, None, None, None, None)
+                .await
+                .unwrap();
+            let first = store
+                .begin_mission_run(mission.id, "test", None)
+                .await
+                .unwrap();
+            store
+                .finish_mission_run(first.run_id, first.generation, Some("native_goal_stopped"))
+                .await
+                .unwrap();
+            store
+                .update_mission_history(
+                    mission.id,
+                    &[MissionHistoryEntry {
+                        role: "assistant".into(),
+                        content: "first generation result".into(),
+                    }],
+                )
+                .await
+                .unwrap();
+            let (tx, rx) = tokio::sync::broadcast::channel(8);
+            let mut persist_rx = tx.subscribe();
+            maybe_finalize_terminal_mission(
+                &store,
+                &tx,
+                mission.id,
+                0,
+                Some(TerminalReason::NativeGoalStopped),
+                Some("first evidence"),
+                None,
+                true,
+                Some("first generation result"),
+                "http callback test",
+            )
+            .await;
+            store
+                .log_event(mission.id, &persist_rx.try_recv().unwrap())
+                .await
+                .unwrap();
+            // Queue the actual finalizer event, then acquire a successor BEFORE
+            // starting the forwarder. This deterministically exercises delay.
+            if resume_before_delivery {
+                store
+                    .update_mission_status(mission.id, MissionStatus::Active)
+                    .await
+                    .unwrap();
+                let next = store
+                    .begin_mission_run(mission.id, "test", None)
+                    .await
+                    .unwrap();
+                assert_eq!(next.generation, 2);
+                store
+                    .finish_mission_run(next.run_id, next.generation, Some("RateLimited"))
+                    .await
+                    .unwrap();
+                store
+                    .update_mission_history(
+                        mission.id,
+                        &[MissionHistoryEntry {
+                            role: "assistant".into(),
+                            content: "SECOND generation result".into(),
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .set_terminal_evidence(mission.id, "SECOND evidence")
+                    .await
+                    .unwrap();
+                store
+                    .update_mission_status_with_reason(
+                        mission.id,
+                        MissionStatus::Failed,
+                        Some("rate_limited"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut markers = super::super::webhook_markers::MarkerStore::load(dir.path());
+            markers.set(
+                mission.id,
+                if resume_before_delivery {
+                    MissionStatus::Failed
+                } else {
+                    MissionStatus::Active
+                },
+            );
+            let (body_tx, mut body_rx) = tokio::sync::mpsc::channel(2);
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let body_tx = body_tx.clone();
+                    async move {
+                        body_tx.send(body).await.unwrap();
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let workspaces =
+                Arc::new(workspace::WorkspaceStore::new(dir.path().to_path_buf()).await);
+            let forwarder = tokio::spawn(paloma_webhook_forwarder_loop(
+                Arc::new(std::sync::OnceLock::new()),
+                rx,
+                store,
+                workspaces,
+                dir.path().to_path_buf(),
+                url,
+                None,
+                reqwest::Client::new(),
+            ));
+            let body = tokio::time::timeout(std::time::Duration::from_secs(5), body_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(body["mission_id"], mission.id.to_string());
+            assert_eq!(body["execution"]["run_id"], first.run_id.to_string());
+            assert_eq!(body["execution"]["generation"], 1);
+            assert_eq!(body["execution"]["state"], "terminal");
+            assert_eq!(body["result_summary"], "first generation result");
+            assert_eq!(body["terminal_reason"], "native_goal_stopped");
+            assert_eq!(body["terminal_evidence"], "first evidence");
+            forwarder.abort();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_identity_persists_in_event_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "callback-event")
+                .await
+                .unwrap();
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let run = store
+            .begin_mission_run(mission.id, "test", None)
+            .await
+            .unwrap();
+        store
+            .finish_mission_run(run.run_id, run.generation, None)
+            .await
+            .unwrap();
+        let event = AgentEvent::MissionStatusChanged {
+            completion: Some(MissionCompletionSnapshot {
+                result_summary: Some("original result".into()),
+                terminal_reason: Some("native_goal_stopped".into()),
+                terminal_evidence: Some("original evidence".into()),
+            }),
+            execution: store.get_latest_mission_run(mission.id).await.unwrap(),
+            mission_id: mission.id,
+            status: MissionStatus::Blocked,
+            summary: None,
+        };
+        store.log_event(mission.id, &event).await.unwrap();
+        drop(store);
+        let reopened =
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "callback-event")
+                .await
+                .unwrap();
+        let events = reopened
+            .get_events(mission.id, None, Some(10), None)
+            .await
+            .unwrap();
+        let restored = events.iter().find_map(stored_event_to_agent_event).unwrap();
+        let AgentEvent::MissionStatusChanged {
+            execution: Some(identity),
+            completion: Some(completion),
+            ..
+        } = restored
+        else {
+            panic!("persisted callback lost execution identity");
+        };
+        assert_eq!(identity.run_id, run.run_id);
+        assert_eq!(identity.generation, 1);
+        assert_eq!(
+            completion.result_summary.as_deref(),
+            Some("original result")
+        );
+        assert_eq!(
+            completion.terminal_reason.as_deref(),
+            Some("native_goal_stopped")
+        );
+        assert_eq!(
+            completion.terminal_evidence.as_deref(),
+            Some("original evidence")
+        );
+        assert!(identity.execution_state.is_terminal());
+        assert_eq!(
+            reopened
+                .get_latest_mission_run(mission.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id,
+            run.run_id
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_identity_survives_lease_release_and_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let stores: Vec<Arc<dyn MissionStore>> = vec![
+            Arc::new(mission_store::InMemoryMissionStore::new()),
+            Arc::new(
+                mission_store::FileMissionStore::new(dir.path().join("file"), "callback")
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(
+                mission_store::SqliteMissionStore::new(dir.path().join("sqlite"), "callback")
+                    .await
+                    .unwrap(),
+            ),
+        ];
+        for store in stores {
+            let mission = store
+                .create_mission(None, None, None, None, None, None, None)
+                .await
+                .unwrap();
+            let first = store
+                .begin_mission_run(mission.id, "test", None)
+                .await
+                .unwrap();
+            store
+                .finish_mission_run(first.run_id, first.generation, Some("native_goal_stopped"))
+                .await
+                .unwrap();
+            assert!(store
+                .get_active_mission_run(mission.id)
+                .await
+                .unwrap()
+                .is_none());
+            let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+            maybe_finalize_terminal_mission(
+                &store,
+                &tx,
+                mission.id,
+                0,
+                Some(TerminalReason::NativeGoalStopped),
+                None,
+                None,
+                true,
+                Some("phase one stopped"),
+                "callback test",
+            )
+            .await;
+            let event = rx.try_recv().unwrap();
+            let AgentEvent::MissionStatusChanged {
+                execution: Some(ref captured),
+                ..
+            } = event
+            else {
+                panic!("terminal transition lost execution identity");
+            };
+            assert_eq!(captured.run_id, first.run_id);
+            assert_eq!(captured.generation, 1);
+            assert!(captured.execution_state.is_terminal());
+            let projection = mission_execution_projection(captured, MissionStatus::Blocked);
+            assert_eq!(projection["health"], "healthy");
+            assert!(projection["status_conflict"].is_null());
+            assert!(projection["ended_at"].is_string());
+            let serialized = serde_json::to_value(&event).unwrap();
+            store
+                .update_mission_status(mission.id, MissionStatus::Active)
+                .await
+                .unwrap();
+            let second = store
+                .begin_mission_run(mission.id, "test", None)
+                .await
+                .unwrap();
+            assert_eq!(second.generation, 2);
+            assert_eq!(
+                store
+                    .get_latest_mission_run(mission.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_id,
+                second.run_id
+            );
+            // The queued event is an immutable first-generation receipt even
+            // if a same-mission successor has already acquired a live lease.
+            assert_eq!(serialized["execution"]["run_id"], first.run_id.to_string());
+            store
+                .finish_mission_run(second.run_id, second.generation, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .get_latest_mission_run(mission.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_id,
+                second.run_id
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn maybe_finalize_terminal_mission_preserves_interrupted_status() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
         let mission = store
@@ -28165,7 +37783,9 @@ Investigate <service/> failures.
             &store,
             &events_tx,
             mission.id,
+            0,
             Some(TerminalReason::LlmError),
+            None,
             None,
             false,
             None,
@@ -28185,6 +37805,52 @@ Investigate <service/> failures.
     }
 
     #[tokio::test]
+    async fn terminal_turn_parks_while_background_task_is_live() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Background build"), None, None, None, None, None, None)
+            .await
+            .expect("mission should be created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("mission should be active");
+        let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(8);
+
+        maybe_finalize_terminal_mission(
+            &store,
+            &events_tx,
+            mission.id,
+            1,
+            Some(TerminalReason::LlmError),
+            None,
+            None,
+            false,
+            Some("Claude Code produced no output after its terminal result"),
+            "background task test",
+        )
+        .await;
+
+        let updated = store
+            .get_mission(mission.id)
+            .await
+            .expect("mission lookup should succeed")
+            .expect("mission should exist");
+        assert_eq!(updated.status, MissionStatus::WaitingBackground);
+        assert_eq!(
+            updated.terminal_reason.as_deref(),
+            Some("background_jobs_running")
+        );
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(AgentEvent::MissionStatusChanged {
+                status: MissionStatus::WaitingBackground,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn maybe_finalize_terminal_mission_skips_low_confidence_completed() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
         let mission = store
@@ -28201,7 +37867,9 @@ Investigate <service/> failures.
             &store,
             &events_tx,
             mission.id,
+            0,
             Some(TerminalReason::Completed),
+            None,
             Some(crate::agents::CompletionConfidence::Low),
             true,
             None,
@@ -28279,6 +37947,197 @@ Investigate <service/> failures.
         assert!(!is_transport_failure_evidence(
             &completion_evidence_for_agent_result(&auth)
         ));
+    }
+
+    #[tokio::test]
+    async fn grok_transport_recovery_budget_survives_restart_and_event_pagination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "grok-retry")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(
+                Some("grok retry"),
+                None,
+                None,
+                None,
+                None,
+                Some("grok"),
+                None,
+            )
+            .await
+            .unwrap();
+        // The reservation must be found beyond an arbitrary first page.
+        for _ in 0..110 {
+            store
+                .log_event(
+                    mission.id,
+                    &AgentEvent::UserMessage {
+                        id: Uuid::new_v4(),
+                        content: "checkpoint".to_string(),
+                        queued: false,
+                        mission_id: Some(mission.id),
+                        source: Some("api:test".to_string()),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let mut attempts = HashMap::new();
+        assert!(
+            reserve_transport_auto_resume(&store, &mut attempts, mission.id, true, false).await
+        );
+        assert!(
+            !reserve_transport_auto_resume(&store, &mut attempts, mission.id, true, false).await
+        );
+        drop(store);
+        let reopened =
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "grok-retry")
+                .await
+                .unwrap();
+        let mut restarted_actor = HashMap::new();
+        assert!(
+            !reserve_transport_auto_resume(
+                &reopened,
+                &mut restarted_actor,
+                mission.id,
+                true,
+                false
+            )
+            .await
+        );
+        let reservations = reopened
+            .get_events(mission.id, Some(&["error"]), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            reservations.len(),
+            1,
+            "serial/parallel retries must share one durable reservation"
+        );
+        assert_eq!(reservations[0].content, GROK_TRANSPORT_RECOVERY_RESERVED);
+    }
+
+    #[tokio::test]
+    async fn grok_transport_recovery_gate_fails_closed_without_changing_other_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "grok-retry")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("missions-grok-retry.db")).unwrap();
+        db.execute("DROP TABLE mission_events", []).unwrap();
+        let mut attempts = HashMap::new();
+        assert!(
+            !reserve_transport_auto_resume(&store, &mut attempts, mission.id, true, false).await
+        );
+        let other = Uuid::new_v4();
+        for _ in 0..3 {
+            assert!(
+                reserve_transport_auto_resume(&store, &mut attempts, other, false, false).await
+            );
+        }
+        assert!(!reserve_transport_auto_resume(&store, &mut attempts, other, false, false).await);
+    }
+
+    #[tokio::test]
+    async fn grok_transport_recovery_respects_preexisting_recovery_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "grok-retry")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .log_event(
+                mission.id,
+                &AgentEvent::UserMessage {
+                    id: Uuid::new_v4(),
+                    content: "prior recovery".to_string(),
+                    queued: false,
+                    mission_id: Some(mission.id),
+                    source: Some("transport_auto_resume".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !reserve_transport_auto_resume(&store, &mut HashMap::new(), mission.id, true, false)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_transport_recovery_cancelled_completion_does_not_consume_or_queue_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "grok-retry")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let mut attempts = HashMap::new();
+        assert!(
+            !reserve_transport_auto_resume(&store, &mut attempts, mission.id, true, true).await
+        );
+        assert!(attempts.is_empty());
+        assert!(store
+            .get_events(mission.id, Some(&["error"]), None, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            reserve_transport_auto_resume(&store, &mut attempts, mission.id, true, false).await
+        );
+    }
+
+    #[test]
+    fn grok_transport_timeout_cannot_be_promoted_to_success() {
+        let mut result = crate::agents::AgentResult::failure("Grok ACP transport-idle timeout after 600s without a protocol event; checkout preserved", 0)
+            .with_terminal_reason(TerminalReason::LlmError)
+            .with_data(serde_json::json!({
+                "failure_class": "transport_error",
+                "transport_failure_stage": "grok_acp_transport_idle",
+                "grok_acp_transport_failure": true,
+            }));
+        maybe_recover_soft_llm_error(&mut result);
+        assert!(!result.success);
+        assert_eq!(result.terminal_reason, Some(TerminalReason::LlmError));
+        assert!(is_grok_acp_transport_failure(&result));
+        assert!(is_transport_failure_evidence(
+            &completion_evidence_for_agent_result(&result)
+        ));
+    }
+
+    #[test]
+    fn chatgpt_ui_transport_resume_replays_the_original_prompt() {
+        let original = "You are GPT-5.6 Pro. Rewrite EIP-8282 in French.";
+        assert_eq!(
+            transport_auto_resume_message(Some("chatgpt_ui"), Some(original)),
+            original
+        );
+        assert_eq!(
+            transport_auto_resume_message(Some("chatgpt_ui"), Some("  \n ")),
+            CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT
+        );
+        assert_eq!(
+            transport_auto_resume_message(Some("chatgpt_ui"), None),
+            CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT
+        );
+        assert_eq!(
+            transport_auto_resume_message(Some("codex"), Some(original)),
+            TRANSPORT_AUTO_RESUME_PROMPT
+        );
+        assert_eq!(
+            transport_auto_resume_message(Some("opencode"), None),
+            TRANSPORT_AUTO_RESUME_PROMPT
+        );
     }
 
     #[test]
@@ -28580,6 +38439,32 @@ Investigate <service/> failures.
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn test_stop_policy_when_mission_terminal() {
+        assert!(
+            !stop_policy_matches_status(
+                &mission_store::StopPolicy::WhenMissionTerminal,
+                MissionStatus::Active,
+                0,
+                false,
+            )
+            .await
+        );
+        assert!(
+            stop_policy_matches_status(
+                &mission_store::StopPolicy::WhenMissionTerminal,
+                MissionStatus::Acknowledged,
+                0,
+                false,
+            )
+            .await
+        );
+        assert!(mission_is_terminal_for_goal_loop(
+            MissionStatus::Interrupted
+        ));
+        assert!(!mission_is_terminal_for_goal_loop(MissionStatus::Active));
     }
 
     #[tokio::test]
@@ -28973,5 +38858,296 @@ Investigate <service/> failures.
             (slow_count as u64) + slow_lagged >= PRODUCER_EVENTS as u64,
             "slow subscriber's got+lost should still account for the producer (got={slow_count} lagged={slow_lagged})"
         );
+    }
+
+    #[test]
+    fn disk_admission_reservations_are_filesystem_scoped_and_exact_at_boundary() {
+        let a = DiskReservation {
+            mission_id: Uuid::new_v4(),
+            filesystem: "filesystem-a".into(),
+            estimated_bytes: 20 << 30,
+            free_bytes_at_grant: 0,
+            workspace_dir: None,
+        };
+        let b = DiskReservation {
+            mission_id: Uuid::new_v4(),
+            filesystem: "filesystem-b".into(),
+            estimated_bytes: 20 << 30,
+            free_bytes_at_grant: 0,
+            workspace_dir: None,
+        };
+        assert_eq!(disk_reservation_outstanding_bytes(&a), 20 << 30);
+        assert_eq!(disk_reservation_outstanding_bytes(&b), 20 << 30);
+
+        let emergency = 64 << 30;
+        let first = 20 << 30;
+        // Hard gate is emergency + candidate only. Paper reserved is a
+        // warning budget, never the refuse line.
+        assert_eq!(
+            disk_admission_hard_required_bytes(emergency, first),
+            84 << 30
+        );
+        assert_eq!(disk_admission_required_bytes(emergency, 0, first), 84 << 30);
+        assert_eq!(
+            disk_admission_required_bytes(emergency, first, first),
+            104 << 30
+        );
+    }
+
+    #[test]
+    fn paper_reservations_do_not_hard_block_when_disk_is_free() {
+        let emergency = 64 << 30;
+        let candidate = 64 << 30;
+        let paper = 5184u64 << 30;
+        let available = 2136u64 << 30;
+        assert!(
+            available >= disk_admission_hard_required_bytes(emergency, candidate),
+            "2 TiB free must admit a 64+64 GiB create"
+        );
+        assert!(
+            available < disk_admission_required_bytes(emergency, paper, candidate),
+            "the old paper-inclusive formula is what blocked Verity"
+        );
+    }
+
+    #[test]
+    fn terminal_missions_release_disk_admission_reservations() {
+        assert!(mission_holds_disk_reservation(MissionStatus::Pending));
+        assert!(mission_holds_disk_reservation(MissionStatus::Active));
+        assert!(mission_holds_disk_reservation(
+            MissionStatus::WaitingBackground
+        ));
+        assert!(!mission_holds_disk_reservation(MissionStatus::AwaitingUser));
+        assert!(!mission_holds_disk_reservation(MissionStatus::Paused));
+        assert!(!mission_holds_disk_reservation(MissionStatus::Completed));
+        assert!(!mission_holds_disk_reservation(MissionStatus::Failed));
+        assert!(!mission_holds_disk_reservation(MissionStatus::Acknowledged));
+    }
+
+    #[test]
+    fn restart_reconstruction_excludes_persisted_remote_missions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missions.db");
+        let local = Uuid::new_v4();
+        let remote = Uuid::new_v4();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE missions (id TEXT PRIMARY KEY, status TEXT, workspace_id TEXT, requires_local_disk INTEGER)",
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO missions VALUES (?1, 'pending', NULL, 1)",
+                rusqlite::params![local.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO missions VALUES (?1, 'active', NULL, 0)",
+                rusqlite::params![remote.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let rows = nonterminal_missions_in_sqlite(&path).unwrap();
+        // Placement comes from authoritative mission rows, never from the
+        // lease ledger. A mixed restart rebuilds only local missions.
+        assert_eq!(rows.get(&local), Some(&(None, true)));
+        assert_eq!(rows.get(&remote), Some(&(None, false)));
+    }
+
+    #[test]
+    fn legacy_ledger_deserializes_requires_local_disk_key() {
+        let remote = Uuid::new_v4();
+        let json = format!(
+            r#"{{"version":2,"reservations":{{}},"requires_local_disk":{{"{remote}":false}}}}"#
+        );
+        let ledger: DiskReservationLedger = serde_json::from_str(&json).unwrap();
+        assert_eq!(ledger.legacy_requires_local_disk.get(&remote), Some(&false));
+        let serialized = serde_json::to_value(&ledger).unwrap();
+        assert!(serialized.get("requires_local_disk").is_none());
+        assert!(serialized.get("legacy_requires_local_disk").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outstanding_reservation_uses_allocated_bytes_not_logical_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sparse.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(64 << 30).unwrap();
+        drop(file);
+        let reservation = DiskReservation {
+            mission_id: Uuid::new_v4(),
+            filesystem: "fs".into(),
+            estimated_bytes: 64 << 30,
+            free_bytes_at_grant: 0,
+            workspace_dir: Some(dir.path().to_path_buf()),
+        };
+        let outstanding = disk_reservation_outstanding_bytes(&reservation);
+        assert!(
+            outstanding > 32 << 30,
+            "a sparse 64 GiB file must not consume the full reservation; outstanding={outstanding}"
+        );
+    }
+
+    #[test]
+    fn running_missions_keep_disk_reservations_after_terminal_status() {
+        assert!(mission_holds_disk_reservation(MissionStatus::Active));
+        // Presentation status is not enough to release: SetMissionStatus must
+        // also observe that no runner is active. The helper below is the
+        // status half of that conjunction.
+        assert!(!mission_holds_disk_reservation(MissionStatus::Completed));
+        assert!(!mission_holds_disk_reservation(MissionStatus::Failed));
+    }
+
+    #[test]
+    fn legacy_ledger_remote_placement_is_migrated_to_sqlite_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missions.db");
+        let local = Uuid::new_v4();
+        let remote = Uuid::new_v4();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        // This is the schema just before placement moved out of the ledger.
+        connection
+            .execute_batch(
+                "CREATE TABLE missions (id TEXT PRIMARY KEY, status TEXT, workspace_id TEXT)",
+            )
+            .unwrap();
+        for id in [local, remote] {
+            connection
+                .execute(
+                    "INSERT INTO missions VALUES (?1, 'pending', NULL)",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        migrate_legacy_ledger_placement_in_sqlite(
+            &path,
+            &HashMap::from([(local, true), (remote, false)]),
+        )
+        .unwrap();
+        let rows = nonterminal_missions_in_sqlite(&path).unwrap();
+        assert_eq!(rows.get(&local), Some(&(None, true)));
+        assert_eq!(rows.get(&remote), Some(&(None, false)));
+    }
+
+    #[test]
+    fn restart_reconciliation_reads_workspace_identity_from_offline_mission_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missions.db");
+        let mission_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE missions (id TEXT PRIMARY KEY, status TEXT, workspace_id TEXT)",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO missions (id, status, workspace_id) VALUES (?1, 'pending', ?2)",
+                rusqlite::params![mission_id.to_string(), workspace_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let rows = nonterminal_missions_in_sqlite(&path).unwrap();
+        // Legacy schemas do not have placement authority, so migration is
+        // deliberately conservative: they are local until explicitly moved.
+        assert_eq!(rows.get(&mission_id), Some(&(Some(workspace_id), true)));
+    }
+
+    fn test_summary(needs_operator: bool) -> super::mission_store::MissionSummary {
+        super::mission_store::MissionSummary {
+            title: Some("ask".into()),
+            status: "active".into(),
+            workspace_name: None,
+            awaiting_kind: None,
+            needs_operator,
+            origin_session_id: None,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn live_wait_alert_uses_the_tool_start_not_the_ancient_active_event() {
+        let mission_id = uuid::Uuid::new_v4();
+        let entry = super::live_wait_alert_entry(
+            mission_id,
+            test_summary(true),
+            Some("2026-08-16T12:00:00Z"),
+            "2026-08-16T12:05:00Z",
+            None,
+        );
+        assert_eq!(entry.mission_id, mission_id);
+        assert_eq!(entry.status, "active");
+        assert_eq!(entry.timestamp, "2026-08-16T12:00:00Z");
+        assert_eq!(entry.summary, "Waiting for user input");
+        assert!(entry.mission.is_some_and(|m| m.needs_operator));
+    }
+
+    #[test]
+    fn live_wait_alert_falls_back_to_now_when_tool_start_is_missing() {
+        let entry = super::live_wait_alert_entry(
+            uuid::Uuid::new_v4(),
+            test_summary(true),
+            None,
+            "2026-08-16T12:05:00Z",
+            None,
+        );
+        assert_eq!(entry.timestamp, "2026-08-16T12:05:00Z");
+    }
+
+    #[tokio::test]
+    async fn failed_tool_scan_marks_user_wait_inventory_incomplete() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let waiting = MissionRun {
+            run_id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            generation: 1,
+            execution_state: MissionExecutionState::WaitingUser,
+            owner_actor_id: "actor".into(),
+            scope_unit: None,
+            started_at: now.clone(),
+            heartbeat_at: now.clone(),
+            stopping_at: None,
+            ended_at: None,
+            terminal_reason: None,
+        };
+        let running = MissionRun {
+            run_id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            execution_state: MissionExecutionState::Running,
+            ..waiting.clone()
+        };
+        let store = mission_store::InMemoryMissionStore::new();
+        store.test_fail_tool_scans();
+
+        assert!(
+            user_wait_tool_started_at_checked(&store, &waiting)
+                .await
+                .is_err(),
+            "a failed scan is an error, not a missing tool row"
+        );
+        assert_eq!(
+            user_wait_tool_started_at_checked(&store, &running).await,
+            Ok(None),
+            "non-waiting runs never touch the tool table"
+        );
+
+        let (waits, complete) =
+            user_wait_starts_for_runs_checked(&store, [&waiting, &running]).await;
+        assert!(
+            !complete,
+            "a failed scan must not report a complete inventory"
+        );
+        assert!(
+            waits.contains_key(&waiting.mission_id),
+            "the run is still known to be waiting even without a clock"
+        );
+        assert_eq!(waits.get(&waiting.mission_id), Some(&None));
+        assert!(!waits.contains_key(&running.mission_id));
     }
 }

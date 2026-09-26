@@ -1,0 +1,7676 @@
+//! Projects board backend: one read-only endpoint that joins the three
+//! sources of project truth on this host into board-ready rows.
+//!
+//! Sources (each optional — absence degrades the row, never the endpoint):
+//! 1. Hermes project trackers (`HERMES_PROJECTS_DIR`, markdown files with a
+//!    `**Status**:` line) — the operator-curated project list.
+//! 2. sandboxed.sh missions across every mission store, joined by their
+//!    `project` tag (live executions per project).
+//! 3. Hermes cron deliveries (`HERMES_STATE_DB`, read-only sqlite) — the same
+//!    `[Cron delivery: …]` updates the operator receives in sessions, routed
+//!    to projects via their `[STATE_SIGNATURE: <key>|…]` trailer.
+//!
+//! Routing keys and tracker slugs don't always coincide; an optional
+//! `routes.json` alias map in the trackers directory bridges them, and
+//! anything still unmatched surfaces in an explicit `unrouted` bucket rather
+//! than being dropped.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Extension, Json, Router};
+use serde::{Deserialize, Serialize};
+
+use super::auth::AuthUser;
+use super::control::events::MissionStatus;
+use super::mission_store::Mission;
+use super::projects_store::ProjectConversation;
+#[allow(unused_imports)]
+use super::projects_store::{ProjectDecision, ProjectGrant, ProjectRecord, ProjectTrack};
+use super::routes::AppState;
+
+/// Terminal missions younger than this stay on the board (recent history).
+const TERMINAL_MISSION_HORIZON_HOURS: i64 = 48;
+/// Hard cap of deliveries scanned per request (newest first).
+const DELIVERY_SCAN_LIMIT: usize = 600;
+/// A tracker marked active with no live mission and no update for this long
+/// is flagged stale-active.
+const STALE_ACTIVE_HOURS: i64 = 24;
+
+/// How recent the controller's latest state event must be for the row to count
+/// as "the controller is on it". Within this window an `active` record with no
+/// blocker suppresses mission-derived attention (failed/interrupted chips): the
+/// controller has seen those missions and keeps reporting active — flagging the
+/// project anyway is what put 48h-old failures on the attention shelf while the
+/// delivery said "Action: aucune". Default 2700s (45min) ≈ 2–3× a typical
+/// controller cadence; tune with `ATTENTION_FRESH_SIGNAL_SECS`.
+const ATTENTION_FRESH_SIGNAL_SECS_DEFAULT: i64 = 2700;
+
+fn attention_fresh_signal_secs() -> i64 {
+    std::env::var("ATTENTION_FRESH_SIGNAL_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(ATTENTION_FRESH_SIGNAL_SECS_DEFAULT)
+}
+
+/// How often the state ingestor folds new deliveries into the timeline.
+///
+/// The window it re-reads overlaps generously; `record_state` is idempotent on
+/// a delivery's timestamp precisely so that overlap is free.
+const STATE_INGEST_INTERVAL_SECS: u64 = 60;
+
+/// Fold controller state signatures into the durable project timeline.
+///
+/// A background task rather than work done on read: ingesting inside the
+/// overview handler would be an unbounded write on a GET, and the history has
+/// to accumulate whether or not anyone has the board open — that is the whole
+/// point of asking "what has this project been doing for three days".
+pub fn spawn_state_ingestor(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(STATE_INGEST_INTERVAL_SECS)).await;
+            let Some(path) = hermes_state_db() else {
+                continue;
+            };
+            let deliveries = match tokio::task::spawn_blocking(move || {
+                read_deliveries(&path, DELIVERY_SCAN_LIMIT, None)
+            })
+            .await
+            {
+                Ok(Ok(deliveries)) => deliveries,
+                Ok(Err(error)) => {
+                    tracing::warn!("state ingest: hermes deliveries unavailable: {error}");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("state ingest: join failed: {error}");
+                    continue;
+                }
+            };
+            // The routing key a controller emits (`lido`) and the roster slug
+            // (`lido-audit`) don't always coincide; resolve through the same
+            // alias map the overview uses so state and mode land on one row.
+            // Overrides gate routing: an alias must not deliver into an
+            // archived target.
+            let (aliases, overrides) = hermes_projects_dir()
+                .map(|dir| (read_alias_map(&dir), read_overrides(&dir)))
+                .unwrap_or_default();
+            let live = live_writer_project_slugs(&state).await;
+            ingest_deliveries_with_live(&state.projects, &aliases, &overrides, deliveries, &live);
+            if let Err(error) = state
+                .projects
+                .expire_pending_decisions(super::controller_honesty::PENDING_DECISION_TTL)
+            {
+                tracing::warn!("state ingest expire decisions: {error}");
+            }
+        }
+    });
+}
+
+/// Roster slugs that currently have an executing writer. Used so ingest can
+/// refuse a lease-writer headline while work is live.
+async fn live_writer_project_slugs(state: &super::routes::AppState) -> HashSet<String> {
+    let Ok(projects) = state.projects.list_projects() else {
+        return HashSet::new();
+    };
+    let mut live = HashSet::new();
+    for project in projects {
+        let Ok(missions) = state
+            .control
+            .collect_attention_missions_for_project(&project.slug)
+            .await
+        else {
+            continue;
+        };
+        if missions
+            .iter()
+            .any(|mission| super::controller_honesty::is_live_writer_status(mission.status))
+        {
+            live.insert(project.slug);
+        }
+    }
+    live
+}
+
+/// Marker prefix for state descriptors the ingestor synthesizes for CTRL-only
+/// deliveries (no STATE_SIGNATURE tail). Recording them is what makes the
+/// headline/session of a CTRL-only controller land on its board row; the
+/// prefix lets readers keep rendering `state` as absent for those.
+const CTRL_DESCRIPTOR_PREFIX: &str = "ctrl:";
+
+/// Headline `[Mission callback:` or descriptor `mission-callback|…|inspect`
+/// (routing key already stripped).
+fn is_mission_inspect_callback(headline: &str, state: Option<&str>) -> bool {
+    if headline.starts_with("[Mission callback:") {
+        return true;
+    }
+    state.is_some_and(|descriptor| {
+        let mut parts = descriptor.split('|');
+        parts.next() == Some("mission-callback") && parts.next_back() == Some("inspect")
+    })
+}
+
+fn stall_descriptor(state: Option<&str>) -> bool {
+    let Some(descriptor) = state.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if descriptor.starts_with(CTRL_DESCRIPTOR_PREFIX) {
+        return false;
+    }
+    if descriptor.starts_with("mission-callback") {
+        return false;
+    }
+    true
+}
+
+/// Newest pending `[CTRL:]` mode per slug, applied after the oldest-first
+/// timeline replay so a mixed batch cannot let an older blocked trailer win.
+struct PendingModeWrite {
+    at: String,
+    mode: String,
+    wait: i64,
+    blocker: Option<String>,
+    next_action: Option<String>,
+}
+
+/// Fold one batch of deliveries into the projects store.
+///
+/// This is THE delivery router: alias resolution, roster auto-upsert, state
+/// and mode recording, and unrouted triage all happen here, once, in the
+/// background — the overview handler only reads the store back.
+fn ingest_deliveries(
+    projects: &super::projects_store::ProjectsStore,
+    aliases: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+    deliveries: Vec<DeliveryUpdate>,
+) {
+    ingest_deliveries_with_live(projects, aliases, overrides, deliveries, &HashSet::new());
+}
+
+fn ingest_deliveries_with_live(
+    projects: &super::projects_store::ProjectsStore,
+    aliases: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+    deliveries: Vec<DeliveryUpdate>,
+    live_projects: &HashSet<String>,
+) {
+    let mut pending_modes: HashMap<String, PendingModeWrite> = HashMap::new();
+    // read_deliveries returns newest-first; replay oldest-first so a
+    // run of the same state lands as one extended row rather than
+    // being rejected as out-of-order.
+    for delivery in deliveries.into_iter().rev() {
+        // The routing key is what identifies the project. It comes from
+        // the STATE_SIGNATURE trailer, or the CTRL trailer as a fallback
+        // (#763) — so a controller that emits only `[CTRL: …]` (no
+        // STATE_SIGNATURE, as Lido does) still routes. Without a key the
+        // delivery goes to the unrouted triage inbox instead of vanishing.
+        let Some(raw_key) = delivery.signature.as_deref() else {
+            record_unrouted(projects, &delivery, "no_routing_key");
+            continue;
+        };
+        let canonical = resolve_alias(aliases, raw_key);
+        // An alias pointing at an archived (or board-deleted) project is a
+        // stale route: delivering through it would silently feed a row nobody
+        // watches. Refuse it — the delivery surfaces as unrouted on the board,
+        // which is what prompts the operator to fix routes.json. The file is
+        // never rewritten here.
+        if aliases.contains_key(raw_key) && slug_is_archived(projects, overrides, &canonical) {
+            record_unrouted(projects, &delivery, "alias_to_archived");
+            continue;
+        }
+        let slug = canonical.as_str();
+        // A delivery may only report *into* a known project; it never creates
+        // one. A slug is known when the roster has it, or when routes.json
+        // names it (as an alias key or target). Anything else — a typo, a test
+        // wake, a controller inventing a second signature — lands in the
+        // unrouted inbox with a reason, where the operator registers or
+        // aliases it. Before this gate a single synthetic wake created a
+        // permanent "Unknown" project on the board.
+        let known = aliases.contains_key(raw_key)
+            || aliases.values().any(|target| target == slug)
+            || matches!(projects.get_project(slug), Ok(Some(_)));
+        if !known {
+            record_unrouted(projects, &delivery, "unknown_slug");
+            continue;
+        }
+        // Touch the roster row (COALESCE upsert: never overwrites fields)
+        // so `updated_at` reflects the report.
+        if let Err(error) = projects.upsert_project(slug, None, None, None, None) {
+            tracing::warn!("state ingest upsert: {slug}: {error}");
+        }
+        // The descriptor (STATE_SIGNATURE tail) records the state timeline; it
+        // may be absent when a controller emits only a CTRL trailer. A
+        // synthetic `ctrl:…` descriptor is recorded then, so the delivery's
+        // headline and session still reach the timeline — that is what the
+        // overview builds `latest_update` from. `observations` drives `wait`.
+        let has_live_writer = live_projects.contains(slug);
+        let (gated_mode, _) = super::controller_honesty::coerce_mode_against_live(
+            delivery.mode.as_deref(),
+            delivery.blocker.as_deref(),
+            has_live_writer,
+        );
+        let headline = Some(delivery.headline.trim()).filter(|h| !h.is_empty());
+        let session = Some(delivery.session_id.as_str()).filter(|s| !s.is_empty());
+        let descriptor = delivery.state.clone().unwrap_or_else(|| {
+            format!("{CTRL_DESCRIPTOR_PREFIX}{}", gated_mode.unwrap_or("report"))
+        });
+        // `[SILENT]` is the controllers-policy convention for "nothing to
+        // report". It must advance freshness (a quiet tick is proof of life),
+        // but it must never become the headline the card shows — fold it onto
+        // the previous state event so `latest_update` keeps surfacing the last
+        // meaningful headline with the fresh timestamp.
+        //
+        // A relaunch-after-cancel-timeout or a lease-writer claim while a
+        // writer is live is the same class: infra / a lie, not a chapter.
+        let silence = headline.is_none_or(|text| {
+            super::controller_honesty::should_silence_headline(text, has_live_writer)
+        });
+        let inspect = is_mission_inspect_callback(&delivery.headline, delivery.state.as_deref());
+        let recorded = if inspect {
+            projects.touch_freshness(slug, &delivery.at, session)
+        } else if silence {
+            projects.record_silent_observation(slug, &descriptor, &delivery.at, session)
+        } else {
+            projects.record_state(slug, &descriptor, headline, &delivery.at, session)
+        };
+        let observations = match recorded {
+            Ok(observations) => observations,
+            Err(error) => {
+                tracing::warn!("state ingest: {slug}: {error}");
+                1
+            }
+        };
+        // Queue the newest gated_mode even when this delivery was already
+        // counted: a crash between record_state and project_mode_from_signal
+        // must retry. The mode watermark rejects older-than-watermark signals,
+        // so a replay stays idempotent. Inspect callbacks still never write.
+        if !is_mission_inspect_callback(&delivery.headline, delivery.state.as_deref()) {
+            if let Some(mode) = gated_mode {
+                let base = mode.split_once(':').map_or(mode, |(base, _)| base);
+                let blocker = mode.split_once(':').map(|(_, cause)| cause);
+                let wait = if observations > 0 {
+                    observations.saturating_sub(1) as i64
+                } else {
+                    // Already counted: keep the roster wait, not the newest
+                    // state event's observations. A later callback can open a
+                    // new 1-observation row; reading that would reset
+                    // wait_ticks to 0 on every overlapping scan.
+                    projects
+                        .get_project(slug)
+                        .ok()
+                        .flatten()
+                        .map(|record| record.wait_ticks)
+                        .unwrap_or(0)
+                };
+                let write = PendingModeWrite {
+                    at: delivery.at.clone(),
+                    mode: base.to_string(),
+                    wait,
+                    blocker: blocker.map(str::to_string),
+                    next_action: delivery.next_action.clone(),
+                };
+                if pending_modes.get(slug).is_none_or(|existing| {
+                    !super::projects_store::rfc3339_after(&existing.at, &write.at)
+                }) {
+                    pending_modes.insert(slug.to_string(), write);
+                }
+            }
+        }
+        // A `[DECISION: …]` trailer reaches the ledger through the same
+        // enforcement gate as the HTTP endpoint: a claimed autonomous act is
+        // coerced to an owner escalation unless the grant's autonomy level
+        // covers acting. Keyed by the delivery's timestamp (INSERT OR IGNORE),
+        // so overlapping ingest windows record it once and never reopen an
+        // answered row.
+        let mut recorded_decided = false;
+        if let Some(trailer) = delivery.decision.as_ref() {
+            let grant = projects.get_grant(slug).ok().flatten();
+            let autonomy = grant.as_ref().and_then(|g| g.autonomy_level.clone());
+            let merge_authority = grant.as_ref().and_then(|g| g.merge_authority.clone());
+            match resolve_decision_disposition_for_grant(
+                autonomy.as_deref(),
+                merge_authority.as_deref(),
+                trailer.authority.as_deref(),
+                trailer.status.as_deref(),
+                trailer.kind.as_deref(),
+            ) {
+                Ok(disposition) => {
+                    recorded_decided = disposition.status == "decided";
+                    let decision = super::projects_store::NewDecision {
+                        question: trailer.question.clone(),
+                        rationale: trailer.rationale.clone(),
+                        kind: trailer.kind.clone(),
+                        authority: disposition.authority,
+                        status: disposition.status,
+                        evidence: trailer.evidence.clone(),
+                    };
+                    if let Err(error) =
+                        projects.record_decision_from_delivery(slug, &delivery.at, &decision)
+                    {
+                        tracing::warn!("state ingest decision: {slug}: {error}");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("state ingest decision trailer rejected: {slug}: {error}");
+                }
+            }
+        }
+        // A material chapter without a `[DECISION:]` trailer still belongs
+        // on Recent activity. Controllers were told not to open owner
+        // questions for in-grant work, so they stopped emitting trailers
+        // entirely — and the panel froze on the last answered escalation
+        // (Lido SRv3, 2026-08-16). Inspect callbacks stay out.
+        if !recorded_decided {
+            if let Some(text) = headline {
+                if super::controller_honesty::is_material_activity_headline(text) {
+                    let grant = projects.get_grant(slug).ok().flatten();
+                    let autonomy = grant.as_ref().and_then(|g| g.autonomy_level.clone());
+                    let merge_authority = grant.as_ref().and_then(|g| g.merge_authority.clone());
+                    if let Ok(disposition) = resolve_decision_disposition_for_grant(
+                        autonomy.as_deref(),
+                        merge_authority.as_deref(),
+                        Some("granted"),
+                        Some("decided"),
+                        Some("report"),
+                    ) {
+                        if disposition.status == "decided" {
+                            recorded_decided = true;
+                            let decision = super::projects_store::NewDecision {
+                                question: text.to_string(),
+                                rationale: None,
+                                kind: Some("report".to_string()),
+                                authority: disposition.authority,
+                                status: disposition.status,
+                                evidence: None,
+                            };
+                            if let Err(error) = projects.record_decision_from_delivery(
+                                slug,
+                                &delivery.at,
+                                &decision,
+                            ) {
+                                tracing::warn!("state ingest activity: {slug}: {error}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A merge announcement (headline or a grant-allowed decided act)
+        // retires older "merge #N?" questions so the card stops asking
+        // about a PR that already landed. The current delivery's own
+        // coerced trailer is skipped — it stays the escalation.
+        let needles = merge_announcement_needles(&delivery, recorded_decided);
+        if !needles.is_empty() {
+            if let Err(error) = projects.close_pending_decisions_referencing(
+                slug,
+                &needles,
+                "closed: referenced PR merged",
+                Some(delivery.at.as_str()),
+            ) {
+                tracing::warn!("state ingest close merged decisions: {slug}: {error}");
+            }
+        }
+    }
+    for (slug, write) in pending_modes {
+        if let Err(error) = projects.project_mode_from_signal(
+            &slug,
+            &write.mode,
+            write.wait,
+            write.next_action.as_deref(),
+            write.blocker.as_deref(),
+            Some(write.at.as_str()),
+        ) {
+            tracing::warn!("state ingest mode: {slug}: {error}");
+        }
+    }
+}
+
+/// Whether routing into `slug` should be refused: board override says
+/// archived/deleted, or the roster record itself is archived.
+fn slug_is_archived(
+    projects: &super::projects_store::ProjectsStore,
+    overrides: &HashMap<String, String>,
+    slug: &str,
+) -> bool {
+    if matches!(
+        overrides.get(slug).map(String::as_str),
+        Some("archived") | Some("deleted")
+    ) {
+        return true;
+    }
+    projects
+        .get_project(slug)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.status == "archived")
+}
+
+/// Diff this read's attention items against the previous read and write a
+/// `resolution` entry into the decision ledger for every reason that went
+/// away — so the drawer's "Recent activity" says *why* a card left the
+/// attention column, and the desktop can toast/reply on the same key. The
+/// first read after boot only seeds the snapshot.
+async fn record_attention_resolutions(state: &AppState, projects: &[ProjectRow]) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut snapshot = state.attention_snapshot.write().await;
+    for row in projects {
+        let current: HashSet<String> = row.attention.iter().map(AttentionItem::key).collect();
+        if let Some(previous) = snapshot.get(&row.slug) {
+            for key in resolved_keys(previous, &current) {
+                let (kind, mission_id) = key.split_once('|').unwrap_or((key.as_str(), ""));
+                let question = match mission_id {
+                    "" => format!("resolved: {}", kind.replace('_', " ")),
+                    id => format!(
+                        "resolved: {} for mission {}",
+                        kind.replace('_', " "),
+                        &id[..8.min(id.len())]
+                    ),
+                };
+                if let Err(error) = state.projects.record_decision(
+                    &row.slug,
+                    &super::projects_store::NewDecision {
+                        question,
+                        rationale: None,
+                        kind: Some("resolution".to_string()),
+                        authority: "granted".to_string(),
+                        status: "decided".to_string(),
+                        evidence: Some(serde_json::json!({
+                            "attention_key": key,
+                            "kind": kind,
+                            "mission_id": (!mission_id.is_empty()).then_some(mission_id),
+                            "resolved_at": now,
+                        })),
+                    },
+                ) {
+                    tracing::warn!(project = %row.slug, %error, "attention resolution not recorded");
+                }
+            }
+        }
+        snapshot.insert(row.slug.clone(), current);
+    }
+    // Rows that vanished from the roster (deleted) drop out silently.
+    let live: HashSet<&str> = projects.iter().map(|row| row.slug.as_str()).collect();
+    snapshot.retain(|slug, _| live.contains(slug.as_str()));
+}
+
+fn record_unrouted(
+    projects: &super::projects_store::ProjectsStore,
+    delivery: &DeliveryUpdate,
+    reason: &str,
+) {
+    if let Err(error) = projects.record_unrouted(
+        &delivery.session_id,
+        &delivery.at,
+        &delivery.headline,
+        delivery.signature.as_deref(),
+        delivery.mode.as_deref(),
+        delivery.blocker.as_deref(),
+        Some(reason),
+    ) {
+        tracing::warn!("state ingest unrouted: {error}");
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StateQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// A project's state history, newest first.
+pub async fn project_state(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Query(query): Query<StateQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
+    }
+    let limit = query.limit.unwrap_or(50).min(200);
+    let states = state
+        .projects
+        .state_timeline(&slug, limit)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(serde_json::json!({ "slug": slug, "states": states })))
+}
+
+fn bad_slug() -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, "invalid project slug".to_string())
+}
+
+pub(crate) fn store_err(error: String) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, error)
+}
+
+/// A track write that the caller got wrong is a 400 (`done` needs a receipt,
+/// unknown status); only store failures are 500.
+fn track_write_err(error: super::projects_store::TrackWriteError) -> (StatusCode, String) {
+    use super::projects_store::TrackWriteError;
+    match error {
+        TrackWriteError::NeedsReceipt(_) | TrackWriteError::Invalid(_) => {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        }
+        TrackWriteError::Store(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn receipt_write_err(error: super::projects_store::ReceiptWriteError) -> (StatusCode, String) {
+    use super::projects_store::ReceiptWriteError;
+    match error {
+        ReceiptWriteError::IdempotencyMismatch { .. } => (StatusCode::CONFLICT, error.to_string()),
+        ReceiptWriteError::Store(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// `GET /api/projects/by-session/:session_id` — resolve a Hermes conversation
+/// (or any continuation in its chain) to the bound project slug.
+pub async fn project_by_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "session_id must be 1-128 chars of [A-Za-z0-9._:-]".to_string(),
+        ));
+    }
+    let bindings = state.projects.bindings().map_err(store_err)?;
+    let pairs: Vec<(String, String)> = bindings
+        .iter()
+        .map(|(slug, conversation)| (slug.clone(), conversation.session_id.clone()))
+        .collect();
+    let chain = match hermes_state_db() {
+        Some(path) => super::session_chain::ancestry(&path, session_id),
+        None => vec![session_id.to_string()],
+    };
+    let slug = super::session_chain::slug_for_bound_session(session_id, &pairs, &chain, |bound| {
+        match hermes_state_db() {
+            Some(path) => super::session_chain::live_tip(&path, bound),
+            None => bound.to_string(),
+        }
+    });
+    let Some(slug) = slug else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no project bound to session '{session_id}'"),
+        ));
+    };
+    // Bindings can name an alias (`verity-roadmap`) or a display title
+    // (`Verity`). The session rail then GET /api/projects/:slug — that
+    // must be the roster card, not a 404 nickname.
+    let slug = canonicalize_project_slug(&slug);
+    Ok(Json(
+        serde_json::json!({ "slug": slug, "session_id": session_id }),
+    ))
+}
+
+/// `GET /api/projects/:slug` — the structured project object: record, grant,
+/// tracks, and open decisions. This is what `get_project` (MCP) returns to a
+/// controller instead of it scanning markdown.
+pub async fn get_project(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let requested = slug;
+    let resolved = resolve_roster_slug(&state.projects, &requested).map_err(store_err)?;
+    let lookup = resolved.as_deref().unwrap_or(&requested).to_string();
+    let (missions, missions_available) = match state
+        .control
+        .collect_attention_missions_for_project(&lookup)
+        .await
+    {
+        Ok(missions) => (missions, true),
+        Err(error) => {
+            tracing::warn!(project = %lookup, %error, "get_project: attention collect failed");
+            (Vec::new(), false)
+        }
+    };
+    let slug = match resolved {
+        Some(slug) => slug,
+        None if !missions.is_empty() => lookup.clone(),
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("unknown project '{requested}'"),
+            ));
+        }
+    };
+    let project = match state.projects.get_project(&slug).map_err(store_err)? {
+        Some(project) => project,
+        None => synthetic_project_record(&slug),
+    };
+    let grant = state.projects.get_grant(&slug).map_err(store_err)?;
+    let tracks = collect_family_tracks(&state.projects, &slug).map_err(store_err)?;
+    let decisions = open_family_decisions(&state.projects, &slug).map_err(store_err)?;
+    let recent = state
+        .projects
+        .recent_activity(&slug, 20)
+        .map_err(store_err)?;
+    let conversation = state
+        .projects
+        .binding_for_canonical(&slug, &project_tag_keys(&slug))
+        .map_err(store_err)?
+        .map(follow_live_conversation);
+    let situation = load_project_situation(&state, &slug).await;
+    let reconciliation = state
+        .projects
+        .latest_unacked_reconcile(&slug)
+        .map_err(store_err)?;
+    let mut project = project;
+    if let Some(derived) = next_action_from_live_titles(
+        missions
+            .iter()
+            .filter_map(|mission| {
+                live_mission_title(
+                    mission.status,
+                    mission.title.as_deref(),
+                    &mission.id.to_string(),
+                )
+            })
+            .collect(),
+    ) {
+        project.next_action = Some(derived);
+    }
+    let (waiting_user_waits, waits_complete) = state.control.collect_waiting_user_waits().await;
+    let effective_missions = if missions_available && waits_complete {
+        Some(missions.as_slice())
+    } else {
+        None
+    };
+    project_mode_projection(
+        &mut project,
+        effective_missions,
+        &waiting_user_waits,
+        decisions.len() as u32,
+    );
+    let steers = state.projects.list_steers(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({
+        "project": project,
+        "grant": grant,
+        "tracks": tracks,
+        "items": situation.items,
+        "summary": situation.summary,
+        "reconciliation": reconciliation,
+        "open_decisions": decisions,
+        "recent_decisions": recent,
+        "conversation": conversation,
+        "steers": steers,
+    })))
+}
+
+/// Open decisions for a project and every alias that folds onto it, so a
+/// decision recorded under an alias is visible (and answerable) from the
+/// canonical slug.
+fn open_family_decisions(
+    store: &super::projects_store::ProjectsStore,
+    slug: &str,
+) -> Result<Vec<super::projects_store::ProjectDecision>, String> {
+    let mut all = store.open_decisions(slug)?;
+    let mut seen: std::collections::HashSet<String> = all.iter().map(|d| d.at.clone()).collect();
+    for key in project_tag_keys(slug) {
+        if key == slug || !is_plain_key(&key) {
+            continue;
+        }
+        for d in store.open_decisions(&key)? {
+            if seen.insert(d.at.clone()) {
+                all.push(d);
+            }
+        }
+    }
+    Ok(all)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertProjectRequest {
+    pub slug: String,
+    pub title: Option<String>,
+    pub objective: Option<String>,
+    pub repository: Option<String>,
+    pub controller_cron_id: Option<String>,
+}
+
+/// `PUT /api/projects` — create or enrich a project record. Used by the seed
+/// and whenever a controller declares its project. Never clears a field: pass
+/// only what you mean to set.
+pub async fn upsert_project(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpsertProjectRequest>,
+) -> Result<Json<ProjectRecord>, (StatusCode, String)> {
+    if !is_plain_key(&req.slug) {
+        return Err(bad_slug());
+    }
+    let record = state
+        .projects
+        .upsert_project(
+            &req.slug,
+            req.title.as_deref(),
+            req.objective.as_deref(),
+            req.repository.as_deref(),
+            req.controller_cron_id.as_deref(),
+        )
+        .map_err(store_err)?;
+    Ok(Json(record))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameProjectRequest {
+    pub new_slug: String,
+}
+
+/// `POST /api/projects/:slug/rename` — move a project to a new slug.
+///
+/// A rename is "move the canonical + leave a forwarding pointer": the store
+/// rows move in one transaction, then the alias map gains `old → new` (and any
+/// alias that pointed at `old` is flattened onto `new` — `resolve_alias` is
+/// single-hop, so a chain would silently stop resolving). External references
+/// — mission project tags, cron `deliver: project:<old>`, `[CTRL: old | …]`
+/// signatures, tracker files — are deliberately not rewritten: the alias
+/// covers them indefinitely.
+///
+/// Renaming onto an existing project or an established alias key is refused:
+/// the first is a merge (explicit, via routes.json), the second would shadow
+/// whatever that key already routes to.
+pub async fn rename_project(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<RenameProjectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let new_slug = req.new_slug.trim();
+    if !is_plain_key(&slug) || !is_plain_key(new_slug) {
+        return Err(bad_slug());
+    }
+    if new_slug == slug {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "new slug is identical to the current one".to_string(),
+        ));
+    }
+    let dir = hermes_projects_dir();
+    if let Some(dir) = &dir {
+        let aliases = read_alias_map(dir);
+        if aliases.contains_key(new_slug) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "'{new_slug}' is already an alias for '{}' — pick another name or remove the alias first",
+                    aliases[new_slug]
+                ),
+            ));
+        }
+    }
+    let record = state
+        .projects
+        .rename_project(&slug, new_slug)
+        .map_err(|error| {
+            if error.contains("not found") {
+                (StatusCode::NOT_FOUND, error)
+            } else if error.contains("already exists") {
+                (StatusCode::CONFLICT, error)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, error)
+            }
+        })?;
+    let mut aliases_flattened = 0usize;
+    if let Some(dir) = &dir {
+        aliases_flattened = rewrite_aliases_for_rename(dir, &slug, new_slug).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "project rows moved to '{new_slug}' but routes.json update failed ({error}); \
+                     add \"{slug}\": \"{new_slug}\" to it manually or deliveries keyed '{slug}' will unroute"
+                ),
+            )
+        })?;
+        // A board override (paused/archived) follows the project it describes.
+        let mut overrides = read_overrides(dir);
+        if let Some(value) = overrides.remove(&slug) {
+            overrides.insert(new_slug.to_string(), value);
+            write_overrides(dir, &overrides).map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write board-overrides.json: {error}"),
+                )
+            })?;
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "project": record,
+        "old_slug": slug,
+        "alias_written": dir.is_some(),
+        "aliases_flattened": aliases_flattened,
+    })))
+}
+
+/// Rewrite routes.json for a rename: every alias pointing at `old` is
+/// flattened onto `new` (single-hop resolution — a chain through `old` would
+/// dead-end), then `old → new` itself is added. Returns how many existing
+/// entries were flattened. Written atomically (tmp + rename), like the
+/// overrides file.
+fn rewrite_aliases_for_rename(dir: &Path, old: &str, new: &str) -> std::io::Result<usize> {
+    let mut aliases = read_alias_map(dir);
+    let mut flattened = 0usize;
+    for target in aliases.values_mut() {
+        if target == old {
+            *target = new.to_string();
+            flattened += 1;
+        }
+    }
+    aliases.insert(old.to_string(), new.to_string());
+    let serialized = serde_json::to_string_pretty(&aliases)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let path = dir.join("routes.json");
+    let tmp = dir.join(".routes.json.tmp");
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(flattened)
+}
+
+fn write_overrides(dir: &Path, overrides: &HashMap<String, String>) -> std::io::Result<()> {
+    let serialized = serde_json::to_string_pretty(overrides)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let tmp = dir.join(".board-overrides.json.tmp");
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, overrides_path(dir))?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetStatusRequest {
+    /// IDs actually read and handled by this tick. Missing means no acknowledgement.
+    #[serde(default)]
+    pub consumed_steer_ids: Vec<String>,
+    pub mode: String,
+    pub next_action: Option<String>,
+    pub blocker: Option<String>,
+}
+
+/// `POST /api/projects/:slug/status` — the controller's per-tick state report.
+/// Replaces the parsed `[CTRL:]` trailer with a structured write; `wait_ticks`
+/// is maintained by the store.
+pub async fn set_project_status(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<SetStatusRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    if req.consumed_steer_ids.len() > super::projects_store::STEER_PENDING_CAP {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "too many steer acknowledgements".into(),
+        ));
+    }
+    let mut mode = req.mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "active" | "blocked" | "paused") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "mode must be active, blocked, or paused".to_string(),
+        ));
+    }
+    let mut blocker = req.blocker.clone();
+    let mut next_action = req.next_action.clone();
+    if mode == "blocked"
+        && super::controller_honesty::is_inspect_next_action(next_action.as_deref())
+    {
+        // "inspect <dead writer>" is harness recovery, not a no-lane. Persist
+        // active so the rail/board cannot stay red after a Codex transport
+        // death. Clear the inspect next_action so it cannot be re-displayed.
+        let inspect_id =
+            super::controller_honesty::parse_inspect_mission_id(next_action.as_deref());
+        let inspect_is_dead = match inspect_id {
+            Some(id) => {
+                let store = state.control.get_mission_store().await;
+                match store.get_mission(id).await {
+                    Ok(Some(mission)) => {
+                        matches!(
+                            mission.status,
+                            crate::api::control::events::MissionStatus::Failed
+                                | crate::api::control::events::MissionStatus::Interrupted
+                        ) && super::controller_honesty::is_harness_terminal_reason(
+                            mission.terminal_reason.as_deref(),
+                            mission.terminal_evidence.as_deref(),
+                        )
+                    }
+                    _ => true,
+                }
+            }
+            None => true,
+        };
+        if inspect_is_dead {
+            let has_live = state
+                .control
+                .collect_attention_missions_for_project(&slug)
+                .await
+                .ok()
+                .is_some_and(|missions| {
+                    missions.iter().any(|mission| {
+                        super::controller_honesty::is_live_writer_status(mission.status)
+                    })
+                });
+            mode = "active".to_string();
+            next_action = None;
+            blocker = if has_live {
+                None
+            } else {
+                Some("harness".to_string())
+            };
+        }
+    }
+    if mode == "blocked" && super::controller_honesty::is_lease_blocker(blocker.as_deref()) {
+        let has_live = state
+            .control
+            .collect_attention_missions_for_project(&slug)
+            .await
+            .ok()
+            .is_some_and(|missions| {
+                missions
+                    .iter()
+                    .any(|mission| super::controller_honesty::is_live_writer_status(mission.status))
+            });
+        if has_live {
+            mode = "active".to_string();
+            blocker = None;
+        }
+    }
+    state
+        .projects
+        .set_mode(&slug, &mode, next_action.as_deref(), blocker.as_deref())
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    state
+        .projects
+        .acknowledge_steers(&slug, &req.consumed_steer_ids)
+        .map_err(store_err)?;
+    let project = state.projects.get_project(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "project": project })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTrackRequest {
+    pub track: String,
+    pub desired_state: Option<String>,
+    pub status: Option<String>,
+}
+
+/// `POST /api/projects/:slug/track` — declare/update one workstream.
+pub async fn set_project_track(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<SetTrackRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &slug)
+        .map_err(store_err)?
+        .unwrap_or(slug);
+    if req.track.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "track is required".to_string()));
+    }
+    state
+        .projects
+        .set_track(
+            &slug,
+            req.track.trim(),
+            req.desired_state.as_deref(),
+            req.status.as_deref(),
+        )
+        .map_err(track_write_err)?;
+    let tracks = collect_family_tracks(&state.projects, &slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "tracks": tracks })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AcceptTrackEvidenceRequest {
+    #[serde(default)]
+    pub criterion: Option<String>,
+    pub verifier_class: String,
+    pub evidence_ref: String,
+    pub artifact_version: String,
+    #[serde(default)]
+    pub observed_at: Option<String>,
+}
+
+/// Accept immutable evidence for one criterion. Satisfaction is derived in the
+/// same projects.db transaction; callers cannot assert `done` directly.
+pub async fn accept_project_track_evidence(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    AxumPath((requested, track)): AxumPath<(String, String)>,
+    Json(req): Json<AcceptTrackEvidenceRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&track) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("unknown project '{requested}'"),
+            )
+        })?;
+    let accepted_by = if user.username.trim().is_empty() {
+        format!("user:{}", user.id)
+    } else {
+        format!("user:{}", user.username.trim())
+    };
+    let family = project_tag_keys(&slug);
+    let stored = state
+        .projects
+        .find_track_slug(&family, &track)
+        .map_err(store_err)?
+        .unwrap_or(slug.clone());
+    let result = state
+        .projects
+        .accept_track_criterion_evidence(
+            &stored,
+            &track,
+            req.criterion.as_deref(),
+            &req.verifier_class,
+            &req.evidence_ref,
+            &req.artifact_version,
+            req.observed_at.as_deref(),
+            &accepted_by,
+        )
+        .map_err(accept_err)?;
+    let situation = load_project_situation(&state, &stored).await;
+    Ok(Json(serde_json::json!({
+        "evidence": result.receipts,
+        "track": result.track,
+        "satisfied": result.track.claim.as_deref() == Some("accept"),
+        "summary": situation.summary,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReopenTrackRequest {
+    pub reason: String,
+    #[serde(default)]
+    pub governed_artifact_version: Option<String>,
+}
+
+pub async fn reopen_project_track(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    AxumPath((requested, track)): AxumPath<(String, String)>,
+    Json(req): Json<ReopenTrackRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&track) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("unknown project '{requested}'"),
+            )
+        })?;
+    let family = project_tag_keys(&slug);
+    let stored = state
+        .projects
+        .find_track_slug(&family, &track)
+        .map_err(store_err)?
+        .unwrap_or(slug.clone());
+    let reopened = state
+        .projects
+        .reopen_track(
+            &stored,
+            &track,
+            &req.reason,
+            req.governed_artifact_version.as_deref(),
+            &if user.username.trim().is_empty() {
+                format!("user:{}", user.id)
+            } else {
+                format!("user:{}", user.username.trim())
+            },
+        )
+        .map_err(accept_err)?;
+    let tracks = state.projects.tracks(&stored).map_err(store_err)?;
+    Ok(Json(
+        serde_json::json!({ "track": reopened, "tracks": tracks }),
+    ))
+}
+
+/// `GET /api/projects/:slug/grant` — the autonomy grant.
+pub async fn get_project_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let grant = state.projects.get_grant(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "slug": slug, "grant": grant })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetGrantRequest {
+    pub merge_authority: Option<String>,
+    pub budget_per_tick: Option<String>,
+    pub parallel_missions: Option<i64>,
+    pub pause_reason: Option<String>,
+    pub resume_condition: Option<String>,
+    pub material_bar: Option<String>,
+    pub autonomy_level: Option<String>,
+}
+
+pub(crate) const AUTONOMY_LEVELS: [&str; 4] = ["observe", "propose", "act_reversible", "act_full"];
+
+/// `POST /api/projects/:slug/grant` — set the autonomy grant. The project must
+/// exist (the grant FK-references it).
+pub async fn set_project_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<SetGrantRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    if state
+        .projects
+        .get_project(&slug)
+        .map_err(store_err)?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, format!("unknown project '{slug}'")));
+    }
+    let autonomy_level = match req.autonomy_level.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(level) if AUTONOMY_LEVELS.contains(&level) => Some(level.to_string()),
+        Some(other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "autonomy_level must be one of {} (got '{other}')",
+                    AUTONOMY_LEVELS.join(", ")
+                ),
+            ));
+        }
+    };
+    state
+        .projects
+        .set_grant(
+            &slug,
+            req.merge_authority.as_deref(),
+            req.budget_per_tick.as_deref(),
+            req.parallel_missions,
+            req.pause_reason.as_deref(),
+            req.resume_condition.as_deref(),
+            req.material_bar.as_deref(),
+            autonomy_level.as_deref(),
+        )
+        .map_err(store_err)?;
+    let grant = state.projects.get_grant(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "slug": slug, "grant": grant })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddSteerRequest {
+    pub body: String,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+/// `GET /api/projects/:slug/steers` — pending inbox plus last consumed.
+pub async fn get_project_steers(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let steers = state.projects.list_steers(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({
+        "slug": slug,
+        "pending": steers.pending,
+        "recent": steers.recent,
+    })))
+}
+
+/// `POST /api/projects/:slug/steers` — queue a one-off order for the next tick.
+/// Does not write the grant.
+pub async fn add_project_steer(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+    Json(req): Json<AddSteerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let origin = req
+        .origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let origin = origin.unwrap_or("api");
+    match state.projects.insert_steer(&slug, &req.body, origin) {
+        Ok(steer) => {
+            let steers = state.projects.list_steers(&slug).map_err(store_err)?;
+            Ok(Json(serde_json::json!({
+                "slug": slug,
+                "steer": steer,
+                "pending": steers.pending,
+                "recent": steers.recent,
+            })))
+        }
+        Err(error) if error.starts_with("unknown project") => Err((StatusCode::NOT_FOUND, error)),
+        Err(error) => Err((StatusCode::BAD_REQUEST, error)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordDecisionRequest {
+    pub question: String,
+    pub rationale: Option<String>,
+    /// merge | dispatch | scope | budget | … (free-form label)
+    pub kind: Option<String>,
+    /// granted (autonomous act) | escalation (question for the owner).
+    /// Legacy callers omit it: default escalation.
+    pub authority: Option<String>,
+    /// decided | pending_user. Defaults follow the authority.
+    pub status: Option<String>,
+    /// Supporting links: {"pr_url": …, "mission_id": …}.
+    pub evidence: Option<serde_json::Value>,
+}
+
+/// How a decision request lands in the ledger after the grant is applied.
+pub(crate) struct DecisionDisposition {
+    pub authority: String,
+    pub status: String,
+    /// Set when the grant downgraded a claimed autonomous act to an
+    /// escalation — surfaced to the caller so the controller learns.
+    pub coerced_reason: Option<String>,
+}
+
+/// Decision kinds that are irreversible once executed: under `act_reversible`
+/// these coerce to an owner escalation exactly like any act under `propose`.
+/// Free-form kinds outside this list pass — the list is the deny set for the
+/// reversible tier, not a taxonomy.
+pub(crate) const IRREVERSIBLE_KINDS: [&str; 6] = [
+    "merge",
+    "abandon",
+    "delete",
+    "publish",
+    "deploy",
+    "force_push",
+];
+
+/// The enforcement point shared by the HTTP endpoint and the delivery-trailer
+/// ingestor: a controller may only *record* an act as autonomous when its
+/// grant actually allows acting. `observe`/`propose` (or an unset level)
+/// coerce granted+decided into an owner escalation instead of failing, so a
+/// mis-calibrated controller degrades to asking rather than erroring — and
+/// `act_reversible` additionally escalates the irreversible kinds.
+pub(crate) fn resolve_decision_disposition(
+    autonomy_level: Option<&str>,
+    authority: Option<&str>,
+    status: Option<&str>,
+    kind: Option<&str>,
+) -> Result<DecisionDisposition, String> {
+    resolve_decision_disposition_for_grant(autonomy_level, None, authority, status, kind)
+}
+
+/// Same gate as [`resolve_decision_disposition`], honoring `merge_authority`.
+/// `act_reversible` still escalates destroy/publish/deploy/force_push, but a
+/// `merge` is allowed when the grant says `full` — otherwise controllers with
+/// `merge_authority=full` keep asking Thomas (Verity/Lido, 2026-08-14).
+pub(crate) fn resolve_decision_disposition_for_grant(
+    autonomy_level: Option<&str>,
+    merge_authority: Option<&str>,
+    authority: Option<&str>,
+    status: Option<&str>,
+    kind: Option<&str>,
+) -> Result<DecisionDisposition, String> {
+    let authority = match authority.map(str::trim).filter(|a| !a.is_empty()) {
+        None => "escalation",
+        Some(a @ ("granted" | "escalation")) => a,
+        Some(other) => {
+            return Err(format!(
+                "authority must be granted or escalation (got '{other}')"
+            ))
+        }
+    };
+    let status = match status.map(str::trim).filter(|s| !s.is_empty()) {
+        None => {
+            if authority == "granted" {
+                "decided"
+            } else {
+                "pending_user"
+            }
+        }
+        Some(s @ ("decided" | "pending_user")) => s,
+        Some(other) => {
+            return Err(format!(
+                "status must be decided or pending_user (got '{other}')"
+            ));
+        }
+    };
+    if authority == "granted" && status == "decided" {
+        // Controllers-policy default is *act*. An unset grant is not observe:
+        // treating it as observe made every `[DECISION: authority=granted]`
+        // bounce back to Thomas (Lido #66 / Verity #2332, 2026-08-13).
+        let effective = match autonomy_level.map(str::trim).filter(|s| !s.is_empty()) {
+            None => "act_reversible",
+            Some(level) => level,
+        };
+        let may_act = matches!(effective, "act_reversible" | "act_full");
+        if !may_act {
+            return Ok(DecisionDisposition {
+                authority: "escalation".to_string(),
+                status: "pending_user".to_string(),
+                coerced_reason: Some(format!("autonomy_level={effective}")),
+            });
+        }
+        if effective == "act_reversible" {
+            let kind_norm = kind.map(str::trim).map(str::to_ascii_lowercase);
+            let merge_ok = kind_norm.as_deref() == Some("merge")
+                && merge_authority
+                    .map(str::trim)
+                    .is_some_and(|a| a.eq_ignore_ascii_case("full"));
+            let irreversible = kind_norm
+                .as_deref()
+                .is_some_and(|k| IRREVERSIBLE_KINDS.contains(&k))
+                && !merge_ok;
+            if irreversible {
+                return Ok(DecisionDisposition {
+                    authority: "escalation".to_string(),
+                    status: "pending_user".to_string(),
+                    coerced_reason: Some(format!(
+                        "autonomy_level=act_reversible kind={}",
+                        kind.unwrap_or_default().trim()
+                    )),
+                });
+            }
+        }
+    }
+    Ok(DecisionDisposition {
+        authority: authority.to_string(),
+        status: status.to_string(),
+        coerced_reason: None,
+    })
+}
+
+/// `POST /api/projects/:slug/decision` — add to the decision ledger: an owner
+/// escalation, or (grant permitting) a declared autonomous act.
+pub async fn record_project_decision(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<RecordDecisionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    if req.question.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "question is required".to_string()));
+    }
+    let grant = state.projects.get_grant(&slug).map_err(store_err)?;
+    let disposition = resolve_decision_disposition_for_grant(
+        grant.as_ref().and_then(|g| g.autonomy_level.as_deref()),
+        grant.as_ref().and_then(|g| g.merge_authority.as_deref()),
+        req.authority.as_deref(),
+        req.status.as_deref(),
+        req.kind.as_deref(),
+    )
+    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let decision = super::projects_store::NewDecision {
+        question: req.question.trim().to_string(),
+        rationale: req.rationale.clone(),
+        kind: req
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
+        authority: disposition.authority,
+        status: disposition.status,
+        evidence: req.evidence.clone(),
+    };
+    let at = state
+        .projects
+        .record_decision(&slug, &decision)
+        .map_err(store_err)?;
+    let open = state.projects.open_decisions(&slug).map_err(store_err)?;
+    Ok(Json(serde_json::json!({
+        "at": at,
+        "authority": decision.authority,
+        "status": decision.status,
+        "coerced": disposition.coerced_reason.is_some(),
+        "coerced_reason": disposition.coerced_reason,
+        "open_decisions": open,
+    })))
+}
+
+/// Extract the first GitHub PR link from free text (result digests and notes
+/// routinely quote one). Read-time extraction, nothing stored.
+pub(crate) fn extract_pr_url(text: &str) -> Option<String> {
+    // Scan every GitHub URL in the text, not just the first: digests routinely
+    // mention the repo before the PR ("Repo https://github.com/x/y; opened
+    // https://github.com/x/y/pull/48"), and locking onto the first hit would
+    // reject the repo link and never reach the PR.
+    text.match_indices("https://github.com/")
+        .find_map(|(start, _)| {
+            let candidate = &text[start..];
+            let end = candidate
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'' | ',')
+                })
+                .unwrap_or(candidate.len());
+            let url = candidate[..end].trim_end_matches(['.', ';', ':']);
+            // Only PR links qualify: /owner/repo/pull/N
+            let path: Vec<&str> = url
+                .strip_prefix("https://github.com/")?
+                .split('/')
+                .collect();
+            match path.as_slice() {
+                [_, _, kind, number, ..]
+                    if *kind == "pull" && number.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    Some(url.to_string())
+                }
+                _ => None,
+            }
+        })
+}
+
+/// `#N` hashes and GitHub PR URLs a later merge announcement can match
+/// against pending ledger rows. `#1` is kept distinct from `#10`.
+pub(crate) fn extract_pr_needles(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(url) = extract_pr_url(text) {
+        out.push(url.clone());
+        if let Some(number) = url.rsplit('/').next() {
+            let hash = format!("#{number}");
+            if !out.contains(&hash) {
+                out.push(hash);
+            }
+        }
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            let hash = format!("#{}", &text[start..end]);
+            if !out.contains(&hash) {
+                out.push(hash);
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn delivery_looks_merged(headline: &str) -> bool {
+    let lower = headline.to_ascii_lowercase();
+    lower.contains("merged") || lower.contains("mergé")
+}
+
+fn merge_announcement_needles(delivery: &DeliveryUpdate, recorded_decided: bool) -> Vec<String> {
+    if !recorded_decided && !delivery_looks_merged(&delivery.headline) {
+        return Vec::new();
+    }
+    let mut blobs: Vec<&str> = vec![delivery.headline.as_str()];
+    if let Some(body) = delivery.body.as_deref() {
+        blobs.push(body);
+    }
+    if let Some(decision) = delivery.decision.as_ref() {
+        blobs.push(decision.question.as_str());
+        if let Some(rationale) = decision.rationale.as_deref() {
+            blobs.push(rationale);
+        }
+        if let Some(url) = decision
+            .evidence
+            .as_ref()
+            .and_then(|value| value.get("pr_url"))
+            .and_then(|value| value.as_str())
+        {
+            blobs.push(url);
+        }
+    }
+    let mut needles = Vec::new();
+    for blob in blobs {
+        for needle in extract_pr_needles(blob) {
+            if !needles.contains(&needle) {
+                needles.push(needle);
+            }
+        }
+    }
+    needles
+}
+
+/// `GET /api/projects/:slug/tasks` — the project's roadmap.
+///
+/// The list **is** the item inventory: `project_tracks`, leftover proposals,
+/// and attention-horizon attempts. Boss `board_tasks` stay private to the
+/// mission that owns them; they are not a second plan. Aliases fold onto the
+/// canonical roster slug — hyphen prefix matching is deliberately not used,
+/// so `verity` never swallows `verity-lido`.
+pub async fn project_tasks(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let situation = load_project_situation(&state, &slug).await;
+    let body = tasks_projection(&situation);
+    // Deprecated: a lossless projection of `/situation`. The counter log line
+    // is the removal gate — delete the route once it stays at zero for a
+    // release (plan step 9).
+    tracing::info!(project = %slug, "deprecated /tasks projection served");
+    let mut response = axum::response::IntoResponse::into_response(Json(body));
+    response
+        .headers_mut()
+        .insert("deprecation", axum::http::HeaderValue::from_static("true"));
+    response.headers_mut().insert(
+        "link",
+        axum::http::HeaderValue::from_str(&format!(
+            "</api/projects/{slug}/situation>; rel=\"successor-version\""
+        ))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("")),
+    );
+    Ok(response)
+}
+
+/// The legacy checklist shape, derived from the situation. `done` keeps its
+/// historical meaning (satisfied *or* claimed) so old readers do not regress;
+/// the canonical split rides alongside under `summary`.
+fn tasks_projection(situation: &super::situation::ProjectSituation) -> serde_json::Value {
+    let mut running = 0usize;
+    let mut failed = 0usize;
+    let rows: Vec<serde_json::Value> = situation
+        .items
+        .iter()
+        .filter(|item| super::situation::belongs_on_roadmap(item))
+        .map(|item| {
+            match super::situation::roadmap_status(item) {
+                "running" | "settled" => running += 1,
+                "failed" => failed += 1,
+                _ => {}
+            }
+            situation_roadmap_task(item)
+        })
+        .collect();
+    let summary = &situation.summary;
+    // Compatibility with the 2026-09-01 projection: live undeclared work is
+    // listed apart, and honesty gaps are itemized.
+    let unplanned: Vec<serde_json::Value> = situation
+        .items
+        .iter()
+        .filter(|item| {
+            item.origin == super::situation::Origin::Absorbed
+                && item.derived_state == super::situation::DerivedState::Executing
+        })
+        .map(situation_roadmap_task)
+        .collect();
+    let mut inconsistencies: Vec<serde_json::Value> = situation
+        .items
+        .iter()
+        .filter(|item| item.derived_state == super::situation::DerivedState::ClaimOnly)
+        .map(|item| {
+            serde_json::json!({
+                "kind": "satisfied_without_current_evidence",
+                "track": item.key,
+                "revision": item.revision,
+            })
+        })
+        .collect();
+    for item in situation.items.iter().filter(|item| item.kind == "task") {
+        inconsistencies.push(serde_json::json!({
+            "kind": "legacy_proposal_not_declared_track",
+            "track": item.key,
+        }));
+    }
+    if summary.source_unavailable {
+        inconsistencies.push(serde_json::json!({ "kind": "source_unavailable" }));
+    }
+    serde_json::json!({
+        "slug": situation.slug,
+        "tasks": rows,
+        "unplanned_attempts": unplanned,
+        "inconsistencies": inconsistencies,
+        "summary": {
+            "total": summary.total,
+            "done": summary.verified_satisfied + summary.claim_only,
+            "running": running,
+            "failed": failed,
+            "declared_total": summary.total,
+            "satisfied": summary.verified_satisfied,
+            "executing": running,
+            "unplanned_attempts": unplanned.len(),
+            "inconsistencies": inconsistencies.len(),
+            "verified_satisfied": summary.verified_satisfied,
+            "claim_only": summary.claim_only,
+            "open": summary.open,
+            "blocked": summary.blocked,
+            "cancelled": summary.cancelled,
+            "live_attempts": summary.live_attempts,
+            "source_unavailable": summary.source_unavailable,
+            "as_of": summary.as_of,
+            "cursor": summary.cursor,
+        },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProposalInput {
+    pub task_key: String,
+    pub title: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanTasksRequest {
+    pub tasks: Vec<ProposalInput>,
+}
+
+/// `POST /api/projects/:slug/tasks` — plan roadmap items from chat.
+///
+/// Writes the project's **item** table (`project_tracks`). This used to insert
+/// a third ledger (`project_roadmap_proposals`); that table is read only to
+/// surface leftover rows until they are absorbed into a track.
+pub async fn plan_project_tasks(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+    Json(req): Json<PlanTasksRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let Some(slug) = resolve_roster_slug(&state.projects, &requested).map_err(store_err)? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown project '{requested}'"),
+        ));
+    };
+    let planned = planned_tracks_from_request(&req.tasks)?;
+    state
+        .projects
+        .upsert_planned_tracks(&slug, &planned)
+        .map_err(store_err)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "proposed": planned.len() }),
+    ))
+}
+
+/// Validate the whole batch before any write so a later 400 cannot leave a
+/// prefix of tracks persisted.
+fn planned_tracks_from_request(
+    tasks: &[ProposalInput],
+) -> Result<Vec<super::projects_store::PlannedTrack>, (StatusCode, String)> {
+    if tasks.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tasks is required".to_string()));
+    }
+    let mut planned = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let task_key = task.task_key.trim();
+        if !is_plain_key(task_key) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("invalid task_key '{}'", task.task_key),
+            ));
+        }
+        let title = task.title.trim();
+        if title.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("task '{task_key}' needs a title"),
+            ));
+        }
+        let desired = task
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(title);
+        planned.push(super::projects_store::PlannedTrack {
+            track: task_key.to_string(),
+            title: title.to_string(),
+            desired_state: desired.to_string(),
+            acceptance_criteria: task.acceptance_criteria.clone(),
+            depends_on: task.depends_on.clone(),
+            position: task.position,
+        });
+    }
+    Ok(planned)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProposalRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Option<Vec<String>>,
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+}
+
+/// `PATCH /api/projects/:slug/tasks/:task_key` — edit an item (track).
+/// Leftover proposal rows are updated as a compatibility fallback.
+pub async fn update_project_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath((requested, task_key)): AxumPath<(String, String)>,
+    Json(req): Json<UpdateProposalRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&task_key) {
+        return Err(bad_slug());
+    }
+    let Some(slug) = resolve_roster_slug(&state.projects, &requested).map_err(store_err)? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown project '{requested}'"),
+        ));
+    };
+    let desired = req
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            req.title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let family = project_tag_keys(&slug);
+    if let Some(stored) = state
+        .projects
+        .find_track_slug(&family, &task_key)
+        .map_err(store_err)?
+    {
+        state
+            .projects
+            .patch_track(
+                &stored,
+                &task_key,
+                desired,
+                None,
+                title,
+                req.acceptance_criteria.as_deref(),
+                req.depends_on.as_deref(),
+            )
+            .map_err(track_write_err)?;
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    let Some(stored) = state
+        .projects
+        .find_open_proposal_slug(&family, &task_key)
+        .map_err(store_err)?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no open item '{task_key}' for '{slug}'"),
+        ));
+    };
+    let updated = state
+        .projects
+        .update_proposal(
+            &stored,
+            &task_key,
+            title,
+            req.prompt.as_deref(),
+            req.acceptance_criteria.as_deref(),
+            req.depends_on.as_deref(),
+        )
+        .map_err(store_err)?;
+    if !updated {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no open item '{task_key}' for '{slug}'"),
+        ));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `DELETE /api/projects/:slug/tasks/:task_key` — cancel an item.
+pub async fn cancel_project_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath((requested, task_key)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&task_key) {
+        return Err(bad_slug());
+    }
+    let Some(slug) = resolve_roster_slug(&state.projects, &requested).map_err(store_err)? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown project '{requested}'"),
+        ));
+    };
+    let family = project_tag_keys(&slug);
+    if let Some(stored) = state
+        .projects
+        .find_track_slug(&family, &task_key)
+        .map_err(store_err)?
+    {
+        state
+            .projects
+            .set_track(&stored, &task_key, None, Some("cancelled"))
+            .map_err(track_write_err)?;
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    let Some(stored) = state
+        .projects
+        .find_open_proposal_slug(&family, &task_key)
+        .map_err(store_err)?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no open item '{task_key}' for '{slug}'"),
+        ));
+    };
+    let cancelled = state
+        .projects
+        .cancel_proposal(&stored, &task_key)
+        .map_err(store_err)?;
+    if !cancelled {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no open item '{task_key}' for '{slug}'"),
+        ));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnswerDecisionRequest {
+    /// The decision's `at` key.
+    pub at: String,
+    pub answer: String,
+}
+
+/// `POST /api/projects/:slug/decision/answer` — resolve a pending escalation.
+/// Delivery of the answer into the control conversation is the caller's job
+/// (the board relay knows how to address the bound Hermes session); this
+/// endpoint owns only the ledger transition.
+pub async fn answer_project_decision(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<AnswerDecisionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    if req.answer.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "answer is required".to_string()));
+    }
+    // `get_project` aggregates decisions across the project family, so a
+    // decision returned under the canonical slug may live under an alias.
+    // Try the exact slug first, then every key that folds onto it.
+    let mut answered = state
+        .projects
+        .answer_decision(&slug, &req.at, req.answer.trim())
+        .map_err(store_err)?;
+    if !answered {
+        for key in project_tag_keys(&slug) {
+            if key == slug || !is_plain_key(&key) {
+                continue;
+            }
+            if state
+                .projects
+                .answer_decision(&key, &req.at, req.answer.trim())
+                .map_err(store_err)?
+            {
+                answered = true;
+                break;
+            }
+        }
+    }
+    if !answered {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no pending decision at '{}' for '{slug}'", req.at),
+        ));
+    }
+    let open = open_family_decisions(&state.projects, &slug).map_err(store_err)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "open_decisions": open }),
+    ))
+}
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/overview", get(projects_overview))
+        .route("/", axum::routing::put(upsert_project))
+        .route("/by-session/:session_id", get(project_by_session))
+        .route("/:slug", get(get_project))
+        .route("/:slug/state", get(project_state))
+        .route("/:slug/situation", get(project_situation))
+        .route(
+            "/:slug/imports",
+            axum::routing::post(super::tracker_import::import_tracker),
+        )
+        .route(
+            "/:slug/reconcile/ack",
+            axum::routing::post(ack_project_reconcile),
+        )
+        .route(
+            "/:slug/tracks/:track/accept",
+            axum::routing::post(accept_project_track),
+        )
+        .route(
+            "/:slug/tracks/:track/invalidate",
+            axum::routing::post(invalidate_project_track_evidence),
+        )
+        .route("/:slug/tracks/:track/receipts", get(project_track_receipts))
+        .route("/:slug/tasks", get(project_tasks).post(plan_project_tasks))
+        .route(
+            "/:slug/tracks/:track/evidence",
+            axum::routing::post(accept_project_track_evidence),
+        )
+        .route(
+            "/:slug/tracks/:track/reopen",
+            axum::routing::post(reopen_project_track),
+        )
+        .route(
+            "/:slug/tasks/:task_key",
+            axum::routing::patch(update_project_task).delete(cancel_project_task),
+        )
+        .route("/:slug/updates", get(project_updates))
+        .route("/:slug/action", axum::routing::post(project_action))
+        .route("/:slug/rename", axum::routing::post(rename_project))
+        .route("/:slug/status", axum::routing::post(set_project_status))
+        .route("/:slug/track", axum::routing::post(set_project_track))
+        .route(
+            "/:slug/grant",
+            get(get_project_grant).post(set_project_grant),
+        )
+        .route(
+            "/:slug/steers",
+            get(get_project_steers).post(add_project_steer),
+        )
+        .route(
+            "/:slug/decision",
+            axum::routing::post(record_project_decision),
+        )
+        .route(
+            "/:slug/decision/answer",
+            axum::routing::post(answer_project_decision),
+        )
+        .route(
+            "/:slug/conversation",
+            axum::routing::put(bind_project_conversation).delete(unbind_project_conversation),
+        )
+        // Lightweight roster + per-project file storage for Orb/desktop.
+        .merge(super::project_files::routes())
+        .merge(super::project_controller::routes())
+        .merge(super::project_crons::routes())
+}
+
+pub(crate) fn hermes_projects_dir() -> Option<PathBuf> {
+    std::env::var("HERMES_PROJECTS_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+/// Path to Hermes' `state.db`, for callers that need the continuation chain.
+pub fn hermes_state_db_path() -> Option<PathBuf> {
+    hermes_state_db()
+}
+
+fn hermes_state_db() -> Option<PathBuf> {
+    std::env::var("HERMES_STATE_DB")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+/// Follow a stored binding forward to the live Hermes continuation.
+///
+/// Bindings freeze a session id at bind time; compressions fork new ids.
+/// Overview already does this walk so the sidebar opens the live chat.
+/// `GET /api/projects/:slug` must do the same — otherwise the card's
+/// Conversation button opens the dead parent and owner messages vanish.
+fn follow_live_conversation(conversation: ProjectConversation) -> ProjectConversation {
+    follow_live_conversation_at(conversation, hermes_state_db().as_deref())
+}
+
+fn follow_live_conversation_at(
+    mut conversation: ProjectConversation,
+    db_path: Option<&Path>,
+) -> ProjectConversation {
+    if let Some(path) = db_path {
+        let tip = super::session_chain::live_tip(path, &conversation.session_id);
+        if tip != conversation.session_id {
+            conversation.session_id = tip;
+        }
+    }
+    conversation
+}
+
+/// The Hermes cron scheduler's jobs file, next to `state.db` in the Hermes
+/// home (`<home>/cron/jobs.json`). Overridable for tests and non-standard
+/// layouts via `HERMES_CRON_JOBS`.
+fn hermes_cron_jobs_path() -> Option<PathBuf> {
+    std::env::var("HERMES_CRON_JOBS")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            hermes_state_db().and_then(|db| db.parent().map(|home| home.join("cron/jobs.json")))
+        })
+        .filter(|path| path.is_file())
+}
+
+/// Scheduler-side controller heartbeats: job id → last successful run
+/// (RFC3339). Read from the Hermes cron jobs file; only enabled jobs whose
+/// last run succeeded count — a job erroring every tick is not a heartbeat.
+/// Best-effort: a missing or malformed file yields an empty map, never an
+/// error (the board must render without Hermes on disk).
+fn read_controller_heartbeats(path: Option<PathBuf>) -> HashMap<String, String> {
+    let Some(path) = path else {
+        return HashMap::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return HashMap::new();
+    };
+    let jobs = match &value {
+        serde_json::Value::Object(map) => match map.get("jobs") {
+            Some(serde_json::Value::Array(jobs)) => jobs.as_slice(),
+            _ => return HashMap::new(),
+        },
+        serde_json::Value::Array(jobs) => jobs.as_slice(),
+        _ => return HashMap::new(),
+    };
+    jobs.iter()
+        .filter_map(|job| {
+            let id = job.get("id")?.as_str()?;
+            if !job
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            if job.get("last_status").and_then(|v| v.as_str()) != Some("ok") {
+                return None;
+            }
+            let last_run = job.get("last_run_at")?.as_str()?;
+            // Normalize to RFC3339 UTC so `finish()` parses it uniformly.
+            let at = chrono::DateTime::parse_from_rfc3339(last_run).ok()?;
+            Some((id.to_string(), at.with_timezone(&chrono::Utc).to_rfc3339()))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TrackerInfo {
+    slug: String,
+    status_line: Option<String>,
+    updated_at: Option<String>,
+}
+
+/// Header copy Hermes shows under ACTIVE. Prefer live writers over a
+/// stored `next_action` that ingest used to wipe on every `[CTRL:]` tick.
+fn next_action_from_live_titles(titles: Vec<String>) -> Option<String> {
+    match titles.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        many => Some(format!("{} live: {}", many.len(), many.join(" · "))),
+    }
+}
+
+fn live_mission_title(status: MissionStatus, title: Option<&str>, id: &str) -> Option<String> {
+    if !super::controller_honesty::is_live_writer_status(status) {
+        return None;
+    }
+    Some(
+        title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| id.chars().take(8).collect()),
+    )
+}
+
+/// The one HTTP call that clears an attention item.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AttentionAction {
+    pub label: &'static str,
+    pub method: &'static str,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
+/// One reason a project needs the operator, with what produced it.
+///
+/// `kind` is stable (the desktop maps it to a button): `blocker_reported`,
+/// `state_stalled`, `mission_awaiting_user`, `decision_pending`,
+/// `mission_failed`, `tracker_stale`, `no_controller`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AttentionItem {
+    pub kind: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<String>,
+    /// When the underlying signal started (status change, delivery time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// The headline that carried the signal (blocker, callback, failure).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_headline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<AttentionAction>,
+}
+
+impl AttentionItem {
+    /// Identity across overview snapshots: the same reason for the same
+    /// subject is the same item even when its message text changes.
+    pub fn key(&self) -> String {
+        format!("{}|{}", self.kind, self.mission_id.as_deref().unwrap_or(""))
+    }
+}
+
+/// Keys present in `previous` and gone from `current`: the reasons that
+/// resolved between two overview reads.
+pub fn resolved_keys(previous: &HashSet<String>, current: &HashSet<String>) -> Vec<String> {
+    let mut gone: Vec<String> = previous.difference(current).cloned().collect();
+    gone.sort();
+    gone
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MissionChip {
+    id: String,
+    status: MissionStatus,
+    title: Option<String>,
+    updated_at: String,
+    github_pr: Option<String>,
+    /// When this mission last entered its current status. Heartbeats bump
+    /// `updated_at` on every tool event; this stays put so "controller behind"
+    /// compares work *start*, not the last tick.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_status_change_at: Option<String>,
+    /// Qualified operator page — ack / in-grace controller waits stay false.
+    #[serde(default)]
+    needs_operator: bool,
+    /// The attempt that replaced this one (relay / handoff). A superseded
+    /// attempt is never a reason for attention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
+}
+
+/// Owned copy of what the health rollup reads.
+///
+/// The chip list is truncated to the 8 newest missions for display; the rollup
+/// must see *all* of them, or a project's oldest broken track becomes invisible
+/// precisely when it has been broken longest.
+#[derive(Debug, Clone)]
+struct OwnedHealthInput {
+    track: Option<String>,
+    status: MissionStatus,
+    desired_state: Option<String>,
+    next_check_at: Option<String>,
+    updated_at: String,
+}
+
+impl OwnedHealthInput {
+    fn as_input(&self) -> super::project_health::MissionHealthInput<'_> {
+        super::project_health::MissionHealthInput {
+            track: self.track.as_deref(),
+            status: self.status,
+            desired_state: self.desired_state.as_deref(),
+            next_check_at: self.next_check_at.as_deref(),
+            updated_at: self.updated_at.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeliveryUpdate {
+    headline: String,
+    body: Option<String>,
+    session_id: String,
+    at: String,
+    /// Routing key: the FIRST field of the STATE_SIGNATURE trailer. Says which
+    /// project the delivery belongs to, not what state it is in.
+    signature: Option<String>,
+    /// The rest of the trailer — the fields that actually describe the state
+    /// (`phase1-stack|7dba916|clean-ready|ci-failures-3-prs|…`). Two deliveries
+    /// with the same value reported the same world.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    /// Controller-reported mode from the `[CTRL: … | mode=… | …]` trailer:
+    /// `active`, `blocked[:cause]` or `paused[:reason]`. Absent for controllers
+    /// that have not adopted the trailer — the three regimes were previously
+    /// indistinguishable, so a quiet tick and a stuck one looked identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    blocker: Option<String>,
+    /// `next=` from the `[CTRL: …]` trailer. Ingest-only: the roster column
+    /// is the durable copy; delivery payloads keep omitting this.
+    #[serde(skip)]
+    next_action: Option<String>,
+    /// A `[DECISION: …]` trailer, when the delivery carried one. Ingest-only:
+    /// the ledger is served through the decision endpoints, never re-emitted
+    /// on delivery payloads.
+    #[serde(skip)]
+    decision: Option<DecisionTrailer>,
+}
+
+/// The parsed `[DECISION: {json}]` (or `[DECISION: plain question]`) trailer —
+/// the MCP-less fallback for controllers to reach the decision ledger.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecisionTrailer {
+    question: String,
+    rationale: Option<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    status: Option<String>,
+    evidence: Option<serde_json::Value>,
+}
+
+impl DecisionTrailer {
+    /// `{json}` form → full shape; anything else → a plain owner escalation.
+    /// Malformed JSON (starts with `{` but does not parse, or lacks a
+    /// question) is dropped rather than guessed at.
+    fn parse(inner: &str) -> Option<Self> {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return None;
+        }
+        if inner.starts_with('{') {
+            let value: serde_json::Value = serde_json::from_str(inner).ok()?;
+            let text = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let question = text("question")?;
+            return Some(Self {
+                question,
+                rationale: text("rationale"),
+                kind: text("kind"),
+                authority: text("authority"),
+                status: text("status"),
+                evidence: value.get("evidence").filter(|v| v.is_object()).cloned(),
+            });
+        }
+        Some(Self {
+            question: inner.to_string(),
+            rationale: None,
+            kind: None,
+            authority: None,
+            status: None,
+            evidence: None,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectRow {
+    slug: String,
+    /// The roster project's title, when one was set — surfaces render it
+    /// instead of the raw slug.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// The controller's declared next step, from the roster record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_action: Option<String>,
+    bucket: &'static str,
+    /// The operator's board override for this slug (`"paused"` / `"archived"`),
+    /// when one is set. This is the provenance bit clients need to distinguish
+    /// an operator pause (override present) from a controller that stopped
+    /// itself (`mode` paused/blocked without an override) — overrides are only
+    /// ever written by the board action endpoint, never by controllers.
+    #[serde(rename = "override", skip_serializing_if = "Option::is_none")]
+    board_override: Option<String>,
+    /// The roster record's controller cron id, when declared — the
+    /// controller ↔ project link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller_cron_id: Option<String>,
+    /// When the linked controller job last ran successfully (from the Hermes
+    /// cron scheduler), regardless of whether it delivered anything. A
+    /// controller that answers `[SILENT]` for hours is quiet, not dead — this
+    /// is the signal that lets the board tell the two apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller_heartbeat_at: Option<String>,
+    /// The roster record's controller-reported mode (`active` / `blocked` /
+    /// `paused`), surfaced directly on the row. Also still rides on
+    /// `latest_update.mode` for compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    /// Honesty read-model — derived health axes, computed read-only in
+    /// `finish()` so the board can show "active but its engine is gone" instead
+    /// of a lying `active`. Absent (None) when the project makes no activity
+    /// claim, so a dormant project stays quiet.
+    ///
+    /// `controller_health`: healthy | stale | missing. A project that claims to
+    /// be active but carries no `controller_cron_id` is `missing`; one whose
+    /// controller has not signalled within the stale window is `stale`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller_health: Option<&'static str>,
+    /// `delivery_health`: reaching_user | misrouted | dropped. Whether the
+    /// controller's output actually reaches a durable conversation, or lands in
+    /// a throwaway per-tick session (the "engine runs but nobody receives" blind
+    /// spot). Coarse in P0 (binding present vs guessed session); refined in P2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_health: Option<&'static str>,
+    /// `progress_state`: working | waiting_external | blocked. What the project
+    /// is actually doing, separate from the operator's desired state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_state: Option<&'static str>,
+    tracker: Option<TrackerInfo>,
+    /// Structured attention: one item per reason, with the evidence that
+    /// produced it and the one call that clears it. `attention_reasons` is
+    /// the same list as plain text.
+    attention: Vec<AttentionItem>,
+    missions: Vec<MissionChip>,
+    latest_update: Option<DeliveryUpdate>,
+    updates_count: usize,
+    /// The grant's normalized autonomy level (observe | propose |
+    /// act_reversible | act_full), surfaced on the row so the card can show it
+    /// without a detail fetch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autonomy_level: Option<String>,
+    /// Decisions waiting on the owner (`status = pending_user`) — the card
+    /// badge and a standing attention reason.
+    pending_decisions: u32,
+    attention_reasons: Vec<String>,
+    /// Per-track rollup, worst-first. Answers "which track is stuck" without
+    /// making the reader scan a list of 800 mission chips.
+    health: super::project_health::ProjectHealth,
+    /// The canonical plan summary — the same numbers `get_project`,
+    /// `/situation` and MCP `get_situation` return. The card renders this and
+    /// nothing else as its progress.
+    summary: super::situation::TrackSummary,
+    /// The conversation to open for this project. An explicit binding wins;
+    /// otherwise the newest delivery's session is offered as a GUESS, tagged
+    /// as such — cron controllers open a throwaway session per tick, so an
+    /// inferred conversation is very often already ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation: Option<ProjectConversation>,
+}
+
+pub async fn projects_overview(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let trackers_dir = hermes_projects_dir();
+    let state_db = hermes_state_db();
+
+    let trackers = trackers_dir
+        .as_deref()
+        .map(read_trackers)
+        .unwrap_or_default();
+    let mut bindings = state
+        .projects
+        .bindings()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    // A binding names the conversation the operator declared. That id goes
+    // stale as soon as Hermes compresses the conversation and forks a
+    // continuation — measured on the Lido audit, four times in one night. The
+    // declared value stays the stored fact; the live tip is resolved here, the
+    // same way Hermes resolves its own routes.
+    if let Some(path) = hermes_state_db() {
+        for conversation in bindings.values_mut() {
+            let tip = super::session_chain::live_tip(&path, &conversation.session_id);
+            if tip != conversation.session_id {
+                tracing::debug!(
+                    declared = %conversation.session_id,
+                    live = %tip,
+                    "binding followed a conversation continuation"
+                );
+                conversation.session_id = tip;
+            }
+        }
+    }
+    let archived = trackers_dir
+        .as_deref()
+        .and_then(|dir| dir.parent().map(|p| p.join("archive")))
+        .filter(|dir| dir.is_dir())
+        .map(|dir| list_markdown_slugs(&dir))
+        .unwrap_or_default();
+    let aliases = trackers_dir
+        .as_deref()
+        .map(read_alias_map)
+        .unwrap_or_default();
+    let overrides = trackers_dir
+        .as_deref()
+        .map(read_overrides)
+        .unwrap_or_default();
+
+    let missions = state
+        .control
+        .collect_project_missions(chrono::Duration::hours(TERMINAL_MISSION_HORIZON_HOURS))
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    // The mission scan above is fail-closed; the wait scan is best-effort.
+    // When it is incomplete, an Active mission parked in AskUserQuestion may
+    // look like ordinary live work, so rows must not derive mode from
+    // mission evidence (same rule as the detail projection).
+    let (waiting_user_waits, waits_complete) = state.control.collect_waiting_user_waits().await;
+
+    // Delivery-derived facts come from the projects store, which the
+    // background ingestor keeps current — the overview never scans the Hermes
+    // state DB per request (that scan was a 600-message LIKE over a
+    // multi-gigabyte SQLite file, on every board render).
+    let latest_states = state
+        .projects
+        .latest_states()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let controller_states = state
+        .projects
+        .latest_controller_states()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let update_totals = state
+        .projects
+        .state_event_totals()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let unrouted_rows = state
+        .projects
+        .unrouted(20)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let autonomy_levels = state
+        .projects
+        .autonomy_levels()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let pending_decisions = state
+        .projects
+        .pending_decision_counts()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+
+    // ── Assemble rows: union of tracker slugs, mission project tags, and
+    //    routed delivery keys. Every source can create a row; every source
+    //    can only enrich, never hide, another.
+    // One instant for the whole response: two tracks in the same payload must
+    // not disagree about whether the same deadline has passed.
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut rows: HashMap<String, ProjectRowBuilder> = HashMap::new();
+
+    let deleted = |slug: &str| overrides.get(slug).map(String::as_str) == Some("deleted");
+    let markdown_roster = markdown_roster_enabled();
+    let mut deferred_trackers: Vec<TrackerInfo> = Vec::new();
+    for tracker in trackers {
+        if deleted(&tracker.slug) {
+            continue;
+        }
+        if !markdown_roster {
+            // Markdown is no longer a roster source: attach the file to a
+            // row that some other source creates, never create one.
+            deferred_trackers.push(tracker);
+            continue;
+        }
+        // An alias's tracker file (`verity.md`, `verity-roadmap.md`) folds onto
+        // the canonical row too — otherwise a markdown file alone re-forks the
+        // phantom card the roster/mission loops just collapsed. The canonical's
+        // own tracker wins; an alias tracker only fills the gap.
+        let key = resolve_alias(&aliases, &tracker.slug);
+        if deleted(&key) {
+            continue;
+        }
+        let is_canonical = key == tracker.slug;
+        let builder = rows
+            .entry(key.clone())
+            .or_insert_with(|| ProjectRowBuilder::new(key.clone()));
+        if is_canonical || builder.tracker.is_none() {
+            builder.tracker = Some(tracker);
+        }
+    }
+    for mission in &missions {
+        let Some(project) = mission.project.project.as_deref() else {
+            continue;
+        };
+        // Some missions carry malformed project tags (raw JSON blobs); only
+        // plain slugs may create or join a row.
+        if !is_plain_key(project) {
+            continue;
+        }
+        let key = resolve_alias(&aliases, project);
+        if deleted(&key) {
+            continue;
+        }
+        let builder = rows
+            .entry(key.clone())
+            .or_insert_with(|| ProjectRowBuilder::new(key));
+        builder.missions.push(mission_chip(
+            mission,
+            waiting_user_waits.contains_key(&mission.id),
+            waiting_user_waits
+                .get(&mission.id)
+                .and_then(|started| started.as_deref()),
+        ));
+        builder.health_inputs.push(OwnedHealthInput {
+            track: mission.project.track.clone(),
+            status: mission.status,
+            desired_state: mission.project.desired_state.clone(),
+            next_check_at: mission.project.next_check_at.clone(),
+            updated_at: mission.updated_at.clone(),
+        });
+    }
+    // Roster projects are rows in their own right: a project created and bound
+    // through the API (no tracker file, no tagged mission, no delivery yet)
+    // must still appear on every surface, or "create + bind" looks like a
+    // silent no-op from the board.
+    // Roster mode/blocker enrich `latest_update` below; capture them before
+    // the record's fields are moved onto the builder.
+    let records = state
+        .projects
+        .list_projects()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    // Canonical slugs that have their own roster row. An alias next_action
+    // may fill only when this set does not contain the fold target —
+    // otherwise a NULL (or live) canonical value is authoritative.
+    let canonical_roster: HashSet<String> = records
+        .iter()
+        .filter(|record| {
+            if deleted(&record.slug) {
+                return false;
+            }
+            let key = resolve_alias(&aliases, &record.slug);
+            !deleted(&key) && key == record.slug
+        })
+        .map(|record| record.slug.clone())
+        .collect();
+    let mut record_signals: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for record in records {
+        if deleted(&record.slug) {
+            continue;
+        }
+        // Fold an alias record onto its canonical row, the same way tagged
+        // missions are resolved above — otherwise every alias slug (`lido-audit`
+        // → `verity-lido`, `verity`/`verity-roadmap` → `verity-core`, …) forks a
+        // phantom card next to the real one. The canonical record is
+        // authoritative; an alias record only fills gaps so a merged card never
+        // shows the alias's stale title/mode over the canonical's.
+        let key = resolve_alias(&aliases, &record.slug);
+        if deleted(&key) {
+            continue;
+        }
+        let is_canonical = key == record.slug;
+        let canonical_has_roster = canonical_roster.contains(&key);
+        if is_canonical || (!canonical_has_roster && !record_signals.contains_key(&key)) {
+            record_signals.insert(key.clone(), (record.mode.clone(), record.blocker.clone()));
+        }
+        let builder = rows
+            .entry(key.clone())
+            .or_insert_with(|| ProjectRowBuilder::new(key.clone()));
+        builder.apply_roster(record, canonical_has_roster);
+    }
+    for tracker in deferred_trackers {
+        let key = resolve_alias(&aliases, &tracker.slug);
+        if let Some(builder) = rows.get_mut(&key) {
+            if key == tracker.slug || builder.tracker.is_none() {
+                builder.tracker = Some(tracker);
+            }
+        }
+    }
+    for (slug, builder) in &mut rows {
+        if let Ok(tracks) = state.projects.tracks(slug) {
+            let tuples: Vec<(String, Option<String>, Option<String>)> = tracks
+                .into_iter()
+                .map(|track| (track.track, track.desired_state, track.status))
+                .collect();
+            builder.next_action = super::controller_honesty::honest_next_action(
+                builder.next_action.as_deref(),
+                &tuples,
+            );
+        }
+    }
+    // One situation per row, from the single mission scan above: the card's
+    // progress must be the same number `get_project` returns.
+    {
+        let by_project = super::situation::group_by(&missions, |mission| {
+            mission
+                .project
+                .project
+                .as_deref()
+                .filter(|project| is_plain_key(project))
+                .map(|project| resolve_alias(&aliases, project))
+        });
+        let empty: Vec<&crate::api::mission_store::Mission> = Vec::new();
+        for (slug, builder) in &mut rows {
+            let mut source = super::situation::SourceStatus::default();
+            let tracks = collect_family_tracks(&state.projects, slug).unwrap_or_else(|error| {
+                tracing::warn!(project = %slug, %error, "overview: tracks unavailable");
+                source.tracks_failed = true;
+                Vec::new()
+            });
+            let proposals =
+                collect_family_proposals(&state.projects, slug).unwrap_or_else(|error| {
+                    tracing::warn!(project = %slug, %error, "overview: proposals unavailable");
+                    source.tracks_failed = true;
+                    Vec::new()
+                });
+            let owned: Vec<crate::api::mission_store::Mission> = by_project
+                .get(slug)
+                .unwrap_or(&empty)
+                .iter()
+                .map(|mission| (*mission).clone())
+                .collect();
+            let items = super::mission_horizon::project_items(&tracks, &proposals, &owned);
+            let situation = super::situation::build(slug, &items, &source, &now);
+            builder.done_keys = super::situation::done_keys(&situation);
+            builder.summary = Some(situation.summary);
+        }
+    }
+    // The latest ingested state per project becomes the row's latest_update —
+    // same serialized shape the delivery scan used to produce, now read back
+    // from the store the ingestor maintains.
+    //
+    // Collapse alias slugs onto their canonical FIRST, keeping only the newest
+    // state per canonical (last_seen_at is an ISO8601 string, so it sorts
+    // chronologically). `attach_store_update` is last-writer-wins, so without
+    // this a stale alias state (e.g. `lido-srv3` @ 08-03) clobbers the
+    // canonical's fresh one (`verity-lido` @ 08-12) and the card's
+    // latest_update goes backwards in time — which reads as "no updates".
+    let mut newest_state: HashMap<String, (&String, &super::projects_store::ProjectState)> =
+        HashMap::new();
+    for (slug, project_state) in &latest_states {
+        let key = resolve_alias(&aliases, slug);
+        if deleted(&key) {
+            continue;
+        }
+        match newest_state.get(&key) {
+            Some((_, existing)) if existing.last_seen_at >= project_state.last_seen_at => {}
+            _ => {
+                newest_state.insert(key, (slug, project_state));
+            }
+        }
+    }
+    for (key, (slug, project_state)) in newest_state {
+        let (mode, blocker) = record_signals
+            .get(&key)
+            .or_else(|| record_signals.get(slug))
+            .cloned()
+            .unwrap_or_default();
+        let material = controller_states
+            .get(slug)
+            .or_else(|| controller_states.get(&key))
+            .unwrap_or(project_state);
+        let mut chapter = material.clone();
+        chapter.last_seen_at = project_state.last_seen_at.clone();
+        if chapter.session_id.is_none() {
+            chapter.session_id = project_state.session_id.clone();
+        }
+        let update = store_update(&key, &chapter, mode, blocker);
+        let total = update_totals.get(slug).copied().unwrap_or(0);
+        rows.entry(key.clone())
+            .or_insert_with(|| ProjectRowBuilder::new(key.clone()))
+            .attach_store_update(update, chapter.observations, total);
+    }
+    let unrouted: Vec<DeliveryUpdate> = unrouted_rows
+        .into_iter()
+        .map(|row| DeliveryUpdate {
+            headline: row.headline,
+            body: None,
+            session_id: row.session_id,
+            at: row.at,
+            signature: row.signature,
+            state: None,
+            mode: row.mode,
+            blocker: row.blocker,
+            next_action: None,
+            decision: None,
+        })
+        .collect();
+
+    // Grant levels and pending-decision counts are keyed by the roster slug the
+    // controller wrote them under; fold them onto canonical rows like every
+    // other source (an alias never hides, only fills).
+    for (slug, level) in &autonomy_levels {
+        let key = resolve_alias(&aliases, slug);
+        if let Some(builder) = rows.get_mut(&key) {
+            if builder.autonomy_level.is_none() || key == *slug {
+                builder.autonomy_level = Some(level.clone());
+            }
+        }
+    }
+    for (slug, count) in &pending_decisions {
+        let key = resolve_alias(&aliases, slug);
+        if let Some(builder) = rows.get_mut(&key) {
+            builder.pending_decisions += count;
+        }
+    }
+
+    // Scheduler-side heartbeats, resolved once per request: a controller that
+    // ran successfully but delivered nothing ([SILENT] ticks) still proves it
+    // is alive.
+    let heartbeats = read_controller_heartbeats(hermes_cron_jobs_path());
+    let mut projects: Vec<ProjectRow> = rows
+        .into_values()
+        .map(|mut builder| {
+            builder.controller_heartbeat_at = builder
+                .controller_cron_id
+                .as_ref()
+                .and_then(|id| heartbeats.get(id))
+                .cloned();
+            let forced = overrides.get(&builder.slug).cloned();
+            let binding = project_tag_keys_with(&aliases, &builder.slug)
+                .into_iter()
+                .find_map(|key| bindings.get(&key).cloned());
+            builder.mission_evidence_complete = waits_complete;
+            builder.finish(&archived, forced.as_deref(), binding, &now)
+        })
+        .collect();
+    projects.sort_by(|a, b| {
+        bucket_rank(a.bucket)
+            .cmp(&bucket_rank(b.bucket))
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
+    record_attention_resolutions(&state, &projects).await;
+
+    Ok(Json(serde_json::json!({
+        "projects": projects,
+        "archived": archived,
+        "unrouted_updates": unrouted.into_iter().take(20).collect::<Vec<_>>(),
+        "sources": {
+            "trackers": trackers_dir.is_some(),
+            "hermes_db": state_db.is_some(),
+        },
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatesQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub async fn project_updates(
+    AxumPath(slug): AxumPath<String>,
+    Query(query): Query<UpdatesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some(db) = hermes_state_db() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "HERMES_STATE_DB is not configured".to_string(),
+        ));
+    };
+    let aliases = hermes_projects_dir()
+        .as_deref()
+        .map(read_alias_map)
+        .unwrap_or_default();
+    // Accept the requested slug, its canonical, and every alias that folds
+    // onto the same card. `verity` must see `verity-core` deliveries — the
+    // board folds that way, but this endpoint used to only expand aliases
+    // that *point at* the raw slug, so `GET /verity/updates` stayed frozen
+    // on August-7 `project:verity` rows.
+    let keys = project_tag_keys_with(&aliases, &slug);
+    let limit = query.limit.unwrap_or(50).min(200);
+    let updates =
+        tokio::task::spawn_blocking(move || read_deliveries(&db, DELIVERY_SCAN_LIMIT, Some(&keys)))
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+
+    Ok(Json(serde_json::json!({
+        "slug": slug,
+        "updates": updates.into_iter().take(limit).collect::<Vec<_>>(),
+    })))
+}
+
+/// The store-held latest state of a project, rendered in the exact serialized
+/// shape the per-request delivery scan used to produce — every surface (web
+/// dashboard, desktop plugin, iOS) consumes `latest_update` as-is.
+///
+/// Field mapping: `headline`/`at`(=last_seen_at)/`session_id` come from the
+/// state event; `signature` is the canonical slug (the routing key the row is
+/// keyed by); `state` is the stored descriptor unless it is a synthetic
+/// `ctrl:` marker (CTRL-only deliveries never had a descriptor); `mode` and
+/// `blocker` come from the roster record; `body` is not stored — `None`.
+fn store_update(
+    slug: &str,
+    state: &super::projects_store::ProjectState,
+    mode: Option<String>,
+    blocker: Option<String>,
+) -> DeliveryUpdate {
+    DeliveryUpdate {
+        headline: state.headline.clone().unwrap_or_default(),
+        body: None,
+        session_id: state.session_id.clone().unwrap_or_default(),
+        at: state.last_seen_at.clone(),
+        signature: Some(slug.to_string()),
+        state: Some(state.signature.clone())
+            .filter(|descriptor| !descriptor.starts_with(CTRL_DESCRIPTOR_PREFIX)),
+        mode,
+        blocker,
+        next_action: None,
+        decision: None,
+    }
+}
+
+/// Turn a slug into a readable fallback name: `ec-defensive-research` ->
+/// `Ec Defensive Research`. Used only when the roster carries no explicit
+/// title, so a raw slug never leaks into a notification or a board row.
+pub(crate) fn humanize_slug(slug: &str) -> String {
+    slug.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Board-visible mission-tag project that has no roster row yet.
+fn synthetic_project_record(slug: &str) -> super::projects_store::ProjectRecord {
+    let now = chrono::Utc::now().to_rfc3339();
+    super::projects_store::ProjectRecord {
+        slug: slug.to_string(),
+        title: Some(humanize_slug(slug)),
+        objective: None,
+        status: "active".to_string(),
+        mode: None,
+        wait_ticks: 0,
+        next_action: None,
+        blocker: None,
+        controller_cron_id: None,
+        repository: None,
+        created_at: now.clone(),
+        updated_at: now,
+        mode_signal_at: None,
+    }
+}
+
+/// Persisted state uses a mode/blocker pair; legacy delivery strings may
+/// carry the reason after a colon. An explicit blocker wins over that suffix.
+fn is_decision_block(mode: Option<&str>, blocker: Option<&str>) -> bool {
+    let Some(mode) = mode else {
+        return false;
+    };
+    let (base, suffix) = mode
+        .split_once(':')
+        .map_or((mode, None), |(base, why)| (base, Some(why)));
+    base.eq_ignore_ascii_case("blocked")
+        && blocker
+            .or(suffix)
+            .is_some_and(|why| why.eq_ignore_ascii_case("decision"))
+}
+
+fn project_mode_projection(
+    project: &mut ProjectRecord,
+    missions: Option<&[Mission]>,
+    waits: &HashMap<uuid::Uuid, Option<String>>,
+    pending_decisions: u32,
+) {
+    let was_decision = is_decision_block(project.mode.as_deref(), project.blocker.as_deref());
+    project.mode = project_mode_from_missions(
+        project.mode.as_deref(),
+        project.blocker.as_deref(),
+        missions,
+        waits,
+        pending_decisions,
+    );
+    let decision_evidence = pending_decisions > 0
+        || missions.is_some_and(|rows| mission_roster_needs_operator(rows, waits));
+    if project.mode.as_deref() == Some("blocked:decision") && decision_evidence {
+        project.blocker = Some("decision".into());
+    } else if missions.is_some() && was_decision {
+        project.blocker = None;
+    }
+}
+
+/// Roster/CTRL mode is the default; live work and parked decisions win.
+/// `paused` is never overridden — the operator (or controller) parked it.
+/// Raw `awaiting_user` is not a decision block. A `pending_user` ledger row
+/// becomes `blocked:decision` only when there is no live work (and no
+/// qualified `needs_operator` page). Live work still wins.
+pub(crate) fn honest_controller_mode(
+    store_mode: Option<&str>,
+    store_blocker: Option<&str>,
+    has_live_mission: bool,
+    needs_operator: bool,
+    pending_decisions: u32,
+) -> Option<String> {
+    let base = store_mode
+        .map(|mode| mode.split_once(':').map_or(mode, |(head, _)| head))
+        .unwrap_or("");
+    if base.eq_ignore_ascii_case("paused") {
+        return store_mode.map(str::to_string);
+    }
+    if has_live_mission && !needs_operator {
+        return Some("active".to_string());
+    }
+    if pending_decisions > 0 || needs_operator {
+        return Some("blocked:decision".to_string());
+    }
+    // A prior decision block is a derived state, not a durable pause. Once
+    // its evidence disappears, clear it rather than making the controller
+    // wait for a decision that no longer exists. Other blockers remain intact.
+    if is_decision_block(store_mode, store_blocker) {
+        return None;
+    }
+    store_mode.map(str::to_string)
+}
+
+/// Use the same qualified mission attention as the board, including live
+/// AskUserQuestion waits. A completed report awaiting ACK is not a decision.
+fn project_mode_from_missions(
+    store_mode: Option<&str>,
+    store_blocker: Option<&str>,
+    missions: Option<&[Mission]>,
+    waiting_user_waits: &HashMap<uuid::Uuid, Option<String>>,
+    pending_decisions: u32,
+) -> Option<String> {
+    // A failed collection is unknown evidence, not an empty roster. Preserve
+    // the last mode until a successful read can establish that a wait ended.
+    let Some(missions) = missions else {
+        if pending_decisions > 0 {
+            return honest_controller_mode(
+                store_mode,
+                store_blocker,
+                false,
+                false,
+                pending_decisions,
+            );
+        }
+        return store_mode.map(str::to_string);
+    };
+    let has_live = missions
+        .iter()
+        .any(|mission| super::controller_honesty::is_live_writer_status(mission.status));
+    let needs_operator = mission_roster_needs_operator(missions, waiting_user_waits);
+    honest_controller_mode(
+        store_mode,
+        store_blocker,
+        has_live,
+        needs_operator,
+        pending_decisions,
+    )
+}
+
+fn mission_roster_needs_operator(
+    missions: &[Mission],
+    waiting_user_waits: &HashMap<uuid::Uuid, Option<String>>,
+) -> bool {
+    missions.iter().any(|mission| {
+        mission_chip(
+            mission,
+            waiting_user_waits.contains_key(&mission.id),
+            waiting_user_waits
+                .get(&mission.id)
+                .and_then(|started| started.as_deref()),
+        )
+        .needs_operator
+    })
+}
+
+struct ProjectRowBuilder {
+    slug: String,
+    /// Roster title/next-action, attached when the slug has a roster record.
+    title: Option<String>,
+    next_action: Option<String>,
+    /// Roster mode + controller link, attached alongside title/next_action.
+    mode: Option<String>,
+    mode_blocker: Option<String>,
+    controller_cron_id: Option<String>,
+    /// Last successful run of the linked controller job (scheduler-side
+    /// heartbeat), resolved by the handler from the Hermes cron jobs file.
+    controller_heartbeat_at: Option<String>,
+    tracker: Option<TrackerInfo>,
+    missions: Vec<MissionChip>,
+    /// Health inputs, accumulated alongside the display chips.
+    health_inputs: Vec<OwnedHealthInput>,
+    latest_update: Option<DeliveryUpdate>,
+    /// When the roster mode/blocker was last written. Ages "blocker reported"
+    /// independently of the newest state-event timestamp.
+    mode_signal_at: Option<String>,
+    /// How many consecutive deliveries reported the latest state — the stall
+    /// signal's input, read from the store's observation count.
+    latest_observations: u32,
+    updates_count: usize,
+    autonomy_level: Option<String>,
+    pending_decisions: u32,
+    /// Attached by the handler from the situation builder; `None` means the
+    /// builder was never consulted, rendered as source-unavailable.
+    summary: Option<super::situation::TrackSummary>,
+    done_keys: std::collections::BTreeSet<String>,
+    /// False when the live wait scan failed for some store: the chips may
+    /// misreport an AskUserQuestion wait as plain live work, so mission
+    /// evidence must not override or clear the stored mode.
+    mission_evidence_complete: bool,
+}
+
+impl ProjectRowBuilder {
+    fn new(slug: String) -> Self {
+        Self {
+            slug,
+            title: None,
+            next_action: None,
+            mode: None,
+            mode_blocker: None,
+            controller_cron_id: None,
+            controller_heartbeat_at: None,
+            tracker: None,
+            missions: Vec::new(),
+            health_inputs: Vec::new(),
+            latest_update: None,
+            mode_signal_at: None,
+            latest_observations: 0,
+            updates_count: 0,
+            autonomy_level: None,
+            pending_decisions: 0,
+            summary: None,
+            done_keys: std::collections::BTreeSet::new(),
+            mission_evidence_complete: true,
+        }
+    }
+
+    /// Fold one roster record onto this (canonical) board row.
+    ///
+    /// A canonical record is authoritative, including a NULL `next_action`.
+    /// An alias record fills `next_action` only when the canonical slug has
+    /// no roster row of its own — `update_project_status` / ingest can write
+    /// the alias first, and that value must survive the fold. Title, mode,
+    /// and controller link still gap-fill either way. Live writers overlay
+    /// `next_action` later in `finish()`.
+    fn apply_roster(&mut self, record: ProjectRecord, canonical_has_roster: bool) {
+        let is_canonical = record.slug == self.slug;
+        let mode_signal_at = record.mode_signal_at.or(Some(record.updated_at));
+        if is_canonical {
+            self.title = record.title;
+            self.next_action = record.next_action;
+            self.mode = record.mode;
+            self.mode_blocker = record.blocker;
+            self.controller_cron_id = record.controller_cron_id;
+            self.mode_signal_at = mode_signal_at;
+            return;
+        }
+        self.title = self.title.take().or(record.title);
+        if !canonical_has_roster {
+            self.next_action = self.next_action.take().or(record.next_action);
+        }
+        if self.mode.is_none() && record.mode.is_some() {
+            self.mode = record.mode;
+            self.mode_blocker = record.blocker;
+            self.mode_signal_at = mode_signal_at.clone();
+        }
+        self.controller_cron_id = self.controller_cron_id.take().or(record.controller_cron_id);
+    }
+
+    /// Attach the store-derived latest update: the newest state event plus the
+    /// roster's mode/blocker, with the observation count driving the stall
+    /// signal and the timeline total driving `updates_count`.
+    fn attach_store_update(&mut self, update: DeliveryUpdate, observations: u32, total: usize) {
+        self.latest_update = Some(update);
+        self.latest_observations = observations;
+        self.updates_count = total;
+    }
+
+    fn finish(
+        mut self,
+        archived: &[String],
+        forced: Option<&str>,
+        binding: Option<ProjectConversation>,
+        now: &str,
+    ) -> ProjectRow {
+        // Rolled up before the chips are truncated, so the verdict covers
+        // every mission rather than only the 8 shown.
+        let inputs: Vec<_> = self.health_inputs.iter().map(|i| i.as_input()).collect();
+        let plan_known = self.summary.is_some();
+        let health = super::project_health::rollup_with_plan(
+            &inputs,
+            now,
+            plan_known.then_some(&self.done_keys),
+        );
+        let summary = self
+            .summary
+            .take()
+            .unwrap_or_else(|| super::situation::TrackSummary {
+                source_unavailable: true,
+                as_of: now.to_string(),
+                ..Default::default()
+            });
+
+        self.missions
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        // Only qualified operator pages count as "awaiting user". Ack and
+        // in-grace controller-owned questions stay off the attention shelf.
+        let awaiting_user = self
+            .missions
+            .iter()
+            .filter(|chip| chip.needs_operator)
+            .count();
+        let has_live_mission = self
+            .missions
+            .iter()
+            .any(|chip| super::controller_honesty::is_live_writer_status(chip.status));
+        // Live work and parked decisions beat the last CTRL trailer. A
+        // writer already running is `active` even if the last cron said
+        // `blocked:cannot-merge`; a pending question with no writer is
+        // `blocked:decision`. Operator `paused` is never overridden.
+        let (stored_mode, stored_blocker) = if self.mode.is_some() {
+            (self.mode.as_deref(), self.mode_blocker.as_deref())
+        } else {
+            self.latest_update.as_ref().map_or((None, None), |update| {
+                (update.mode.as_deref(), update.blocker.as_deref())
+            })
+        };
+        let was_decision = is_decision_block(stored_mode, stored_blocker);
+        self.mode = if self.mission_evidence_complete {
+            honest_controller_mode(
+                stored_mode,
+                stored_blocker,
+                has_live_mission,
+                awaiting_user > 0,
+                self.pending_decisions,
+            )
+        } else {
+            // Unknown evidence, not an empty roster: keep the stored mode
+            // (a ledger decision still wins) and never clear a blocker.
+            project_mode_from_missions(
+                stored_mode,
+                stored_blocker,
+                None,
+                &HashMap::new(),
+                self.pending_decisions,
+            )
+        };
+        if self.mission_evidence_complete
+            && was_decision
+            && self.mode.as_deref() != Some("blocked:decision")
+        {
+            self.mode_blocker = None;
+            if let Some(update) = self.latest_update.as_mut() {
+                if is_decision_block(update.mode.as_deref(), update.blocker.as_deref()) {
+                    update.mode = self.mode.clone();
+                    update.blocker = None;
+                }
+            }
+        }
+
+        let mut attention: Vec<String> = Vec::new();
+        let mut items: Vec<AttentionItem> = Vec::new();
+        let evidence_headline = self
+            .latest_update
+            .as_ref()
+            .map(|update| update.headline.clone())
+            .filter(|headline| !headline.trim().is_empty());
+        let latest_at = self.latest_update.as_ref().map(|update| update.at.clone());
+
+        if let Some(latest) = &self.latest_update {
+            if let Some(blocker) = latest.blocker.as_deref() {
+                // Age from the mode write, not the newest state event. A
+                // fresh mission callback refreshes `latest.at` without
+                // touching a stale roster blocker; a fresh HTTP set_mode
+                // stamps `mode_signal_at` even when the last state event is
+                // old.
+                let signal_at = self.mode_signal_at.as_deref().unwrap_or(&latest.at);
+                let stale_mode = chrono::DateTime::parse_from_rfc3339(signal_at)
+                    .ok()
+                    .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+                    .is_some_and(|(at, now)| {
+                        now.signed_duration_since(at) > chrono::Duration::hours(STALE_ACTIVE_HOURS)
+                    });
+                if !stale_mode {
+                    attention.push(format!("blocker reported: {blocker}"));
+                    items.push(AttentionItem {
+                        kind: "blocker_reported",
+                        message: format!("blocker reported: {blocker}"),
+                        mission_id: None,
+                        since: Some(signal_at.to_string()),
+                        evidence_headline: evidence_headline.clone(),
+                        action: None,
+                    });
+                }
+            }
+            // Same non-silent state three ticks in a row: the controller
+            // keeps reporting an unchanged world — the phantom-lease shape.
+            // Compare the state descriptor, not the routing key: the store
+            // collapses consecutive identical descriptors into one row and
+            // counts observations, so "three deliveries reported this state
+            // running" is exactly `observations >= 3` on the latest event.
+            if stall_descriptor(latest.state.as_deref()) && self.latest_observations >= 3 {
+                attention.push("same state on 3 consecutive updates".to_string());
+                items.push(AttentionItem {
+                    kind: "state_stalled",
+                    message: "same state on 3 consecutive updates".to_string(),
+                    mission_id: None,
+                    since: latest_at.clone(),
+                    evidence_headline: evidence_headline.clone(),
+                    action: None,
+                });
+            }
+        }
+        if awaiting_user > 0 {
+            attention.push(match awaiting_user {
+                1 => "1 mission awaiting user input".to_string(),
+                count => format!("{count} missions awaiting user input"),
+            });
+            for chip in self.missions.iter().filter(|chip| chip.needs_operator) {
+                items.push(AttentionItem {
+                    kind: "mission_awaiting_user",
+                    message: format!(
+                        "mission {} is waiting for you{}",
+                        &chip.id[..8.min(chip.id.len())],
+                        chip.title
+                            .as_deref()
+                            .map(|title| format!(": {title}"))
+                            .unwrap_or_default()
+                    ),
+                    mission_id: Some(chip.id.clone()),
+                    since: chip.last_status_change_at.clone(),
+                    evidence_headline: chip.title.clone(),
+                    action: Some(AttentionAction {
+                        label: "Acknowledge",
+                        method: "POST",
+                        path: format!("/api/control/missions/{}/status", chip.id),
+                        body: Some(serde_json::json!({ "status": "acknowledged" })),
+                    }),
+                });
+            }
+        }
+        // Same rule for ledger escalations: a pending_user decision is a
+        // question only the owner can answer, so freshness never silences it.
+        if self.pending_decisions > 0 {
+            let message = match self.pending_decisions {
+                1 => "1 decision awaiting you".to_string(),
+                count => format!("{count} decisions awaiting you"),
+            };
+            attention.push(message.clone());
+            items.push(AttentionItem {
+                kind: "decision_pending",
+                message,
+                mission_id: None,
+                since: latest_at.clone(),
+                evidence_headline: evidence_headline.clone(),
+                action: Some(AttentionAction {
+                    label: "Answer",
+                    method: "POST",
+                    path: format!("/api/projects/{}/decision/answer", self.slug),
+                    body: None,
+                }),
+            });
+        }
+
+        // Fresh-active suppression: the controller reported recently (silent
+        // ticks advance `at` too), says it is active, and reports no blocker —
+        // it has seen the failed/interrupted missions and continues, so those
+        // mission-derived reasons are noise, not attention. A stale controller,
+        // a blocker, a non-active mode, or an awaiting_user mission each keep
+        // the reasons. When suppression applies the reasons are not emitted at
+        // all: cards and pills count `attention_reasons` as rendered.
+        let mode_active = self
+            .mode
+            .as_deref()
+            .or_else(|| {
+                self.latest_update
+                    .as_ref()
+                    .and_then(|update| update.mode.as_deref())
+            })
+            .is_some_and(|mode| mode == "active");
+        let signal_fresh = self
+            .latest_update
+            .as_ref()
+            .and_then(|update| chrono::DateTime::parse_from_rfc3339(&update.at).ok())
+            .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+            .is_some_and(|(at, now)| {
+                let age = now.signed_duration_since(at);
+                age <= chrono::Duration::seconds(attention_fresh_signal_secs())
+            });
+        let blocker_set = self
+            .latest_update
+            .as_ref()
+            .is_some_and(|update| update.blocker.is_some());
+        let suppress_mission_reasons =
+            signal_fresh && mode_active && !blocker_set && awaiting_user == 0;
+
+        // One aggregated line instead of one per mission: the detail pane
+        // already lists every mission chip.
+        let problem_missions: Vec<&MissionChip> = if suppress_mission_reasons {
+            Vec::new()
+        } else {
+            self.missions
+                .iter()
+                .filter(|chip| {
+                    matches!(
+                        chip.status,
+                        MissionStatus::Failed | MissionStatus::Interrupted
+                    ) && chip.superseded_by.is_none()
+                })
+                .collect()
+        };
+        match problem_missions.len() {
+            0 => {}
+            1 => {
+                let chip = problem_missions[0];
+                attention.push(format!(
+                    "mission {} is {:?}",
+                    &chip.id[..8.min(chip.id.len())],
+                    chip.status
+                ));
+            }
+            count => {
+                attention.push(format!("{count} missions failed or interrupted"));
+            }
+        }
+        for chip in &problem_missions {
+            items.push(AttentionItem {
+                kind: "mission_failed",
+                message: format!(
+                    "mission {} is {:?}{}",
+                    &chip.id[..8.min(chip.id.len())],
+                    chip.status,
+                    chip.title
+                        .as_deref()
+                        .map(|title| format!(": {title}"))
+                        .unwrap_or_default()
+                ),
+                mission_id: Some(chip.id.clone()),
+                since: chip.last_status_change_at.clone(),
+                evidence_headline: chip.title.clone(),
+                action: Some(AttentionAction {
+                    label: "Acknowledge",
+                    method: "POST",
+                    path: format!("/api/control/missions/{}/status", chip.id),
+                    body: Some(serde_json::json!({ "status": "acknowledged" })),
+                }),
+            });
+        }
+        let tracker_active = self
+            .tracker
+            .as_ref()
+            .and_then(|t| t.status_line.as_deref())
+            .map(|line| {
+                let lower = line.to_lowercase();
+                lower.contains("active") || lower.contains("running")
+            })
+            .unwrap_or(false);
+        let tracker_paused = self
+            .tracker
+            .as_ref()
+            .and_then(|t| t.status_line.as_deref())
+            .map(|line| line.to_lowercase().contains("paused"))
+            .unwrap_or(false);
+        if tracker_active && !has_live_mission {
+            let last_signal = self
+                .latest_update
+                .as_ref()
+                .map(|u| u.at.clone())
+                .or_else(|| self.tracker.as_ref().and_then(|t| t.updated_at.clone()));
+            let stale = last_signal
+                .as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| {
+                    chrono::Utc::now().signed_duration_since(at.with_timezone(&chrono::Utc))
+                        > chrono::Duration::hours(STALE_ACTIVE_HOURS)
+                })
+                .unwrap_or(false);
+            if stale {
+                attention.push("active tracker with no live mission or recent update".to_string());
+                items.push(AttentionItem {
+                    kind: "tracker_stale",
+                    message: "active tracker with no live mission or recent update".to_string(),
+                    mission_id: None,
+                    since: last_signal.clone(),
+                    evidence_headline: evidence_headline.clone(),
+                    action: Some(AttentionAction {
+                        label: "Pause project",
+                        method: "POST",
+                        path: format!("/api/projects/{}/action", self.slug),
+                        body: Some(serde_json::json!({ "action": "pause" })),
+                    }),
+                });
+            }
+        }
+
+        // ── Honesty read-model: derive controller_health + progress_state
+        //    read-only, BEFORE the bucket so a lying `active` becomes an honest
+        //    `attention`. A project "claims to be active" when its controller
+        //    mode or its tracker says so; only then does a missing/stale
+        //    controller become worth surfacing. A dormant project (no claim, no
+        //    controller link) stays quiet (axes None). delivery_health is
+        //    computed after `conversation` below.
+        let claims_active = mode_active || tracker_active;
+        // Use the single `now` the handler stamped for the whole response (also
+        // what the tests fix), NOT wall-clock — otherwise two rows in one
+        // payload could disagree, and unit tests with a fixed `now` would read
+        // an 8-day-old signal.
+        let now_parsed = chrono::DateTime::parse_from_rfc3339(now).ok();
+        let signal_within_stale_window = self
+            .latest_update
+            .as_ref()
+            .map(|u| u.at.clone())
+            .or_else(|| self.tracker.as_ref().and_then(|t| t.updated_at.clone()))
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+            .zip(now_parsed)
+            .map(|(at, now)| {
+                now.signed_duration_since(at) <= chrono::Duration::hours(STALE_ACTIVE_HOURS)
+            })
+            .unwrap_or(false);
+        // Scheduler-side heartbeat: the linked job ran successfully recently,
+        // even if it delivered nothing ([SILENT] ticks produce no state event).
+        // A quiet controller is not a dead one.
+        let heartbeat_within_stale_window = self
+            .controller_heartbeat_at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .zip(now_parsed)
+            .map(|(at, now)| {
+                now.signed_duration_since(at) <= chrono::Duration::hours(STALE_ACTIVE_HOURS)
+            })
+            .unwrap_or(false);
+        let controller_health: Option<&'static str> =
+            if claims_active || self.controller_cron_id.is_some() {
+                if signal_within_stale_window || has_live_mission || heartbeat_within_stale_window {
+                    // Something is clearly driving it (fresh delivery or live
+                    // work) — don't cry wolf over a missing link when the engine
+                    // is demonstrably running. The link mismatch is a P2 concern.
+                    Some("healthy")
+                } else if claims_active && self.controller_cron_id.is_none() {
+                    // Active, but no recent signal, no live work, and no
+                    // controller link at all: the genuine zombie.
+                    Some("missing")
+                } else {
+                    // Has a link but has gone quiet past the stale window.
+                    Some("stale")
+                }
+            } else {
+                None
+            };
+        // The zombie the board used to render as a healthy `active`: an active
+        // project whose engine link is gone. Surface it as attention so the
+        // bucket stops lying. (`stale` is already covered by the tracker block
+        // above; the field alone carries it without forcing attention.)
+        if controller_health == Some("missing") {
+            attention.push("active project has no controller".to_string());
+            items.push(AttentionItem {
+                kind: "no_controller",
+                message: "active project has no controller".to_string(),
+                mission_id: None,
+                since: latest_at.clone(),
+                evidence_headline: evidence_headline.clone(),
+                action: Some(AttentionAction {
+                    label: "Pause project",
+                    method: "POST",
+                    path: format!("/api/projects/{}/action", self.slug),
+                    body: Some(serde_json::json!({ "action": "pause" })),
+                }),
+            });
+        }
+        let effective_mode = self
+            .mode
+            .as_deref()
+            .or_else(|| self.latest_update.as_ref().and_then(|u| u.mode.as_deref()));
+        let progress_state: Option<&'static str> =
+            if blocker_set || effective_mode == Some("blocked") {
+                Some("blocked")
+            } else if effective_mode == Some("active") && (has_live_mission || signal_fresh) {
+                Some("working")
+            } else if signal_within_stale_window && !has_live_mission && claims_active {
+                Some("waiting_external")
+            } else {
+                None
+            };
+
+        // A board override silences the automatic rules: pausing a project is
+        // an explicit "stop flagging this" from the operator.
+        let bucket: &'static str = match forced {
+            Some("paused") => "paused",
+            Some("archived") => "archived",
+            _ => {
+                if archived.contains(&self.slug) {
+                    "archived"
+                } else if !attention.is_empty() {
+                    "attention"
+                } else if tracker_paused {
+                    "paused"
+                } else {
+                    "active"
+                }
+            }
+        };
+
+        let conversation = binding.or_else(|| {
+            self.latest_update
+                .as_ref()
+                .map(|update| update.session_id.clone())
+                .filter(|session_id| !session_id.is_empty())
+                .map(|session_id| ProjectConversation {
+                    session_id,
+                    source: "latest_update",
+                    bound_at: None,
+                })
+        });
+
+        // Coarse in P0: a real binding means the controller's reports have a
+        // durable home; a merely-guessed session (`latest_update` fallback, a
+        // throwaway per-tick cron session) means the output is not reaching a
+        // stable conversation; nothing at all while active means it is dropped.
+        // Refined in P2 once the route has a single authoritative owner.
+        let delivery_health: Option<&'static str> =
+            if claims_active || self.controller_cron_id.is_some() {
+                match conversation.as_ref() {
+                    None => Some("dropped"),
+                    Some(c) if c.source == "latest_update" => Some("misrouted"),
+                    Some(_) => Some("reaching_user"),
+                }
+            } else {
+                None
+            };
+
+        // Never let a surface fall back to the raw lowercase-hyphenated slug
+        // ("ec-security"): when the roster carries no title, present a
+        // humanized slug ("Ec Security") so notifications/board rows always
+        // read as a name. (A project's true display title still wins when set.)
+        let title = self
+            .title
+            .clone()
+            .or_else(|| Some(humanize_slug(&self.slug)));
+
+        let next_action = next_action_from_live_titles(
+            self.missions
+                .iter()
+                .filter_map(|mission| {
+                    live_mission_title(mission.status, mission.title.as_deref(), &mission.id)
+                })
+                .collect(),
+        )
+        .or(self.next_action);
+
+        // Truncation is display-only: mode, attention and next action above
+        // must use the complete roster, including older long-running work.
+        self.missions.truncate(8);
+        ProjectRow {
+            slug: self.slug,
+            title,
+            next_action,
+            bucket,
+            board_override: forced.map(str::to_string),
+            controller_cron_id: self.controller_cron_id,
+            controller_heartbeat_at: self.controller_heartbeat_at,
+            mode: self.mode,
+            controller_health,
+            delivery_health,
+            progress_state,
+            tracker: self.tracker,
+            missions: self.missions,
+            latest_update: self.latest_update,
+            updates_count: self.updates_count,
+            autonomy_level: self.autonomy_level,
+            pending_decisions: self.pending_decisions,
+            attention_reasons: attention,
+            attention: items,
+            health,
+            summary,
+            conversation,
+        }
+    }
+}
+
+fn bucket_rank(bucket: &str) -> u8 {
+    match bucket {
+        "attention" => 0,
+        "active" => 1,
+        "paused" => 2,
+        _ => 3,
+    }
+}
+
+fn mission_chip(
+    mission: &Mission,
+    waiting_for_user_tool: bool,
+    wait_started_at: Option<&str>,
+) -> MissionChip {
+    MissionChip {
+        id: mission.id.to_string(),
+        status: mission.status,
+        title: mission.title.clone(),
+        updated_at: mission.updated_at.clone(),
+        github_pr: mission.project.github_pr.clone(),
+        last_status_change_at: mission
+            .activity
+            .last_status_change_at
+            .clone()
+            .or_else(|| Some(mission.created_at.clone())),
+        needs_operator: super::operator_attention::mission_needs_operator(
+            mission,
+            waiting_for_user_tool,
+            wait_started_at,
+            chrono::Utc::now(),
+        ),
+        superseded_by: super::mission_horizon::superseded_by(mission).map(|id| id.to_string()),
+    }
+}
+
+fn read_trackers(dir: &Path) -> Vec<TrackerInfo> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut trackers = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+        let status_line = std::fs::read_to_string(&path).ok().and_then(|content| {
+            content
+                .lines()
+                .find_map(|line| {
+                    let trimmed = line.trim();
+                    trimmed
+                        .strip_prefix("**Status**:")
+                        .or_else(|| trimmed.strip_prefix("**Status** :"))
+                        .map(|rest| rest.trim().to_string())
+                })
+                .or_else(|| {
+                    // Fallback: yaml-ish `status: …` near the top of the file.
+                    content.lines().take(20).find_map(|line| {
+                        let trimmed = line.trim();
+                        let rest = trimmed
+                            .strip_prefix("status:")
+                            .or_else(|| trimmed.strip_prefix("Status:"))?;
+                        let value = rest.trim();
+                        (!value.is_empty()).then(|| value.to_string())
+                    })
+                })
+        });
+        let updated_at = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339());
+        trackers.push(TrackerInfo {
+            slug,
+            status_line,
+            updated_at,
+        });
+    }
+    trackers
+}
+
+fn list_markdown_slugs(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut slugs: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                return None;
+            }
+            path.file_stem().and_then(|s| s.to_str()).map(String::from)
+        })
+        .collect();
+    slugs.sort();
+    slugs
+}
+
+/// Optional `routes.json` in the trackers dir: `{ "verity": "verity-roadmap" }`
+/// maps a controller routing key (STATE_SIGNATURE prefix or mission project
+/// tag) onto the tracker slug that should own its row.
+pub(crate) fn read_alias_map(dir: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(dir.join("routes.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn resolve_alias(aliases: &HashMap<String, String>, key: &str) -> String {
+    aliases.get(key).cloned().unwrap_or_else(|| key.to_string())
+}
+
+/// Fold a mission/controller project tag through `routes.json`.
+///
+/// An inverted alias (canonical slug pointing at a phantom name) is how
+/// Coldcard reports signed `ec-defensive-research` and never reached the
+/// bound session. Callers that persist a project tag must store the
+/// canonical roster slug, not a nickname.
+pub fn canonicalize_project_slug(slug: &str) -> String {
+    canonicalize_project_slug_with(
+        &hermes_projects_dir()
+            .map(|dir| read_alias_map(&dir))
+            .unwrap_or_default(),
+        slug,
+    )
+}
+
+/// Test seam: same fold as [`canonicalize_project_slug`] with an explicit map.
+pub fn canonicalize_project_slug_with(aliases: &HashMap<String, String>, slug: &str) -> String {
+    let trimmed = slug.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(canonical) = aliases.get(trimmed) {
+        return canonical.clone();
+    }
+    // Display titles (`Verity`) and mixed-case route keys must fold the
+    // same way as the lowercase nickname already in routes.json.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower != trimmed {
+        if let Some(canonical) = aliases.get(&lower) {
+            return canonical.clone();
+        }
+    }
+    resolve_alias(aliases, trimmed)
+}
+
+/// Roster keys to try for `GET /api/projects/:slug`, first hit wins.
+///
+/// Canonical alias first (`verity-roadmap` / `Verity` → `verity-core`),
+/// then ASCII-lower of the request, then the raw slug so a brand-new
+/// roster row is still reachable before `routes.json` knows about it.
+pub fn roster_lookup_keys_with(aliases: &HashMap<String, String>, requested: &str) -> Vec<String> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let canonical = canonicalize_project_slug_with(aliases, trimmed);
+    let lower = trimmed.to_ascii_lowercase();
+    let mut keys = Vec::new();
+    for key in [canonical, lower, trimmed.to_string()] {
+        if !key.is_empty() && !keys.iter().any(|seen| seen == &key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+pub(crate) fn resolve_roster_slug(
+    store: &super::projects_store::ProjectsStore,
+    requested: &str,
+) -> Result<Option<String>, String> {
+    for key in roster_lookup_keys_with(
+        &hermes_projects_dir()
+            .map(|dir| read_alias_map(&dir))
+            .unwrap_or_default(),
+        requested,
+    ) {
+        if !is_plain_key(&key) {
+            continue;
+        }
+        if store.get_project(&key)?.is_some() {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}
+
+/// Mission `project` tags that belong on this project's item view.
+///
+/// Creates persist the canonical slug, but historical rows and some
+/// controllers still stamp an alias (`coldcard`, `ec-defensive-research`).
+/// The item inventory has to gather every tag that folds onto the same
+/// canonical, otherwise `get_project("coldcard")` looks empty while
+/// `coldcard-rng-cracker` / `ec-defensive-research` hold the attempts.
+pub fn project_tag_keys(slug: &str) -> Vec<String> {
+    project_tag_keys_with(
+        &hermes_projects_dir()
+            .map(|dir| read_alias_map(&dir))
+            .unwrap_or_default(),
+        slug,
+    )
+}
+
+pub fn project_tag_keys_with(aliases: &HashMap<String, String>, slug: &str) -> Vec<String> {
+    let trimmed = slug.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let canonical = canonicalize_project_slug_with(aliases, trimmed);
+    let mut keys = vec![canonical.clone()];
+    if trimmed != canonical && !keys.iter().any(|key| key == trimmed) {
+        keys.push(trimmed.to_string());
+    }
+    let mut extras: Vec<String> = aliases
+        .keys()
+        .filter(|alias| {
+            canonicalize_project_slug_with(aliases, alias) == canonical
+                && !keys.iter().any(|key| key == *alias)
+        })
+        .cloned()
+        .collect();
+    extras.sort();
+    keys.extend(extras);
+    keys
+}
+
+fn collect_family_tracks(
+    store: &super::projects_store::ProjectsStore,
+    slug: &str,
+) -> Result<Vec<super::projects_store::ProjectTrack>, String> {
+    let mut collected = Vec::new();
+    let mut seen = HashSet::new();
+    for key in project_tag_keys(slug) {
+        for track in store.tracks(&key)? {
+            if seen.insert(track.track.clone()) {
+                collected.push(track);
+            }
+        }
+    }
+    Ok(collected)
+}
+
+fn collect_family_proposals(
+    store: &super::projects_store::ProjectsStore,
+    slug: &str,
+) -> Result<Vec<super::projects_store::RoadmapProposal>, String> {
+    let mut collected = Vec::new();
+    let mut seen = HashSet::new();
+    for key in project_tag_keys(slug) {
+        for proposal in store.list_open_proposals(&key)? {
+            if seen.insert(proposal.task_key.clone()) {
+                collected.push(proposal);
+            }
+        }
+    }
+    Ok(collected)
+}
+
+/// Load one project's situation: declared tracks, leftover proposals and
+/// attention-horizon attempts, folded through the situation builder. A store
+/// or mission-collect failure is reported on the summary
+/// (`source_unavailable`) instead of collapsing to an empty plan.
+pub(crate) async fn load_project_situation(
+    state: &Arc<AppState>,
+    slug: &str,
+) -> super::situation::ProjectSituation {
+    let mut source = super::situation::SourceStatus::default();
+    let tracks = match collect_family_tracks(&state.projects, slug) {
+        Ok(tracks) => tracks,
+        Err(error) => {
+            tracing::warn!(project = %slug, %error, "situation: tracks unavailable");
+            source.tracks_failed = true;
+            Vec::new()
+        }
+    };
+    let proposals = match collect_family_proposals(&state.projects, slug) {
+        Ok(proposals) => proposals,
+        Err(error) => {
+            tracing::warn!(project = %slug, %error, "situation: proposals unavailable");
+            source.tracks_failed = true;
+            Vec::new()
+        }
+    };
+    let missions = match state
+        .control
+        .collect_attention_missions_for_project(slug)
+        .await
+    {
+        Ok(missions) => missions,
+        Err(error) => {
+            tracing::warn!(project = %slug, %error, "situation: attention collect failed");
+            source.missions_failed = true;
+            Vec::new()
+        }
+    };
+    let items = super::mission_horizon::project_items(&tracks, &proposals, &missions);
+    let as_of = chrono::Utc::now().to_rfc3339();
+    let mut situation = super::situation::build(slug, &items, &source, &as_of);
+    match state.projects.live_leases(Some(slug)) {
+        Ok(leases) => super::situation::apply_leases(&mut situation, &leases),
+        Err(error) => {
+            tracing::warn!(project = %slug, %error, "situation: leases unavailable");
+        }
+    }
+    situation
+}
+
+/// Snapshot the controller state as markdown for `.paloma/controller.md`.
+pub(crate) async fn controller_snapshot_markdown(state: &Arc<AppState>, slug: &str) -> String {
+    let grant = state.projects.get_grant(slug).ok().flatten();
+    let grant_md = grant.map(|grant| {
+        let mut lines = Vec::new();
+        if let Some(level) = grant.autonomy_level {
+            lines.push(format!("- autonomy_level: {level}"));
+        }
+        if let Some(merge) = grant.merge_authority {
+            lines.push(format!("- merge_authority: {merge}"));
+        }
+        if let Some(budget) = grant.budget_per_tick {
+            lines.push(format!("- budget_per_tick: {budget}"));
+        }
+        if let Some(parallel) = grant.parallel_missions {
+            lines.push(format!("- parallel_missions: {parallel}"));
+        }
+        if let Some(bar) = grant.material_bar {
+            lines.push(format!("- material_bar: {bar}"));
+        }
+        if let Some(pause) = grant.pause_reason {
+            lines.push(format!("- pause_reason: {pause}"));
+        }
+        if let Some(resume) = grant.resume_condition {
+            lines.push(format!("- resume_condition: {resume}"));
+        }
+        if lines.is_empty() {
+            "_(empty)_".to_string()
+        } else {
+            lines.join("\n")
+        }
+    });
+    let situation = load_project_situation(state, slug).await;
+    let tracks = situation
+        .items
+        .iter()
+        .filter(|item| item.open)
+        .take(24)
+        .map(|item| {
+            format!(
+                "`{}` — {} ({})",
+                item.key,
+                if item.title.is_empty() {
+                    item.key.as_str()
+                } else {
+                    item.title.as_str()
+                },
+                item.derived_state.as_str()
+            )
+        })
+        .collect();
+    let live_missions = situation
+        .items
+        .iter()
+        .flat_map(|item| item.attempts.iter())
+        .filter(|attempt| {
+            matches!(
+                attempt.status.as_str(),
+                "active" | "pending" | "running" | "starting" | "queued" | "waiting_background"
+            )
+        })
+        .take(16)
+        .map(|attempt| {
+            format!(
+                "{} — {}",
+                attempt.id,
+                attempt.title.as_deref().unwrap_or("untitled")
+            )
+        })
+        .collect();
+    let steers = state
+        .projects
+        .list_pending_steers(slug)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|steer| steer.body)
+        .collect();
+    let view = super::project_controller::snapshot_view(state, slug).await;
+    let runs = view.as_ref().map(|v| v.runs.as_slice()).unwrap_or_default();
+    let ctrl = runs.iter().find_map(|run| run.ctrl.clone());
+    let last_tick = runs
+        .iter()
+        .find(|run| !run.silent && !run.report.trim().is_empty())
+        .map(|run| run.report.clone());
+    super::mission_payload::render_controller_md(&super::mission_payload::ControllerSnapshot {
+        slug: slug.to_string(),
+        grant: grant_md,
+        ctrl,
+        last_tick,
+        tracks,
+        live_missions,
+        pending_steers: steers,
+    })
+}
+
+fn accept_err(error: super::projects_store::AcceptError) -> (StatusCode, String) {
+    use super::projects_store::AcceptError;
+    match &error {
+        AcceptError::NotFound => (StatusCode::NOT_FOUND, error.to_string()),
+        AcceptError::StaleRevision { .. } | AcceptError::IdempotencyMismatch { .. } => {
+            (StatusCode::CONFLICT, error.to_string())
+        }
+        AcceptError::Invalid(_) => (StatusCode::BAD_REQUEST, error.to_string()),
+        AcceptError::Store(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+    }
+}
+
+/// `POST /api/projects/:slug/tracks/:track/accept` — satisfy a track with
+/// evidence. This is the only way a track becomes `satisfied`.
+pub async fn accept_project_track(
+    State(state): State<Arc<AppState>>,
+    AxumPath((requested, track)): AxumPath<(String, String)>,
+    Json(req): Json<super::projects_store::AcceptRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&track) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let family = project_tag_keys(&slug);
+    let stored = state
+        .projects
+        .find_track_slug(&family, &track)
+        .map_err(store_err)?
+        .unwrap_or(slug);
+    let result = state
+        .projects
+        .accept_track_evidence(&stored, &track, &req)
+        .map_err(accept_err)?;
+    let situation = load_project_situation(&state, &stored).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "replayed": result.replayed,
+        "track": result.track,
+        "receipts": result.receipts,
+        "summary": situation.summary,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InvalidateEvidenceRequest {
+    pub receipt_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+/// `POST /api/projects/:slug/tracks/:track/invalidate` — append an
+/// `invalidate` receipt over evidence; the track reopens on the next read.
+pub async fn invalidate_project_track_evidence(
+    State(state): State<Arc<AppState>>,
+    AxumPath((requested, track)): AxumPath<(String, String)>,
+    Json(req): Json<InvalidateEvidenceRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&track) {
+        return Err(bad_slug());
+    }
+    if req.reason.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "reason is required".to_string()));
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let family = project_tag_keys(&slug);
+    let stored = state
+        .projects
+        .find_track_slug(&family, &track)
+        .map_err(store_err)?
+        .unwrap_or(slug);
+    let receipt = state
+        .projects
+        .invalidate_track_evidence(
+            &stored,
+            &track,
+            &req.receipt_id,
+            req.reason.trim(),
+            "operator",
+            req.actor.as_deref().unwrap_or("operator"),
+        )
+        .map_err(accept_err)?;
+    let situation = load_project_situation(&state, &stored).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "receipt": receipt,
+        "summary": situation.summary,
+    })))
+}
+
+/// `GET /api/projects/:slug/tracks/:track/receipts` — the evidence history.
+pub async fn project_track_receipts(
+    State(state): State<Arc<AppState>>,
+    AxumPath((requested, track)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) || !is_plain_key(&track) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let family = project_tag_keys(&slug);
+    let stored = state
+        .projects
+        .find_track_slug(&family, &track)
+        .map_err(store_err)?
+        .unwrap_or(slug);
+    let receipts = state
+        .projects
+        .receipts_for_track(&stored, &track)
+        .map_err(store_err)?;
+    let track_row = state.projects.track(&stored, &track).map_err(store_err)?;
+    Ok(Json(serde_json::json!({
+        "track": track_row,
+        "receipts": receipts,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AckReconcileRequest {
+    pub receipt_id: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+/// `POST /api/projects/:slug/reconcile/ack` — acknowledge a reconciliation
+/// receipt. Appends `reconcile_ack`; the receipt itself is immutable.
+pub async fn ack_project_reconcile(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+    Json(req): Json<AckReconcileRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let Some(receipt) = state.projects.receipt(&req.receipt_id).map_err(store_err)? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no receipt '{}'", req.receipt_id),
+        ));
+    };
+    if receipt.kind != "reconcile" || receipt.project_slug.as_deref() != Some(slug.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "receipt '{}' is not a reconcile receipt of '{slug}'",
+                req.receipt_id
+            ),
+        ));
+    }
+    let ack = state
+        .projects
+        .ack_reconcile(
+            &slug,
+            &req.receipt_id,
+            req.actor.as_deref().unwrap_or("operator"),
+        )
+        .map_err(receipt_write_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "ack": ack })))
+}
+
+/// `SANDBOXED_ROSTER_MARKDOWN=off` stops Hermes tracker Markdown from
+/// creating roster rows. Tracker files then only enrich rows that exist
+/// (status line, mtime). Default on for one release; flipped per project
+/// after `palomactl import-trackers` has run.
+pub fn markdown_roster_enabled() -> bool {
+    !matches!(
+        std::env::var("SANDBOXED_ROSTER_MARKDOWN")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "0" | "false" | "no"
+    )
+}
+
+/// `GET /api/projects/:slug/situation` — the canonical bounded read.
+/// `get_project`, `/tasks`, the roster row and MCP `get_situation` are all
+/// projections of this. `steers` rides alongside the situation builder
+/// output so the cursor hash stays a plan hash, not an inbox hash.
+pub async fn project_situation(
+    State(state): State<Arc<AppState>>,
+    AxumPath(requested): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&requested) {
+        return Err(bad_slug());
+    }
+    let slug = resolve_roster_slug(&state.projects, &requested)
+        .map_err(store_err)?
+        .unwrap_or(requested);
+    let situation = load_project_situation(&state, &slug).await;
+    let steers = state.projects.list_steers(&slug).map_err(store_err)?;
+    let mut value = serde_json::to_value(situation).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialize situation: {error}"),
+        )
+    })?;
+    value["steers"] = serde_json::to_value(steers).unwrap_or(serde_json::json!({
+        "pending": [],
+        "recent": []
+    }));
+    Ok(Json(value))
+}
+
+/// Map a canonical item onto the `/tasks` row shape the desktop still
+/// renders. Status vocabulary stays the checklist's: accepted / running /
+/// failed / proposed / pending — derived from `derived_state`, never counted
+/// separately.
+fn situation_roadmap_task(item: &super::situation::SituationItem) -> serde_json::Value {
+    let latest = item.attempts.first();
+    serde_json::json!({
+        "id": item.id,
+        "task_key": item.key,
+        "title": item.title,
+        "status": super::situation::roadmap_status(item),
+        "derived_state": item.derived_state,
+        "origin": item.origin,
+        "kind": item.kind,
+        "open": item.open,
+        "desired_state": item.desired_state,
+        "acceptance_criteria": item.acceptance_criteria,
+        "depends_on": item.depends_on,
+        "worker_mission_id": latest.map(|attempt| attempt.id.to_string()),
+        "attempts": item.attempts.len(),
+        "updated_at": item.updated_at,
+    })
+}
+
+/// True when every field of a state descriptor is an unfilled `<placeholder>`.
+///
+/// Deliberately narrow: a descriptor is rejected only when it carries no real
+/// content at all. A partially-filled trailer is still a state — the operator
+/// learns more from `phase1|<heads>|blocked` than from silence.
+fn is_placeholder_descriptor(descriptor: &str) -> bool {
+    let mut saw_field = false;
+    for field in descriptor.split('|') {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
+        saw_field = true;
+        if !(field.starts_with('<') && field.ends_with('>')) {
+            return false;
+        }
+    }
+    saw_field
+}
+
+/// A routing key / project tag must be a plain slug.
+pub(crate) fn is_plain_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 100
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Board-level state overrides (`board-overrides.json` in the trackers dir):
+/// `{ "slug": "paused" | "archived" | "deleted" }`. An overlay owned by the
+/// dashboard — tracker files stay untouched because Hermes controllers own
+/// them. `deleted` hides the row (and drops its deliveries); the two others
+/// force the bucket.
+fn overrides_path(dir: &Path) -> PathBuf {
+    dir.join("board-overrides.json")
+}
+
+pub(crate) fn read_overrides(dir: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(overrides_path(dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectActionRequest {
+    action: String,
+    /// Only used by `delete`. Default is `delete_missions` (wipe tagged
+    /// missions). Pass `keep_missions` to drop the roster row and keep
+    /// mission history — archive is the usual way to keep a project.
+    #[serde(default)]
+    delete_mode: Option<String>,
+}
+
+/// Apply a board action to a project. Delete wipes the roster row and, by
+/// default, every mission tagged with the slug. The board override stays as a
+/// tombstone so tracker markdown cannot recreate the row.
+#[derive(Debug, serde::Deserialize)]
+pub struct BindConversationRequest {
+    pub session_id: String,
+}
+
+/// Declare which conversation a project reports into.
+///
+/// Deliberately explicit: the inferred value (newest delivery's session) is
+/// almost always a cron tick's throwaway session, which is already ended and
+/// cannot be replied to.
+pub async fn bind_project_conversation(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(request): Json<BindConversationRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // `is_plain_key` also rejects path traversal, which the slug-length check
+    // in `project_action` does not.
+    if !is_plain_key(&slug) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
+    }
+    let session_id = request.session_id.trim();
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "session_id must be 1-128 chars of [A-Za-z0-9._:-]".to_string(),
+        ));
+    }
+    let canonical = canonicalize_project_slug(&slug);
+    if !is_plain_key(&canonical) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
+    }
+    let aliases = project_tag_keys(&canonical);
+    let tip = match hermes_state_db() {
+        Some(path) => super::session_chain::live_tip(&path, session_id),
+        None => session_id.to_string(),
+    };
+    let conversation = state
+        .projects
+        .set_canonical_binding(&canonical, &tip, &aliases, None)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if let Err(error) = super::hermes_control_route::bind_canonical(&canonical, &tip) {
+        tracing::warn!(slug = %canonical, session = %tip, %error, "hermes route write-through failed");
+    }
+    Ok(Json(serde_json::json!({
+        "slug": canonical,
+        "conversation": conversation,
+    })))
+}
+
+pub async fn unbind_project_conversation(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
+    }
+    let canonical = canonicalize_project_slug(&slug);
+    let aliases = project_tag_keys(&canonical);
+    let mut removed = state
+        .projects
+        .clear_binding(&canonical)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    for alias in &aliases {
+        if alias != &canonical {
+            removed |= state
+                .projects
+                .clear_binding(alias)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+    }
+    if let Err(error) = super::hermes_control_route::unbind_canonical(&canonical) {
+        tracing::warn!(slug = %canonical, %error, "hermes route unbind write-through failed");
+    }
+    Ok(Json(
+        serde_json::json!({ "slug": canonical, "unbound": removed }),
+    ))
+}
+
+pub async fn project_action(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(request): Json<ProjectActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some(dir) = hermes_projects_dir() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "HERMES_PROJECTS_DIR is not configured".to_string(),
+        ));
+    };
+    if slug.is_empty() || slug.len() > 200 {
+        return Err((StatusCode::BAD_REQUEST, "invalid slug".to_string()));
+    }
+    let mut overrides = read_overrides(&dir);
+    let mut deleted_mission_ids = Vec::new();
+    let mut project_record_deleted = false;
+    match request.action.as_str() {
+        "pause" => {
+            overrides.insert(slug.clone(), "paused".to_string());
+        }
+        "archive" => {
+            overrides.insert(slug.clone(), "archived".to_string());
+        }
+        "delete" => {
+            match request.delete_mode.as_deref().unwrap_or("delete_missions") {
+                "keep_missions" => {}
+                "delete_missions" => {
+                    let tags = project_tag_keys(&slug);
+                    deleted_mission_ids = state
+                        .control
+                        .delete_project_missions(&tags)
+                        .await
+                        .map_err(|error| (StatusCode::CONFLICT, error))?;
+                }
+                other => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "unknown delete_mode '{other}'; expected keep_missions or delete_missions"
+                        ),
+                    ));
+                }
+            }
+            project_record_deleted = state.projects.delete_project(&slug).map_err(store_err)?;
+            overrides.insert(slug.clone(), "deleted".to_string());
+        }
+        "resume" | "unarchive" | "restore" => {
+            overrides.remove(&slug);
+            // Operator intent is authoritative over a stale controller mode:
+            // resuming clears a lingering self-pause/blocked so the project
+            // stops being buried while the operator wants it active. The
+            // controller re-confirms/adjusts its mode on its next tick. Ignore
+            // the "unknown project" error (a project with no roster record).
+            let _ = state.projects.set_mode(&slug, "active", None, None);
+        }
+        other => {
+            return Err((StatusCode::BAD_REQUEST, format!("unknown action '{other}'")));
+        }
+    }
+    let serialized = serde_json::to_string_pretty(&overrides)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let path = overrides_path(&dir);
+    let tmp = dir.join(".board-overrides.json.tmp");
+    std::fs::write(&tmp, serialized)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write {}: {error}", path.display()),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "slug": slug,
+        "override": overrides.get(&slug),
+        "project_record_deleted": project_record_deleted,
+        "deleted_mission_ids": deleted_mission_ids,
+        "deleted_mission_count": deleted_mission_ids.len(),
+    })))
+}
+
+/// Read `[Cron delivery: …]` updates from the Hermes SessionDB, newest first.
+/// `filter_keys`, when set, keeps only deliveries whose signature key matches.
+pub fn read_deliveries(
+    db_path: &Path,
+    scan_limit: usize,
+    filter_keys: Option<&[String]>,
+) -> Result<Vec<DeliveryUpdate>, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("open {} read-only: {error}", db_path.display()))?;
+    // Two shapes coexist in the Hermes DB: the canonical cron-session report
+    // (assistant message ending in a real `[STATE_SIGNATURE: …]` trailer) and
+    // its `[Cron delivery: …]` copy in target sessions, which has the
+    // signature stripped. We read both and drop copies whose body duplicates
+    // a signature-bearing report.
+    let mut statement = connection
+        .prepare(
+            "SELECT session_id, timestamp, content FROM messages \
+             WHERE role = 'assistant' AND (content LIKE '[Cron delivery:%' \
+                OR content LIKE '%[STATE_SIGNATURE:%') \
+             ORDER BY timestamp DESC LIMIT ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([scan_limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut deliveries = Vec::new();
+    let mut routed_fingerprints: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for row in rows {
+        let (session_id, timestamp, content) = row.map_err(|error| error.to_string())?;
+        let parsed = parse_delivery(&session_id, timestamp, &content);
+        if parsed.signature.is_some() {
+            routed_fingerprints.insert(delivery_fingerprint(&content));
+        }
+        if let Some(keys) = filter_keys {
+            let matches = parsed
+                .signature
+                .as_deref()
+                .is_some_and(|signature| keys.iter().any(|key| key == signature));
+            if !matches {
+                continue;
+            }
+        }
+        deliveries.push(parsed);
+    }
+    // Second pass: signature-less delivery copies of a routed report are
+    // duplicates, not unrouted updates.
+    deliveries.retain(|delivery| {
+        delivery.signature.is_some()
+            || delivery
+                .body
+                .as_deref()
+                .map(|body| !routed_fingerprints.contains(&delivery_fingerprint(body)))
+                .unwrap_or(true)
+    });
+    Ok(deliveries)
+}
+
+/// Whitespace-normalized prefix of the report body (tag and signature lines
+/// stripped) — enough to identify a delivery copy of a routed report.
+fn delivery_fingerprint(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with("[Cron delivery:")
+                && !trimmed.starts_with("[STATE_SIGNATURE:")
+        })
+        .flat_map(|line| line.split_whitespace())
+        .flat_map(|word| word.chars())
+        .take(160)
+        .collect()
+}
+
+fn parse_delivery(session_id: &str, timestamp: f64, content: &str) -> DeliveryUpdate {
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        timestamp as i64,
+        ((timestamp.fract()) * 1e9) as u32,
+    )
+    .map(|t| t.to_rfc3339())
+    .unwrap_or_default();
+
+    // Headline: the first non-empty line after the `[Cron delivery: …]` tag,
+    // falling back to the tag's own title (the cron job name).
+    let tag_title = content.lines().next().and_then(|line| {
+        line.trim()
+            .strip_prefix("[Cron delivery:")
+            .map(|rest| rest.trim_end_matches(']').trim().to_string())
+    });
+    let mut headline = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("[Cron delivery:")
+            || trimmed.starts_with("[STATE_SIGNATURE:")
+            || trimmed.starts_with("[CTRL:")
+            || trimmed.starts_with("[DECISION:")
+        {
+            continue;
+        }
+        headline = trimmed.trim_start_matches('#').trim().to_string();
+        break;
+    }
+    if headline.is_empty() {
+        headline = tag_title.unwrap_or_default();
+    }
+
+    // `[STATE_SIGNATURE: <routing-key>|<state fields…>]`. The first field says
+    // WHICH project; everything after it says WHAT state it is in. Conflating
+    // the two is what made the stall signal meaningless — see `state` below.
+    let trailer = content.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("[STATE_SIGNATURE:")
+            .and_then(|rest| rest.strip_suffix(']'))
+    });
+    let ctrl = content.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("[CTRL:")
+            .and_then(|rest| rest.strip_suffix(']'))
+    });
+    // `[DECISION: {json}]` / `[DECISION: plain question]` — the ledger's
+    // trailer fallback. Unlike the state/ctrl trailers (which only route and
+    // describe), this one CREATES a durable ledger row, so it is only honored
+    // inside the trailing control block: consecutive trailer/empty lines at
+    // the end of the message. A `[DECISION:` line quoted mid-prose (a
+    // controller echoing its own instructions) never reaches the ledger.
+    let decision = content
+        .lines()
+        .rev()
+        .take_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty() || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        })
+        .find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("[DECISION:")
+                .and_then(|rest| rest.strip_suffix(']'))
+        })
+        .and_then(DecisionTrailer::parse);
+    let signature = trailer
+        .and_then(|inner| inner.split('|').next())
+        .map(|key| key.trim().to_string())
+        // Reject template placeholders like `<project>` and anything that
+        // isn't a plain routing key.
+        .filter(|key| is_plain_key(key))
+        // Fall back to the `[CTRL: <project> | …]` trailer's own first field.
+        // Requiring a controller to emit two separate trailers to be routed is
+        // a rule it will eventually forget, and the failure is silent: the
+        // report simply never reaches its project row. The mode trailer already
+        // names the project, so accept it rather than lose the delivery.
+        .or_else(|| {
+            ctrl.and_then(|inner| inner.split('|').next())
+                .map(|key| key.trim().to_string())
+                .filter(|key| is_plain_key(key))
+        });
+    // The state descriptor: the trailer minus its routing key. Empty when the
+    // controller emitted a key and nothing else, which is not a state.
+    let state = trailer
+        .and_then(|inner| inner.split_once('|'))
+        .map(|(_, rest)| rest.trim().to_string())
+        .filter(|rest| !rest.is_empty())
+        // A controller that quotes the trailer's own template back into its
+        // report emits `lido|<phase>|<heads>|<blocker>`. The routing key is a
+        // real slug so `is_plain_key` above accepts it, and the last trailer
+        // in the message wins — so an echoed template landing last would be
+        // recorded as a genuine state and sit in the durable timeline forever.
+        .filter(|rest| !is_placeholder_descriptor(rest));
+
+    // `[CTRL: <project> | mode=active|blocked|paused | wait=<n> | next=…]`.
+    // Emitted on every delivery INCLUDING `[SILENT]`, so a healthy quiet tick is
+    // distinguishable from one stuck on the same blocker. Absent for controllers
+    // that predate the convention: the field is then omitted entirely rather
+    // than defaulted, so the UI can render exactly as it did before.
+    let mode = ctrl
+        .and_then(|inner| {
+            inner
+                .split('|')
+                .filter_map(|field| field.trim().strip_prefix("mode="))
+                .map(|value| value.trim().to_ascii_lowercase())
+                .next()
+        })
+        .filter(|value| {
+            // Only the three known regimes, each optionally carrying a cause
+            // (`blocked:transport-cap`). Anything else is a malformed trailer
+            // and must not reach the UI as a mode chip.
+            let base = value
+                .split_once(':')
+                .map_or(value.as_str(), |(base, _)| base);
+            matches!(base, "active" | "blocked" | "paused")
+        });
+
+    // "Bloqué par:" / "Blocked by:" field, when it names a real blocker.
+    let blocker = content.lines().find_map(|line| {
+        let lower = line.to_lowercase();
+        let (idx, marker_len) = ["bloqué par", "blocked by"]
+            .iter()
+            .find_map(|marker| lower.find(marker).map(|idx| (idx, marker.len())))?;
+        let rest = &line[idx + marker_len..];
+        let value = rest
+            .trim_start_matches(['*', ':', ' ', '\u{a0}'])
+            .trim_end_matches("**")
+            .trim();
+        let normalized = value.to_lowercase();
+        // Controllers routinely write "Blocked by: nothing currently; …" —
+        // any negation opener means "not blocked", however long the tail.
+        const EMPTY_OPENERS: [&str; 7] = [
+            "aucun",
+            "rien",
+            "none",
+            "nothing",
+            "n/a",
+            "no blocker",
+            "not blocked",
+        ];
+        if value.is_empty()
+            || EMPTY_OPENERS
+                .iter()
+                .any(|opener| normalized.starts_with(opener))
+            || normalized.starts_with('—')
+            || normalized.starts_with('-')
+        {
+            None
+        } else {
+            Some(value.chars().take(200).collect::<String>())
+        }
+    });
+
+    let next_action = ctrl.and_then(|inner| {
+        inner
+            .split('|')
+            .filter_map(|field| field.trim().strip_prefix("next="))
+            .map(str::trim)
+            .find(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+            .map(|value| value.chars().take(200).collect())
+    });
+
+    DeliveryUpdate {
+        headline,
+        body: Some(content.chars().take(8000).collect()),
+        session_id: session_id.to_string(),
+        at,
+        signature,
+        state,
+        mode,
+        blocker,
+        next_action,
+        decision,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_slug_makes_a_readable_name() {
+        assert_eq!(
+            humanize_slug("ec-defensive-research"),
+            "Ec Defensive Research"
+        );
+        assert_eq!(humanize_slug("coldcard"), "Coldcard");
+        assert_eq!(humanize_slug("minimax_m3_full263"), "Minimax M3 Full263");
+        assert_eq!(humanize_slug("verity-core"), "Verity Core");
+        assert_eq!(humanize_slug(""), "");
+    }
+
+    /// A rename flattens every alias that pointed at the old slug and adds the
+    /// forwarding entry — `resolve_alias` is single-hop, so `x → old → new`
+    /// would dead-end at a slug that no longer exists.
+    #[test]
+    fn rename_alias_rewrite_flattens_chains_and_adds_forwarding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("routes.json"),
+            r#"{"coldcard": "old-name", "coldcard-rng": "old-name", "lido": "verity-lido"}"#,
+        )
+        .expect("seed");
+
+        let flattened =
+            rewrite_aliases_for_rename(dir.path(), "old-name", "new-name").expect("rewrite");
+        assert_eq!(flattened, 2);
+
+        let aliases = read_alias_map(dir.path());
+        assert_eq!(
+            aliases.get("coldcard").map(String::as_str),
+            Some("new-name")
+        );
+        assert_eq!(
+            aliases.get("coldcard-rng").map(String::as_str),
+            Some("new-name")
+        );
+        assert_eq!(
+            aliases.get("old-name").map(String::as_str),
+            Some("new-name")
+        );
+        assert_eq!(aliases.get("lido").map(String::as_str), Some("verity-lido"));
+        // Single-hop resolution now lands every historical key on the new slug.
+        assert_eq!(resolve_alias(&aliases, "coldcard"), "new-name");
+        assert_eq!(resolve_alias(&aliases, "old-name"), "new-name");
+    }
+
+    /// With no routes.json yet, a rename creates one containing only the
+    /// forwarding entry.
+    #[test]
+    fn rename_alias_rewrite_creates_the_map_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let flattened =
+            rewrite_aliases_for_rename(dir.path(), "old-name", "new-name").expect("rewrite");
+        assert_eq!(flattened, 0);
+        let aliases = read_alias_map(dir.path());
+        assert_eq!(
+            aliases.get("old-name").map(String::as_str),
+            Some("new-name")
+        );
+    }
+
+    #[test]
+    fn resolve_alias_folds_known_keys_and_passes_through_the_rest() {
+        let mut aliases = HashMap::new();
+        aliases.insert("lido-audit".to_string(), "verity-lido".to_string());
+        aliases.insert("verity-roadmap".to_string(), "verity-core".to_string());
+        // Verity and Lido are kept distinct: an alias only ever resolves to the
+        // canonical its own family declares, never across families.
+        assert_eq!(resolve_alias(&aliases, "lido-audit"), "verity-lido");
+        assert_eq!(resolve_alias(&aliases, "verity-roadmap"), "verity-core");
+        // The canonical resolves to itself, and an unknown slug is untouched.
+        assert_eq!(resolve_alias(&aliases, "verity-lido"), "verity-lido");
+        assert_eq!(resolve_alias(&aliases, "sandboxed-sh"), "sandboxed-sh");
+    }
+
+    #[test]
+    fn canonicalize_project_slug_folds_nicknames_and_keeps_the_canonical() {
+        let mut aliases = HashMap::new();
+        aliases.insert("coldcard".to_string(), "coldcard-rng-cracker".to_string());
+        aliases.insert(
+            "coldcard-rng".to_string(),
+            "coldcard-rng-cracker".to_string(),
+        );
+        aliases.insert(
+            "ec-defensive-research".to_string(),
+            "coldcard-rng-cracker".to_string(),
+        );
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "coldcard"),
+            "coldcard-rng-cracker"
+        );
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "  ec-defensive-research  "),
+            "coldcard-rng-cracker"
+        );
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "coldcard-rng-cracker"),
+            "coldcard-rng-cracker"
+        );
+        assert_eq!(canonicalize_project_slug_with(&aliases, "verity"), "verity");
+        assert_eq!(canonicalize_project_slug_with(&aliases, "   "), "");
+    }
+
+    #[test]
+    fn canonicalize_project_slug_folds_title_case_and_roadmap_aliases() {
+        // Prod routes.json (2026-08-15): display title + tracker nickname
+        // both point at the roster card the session rail must load.
+        let mut aliases = HashMap::new();
+        aliases.insert("verity".to_string(), "verity-core".to_string());
+        aliases.insert("verity-roadmap".to_string(), "verity-core".to_string());
+        aliases.insert("Verity".to_string(), "verity-core".to_string());
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "verity-roadmap"),
+            "verity-core"
+        );
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "Verity"),
+            "verity-core"
+        );
+        // Title-case still folds when only the lowercase nickname is mapped.
+        aliases.remove("Verity");
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "Verity"),
+            "verity-core"
+        );
+        assert_eq!(
+            canonicalize_project_slug_with(&aliases, "verity-core"),
+            "verity-core"
+        );
+    }
+
+    #[test]
+    fn roster_lookup_keys_prefer_canonical_then_casefold() {
+        let mut aliases = HashMap::new();
+        aliases.insert("verity".to_string(), "verity-core".to_string());
+        aliases.insert("verity-roadmap".to_string(), "verity-core".to_string());
+        assert_eq!(
+            roster_lookup_keys_with(&aliases, "Verity"),
+            vec![
+                "verity-core".to_string(),
+                "verity".to_string(),
+                "Verity".to_string()
+            ]
+        );
+        assert_eq!(
+            roster_lookup_keys_with(&aliases, "verity-roadmap"),
+            vec!["verity-core".to_string(), "verity-roadmap".to_string()]
+        );
+        assert_eq!(
+            roster_lookup_keys_with(&HashMap::new(), "Verity"),
+            vec!["Verity".to_string(), "verity".to_string()]
+        );
+    }
+
+    #[test]
+    fn project_tag_keys_include_canonical_and_every_alias() {
+        let mut aliases = HashMap::new();
+        aliases.insert("coldcard".to_string(), "coldcard-rng-cracker".to_string());
+        aliases.insert(
+            "coldcard-rng".to_string(),
+            "coldcard-rng-cracker".to_string(),
+        );
+        aliases.insert(
+            "ec-defensive-research".to_string(),
+            "coldcard-rng-cracker".to_string(),
+        );
+        aliases.insert("lido-audit".to_string(), "verity-lido".to_string());
+
+        let from_nick = project_tag_keys_with(&aliases, "coldcard");
+        assert!(from_nick.contains(&"coldcard-rng-cracker".to_string()));
+        assert!(from_nick.contains(&"coldcard".to_string()));
+        assert!(from_nick.contains(&"ec-defensive-research".to_string()));
+        assert!(from_nick.contains(&"coldcard-rng".to_string()));
+        assert!(!from_nick.contains(&"verity-lido".to_string()));
+
+        let mut from_canonical = project_tag_keys_with(&aliases, "coldcard-rng-cracker");
+        let mut from_nick_sorted = from_nick.clone();
+        from_nick_sorted.sort();
+        from_canonical.sort();
+        assert_eq!(from_nick_sorted, from_canonical);
+
+        assert_eq!(
+            project_tag_keys_with(&aliases, "verity"),
+            vec!["verity".to_string()]
+        );
+    }
+
+    #[test]
+    fn sibling_verity_projects_do_not_share_a_hyphen_family() {
+        let mut aliases = HashMap::new();
+        aliases.insert("verity".to_string(), "verity-core".to_string());
+        aliases.insert("lido".to_string(), "verity-lido".to_string());
+        aliases.insert("lido-audit".to_string(), "verity-lido".to_string());
+        aliases.insert("lido-pdeposit1-tx".to_string(), "verity-lido".to_string());
+
+        let core = project_tag_keys_with(&aliases, "verity-core");
+        assert!(core.contains(&"verity-core".to_string()));
+        assert!(core.contains(&"verity".to_string()));
+        assert!(!core.iter().any(|key| key.contains("lido")));
+
+        let lido = project_tag_keys_with(&aliases, "lido-audit");
+        assert!(lido.contains(&"verity-lido".to_string()));
+        assert!(lido.contains(&"lido-pdeposit1-tx".to_string()));
+        assert!(!lido.contains(&"verity-core".to_string()));
+        assert!(!lido.contains(&"verity".to_string()));
+    }
+
+    #[test]
+    fn tasks_projection_is_derived_from_the_situation() {
+        use crate::api::mission_horizon::{ProjectItem, ProjectItemAttempt};
+        use crate::api::situation::{build, SourceStatus};
+        use uuid::Uuid;
+
+        let open_live = ProjectItem {
+            key: "c5".into(),
+            kind: "track",
+            position: Some(0),
+            desired_state: Some("land #2332".into()),
+            status: Some("open".into()),
+            title: Some("Land #2332".into()),
+            acceptance_criteria: vec!["CI green".into()],
+            depends_on: vec!["freeze".into()],
+            open: true,
+            declared: true,
+            attempts: vec![ProjectItemAttempt {
+                id: Uuid::nil(),
+                status: "active".into(),
+                title: Some("repair #2332".into()),
+                updated_at: "2026-08-15T00:00:00Z".into(),
+                role: None,
+            }],
+            id: None,
+            origin: None,
+            revision: 0,
+            blocker: None,
+        };
+        let done = ProjectItem {
+            key: "c4".into(),
+            open: false,
+            status: Some("done".into()),
+            attempts: Vec::new(),
+            ..open_live.clone()
+        };
+        let zombie = ProjectItem {
+            key: "zombie".into(),
+            open: true,
+            status: None,
+            desired_state: None,
+            title: None,
+            declared: false,
+            attempts: vec![ProjectItemAttempt {
+                id: Uuid::nil(),
+                status: "failed".into(),
+                title: Some("old cert".into()),
+                updated_at: "2026-08-01T00:00:00Z".into(),
+                role: None,
+            }],
+            ..open_live.clone()
+        };
+        let situation = build(
+            "p",
+            &[open_live, done, zombie],
+            &SourceStatus::default(),
+            "2026-08-15T00:00:00Z",
+        );
+        let body = tasks_projection(&situation);
+        let rows = body["tasks"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "unacknowledged failed attempts are not the roadmap"
+        );
+        let c5 = rows.iter().find(|row| row["task_key"] == "c5").unwrap();
+        assert_eq!(c5["title"], "Land #2332");
+        assert_eq!(c5["status"], "running");
+        assert_eq!(c5["derived_state"], "executing");
+        assert_eq!(c5["acceptance_criteria"][0], "CI green");
+        assert_eq!(c5["depends_on"][0], "freeze");
+        let c4 = rows.iter().find(|row| row["task_key"] == "c4").unwrap();
+        assert_eq!(c4["status"], "accepted");
+        assert_eq!(c4["derived_state"], "claim_only");
+        // Legacy `done` counts claims; the canonical split is alongside.
+        assert_eq!(body["summary"]["done"], 1);
+        assert_eq!(body["summary"]["verified_satisfied"], 0);
+        assert_eq!(body["summary"]["claim_only"], 1);
+        assert_eq!(body["summary"]["total"], 2);
+    }
+
+    #[test]
+    fn declared_open_tracks_stay_on_the_roadmap() {
+        use crate::api::mission_horizon::{track_status_is_open, ProjectItem};
+        use crate::api::situation::{belongs_on_roadmap, build, SourceStatus};
+
+        let declared = |status: Option<&str>| ProjectItem {
+            key: "pr-48".into(),
+            kind: "track",
+            position: Some(0),
+            desired_state: None,
+            status: status.map(str::to_string),
+            title: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+            open: track_status_is_open(status),
+            declared: true,
+            attempts: Vec::new(),
+            id: None,
+            origin: None,
+            revision: 0,
+            blocker: None,
+        };
+        let on_roadmap = |status: Option<&str>| {
+            let situation = build("p", &[declared(status)], &SourceStatus::default(), "now");
+            belongs_on_roadmap(&situation.items[0])
+        };
+        for status in [
+            None,
+            Some(""),
+            Some("open"),
+            Some("running"),
+            Some("in-progress"),
+        ] {
+            assert!(
+                on_roadmap(status),
+                "declared track status {status:?} belongs on the roadmap"
+            );
+        }
+        assert!(on_roadmap(Some("done")));
+        // `closed` is a legacy claim, same as `done`: shown as accepted.
+        assert!(on_roadmap(Some("closed")));
+        assert!(!on_roadmap(Some("cancelled")));
+    }
+
+    #[test]
+    fn plan_request_validates_the_whole_batch_before_any_write() {
+        let ok = ProposalInput {
+            task_key: "land-2332".into(),
+            position: None,
+            title: "Land #2332".into(),
+            prompt: Some("merge after certify".into()),
+            acceptance_criteria: vec!["CI green".into()],
+            depends_on: vec!["freeze-head".into()],
+        };
+        let planned = planned_tracks_from_request(&[ok]).expect("valid");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].title, "Land #2332");
+        assert_eq!(planned[0].desired_state, "merge after certify");
+        assert_eq!(planned[0].acceptance_criteria, vec!["CI green"]);
+        assert_eq!(planned[0].depends_on, vec!["freeze-head"]);
+
+        let first = ProposalInput {
+            task_key: "ok-item".into(),
+            position: None,
+            title: "Fine".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let bad_key = ProposalInput {
+            task_key: "not a key".into(),
+            position: None,
+            title: "Bad".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let err = planned_tracks_from_request(&[first, bad_key]).expect_err("invalid key");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        let empty_title = ProposalInput {
+            task_key: "second".into(),
+            position: None,
+            title: "   ".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let first = ProposalInput {
+            task_key: "ok-item".into(),
+            position: None,
+            title: "Fine".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let err = planned_tracks_from_request(&[first, empty_title]).expect_err("empty title");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("needs a title"));
+
+        // The handler only writes after the whole batch validates.
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity-core", None, None, None, None)
+            .expect("seed");
+        let valid = ProposalInput {
+            task_key: "first".into(),
+            position: None,
+            title: "First".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let invalid = ProposalInput {
+            task_key: "".into(),
+            position: None,
+            title: "Second".into(),
+            prompt: None,
+            acceptance_criteria: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        assert!(planned_tracks_from_request(&[valid, invalid]).is_err());
+        assert!(
+            store.tracks("verity-core").expect("tracks").is_empty(),
+            "a rejected batch must not persist earlier entries"
+        );
+    }
+
+    const SAMPLE: &str = "[Cron delivery: Verity two-phase Fable/Codex progression]\n\
+        Verity — BLOQUÉE PAR LE CONTROL PLANE\n\n\
+        **Changé :** l'audit est terminé.\n\
+        **Bloqué par :** lease writer fantôme sur #2219.\n\n\
+        [STATE_SIGNATURE: verity|phase-1b|abc123|blocked|lease|next]";
+
+    #[test]
+    fn ctrl_trailer_yields_mode_and_never_becomes_the_headline() {
+        // A quiet tick: the only content is [SILENT] plus the trailer. The
+        // trailer must not be mistaken for the headline.
+        let quiet = "[Cron delivery: Verity]\n[SILENT]\n[CTRL: verity | mode=active | wait=0 | next=certify #2240]";
+        let parsed = parse_delivery("s1", 0.0, quiet);
+        assert_eq!(parsed.mode.as_deref(), Some("active"));
+        assert_eq!(parsed.headline, "[SILENT]");
+
+        // A cause rides along with the mode.
+        let blocked = "[Cron delivery: Bench]\nTransport rejected\n[CTRL: verity-benchmark | mode=blocked:transport-cap | wait=3 | next=shrink tree]";
+        assert_eq!(
+            parse_delivery("s2", 0.0, blocked).mode.as_deref(),
+            Some("blocked:transport-cap")
+        );
+
+        // Controllers that never adopted the trailer report no mode at all,
+        // rather than defaulting to one: the UI must render as it did before.
+        let legacy = "[Cron delivery: Lido]\nSomething happened\n[STATE_SIGNATURE: lido|phase|head|none|next]";
+        assert!(parse_delivery("s3", 0.0, legacy).mode.is_none());
+
+        // The CTRL trailer alone routes the delivery: requiring two separate
+        // trailers is a rule a controller eventually forgets, and the failure
+        // is silent — the report never reaches its project row.
+        let ctrl_only =
+            "[Cron delivery: Verity]\nDid a thing\n[CTRL: verity | mode=active | wait=0 | next=x]";
+        let parsed_ctrl = parse_delivery("s5", 0.0, ctrl_only);
+        assert_eq!(parsed_ctrl.signature.as_deref(), Some("verity"));
+        assert_eq!(parsed_ctrl.next_action.as_deref(), Some("x"));
+
+        // When both are present the explicit routing trailer still wins.
+        let both = "[Cron delivery: X]\nhi\n[CTRL: ctrl-key | mode=active | wait=0 | next=x]\n[STATE_SIGNATURE: sig-key|a|b|c|d]";
+        assert_eq!(
+            parse_delivery("s6", 0.0, both).signature.as_deref(),
+            Some("sig-key")
+        );
+
+        // A malformed mode is dropped rather than surfaced as a chip.
+        let bogus = "[Cron delivery: X]\nhi\n[CTRL: x | mode=confused | wait=0 | next=none]";
+        assert!(parse_delivery("s4", 0.0, bogus).mode.is_none());
+        assert!(parse_delivery("s4", 0.0, bogus).next_action.is_none());
+    }
+
+    #[test]
+    fn parses_delivery_headline_signature_and_blocker() {
+        let parsed = parse_delivery("sess-1", 1_754_000_000.5, SAMPLE);
+        assert_eq!(parsed.headline, "Verity — BLOQUÉE PAR LE CONTROL PLANE");
+        assert_eq!(parsed.signature.as_deref(), Some("verity"));
+        assert!(parsed
+            .blocker
+            .as_deref()
+            .is_some_and(|b| b.contains("lease writer fantôme")));
+        assert!(!parsed.at.is_empty());
+    }
+
+    /// The trailer's first field routes; the rest describes the state. Keeping
+    /// them apart is the whole fix — see the stall-signal test below.
+    #[test]
+    fn the_state_descriptor_is_the_trailer_minus_its_routing_key() {
+        let content = "[Cron delivery: x]\nTitre\n\
+                       [STATE_SIGNATURE: verity|phase1-stack|7dba916|clean-ready|none]\n";
+        let parsed = parse_delivery("sess-1", 1_754_000_000.0, content);
+        assert_eq!(parsed.signature.as_deref(), Some("verity"));
+        assert_eq!(
+            parsed.state.as_deref(),
+            Some("phase1-stack|7dba916|clean-ready|none")
+        );
+    }
+
+    /// Observed on 2026-08-05: the Lido controller quoted the trailer template
+    /// from its own instructions back into the report, so the message carried
+    /// both the template and the real signature. The last trailer wins, so an
+    /// echo landing last would be ingested as a genuine state and kept in the
+    /// durable timeline. The routing key is a real slug, so `is_plain_key`
+    /// does not catch it.
+    #[test]
+    fn an_echoed_template_is_not_a_state() {
+        let content = "[Cron delivery: x]\nTitre\n\
+                       [STATE_SIGNATURE: lido|<phase>|<heads>|<blocker>|<next-action>]\n";
+        let parsed = parse_delivery("s", 1_754_000_000.0, content);
+        assert_eq!(parsed.signature.as_deref(), Some("lido"), "the key is real");
+        assert_eq!(parsed.state, None, "but the descriptor carries no state");
+    }
+
+    #[test]
+    fn a_partly_filled_descriptor_is_still_a_state() {
+        // Rejecting these would lose real information: knowing the phase and
+        // that it is blocked beats knowing nothing.
+        let content = "[Cron delivery: x]\nTitre\n\
+                       [STATE_SIGNATURE: lido|phase3|<heads>|blocked-on-2231]\n";
+        let parsed = parse_delivery("s", 1_754_000_000.0, content);
+        assert_eq!(
+            parsed.state.as_deref(),
+            Some("phase3|<heads>|blocked-on-2231")
+        );
+    }
+
+    #[test]
+    fn the_real_signature_wins_when_a_template_precedes_it() {
+        let content = "[Cron delivery: x]\nTitre\n\
+                       [STATE_SIGNATURE: lido|<phase>|<heads>]\n\
+                       [STATE_SIGNATURE: lido|phase3|a3d80673|none]\n";
+        let parsed = parse_delivery("s", 1_754_000_000.0, content);
+        assert_eq!(parsed.state.as_deref(), Some("phase3|a3d80673|none"));
+    }
+
+    #[test]
+    fn a_routing_key_with_no_state_fields_is_not_a_state() {
+        let content = "[Cron delivery: x]\nTitre\n[STATE_SIGNATURE: verity]\n";
+        let parsed = parse_delivery("sess-1", 1_754_000_000.0, content);
+        assert_eq!(parsed.signature.as_deref(), Some("verity"));
+        assert_eq!(parsed.state, None);
+
+        // A trailing separator with nothing after it is the same absence.
+        let content = "[Cron delivery: x]\nTitre\n[STATE_SIGNATURE: verity|  ]\n";
+        assert_eq!(parse_delivery("s", 1.0, content).state, None);
+    }
+
+    /// The signal used to compare the *routing key*, which is near-constant
+    /// within a project row by construction — so it fired for essentially
+    /// every project with three updates, flagging steady progress and a real
+    /// stall identically. Measured on prod: 6 of 26 rows, i.e. exactly those
+    /// with three or more deliveries.
+    #[test]
+    fn the_stall_signal_tracks_the_state_not_the_routing_key() {
+        let delivery = |state: &str| DeliveryUpdate {
+            headline: "h".into(),
+            body: None,
+            session_id: "s".into(),
+            at: "2026-08-04T12:00:00Z".into(),
+            signature: Some("verity".into()),
+            mode: None,
+            state: Some(state.into()),
+            blocker: None,
+            next_action: None,
+            decision: None,
+        };
+
+        // A project changing state every tick: the latest state has a single
+        // observation, however many total updates there were. Not a stall.
+        let mut moving = ProjectRowBuilder::new("verity".into());
+        moving.attach_store_update(delivery("c|3"), 1, 3);
+        let row = moving.finish(&[], None, None, "2026-08-04T20:00:00Z");
+        assert!(
+            !row.attention_reasons
+                .iter()
+                .any(|r| r.contains("3 consecutive")),
+            "a project changing state every tick must not be flagged: {:?}",
+            row.attention_reasons
+        );
+
+        // Same state three times running: that is the stall worth reporting.
+        let mut stuck = ProjectRowBuilder::new("verity".into());
+        stuck.attach_store_update(delivery("blocked|same"), 3, 3);
+        let row = stuck.finish(&[], None, None, "2026-08-04T20:00:00Z");
+        assert!(
+            row.attention_reasons
+                .iter()
+                .any(|r| r.contains("3 consecutive")),
+            "an unchanged state must still be flagged: {:?}",
+            row.attention_reasons
+        );
+
+        // A synthetic CTRL-only marker never surfaces as a state, so repeated
+        // quiet CTRL ticks must not trip the stall signal either.
+        let mut quiet = ProjectRowBuilder::new("verity".into());
+        let mut update = delivery("ignored");
+        update.state = None;
+        quiet.attach_store_update(update, 5, 5);
+        let row = quiet.finish(&[], None, None, "2026-08-04T20:00:00Z");
+        assert!(!row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("3 consecutive")));
+
+        // Inspect callbacks repeating must not stall — they are not a chapter.
+        let mut inspecting = ProjectRowBuilder::new("verity".into());
+        inspecting.attach_store_update(
+            delivery("mission-callback|fcbaebd9|awaiting_user|inspect"),
+            3,
+            3,
+        );
+        let row = inspecting.finish(&[], None, None, "2026-08-04T20:00:00Z");
+        assert!(
+            !row.attention_reasons
+                .iter()
+                .any(|r| r.contains("3 consecutive")),
+            "inspect callbacks must not stall: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    // ---- [DECISION:] trailer ----
+
+    #[test]
+    fn a_decision_trailer_parses_json_and_plain_forms_and_never_becomes_the_headline() {
+        let content = "[Cron delivery: verity]\nReal headline\n\
+            [DECISION: {\"kind\":\"merge\",\"authority\":\"granted\",\"status\":\"decided\",\
+             \"question\":\"Merged verity#2213\",\"evidence\":{\"pr_url\":\"https://github.com/x/y/pull/2213\"}}]\n\
+            [STATE_SIGNATURE: verity|phase|head|clean]\n";
+        let parsed = parse_delivery("s", 1_754_000_000.0, content);
+        assert_eq!(parsed.headline, "Real headline");
+        let decision = parsed.decision.expect("decision");
+        assert_eq!(decision.question, "Merged verity#2213");
+        assert_eq!(decision.authority.as_deref(), Some("granted"));
+        assert_eq!(decision.kind.as_deref(), Some("merge"));
+        assert_eq!(
+            decision.evidence.unwrap()["pr_url"],
+            "https://github.com/x/y/pull/2213"
+        );
+
+        // Plain-text form = owner escalation (fields defaulted downstream).
+        let plain = parse_delivery(
+            "s",
+            1.0,
+            "[Cron delivery: x]\nTitle\n[DECISION: Ship v2 now or wait for audit?]\n",
+        );
+        let decision = plain.decision.expect("decision");
+        assert_eq!(decision.question, "Ship v2 now or wait for audit?");
+        assert_eq!(decision.authority, None);
+
+        // A trailer alone must not become the headline (tag title fallback).
+        let only = parse_delivery("s", 1.0, "[Cron delivery: x]\n[DECISION: Question?]\n");
+        assert_eq!(only.headline, "x");
+
+        // A [DECISION:] line quoted mid-prose (followed by ordinary text) is
+        // an example, not a trailer — it must never reach the ledger.
+        let quoted = parse_delivery(
+            "s",
+            1.0,
+            "[Cron delivery: x]\nTitle\n[DECISION: use this format]\nas documented, \
+             append the trailer to your report.\n[STATE_SIGNATURE: verity|phase]\n",
+        );
+        assert_eq!(quoted.decision, None, "mid-prose DECISION must be ignored");
+
+        // Malformed JSON is dropped, not guessed at.
+        assert_eq!(
+            parse_delivery("s", 1.0, "t\n[DECISION: {\"kind\":]\n").decision,
+            None
+        );
+        // JSON without a question is dropped too.
+        assert_eq!(
+            parse_delivery("s", 1.0, "t\n[DECISION: {\"kind\":\"merge\"}]\n").decision,
+            None
+        );
+    }
+
+    #[test]
+    fn ingested_decision_trailers_are_coerced_and_idempotent() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        // Unset grant defaults to act_reversible, so a *merge* (irreversible)
+        // still lands as a pending owner escalation.
+        let content = "[Cron delivery: verity]\nHeadline\n\
+            [DECISION: {\"kind\":\"merge\",\"authority\":\"granted\",\"status\":\"decided\",\"question\":\"Merged #1\"}]\n\
+            [STATE_SIGNATURE: verity|phase|head]\n";
+        let delivery = parse_delivery("s1", 1_754_000_000.0, content);
+        let aliases = HashMap::new();
+        let overrides = HashMap::new();
+        ingest_deliveries(&store, &aliases, &overrides, vec![delivery.clone()]);
+        let open = store.open_decisions("verity").expect("open");
+        assert_eq!(open.len(), 1, "coerced to escalation");
+        assert_eq!(open[0].status.as_deref(), Some("pending_user"));
+
+        // Replaying the same delivery window must not duplicate the row —
+        // and must not reopen it once answered.
+        ingest_deliveries(&store, &aliases, &overrides, vec![delivery.clone()]);
+        assert_eq!(store.open_decisions("verity").expect("open").len(), 1);
+        let at = store.open_decisions("verity").expect("open")[0].at.clone();
+        assert!(store.answer_decision("verity", &at, "ok").expect("answer"));
+        ingest_deliveries(&store, &aliases, &overrides, vec![delivery]);
+        assert!(
+            store.open_decisions("verity").expect("open").is_empty(),
+            "an answered decision must stay answered across ingest replays"
+        );
+
+        // With an acting grant, the same trailer records an autonomous act.
+        store
+            .set_grant(
+                "verity",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("act_full"),
+            )
+            .expect("grant");
+        let content2 = content.replace("Merged #1", "Merged #2");
+        let delivery2 = parse_delivery("s1", 1_754_000_100.0, &content2);
+        ingest_deliveries(&store, &aliases, &overrides, vec![delivery2]);
+        assert!(store.open_decisions("verity").expect("open").is_empty());
+        let recent = store.recent_decisions("verity", 10).expect("recent");
+        assert!(recent
+            .iter()
+            .any(|d| d.question == "Merged #2" && d.status.as_deref() == Some("decided")));
+    }
+
+    #[test]
+    fn delivery_does_not_acknowledge_unread_steers() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().unwrap();
+        store
+            .upsert_project("lido", None, None, None, None)
+            .unwrap();
+        let steer = store
+            .insert_steer("lido", "arrived during tick", "orb")
+            .unwrap();
+        let delivery = parse_delivery(
+            "cron_1",
+            2_000_000_000.0,
+            "[Cron delivery: Lido]\nDone\n[CTRL: lido | mode=active | wait=0 | next=review]\n",
+        );
+        ingest_deliveries(&store, &HashMap::new(), &HashMap::new(), vec![delivery]);
+        assert_eq!(store.list_pending_steers("lido").unwrap()[0].id, steer.id);
+    }
+
+    #[test]
+    fn material_headlines_without_a_decision_trailer_still_land_on_recent_activity() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity-lido", None, None, None, None)
+            .expect("seed");
+        store
+            .set_grant(
+                "verity-lido",
+                Some("review-first"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("act_reversible"),
+            )
+            .expect("grant");
+        let aliases = HashMap::new();
+        let overrides = HashMap::new();
+        let chapter = parse_delivery(
+            "cron_1",
+            1_755_360_000.0,
+            "[Cron delivery: Lido]\nLido #81 — RÉPARATION/REVIEW EN COURS\n\
+             [CTRL: verity-lido | mode=active | wait=0 | next=review-81]\n\
+             [STATE_SIGNATURE: verity-lido|pr-81|review]\n",
+        );
+        let inspect = parse_delivery(
+            "s",
+            1_755_360_100.0,
+            "[Cron delivery: Lido]\n[Mission callback: Repair Lido #76]\n\
+             [STATE_SIGNATURE: verity-lido|mission-callback|inspect]\n",
+        );
+        ingest_deliveries(&store, &aliases, &overrides, vec![chapter, inspect]);
+        let recent = store.recent_activity("verity-lido", 10).expect("activity");
+        assert!(
+            recent.iter().any(|d| d.question.contains("#81")),
+            "controller chapter must become a decided act"
+        );
+        assert!(
+            recent
+                .iter()
+                .all(|d| !d.question.starts_with("[Mission callback:")),
+            "inspect callbacks stay off the panel"
+        );
+        assert!(store
+            .open_decisions("verity-lido")
+            .expect("open")
+            .is_empty());
+    }
+
+    #[test]
+    fn pr_links_are_extracted_from_digests_and_nothing_else() {
+        assert_eq!(
+            extract_pr_url("Opened https://github.com/lfglabs-dev/verity/pull/2213 for review."),
+            Some("https://github.com/lfglabs-dev/verity/pull/2213".to_string())
+        );
+        assert_eq!(
+            extract_pr_url("(see https://github.com/x/y/pull/48)"),
+            Some("https://github.com/x/y/pull/48".to_string())
+        );
+        // A repo link BEFORE the PR link must not shadow it.
+        assert_eq!(
+            extract_pr_url("Repo https://github.com/x/y; opened https://github.com/x/y/pull/48"),
+            Some("https://github.com/x/y/pull/48".to_string())
+        );
+        // Repo links, issues, and bare mentions are not PR links.
+        assert_eq!(extract_pr_url("https://github.com/x/y"), None);
+        assert_eq!(extract_pr_url("https://github.com/x/y/issues/12"), None);
+        assert_eq!(extract_pr_url("no links here"), None);
+    }
+
+    #[test]
+    fn pr_needles_include_hashes_and_urls_without_prefix_collisions() {
+        let needles = extract_pr_needles(
+            "Certify #2240 merged via https://github.com/lfglabs-dev/verity/pull/2240",
+        );
+        assert!(needles.contains(&"https://github.com/lfglabs-dev/verity/pull/2240".to_string()));
+        assert!(needles.contains(&"#2240".to_string()));
+        assert!(!needles.iter().any(|n| n == "#224" || n == "#2"));
+    }
+
+    #[test]
+    fn a_merge_headline_closes_older_pending_questions_for_that_pr() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("lido", None, None, None, None)
+            .expect("seed");
+        store
+            .record_decision(
+                "lido",
+                &super::super::projects_store::NewDecision {
+                    question: "merge #66?".to_string(),
+                    rationale: Some("blocks A.2".to_string()),
+                    kind: Some("merge".to_string()),
+                    authority: "escalation".to_string(),
+                    status: "pending_user".to_string(),
+                    evidence: None,
+                },
+            )
+            .expect("pending");
+        let aliases = HashMap::new();
+        let overrides = HashMap::new();
+        let delivery = parse_delivery(
+            "s",
+            1_754_000_500.0,
+            "[Cron delivery: lido]\n#66 MERGED\n[STATE_SIGNATURE: lido|done|02a0da1]\n",
+        );
+        ingest_deliveries(&store, &aliases, &overrides, vec![delivery]);
+        assert!(
+            store.open_decisions("lido").expect("open").is_empty(),
+            "the merge headline must retire the older merge #66? question"
+        );
+    }
+
+    #[test]
+    fn a_coerced_merge_trailer_does_not_close_itself() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        let content = "[Cron delivery: verity]\nHeadline\n\
+            [DECISION: {\"kind\":\"merge\",\"authority\":\"granted\",\"status\":\"decided\",\"question\":\"Merged #2333\"}]\n\
+            [STATE_SIGNATURE: verity|phase|head]\n";
+        let delivery = parse_delivery("s1", 1_754_000_000.0, content);
+        ingest_deliveries(&store, &HashMap::new(), &HashMap::new(), vec![delivery]);
+        let open = store.open_decisions("verity").expect("open");
+        assert_eq!(open.len(), 1, "coerced merge stays pending");
+        assert_eq!(open[0].question, "Merged #2333");
+    }
+
+    #[test]
+    fn relaunch_and_stale_lease_deliveries_are_folded_silent() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity-lido", None, None, None, None)
+            .expect("seed lido");
+        store
+            .upsert_project("verity-core", None, None, None, None)
+            .expect("seed verity");
+        let aliases = HashMap::new();
+        let overrides = HashMap::new();
+        let first = parse_delivery(
+            "s",
+            1_754_000_000.0,
+            "[Cron delivery: verity-lido]\nLido closure-v2 — re-pin started\n\
+             [CTRL: verity-lido | mode=active | wait=0 | next=repin]\n\
+             [STATE_SIGNATURE: verity-lido|closure|04729a9|none|repin]\n",
+        );
+        ingest_deliveries(&store, &aliases, &overrides, vec![first]);
+        let relaunch = parse_delivery(
+            "s",
+            1_754_000_100.0,
+            "[Cron delivery: verity-lido]\nLido audit — CAMPAGNE RELANCÉE\n\
+             [CTRL: verity-lido | mode=active | wait=0 | next=repin]\n\
+             [STATE_SIGNATURE: verity-lido|closure|04729a9|none|repin]\n",
+        );
+        ingest_deliveries(&store, &aliases, &overrides, vec![relaunch]);
+        let lido = &store.latest_states().expect("latest")["verity-lido"];
+        assert_eq!(
+            lido.headline.as_deref(),
+            Some("Lido closure-v2 — re-pin started"),
+            "relaunch prose must not become the card headline"
+        );
+        assert!(lido.observations >= 2);
+
+        let live = HashSet::from(["verity-core".to_string()]);
+        let lease = parse_delivery(
+            "s",
+            1_754_000_200.0,
+            "[Cron delivery: verity-core]\nVerity #2332 — BLOQUÉE PAR LEASE WRITER\n\
+             [CTRL: verity-core | mode=blocked:lease-writer | wait=3 | next=wait]\n\
+             [STATE_SIGNATURE: verity-core|c5|#2332|lease|wait]\n",
+        );
+        ingest_deliveries_with_live(&store, &aliases, &overrides, vec![lease], &live);
+        let verity = store
+            .get_project("verity-core")
+            .expect("row")
+            .expect("exists");
+        assert_eq!(
+            verity.mode.as_deref(),
+            Some("active"),
+            "a live writer cannot stay blocked:lease"
+        );
+        assert!(
+            store
+                .latest_states()
+                .expect("latest")
+                .get("verity-core")
+                .and_then(|s| s.headline.as_deref())
+                .is_none(),
+            "lease-writer lie must not open a headline while a writer is live"
+        );
+    }
+
+    #[test]
+    fn honest_mode_prefers_live_work_and_parked_decisions_over_cron_prose() {
+        assert_eq!(
+            honest_controller_mode(Some("blocked:cannot-merge"), None, true, false, 1).as_deref(),
+            Some("active")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("active"), None, false, false, 2).as_deref(),
+            Some("blocked:decision")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("paused:owner"), None, true, false, 1).as_deref(),
+            Some("paused:owner")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("blocked:transport-cap"), None, false, false, 0).as_deref(),
+            Some("blocked:transport-cap")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("active"), None, true, true, 0).as_deref(),
+            Some("blocked:decision")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("active"), None, true, false, 0).as_deref(),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn project_detail_and_board_agree_on_ack_decision_and_live_waits() {
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let fresh = now.to_rfc3339();
+        for (kind, origin, timestamp, live_wait, expected) in [
+            ("ack", Some("hermes-session"), old.as_str(), false, None),
+            (
+                "decision",
+                None,
+                old.as_str(),
+                false,
+                Some("blocked:decision"),
+            ),
+            (
+                "decision",
+                Some("hermes-session"),
+                fresh.as_str(),
+                false,
+                None,
+            ),
+            (
+                "decision",
+                Some("hermes-session"),
+                old.as_str(),
+                false,
+                Some("blocked:decision"),
+            ),
+            ("ack", None, old.as_str(), true, Some("blocked:decision")),
+        ] {
+            let mission: Mission = serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::new_v4(), "status": if live_wait { "active" } else { "awaiting_user" },
+                "history": [], "created_at": timestamp, "updated_at": timestamp,
+                "last_status_change_at": timestamp,
+                "awaiting_kind": kind, "origin_session_id": origin,
+            }))
+            .unwrap();
+            let mut waits = HashMap::new();
+            if live_wait {
+                waits.insert(mission.id, Some(timestamp.to_string()));
+            }
+            let mut board = ProjectRowBuilder::new("verity".into());
+            board.mode = Some("blocked:decision".into());
+            board.missions.push(mission_chip(
+                &mission,
+                live_wait,
+                live_wait.then_some(timestamp),
+            ));
+            let detail = project_mode_from_missions(
+                Some("blocked:decision"),
+                None,
+                Some(std::slice::from_ref(&mission)),
+                &waits,
+                0,
+            );
+            assert_eq!(
+                detail.as_deref(),
+                expected,
+                "kind={kind}, origin={origin:?}"
+            );
+            assert_eq!(board.finish(&[], None, None, &fresh).mode, detail);
+            if kind == "ack" && !live_wait {
+                let mut active = mission.clone();
+                active.id = uuid::Uuid::new_v4();
+                active.status = MissionStatus::Active;
+                active.awaiting_kind = None;
+                let mut board = ProjectRowBuilder::new("verity".into());
+                board.mode = Some("blocked:decision".into());
+                board.missions.push(mission_chip(&mission, false, None));
+                board.missions.push(mission_chip(&active, false, None));
+                let detail = project_mode_from_missions(
+                    Some("blocked:decision"),
+                    None,
+                    Some(&[mission, active]),
+                    &waits,
+                    0,
+                );
+                assert_eq!(detail.as_deref(), Some("active"));
+                assert_eq!(board.finish(&[], None, None, &fresh).mode, detail);
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_decision_pairs_project_consistently_after_http_and_ctrl_writes() {
+        let now = chrono::Utc::now();
+        let timestamp = now.to_rfc3339();
+        for via_ctrl in [false, true] {
+            let store = ProjectsStore::open_in_memory().unwrap();
+            store
+                .upsert_project("verity", None, None, None, None)
+                .unwrap();
+            if via_ctrl {
+                ingest_deliveries(&store, &HashMap::new(), &HashMap::new(), vec![parse_delivery(
+                    "session", now.timestamp() as f64 + 1.0,
+                    "[Cron delivery: Verity]\nWaiting\n[CTRL: verity | mode=blocked:decision | wait=0 | next=wait]\n[STATE_SIGNATURE: verity|waiting]\n"
+                )]);
+            } else {
+                store
+                    .set_mode("verity", "blocked", None, Some("decision"))
+                    .unwrap();
+                store
+                    .record_state(
+                        "verity",
+                        "waiting",
+                        Some("Waiting"),
+                        &timestamp,
+                        Some("session"),
+                    )
+                    .unwrap();
+            }
+            let record = store.get_project("verity").unwrap().unwrap();
+            assert_eq!(record.mode.as_deref(), Some("blocked"));
+            assert_eq!(record.blocker.as_deref(), Some("decision"));
+            for (available, pending, expected_mode, expected_blocker) in [
+                (true, 0, None, None),
+                (false, 0, Some("blocked"), Some("decision")),
+                (false, 1, Some("blocked:decision"), Some("decision")),
+                (true, 1, Some("blocked:decision"), Some("decision")),
+            ] {
+                let mut projected = record.clone();
+                project_mode_projection(
+                    &mut projected,
+                    available.then_some(&[]),
+                    &HashMap::new(),
+                    pending,
+                );
+                assert_eq!(projected.mode.as_deref(), expected_mode);
+                assert_eq!(projected.blocker.as_deref(), expected_blocker);
+            }
+            let state = store.latest_states().unwrap().remove("verity").unwrap();
+            let mut board = ProjectRowBuilder::new("verity".into());
+            board.apply_roster(record.clone(), true);
+            board.attach_store_update(
+                store_update(
+                    "verity",
+                    &state,
+                    record.mode.clone(),
+                    record.blocker.clone(),
+                ),
+                1,
+                1,
+            );
+            let row = board.finish(&[], None, None, &timestamp);
+            assert_eq!(row.mode, None);
+            assert!(row
+                .attention_reasons
+                .iter()
+                .all(|reason| !reason.contains("blocker reported")));
+            let update = row.latest_update.unwrap();
+            assert_eq!(update.mode, None);
+            assert_eq!(update.blocker, None);
+            // These are read projections: controller history stays intact.
+            assert_eq!(store.get_project("verity").unwrap().unwrap(), record);
+        }
+    }
+
+    #[test]
+    fn persisted_nondecision_pairs_and_canonical_alias_provenance_are_preserved() {
+        let store = ProjectsStore::open_in_memory().unwrap();
+        store
+            .upsert_project("verity", None, None, None, None)
+            .unwrap();
+        store
+            .upsert_project("alias", None, None, None, None)
+            .unwrap();
+        for (mode, blocker) in [
+            ("blocked", "transport-cap"),
+            ("blocked", "manual"),
+            ("paused", "decision"),
+        ] {
+            store.set_mode("verity", mode, None, Some(blocker)).unwrap();
+            store
+                .set_mode("alias", "blocked", None, Some("decision"))
+                .unwrap();
+            let record = store.get_project("verity").unwrap().unwrap();
+            let mut projected = record.clone();
+            project_mode_projection(&mut projected, Some(&[]), &HashMap::new(), 0);
+            assert_eq!(projected.mode.as_deref(), Some(mode));
+            assert_eq!(projected.blocker.as_deref(), Some(blocker));
+            let mut board = ProjectRowBuilder::new("verity".into());
+            board.apply_roster(record, true);
+            board.apply_roster(store.get_project("alias").unwrap().unwrap(), true);
+            let row = board.finish(&[], None, None, &chrono::Utc::now().to_rfc3339());
+            assert_eq!(row.mode.as_deref(), Some(mode));
+        }
+        store
+            .set_mode("verity", "blocked:decision", None, Some("manual"))
+            .unwrap();
+        let mut conflicting = store.get_project("verity").unwrap().unwrap();
+        project_mode_projection(&mut conflicting, Some(&[]), &HashMap::new(), 0);
+        assert_eq!(conflicting.blocker.as_deref(), Some("manual"));
+        project_mode_projection(&mut conflicting, None, &HashMap::new(), 1);
+        assert_eq!(conflicting.blocker.as_deref(), Some("decision"));
+        assert!(
+            !is_decision_block(Some("blocked:decision"), Some("manual")),
+            "explicit provenance wins over legacy suffix"
+        );
+    }
+
+    #[test]
+    fn old_live_work_remains_visible_to_mode_under_eight_new_acks() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.mode = Some("blocked:decision".into());
+        let mut active = awaiting_chip("old-writer", false);
+        active.status = MissionStatus::Active;
+        active.updated_at = "2026-08-04T10:00:00Z".into();
+        builder.missions.push(active);
+        for i in 0..8 {
+            builder
+                .missions
+                .push(awaiting_chip(&format!("ack-{i}"), false));
+        }
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.mode.as_deref(), Some("active"));
+        assert_eq!(row.missions.len(), 8);
+        assert!(row
+            .missions
+            .iter()
+            .all(|mission| mission.id != "old-writer"));
+    }
+
+    #[test]
+    fn expired_decision_mode_clears_without_changing_pauses_or_other_blockers() {
+        for stored in [None, Some("active"), Some("blocked:decision")] {
+            assert_eq!(
+                project_mode_from_missions(stored, None, None, &HashMap::new(), 1).as_deref(),
+                Some("blocked:decision")
+            );
+        }
+        assert_eq!(
+            project_mode_from_missions(Some("paused:owner"), None, None, &HashMap::new(), 1)
+                .as_deref(),
+            Some("paused:owner")
+        );
+        assert_eq!(
+            project_mode_from_missions(Some("blocked:decision"), None, None, &HashMap::new(), 0)
+                .as_deref(),
+            Some("blocked:decision"),
+            "unavailable mission evidence cannot clear a real question"
+        );
+        assert_eq!(
+            project_mode_from_missions(
+                Some("blocked:decision"),
+                None,
+                Some(&[]),
+                &HashMap::new(),
+                0
+            ),
+            None,
+            "a successful empty roster can clear stale decision state"
+        );
+        assert_eq!(
+            honest_controller_mode(Some("blocked:decision"), None, false, false, 0),
+            None
+        );
+        assert_eq!(
+            honest_controller_mode(Some("blocked:decision"), None, true, false, 0).as_deref(),
+            Some("active")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("paused:owner"), None, false, false, 0).as_deref(),
+            Some("paused:owner")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("blocked:decision"), None, false, false, 1).as_deref(),
+            Some("blocked:decision")
+        );
+        assert_eq!(
+            honest_controller_mode(Some("blocked:transport-cap"), None, false, false, 0).as_deref(),
+            Some("blocked:transport-cap")
+        );
+    }
+
+    #[test]
+    fn a_live_writer_makes_the_card_mode_active_despite_a_blocked_ctrl() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.mode = Some("blocked:cannot-merge".into());
+        builder.pending_decisions = 1;
+        builder.missions.push(MissionChip {
+            id: "abcd1234".into(),
+            status: MissionStatus::Active,
+            title: Some("rebase #2332".into()),
+            updated_at: "2026-08-14T06:00:00Z".into(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator: false,
+            superseded_by: None,
+        });
+        let row = builder.finish(&[], None, None, "2026-08-14T06:05:00Z");
+        assert_eq!(row.mode.as_deref(), Some("active"));
+    }
+
+    // ---- decision disposition (the autonomy enforcement point) ----
+
+    #[test]
+    fn an_unearned_autonomous_act_is_coerced_into_an_escalation() {
+        // observe and propose deny acting. An unset grant follows the
+        // controllers-policy default (act_reversible), not observe.
+        for level in [Some("observe"), Some("propose")] {
+            let d = resolve_decision_disposition(level, Some("granted"), Some("decided"), None)
+                .expect("valid");
+            assert_eq!(d.authority, "escalation");
+            assert_eq!(d.status, "pending_user");
+            assert!(d.coerced_reason.is_some(), "level {level:?} must coerce");
+        }
+        let unset = resolve_decision_disposition(None, Some("granted"), Some("decided"), None)
+            .expect("valid");
+        assert_eq!(unset.authority, "granted");
+        assert_eq!(unset.status, "decided");
+        assert!(unset.coerced_reason.is_none());
+        for level in ["act_reversible", "act_full"] {
+            let d =
+                resolve_decision_disposition(Some(level), Some("granted"), Some("decided"), None)
+                    .expect("valid");
+            assert_eq!(d.authority, "granted");
+            assert_eq!(d.status, "decided");
+            assert!(d.coerced_reason.is_none());
+        }
+    }
+
+    #[test]
+    fn act_reversible_escalates_the_irreversible_kinds() {
+        for kind in ["merge", "Abandon", " deploy "] {
+            let d = resolve_decision_disposition(
+                Some("act_reversible"),
+                Some("granted"),
+                Some("decided"),
+                Some(kind),
+            )
+            .expect("valid");
+            assert_eq!(d.status, "pending_user", "kind {kind:?} must escalate");
+            assert!(d.coerced_reason.as_deref().unwrap_or("").contains("kind="));
+        }
+        // Reversible work passes at act_reversible; everything passes at act_full.
+        for (level, kind) in [
+            ("act_reversible", Some("dispatch")),
+            ("act_reversible", None),
+            ("act_full", Some("merge")),
+        ] {
+            let d =
+                resolve_decision_disposition(Some(level), Some("granted"), Some("decided"), kind)
+                    .expect("valid");
+            assert_eq!(d.status, "decided", "{level}/{kind:?} must pass");
+        }
+    }
+
+    #[test]
+    fn merge_authority_full_lets_act_reversible_record_a_merge() {
+        let denied = resolve_decision_disposition_for_grant(
+            Some("act_reversible"),
+            Some("review-first"),
+            Some("granted"),
+            Some("decided"),
+            Some("merge"),
+        )
+        .expect("valid");
+        assert_eq!(denied.status, "pending_user");
+
+        let allowed = resolve_decision_disposition_for_grant(
+            Some("act_reversible"),
+            Some("full"),
+            Some("granted"),
+            Some("decided"),
+            Some("merge"),
+        )
+        .expect("valid");
+        assert_eq!(allowed.authority, "granted");
+        assert_eq!(allowed.status, "decided");
+        assert!(allowed.coerced_reason.is_none());
+
+        // force_push stays banned even with merge_authority=full
+        let force = resolve_decision_disposition_for_grant(
+            Some("act_reversible"),
+            Some("full"),
+            Some("granted"),
+            Some("decided"),
+            Some("force_push"),
+        )
+        .expect("valid");
+        assert_eq!(force.status, "pending_user");
+    }
+
+    #[test]
+    fn legacy_decision_bodies_default_to_owner_escalations() {
+        // The pre-ledger callers send only question+rationale: no authority,
+        // no status. They must keep meaning "ask the owner".
+        let d = resolve_decision_disposition(Some("act_full"), None, None, None).expect("valid");
+        assert_eq!(d.authority, "escalation");
+        assert_eq!(d.status, "pending_user");
+        assert!(d.coerced_reason.is_none());
+
+        assert!(resolve_decision_disposition(None, Some("sovereign"), None, None).is_err());
+        assert!(resolve_decision_disposition(None, None, Some("expired"), None).is_err());
+    }
+
+    #[test]
+    fn pending_decisions_are_a_standing_attention_reason() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.pending_decisions = 2;
+        builder.autonomy_level = Some("propose".into());
+        let row = builder.finish(&[], None, None, "2026-08-04T20:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert_eq!(row.pending_decisions, 2);
+        assert_eq!(row.autonomy_level.as_deref(), Some("propose"));
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r == "2 decisions awaiting you"));
+    }
+
+    #[test]
+    fn empty_blockers_are_not_blockers() {
+        for line in [
+            "**Bloqué par :** aucun pour l'instant.",
+            "**Blocked by:** nothing currently; the four v33 lanes are healthy.",
+            "**Blocked by:** none — waiting on CI.",
+            "**Blocked by:** n/a",
+            "**Blocked by:** not blocked, just slow.",
+        ] {
+            let content = format!("[Cron delivery: x]\nTitre\n{line}\n");
+            let parsed = parse_delivery("s", 0.0, &content);
+            assert!(parsed.blocker.is_none(), "should be empty: {line}");
+        }
+    }
+
+    #[test]
+    fn repeated_signature_and_blocker_raise_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        // Three deliveries of SAMPLE collapse in the store into one state
+        // event with observations=3; the builder sees that count.
+        let mut update = parse_delivery("s", 1_754_000_000.0, SAMPLE);
+        update.at = "2026-08-04T11:00:00Z".into();
+        builder.attach_store_update(update, 3, 3);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert!(row.attention_reasons.iter().any(|r| r.contains("blocker")));
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("same state")));
+    }
+
+    #[test]
+    fn template_placeholder_signatures_are_rejected() {
+        let content = "Rapport\n[STATE_SIGNATURE: <project>|<item>|x]";
+        let parsed = parse_delivery("s", 0.0, content);
+        assert!(parsed.signature.is_none());
+    }
+
+    #[test]
+    fn delivery_copy_shares_fingerprint_with_routed_report() {
+        let routed = "Verity — état stable.\n\nDétails du tick.\n\n[STATE_SIGNATURE: verity|a|b]";
+        let copy = "[Cron delivery: Verity two-phase]\nVerity — état stable.\n\nDétails du tick.";
+        assert_eq!(delivery_fingerprint(routed), delivery_fingerprint(copy));
+    }
+
+    #[test]
+    fn headline_falls_back_to_cron_tag_title() {
+        let parsed = parse_delivery("s", 0.0, "[Cron delivery: Lido campaign controller]\n\n");
+        assert_eq!(parsed.headline, "Lido campaign controller");
+    }
+
+    #[test]
+    fn multiple_problem_missions_aggregate_into_one_reason() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        for i in 0..3 {
+            builder.missions.push(MissionChip {
+                id: format!("0000000{i}-aaaa-bbbb-cccc-dddddddddddd"),
+                status: MissionStatus::Failed,
+                title: None,
+                updated_at: "2026-08-01T00:00:00Z".to_string(),
+                github_pr: None,
+                last_status_change_at: None,
+                needs_operator: false,
+                superseded_by: None,
+            });
+        }
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        let failed_lines: Vec<&String> = row
+            .attention_reasons
+            .iter()
+            .filter(|r| r.contains("ailed"))
+            .collect();
+        assert_eq!(failed_lines.len(), 1);
+        assert!(failed_lines[0].contains("3 missions failed or interrupted"));
+    }
+
+    // ---- fresh-active suppression ----
+
+    fn failed_chip(id: &str) -> MissionChip {
+        MissionChip {
+            id: id.to_string(),
+            status: MissionStatus::Failed,
+            title: None,
+            updated_at: "2026-08-02T00:00:00Z".to_string(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator: false,
+            superseded_by: None,
+        }
+    }
+
+    #[test]
+    fn a_superseded_failed_attempt_is_not_a_reason_for_attention() {
+        let mut builder = ProjectRowBuilder::new("eip-8282".into());
+        let mut chip = failed_chip("1971a723-0000-0000-0000-000000000000");
+        chip.superseded_by = Some("bc136872-0000-0000-0000-000000000000".into());
+        builder.missions.push(chip);
+        let row = builder.finish(&[], None, None, "2026-08-02T01:00:00Z");
+        assert!(
+            row.attention_reasons.is_empty(),
+            "relayed attempt still flagged: {:?}",
+            row.attention_reasons
+        );
+        let mut builder = ProjectRowBuilder::new("eip-8282".into());
+        builder
+            .missions
+            .push(failed_chip("1971a723-0000-0000-0000-000000000000"));
+        let row = builder.finish(&[], None, None, "2026-08-02T01:00:00Z");
+        assert_eq!(row.attention_reasons.len(), 1);
+    }
+
+    fn active_update(at: &str, blocker: Option<&str>) -> DeliveryUpdate {
+        DeliveryUpdate {
+            headline: "tick".into(),
+            body: None,
+            session_id: "s".into(),
+            at: at.into(),
+            signature: Some("verity".into()),
+            state: Some("phase|head|clean".into()),
+            mode: Some("active".into()),
+            blocker: blocker.map(str::to_string),
+            next_action: None,
+            decision: None,
+        }
+    }
+
+    /// The incident shape: 48h-old failed missions, but the controller
+    /// reported minutes ago, says active, and reports no blocker. It has seen
+    /// those missions and continues — the row must not sit on the attention
+    /// shelf, and the suppressed reasons must not be emitted at all.
+    #[test]
+    fn fresh_active_controller_suppresses_mission_derived_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        builder
+            .missions
+            .push(failed_chip("00000001-aaaa-bbbb-cccc-dddddddddddd"));
+        builder.attach_store_update(active_update("2026-08-04T11:50:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "active");
+        assert!(
+            row.attention_reasons.is_empty(),
+            "suppressed reasons must not be emitted: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    /// A stale controller cannot vouch for its failures: past the freshness
+    /// window the failed missions flag the row again.
+    #[test]
+    fn stale_controller_with_failed_missions_stays_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        builder
+            .missions
+            .push(failed_chip("00000001-aaaa-bbbb-cccc-dddddddddddd"));
+        builder.attach_store_update(active_update("2026-08-02T12:00:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert!(row.attention_reasons.iter().any(|r| r.contains("Failed")));
+    }
+
+    /// A controller that runs on schedule but delivers nothing ([SILENT]
+    /// ticks) is quiet, not dead: a fresh scheduler heartbeat keeps
+    /// `controller_health=healthy` even when the last state event is old.
+    #[test]
+    fn silent_controller_with_fresh_heartbeat_is_healthy() {
+        let mut builder = ProjectRowBuilder::new("lean-silicon".to_string());
+        builder.mode = Some("active".to_string());
+        builder.controller_cron_id = Some("job42".to_string());
+        // Last delivered state is 2 days old …
+        builder.attach_store_update(active_update("2026-08-02T12:00:00Z", None), 1, 5);
+        // … but the job itself ran successfully 10 minutes ago.
+        builder.controller_heartbeat_at = Some("2026-08-04T11:50:00+00:00".to_string());
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.controller_health, Some("healthy"));
+        assert_eq!(
+            row.controller_heartbeat_at.as_deref(),
+            Some("2026-08-04T11:50:00+00:00")
+        );
+    }
+
+    /// Without a heartbeat the same silent controller is `stale` — the field
+    /// is what separates the two regimes.
+    #[test]
+    fn silent_controller_without_heartbeat_stays_stale() {
+        let mut builder = ProjectRowBuilder::new("lean-silicon".to_string());
+        builder.mode = Some("active".to_string());
+        builder.controller_cron_id = Some("job42".to_string());
+        builder.attach_store_update(active_update("2026-08-02T12:00:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.controller_health, Some("stale"));
+    }
+
+    /// jobs.json → heartbeat map: only enabled jobs whose last run succeeded
+    /// count, and timestamps normalize to UTC.
+    #[test]
+    fn heartbeats_read_only_successful_enabled_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("jobs.json");
+        std::fs::write(
+            &path,
+            r#"{"jobs": [
+                {"id": "ok1", "enabled": true, "last_status": "ok", "last_run_at": "2026-08-13T12:33:20.283248+02:00"},
+                {"id": "err1", "enabled": true, "last_status": "error", "last_run_at": "2026-08-13T12:14:43+02:00"},
+                {"id": "off1", "enabled": false, "last_status": "ok", "last_run_at": "2026-08-13T12:14:43+02:00"},
+                {"id": "new1", "enabled": true, "last_status": null, "last_run_at": null}
+            ]}"#,
+        )
+        .expect("seed");
+        let map = read_controller_heartbeats(Some(path));
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("ok1").map(String::as_str),
+            Some("2026-08-13T10:33:20.283248+00:00")
+        );
+        assert!(read_controller_heartbeats(None).is_empty());
+    }
+
+    /// Honesty read-model: an active project whose engine is gone (no fresh
+    /// signal, no live mission, no controller link) is a zombie — surfaced as
+    /// `controller_health=missing` and pushed to the attention bucket instead
+    /// of a lying `active`.
+    #[test]
+    fn zombie_active_project_is_controller_missing_and_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        // Stale signal (2 days old), no controller_cron_id, no live mission.
+        builder.attach_store_update(active_update("2026-08-02T12:00:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.controller_health, Some("missing"));
+        assert_eq!(row.bucket, "attention");
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("no controller")));
+    }
+
+    /// A fresh-signalling active controller is `healthy` even without a linked
+    /// cron id — something is demonstrably driving it, so P0 does not cry wolf
+    /// (the link mismatch is a P2 concern). Bucket stays `active`.
+    #[test]
+    fn fresh_signal_is_controller_healthy_not_missing() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        builder.attach_store_update(active_update("2026-08-04T11:50:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.controller_health, Some("healthy"));
+        assert_eq!(row.progress_state, Some("working"));
+        assert_eq!(row.bucket, "active");
+    }
+
+    /// delivery_health: a real binding means the reports have a durable home
+    /// (`reaching_user`); with only a guessed per-tick session it is
+    /// `misrouted` — the "engine runs but nobody receives" blind spot.
+    #[test]
+    fn delivery_health_tracks_binding_presence() {
+        let mut misrouted = ProjectRowBuilder::new("verity".to_string());
+        misrouted.mode = Some("active".to_string());
+        misrouted.attach_store_update(active_update("2026-08-04T11:50:00Z", None), 1, 5);
+        let row = misrouted.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.delivery_health, Some("misrouted"));
+
+        let mut bound = ProjectRowBuilder::new("verity".to_string());
+        bound.mode = Some("active".to_string());
+        bound.attach_store_update(active_update("2026-08-04T11:50:00Z", None), 1, 5);
+        let row = bound.finish(
+            &[],
+            None,
+            Some(ProjectConversation {
+                session_id: "20260806_172248_c520d0".into(),
+                source: "binding",
+                bound_at: Some("2026-08-08T12:00:00Z".into()),
+            }),
+            "2026-08-04T12:00:00Z",
+        );
+        assert_eq!(row.delivery_health, Some("reaching_user"));
+    }
+
+    /// A dormant project (no activity claim, no controller link) stays quiet:
+    /// all three honesty axes are absent from the payload.
+    #[test]
+    fn dormant_project_has_no_health_axes() {
+        let row = ProjectRowBuilder::new("collatz-research".to_string()).finish(
+            &[],
+            None,
+            None,
+            "2026-08-04T12:00:00Z",
+        );
+        assert_eq!(row.controller_health, None);
+        assert_eq!(row.delivery_health, None);
+        assert_eq!(row.progress_state, None);
+        let json = serde_json::to_value(&row).expect("serialize");
+        assert!(json.get("controller_health").is_none());
+        assert!(json.get("delivery_health").is_none());
+        assert!(json.get("progress_state").is_none());
+    }
+
+    /// A reported blocker always wins over freshness: the controller itself
+    /// says it is stuck.
+    #[test]
+    fn fresh_controller_with_blocker_stays_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        builder
+            .missions
+            .push(failed_chip("00000001-aaaa-bbbb-cccc-dddddddddddd"));
+        builder.attach_store_update(
+            active_update("2026-08-04T11:50:00Z", Some("waiting on CI runner")),
+            1,
+            5,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert!(row.attention_reasons.iter().any(|r| r.contains("blocker")));
+        // Suppression is off entirely: the failed mission surfaces too.
+        assert!(row.attention_reasons.iter().any(|r| r.contains("Failed")));
+    }
+
+    /// A parked question is always attention: no controller signal can answer
+    /// on the operator's behalf, and it disables suppression for the row.
+    #[test]
+    fn awaiting_user_is_attention_regardless_of_freshness() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.mode = Some("active".to_string());
+        builder.missions.push(MissionChip {
+            id: "00000002-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+            status: MissionStatus::AwaitingUser,
+            title: None,
+            updated_at: "2026-08-04T11:00:00Z".to_string(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator: true,
+            superseded_by: None,
+        });
+        builder
+            .missions
+            .push(failed_chip("00000001-aaaa-bbbb-cccc-dddddddddddd"));
+        builder.attach_store_update(active_update("2026-08-04T11:50:00Z", None), 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("awaiting user input")));
+        assert!(row.attention_reasons.iter().any(|r| r.contains("Failed")));
+    }
+
+    fn awaiting_chip(id: &str, needs_operator: bool) -> MissionChip {
+        MissionChip {
+            id: id.to_string(),
+            status: MissionStatus::AwaitingUser,
+            title: None,
+            updated_at: "2026-08-04T11:00:00Z".to_string(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator,
+            superseded_by: None,
+        }
+    }
+
+    #[test]
+    fn ack_with_controller_origin_is_not_project_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder
+            .missions
+            .push(awaiting_chip("00000002-aaaa-bbbb-cccc-dddddddddddd", false));
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(!row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("awaiting user input")));
+        assert_ne!(row.mode.as_deref(), Some("blocked:decision"));
+    }
+
+    #[test]
+    fn decision_without_origin_is_project_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder
+            .missions
+            .push(awaiting_chip("00000002-aaaa-bbbb-cccc-dddddddddddd", true));
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("awaiting user input")));
+        assert_eq!(row.mode.as_deref(), Some("blocked:decision"));
+    }
+
+    #[test]
+    fn pending_user_is_attention_regardless_of_missions() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.pending_decisions = 1;
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("decision awaiting you")));
+        assert!(!row
+            .attention_reasons
+            .iter()
+            .any(|r| r.contains("awaiting user input")));
+        assert_eq!(row.mode.as_deref(), Some("blocked:decision"));
+        assert_eq!(row.bucket, "attention");
+    }
+
+    /// Freshness alone is not enough: without an active mode the controller
+    /// has not vouched for anything.
+    #[test]
+    fn fresh_signal_without_active_mode_does_not_suppress() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder
+            .missions
+            .push(failed_chip("00000001-aaaa-bbbb-cccc-dddddddddddd"));
+        let mut update = active_update("2026-08-04T11:50:00Z", None);
+        update.mode = None;
+        builder.attach_store_update(update, 1, 5);
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "attention");
+        assert!(row.attention_reasons.iter().any(|r| r.contains("Failed")));
+    }
+
+    #[test]
+    fn forced_override_silences_attention() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.attach_store_update(parse_delivery("s", 3.0, SAMPLE), 3, 3);
+        let row = builder.finish(&[], Some("paused"), None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "paused");
+        // Reasons stay visible in the detail pane even when silenced.
+        assert!(!row.attention_reasons.is_empty());
+    }
+
+    #[test]
+    fn paused_tracker_without_signals_lands_in_paused_bucket() {
+        let mut builder = ProjectRowBuilder::new("erc".to_string());
+        builder.tracker = Some(TrackerInfo {
+            slug: "erc".to_string(),
+            status_line: Some("paused (drained)".to_string()),
+            updated_at: None,
+        });
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.bucket, "paused");
+    }
+
+    #[test]
+    fn get_project_conversation_follows_the_live_continuation() {
+        // Coldcard was bound to ff644f; Hermes compressed it eight times to
+        // 1310a9. Opening the frozen id is why an owner message "does not
+        // work" — the submit lands on a dead parent.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("state.db");
+        let connection = rusqlite::Connection::open(&path).expect("open");
+        connection
+            .execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)",
+                [],
+            )
+            .expect("schema");
+        for (id, parent) in [
+            ("20260806_231844_ff644f", None),
+            ("20260809_005018_564a75", Some("20260806_231844_ff644f")),
+            ("20260813_111430_1310a9", Some("20260809_005018_564a75")),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO sessions (id, parent_session_id) VALUES (?1, ?2)",
+                    rusqlite::params![id, parent],
+                )
+                .expect("insert");
+        }
+        let conversation = follow_live_conversation_at(
+            ProjectConversation {
+                session_id: "20260806_231844_ff644f".into(),
+                source: "binding",
+                bound_at: Some("2026-08-08T12:43:56Z".into()),
+            },
+            Some(&path),
+        );
+        assert_eq!(conversation.session_id, "20260813_111430_1310a9");
+        assert_eq!(conversation.source, "binding");
+    }
+
+    /// An explicit binding must win over the inferred session, and the
+    /// inferred one must be labelled as a guess so the UI can offer to bind it.
+    #[test]
+    fn explicit_binding_wins_over_the_inferred_session() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.attach_store_update(
+            DeliveryUpdate {
+                headline: "tick".into(),
+                body: None,
+                at: "2026-08-04T12:00:00Z".into(),
+                session_id: "cron_e594d751447d_20260804_120931".into(),
+                signature: None,
+                mode: None,
+                state: None,
+                blocker: None,
+                next_action: None,
+                decision: None,
+            },
+            1,
+            1,
+        );
+        let row = builder.finish(
+            &[],
+            None,
+            Some(ProjectConversation {
+                session_id: "20260804_103847_86ca5c".into(),
+                source: "binding",
+                bound_at: Some("2026-08-04T13:00:00Z".into()),
+            }),
+            "2026-08-04T12:00:00Z",
+        );
+        let conversation = row.conversation.expect("conversation");
+        assert_eq!(conversation.session_id, "20260804_103847_86ca5c");
+        assert_eq!(conversation.source, "binding");
+    }
+
+    #[test]
+    fn without_a_binding_the_latest_update_is_offered_as_a_guess() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.attach_store_update(
+            DeliveryUpdate {
+                headline: "tick".into(),
+                body: None,
+                at: "2026-08-04T12:00:00Z".into(),
+                session_id: "cron_e594d751447d_20260804_120931".into(),
+                signature: None,
+                mode: None,
+                state: None,
+                blocker: None,
+                next_action: None,
+                decision: None,
+            },
+            1,
+            1,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        let conversation = row.conversation.expect("conversation");
+        assert_eq!(conversation.source, "latest_update");
+        assert_eq!(conversation.bound_at, None);
+    }
+
+    /// Roster metadata rides on the row: a set title replaces the slug on cards
+    /// and the palette; next_action renders on attention cards. next_action is
+    /// optional and absent from the JSON when unset. `title`, however, is never
+    /// absent — when the roster carries no title the row humanizes the slug so a
+    /// surface never falls back to the raw lowercase-hyphenated slug.
+    #[test]
+    fn roster_title_and_next_action_ride_on_the_row() {
+        let mut builder = ProjectRowBuilder::new("verity".to_string());
+        builder.title = Some("Verity 4.31 convergence".to_string());
+        builder.next_action = Some("certify #2240".to_string());
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert_eq!(row.title.as_deref(), Some("Verity 4.31 convergence"));
+        assert_eq!(row.next_action.as_deref(), Some("certify #2240"));
+
+        let bare = ProjectRowBuilder::new("lido".to_string()).finish(
+            &[],
+            None,
+            None,
+            "2026-08-04T12:00:00Z",
+        );
+        // A bare row still gets a humanized title ("Lido") — never the raw slug,
+        // never omitted — so notifications and board rows always read as a name.
+        assert_eq!(bare.title.as_deref(), Some("Lido"));
+        let json = serde_json::to_value(&bare).expect("serialize");
+        assert_eq!(
+            json.get("title").and_then(|v| v.as_str()),
+            Some("Lido"),
+            "unset title humanizes the slug rather than being omitted"
+        );
+        assert!(
+            json.get("next_action").is_none(),
+            "unset next_action is omitted"
+        );
+    }
+
+    #[test]
+    fn live_writers_override_a_stale_or_empty_next_action() {
+        let mut builder = ProjectRowBuilder::new("verity-lido".to_string());
+        builder.next_action = Some("Drain CLEAN Lido PRs; pin is #81".to_string());
+        builder.missions.push(MissionChip {
+            id: "b466f65d-798b-467b-b20c-f1433c3b52a4".to_string(),
+            status: MissionStatus::Active,
+            title: Some("Certify Lido PR #88 exact head".to_string()),
+            updated_at: "2026-08-16T19:00:00Z".to_string(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator: false,
+            superseded_by: None,
+        });
+        builder.missions.push(MissionChip {
+            id: "8cc8df04-b8f4-4003-b668-d17f7d3e8def".to_string(),
+            status: MissionStatus::Active,
+            title: Some("Design P-RESERVE-RELATIONAL implementation packet".to_string()),
+            updated_at: "2026-08-16T19:00:01Z".to_string(),
+            github_pr: None,
+            last_status_change_at: None,
+            needs_operator: false,
+            superseded_by: None,
+        });
+        let row = builder.finish(&[], None, None, "2026-08-16T19:05:00Z");
+        let next = row.next_action.expect("derived");
+        assert!(next.starts_with("2 live:"), "{next}");
+        assert!(next.contains("#88"), "{next}");
+        assert!(next.contains("P-RESERVE-RELATIONAL"), "{next}");
+    }
+
+    fn roster_record(slug: &str, next_action: Option<&str>) -> ProjectRecord {
+        ProjectRecord {
+            slug: slug.to_string(),
+            title: Some(slug.to_string()),
+            objective: None,
+            status: "active".to_string(),
+            mode: Some("active".to_string()),
+            wait_ticks: 0,
+            next_action: next_action.map(str::to_string),
+            blocker: Some("lease".to_string()),
+            controller_cron_id: None,
+            repository: None,
+            created_at: "2026-08-16T00:00:00Z".to_string(),
+            updated_at: "2026-08-16T00:00:00Z".to_string(),
+            mode_signal_at: None,
+        }
+    }
+
+    /// `routes.json` maps an existing roster slug onto a canonical slug that
+    /// has no roster row of its own (`update_project_status` / ingest wrote
+    /// next_action onto the alias first). The fold must keep that value.
+    #[test]
+    fn alias_only_roster_row_keeps_next_action_on_canonical_fold() {
+        let mut builder = ProjectRowBuilder::new("verity-lido".to_string());
+        builder.apply_roster(roster_record("lido-audit", Some("certify #88")), false);
+        let row = builder.finish(&[], None, None, "2026-08-16T19:05:00Z");
+        assert_eq!(row.next_action.as_deref(), Some("certify #88"));
+        assert_eq!(row.title.as_deref(), Some("lido-audit"));
+        assert_eq!(row.mode.as_deref(), Some("active"));
+    }
+
+    /// A canonical roster row owns next_action, including an explicit NULL.
+    /// An alias must not fill that hole (Lido's day-old "Drain CLEAN PRs").
+    #[test]
+    fn alias_does_not_overwrite_canonical_next_action() {
+        let mut populated = ProjectRowBuilder::new("verity-lido".to_string());
+        populated.apply_roster(roster_record("verity-lido", Some("certify #88")), true);
+        populated.apply_roster(
+            roster_record("lido-audit", Some("Drain CLEAN Lido PRs; pin is #81")),
+            true,
+        );
+        let row = populated.finish(&[], None, None, "2026-08-16T19:05:00Z");
+        assert_eq!(row.next_action.as_deref(), Some("certify #88"));
+
+        let mut empty = ProjectRowBuilder::new("verity-lido".to_string());
+        empty.apply_roster(roster_record("verity-lido", None), true);
+        empty.apply_roster(
+            roster_record("lido-audit", Some("Drain CLEAN Lido PRs; pin is #81")),
+            true,
+        );
+        let row = empty.finish(&[], None, None, "2026-08-16T19:05:00Z");
+        assert_eq!(row.next_action, None);
+    }
+
+    /// Provenance rides on the row: `override` is the operator's board action,
+    /// `mode` is the controller's own report. An operator pause serializes the
+    /// override; a controller self-pause serializes mode without an override —
+    /// that difference is what lets clients render "paused by you" vs
+    /// "controller stopped itself". All three fields are omitted when unset.
+    #[test]
+    fn override_mode_and_controller_id_expose_stop_provenance() {
+        // Operator pause: board override present, controller still active.
+        let mut operator = ProjectRowBuilder::new("verity".to_string());
+        operator.mode = Some("active".to_string());
+        operator.controller_cron_id = Some("cron-abc123".to_string());
+        let row = operator.finish(&[], Some("paused"), None, "2026-08-04T12:00:00Z");
+        let json = serde_json::to_value(&row).expect("serialize");
+        assert_eq!(json["override"], "paused");
+        assert_eq!(json["mode"], "active");
+        assert_eq!(json["controller_cron_id"], "cron-abc123");
+        assert_eq!(row.bucket, "paused");
+
+        // Controller self-pause: mode says paused, no override.
+        let mut cut = ProjectRowBuilder::new("lido".to_string());
+        cut.mode = Some("paused".to_string());
+        let row = cut.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        let json = serde_json::to_value(&row).expect("serialize");
+        assert!(json.get("override").is_none(), "no override was set");
+        assert_eq!(json["mode"], "paused");
+
+        // Nothing set: all three are omitted from the JSON.
+        let bare = ProjectRowBuilder::new("erc".to_string()).finish(
+            &[],
+            None,
+            None,
+            "2026-08-04T12:00:00Z",
+        );
+        let json = serde_json::to_value(&bare).expect("serialize");
+        assert!(json.get("override").is_none());
+        assert!(json.get("mode").is_none());
+        assert!(json.get("controller_cron_id").is_none());
+    }
+
+    // ---- store-driven overview (the ingestor is the only delivery reader) ----
+
+    use super::super::projects_store::{ProjectState, ProjectsStore};
+
+    /// A CTRL-only delivery (no STATE_SIGNATURE descriptor) must still land as
+    /// the row's latest_update — via the store, with no per-request scan of
+    /// HERMES_STATE_DB. The whole path here runs with that env unset.
+    #[test]
+    fn a_ctrl_only_delivery_headline_lands_on_the_row_via_the_store() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed roster");
+        let ctrl_only =
+            "[Cron delivery: Verity]\nDid a thing\n[CTRL: verity | mode=active | wait=0 | next=x]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-1", 1_754_000_000.0, ctrl_only)],
+        );
+
+        let latest = store.latest_states().expect("latest");
+        let event = latest.get("verity").expect("state event recorded");
+        let record = store
+            .get_project("verity")
+            .expect("read")
+            .expect("roster auto-upserted");
+        let update = store_update("verity", event, record.mode, record.blocker);
+        assert_eq!(update.headline, "Did a thing");
+        assert_eq!(update.session_id, "sess-1");
+        assert_eq!(update.signature.as_deref(), Some("verity"));
+        assert_eq!(update.mode.as_deref(), Some("active"));
+        assert_eq!(
+            update.state, None,
+            "the synthetic ctrl descriptor is not a state"
+        );
+    }
+
+    /// A `[SILENT]` tick after a real report must advance freshness without
+    /// stealing the headline: the card keeps the last meaningful headline,
+    /// stamped with the silent delivery's (fresher) time. Observed live on
+    /// verity-lido, where cards showed the literal string "[SILENT]".
+    #[test]
+    fn a_silent_delivery_keeps_the_previous_headline_but_advances_freshness() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed roster");
+        let real = "[Cron delivery: Verity]\nCertify #2240 merged\n\
+                    [CTRL: verity | mode=active | wait=0 | next=x]";
+        let quiet = "[Cron delivery: Verity]\n[SILENT]\n\
+                     [CTRL: verity | mode=active | wait=1 | next=x]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            // Newest-first, as read_deliveries returns them.
+            vec![
+                parse_delivery("sess-2", 1_754_003_600.0, quiet),
+                parse_delivery("sess-1", 1_754_000_000.0, real),
+            ],
+        );
+
+        let latest = store.latest_states().expect("latest");
+        let event = latest.get("verity").expect("state event recorded");
+        let update = store_update("verity", event, None, None);
+        assert_eq!(
+            update.headline, "Certify #2240 merged",
+            "the [SILENT] tick must not replace the last meaningful headline"
+        );
+        assert_eq!(
+            update.at,
+            parse_delivery("sess-2", 1_754_003_600.0, quiet).at,
+            "freshness must advance to the silent delivery's time"
+        );
+        assert_eq!(event.observations, 2, "the quiet tick is still counted");
+    }
+
+    /// A controller whose very first delivery is `[SILENT]` must not put the
+    /// literal marker on the card: the event lands with no headline at all.
+    #[test]
+    fn a_silent_first_delivery_records_no_garbage_headline() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("lido", None, None, None, None)
+            .expect("seed roster");
+        let quiet = "[Cron delivery: Lido]\n[SILENT]\n\
+                     [CTRL: lido | mode=active | wait=0 | next=x]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-1", 1_754_000_000.0, quiet)],
+        );
+
+        let latest = store.latest_states().expect("latest");
+        let event = latest.get("lido").expect("freshness is still recorded");
+        assert_eq!(event.headline, None, "no [SILENT] garbage headline");
+        let update = store_update("lido", event, None, None);
+        assert_eq!(update.headline, "");
+    }
+
+    /// The serialized shape of a store-built latest_update is the one every
+    /// surface already consumes: body present (null), state/mode omitted when
+    /// absent, the rest verbatim.
+    #[test]
+    fn the_store_built_latest_update_keeps_the_delivery_shape() {
+        let event = ProjectState {
+            signature: "phase1|abc".into(),
+            headline: Some("Verity — stable".into()),
+            first_seen_at: "2026-08-04T10:00:00Z".into(),
+            last_seen_at: "2026-08-04T12:00:00Z".into(),
+            observations: 2,
+            session_id: Some("sess-9".into()),
+        };
+        let full = store_update(
+            "verity",
+            &event,
+            Some("blocked:cap".into()),
+            Some("cap".into()),
+        );
+        let json = serde_json::to_value(&full).expect("serialize");
+        assert_eq!(json["headline"], "Verity — stable");
+        assert_eq!(json["body"], serde_json::Value::Null);
+        assert_eq!(json["session_id"], "sess-9");
+        assert_eq!(json["at"], "2026-08-04T12:00:00Z");
+        assert_eq!(json["signature"], "verity");
+        assert_eq!(json["state"], "phase1|abc");
+        assert_eq!(json["mode"], "blocked:cap");
+        assert_eq!(json["blocker"], "cap");
+
+        let mut bare_event = event;
+        bare_event.signature = "ctrl:report".into();
+        bare_event.session_id = None;
+        let bare = store_update("verity", &bare_event, None, None);
+        let json = serde_json::to_value(&bare).expect("serialize");
+        assert!(json.get("state").is_none(), "absent state is omitted");
+        assert!(json.get("mode").is_none(), "absent mode is omitted");
+        assert_eq!(json["session_id"], "");
+        assert_eq!(json["blocker"], serde_json::Value::Null);
+    }
+
+    /// An alias whose target is archived — by roster status or board override —
+    /// must refuse the route: the delivery surfaces as unrouted instead of
+    /// silently feeding a row nobody watches. routes.json is never rewritten.
+    #[test]
+    fn an_alias_onto_an_archived_target_is_refused_and_surfaces_as_unrouted() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("lido-audit", None, None, None, None)
+            .expect("seed");
+        store.set_status("lido-audit", "archived").expect("archive");
+        let aliases: HashMap<String, String> =
+            [("lido".to_string(), "lido-audit".to_string())].into();
+
+        let routed = "[Cron delivery: Lido]\nAudit tick\n[STATE_SIGNATURE: lido|phase3|abc|none]";
+        ingest_deliveries(
+            &store,
+            &aliases,
+            &HashMap::new(),
+            vec![parse_delivery("sess-2", 1_754_000_000.0, routed)],
+        );
+        assert!(
+            store
+                .latest_states()
+                .expect("latest")
+                .get("lido-audit")
+                .is_none(),
+            "nothing may be recorded against the archived target"
+        );
+        let unrouted = store.unrouted(10).expect("unrouted");
+        assert_eq!(unrouted.len(), 1);
+        assert_eq!(unrouted[0].signature.as_deref(), Some("lido"));
+        assert_eq!(unrouted[0].headline, "Audit tick");
+
+        // Board override archived/deleted refuses the route the same way.
+        let aliases2: HashMap<String, String> =
+            [("verity".to_string(), "verity-roadmap".to_string())].into();
+        let overrides: HashMap<String, String> =
+            [("verity-roadmap".to_string(), "archived".to_string())].into();
+        let routed2 = "[Cron delivery: V]\nTick\n[STATE_SIGNATURE: verity|p|x|y]";
+        ingest_deliveries(
+            &store,
+            &aliases2,
+            &overrides,
+            vec![parse_delivery("sess-3", 1_754_000_001.0, routed2)],
+        );
+        assert!(store
+            .latest_states()
+            .expect("latest")
+            .get("verity-roadmap")
+            .is_none());
+        assert_eq!(store.unrouted(10).expect("unrouted").len(), 2);
+
+        // A direct (non-aliased) key still routes even when archived: only a
+        // stale alias is refused.
+        let direct = "[Cron delivery: L]\nDirect\n[STATE_SIGNATURE: lido-audit|p|x|y]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-4", 1_754_000_002.0, direct)],
+        );
+        assert!(store
+            .latest_states()
+            .expect("latest")
+            .get("lido-audit")
+            .is_some());
+    }
+
+    /// A delivery with no routing key at all lands in the triage inbox — this
+    /// used to be derived per request by the overview's own scan.
+    #[test]
+    fn a_keyless_delivery_is_recorded_as_unrouted_by_the_ingestor() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery(
+                "sess-5",
+                1_754_000_000.0,
+                "[Cron delivery: Mystery]\nNo trailer here.",
+            )],
+        );
+        let unrouted = store.unrouted(10).expect("unrouted");
+        assert_eq!(unrouted.len(), 1);
+        assert_eq!(unrouted[0].headline, "No trailer here.");
+        assert!(
+            store.latest_states().expect("latest").is_empty(),
+            "no phantom project was fabricated"
+        );
+    }
+
+    /// Repeated CTRL-only quiet ticks collapse into one state event whose
+    /// observation count and mode projection keep working.
+    #[test]
+    fn repeated_ctrl_only_ticks_collapse_and_project_the_mode() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("lido", None, None, None, None)
+            .expect("seed roster");
+        for i in 0..3 {
+            let tick = "[Cron delivery: Lido]\n[SILENT]\n[CTRL: lido | mode=blocked:transport-cap | wait=0 | next=x]";
+            ingest_deliveries(
+                &store,
+                &HashMap::new(),
+                &HashMap::new(),
+                vec![parse_delivery(
+                    &format!("sess-{i}"),
+                    1_754_000_000.0 + (i as f64) * 60.0,
+                    tick,
+                )],
+            );
+        }
+        let latest = store.latest_states().expect("latest");
+        let event = latest.get("lido").expect("event");
+        assert_eq!(event.observations, 3);
+        assert_eq!(event.session_id.as_deref(), Some("sess-2"), "newest wins");
+        let record = store.get_project("lido").expect("read").expect("present");
+        assert_eq!(record.mode.as_deref(), Some("blocked"));
+        assert_eq!(record.blocker.as_deref(), Some("transport-cap"));
+        assert_eq!(record.wait_ticks, 2);
+        assert_eq!(store.state_event_totals().expect("totals")["lido"], 3);
+    }
+
+    #[test]
+    fn older_blocked_replay_does_not_paint_mode_or_reset_wait() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        let newer = "[Cron delivery: Verity]\nCertify merged\n\
+                     [CTRL: verity | mode=active | wait=2 | next=x]\n\
+                     [STATE_SIGNATURE: verity|phase|head|clean]\n";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-new", 1_754_003_600.0, newer)],
+        );
+        store
+            .project_mode_from_signal("verity", "active", 2, None, None, None)
+            .expect("seed wait");
+        let before = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(before.mode.as_deref(), Some("active"));
+        assert_eq!(before.wait_ticks, 2);
+
+        let older = "[Cron delivery: Verity]\nBLOQUÉE\n**Blocked by:** stale lease\n\
+                     [CTRL: verity | mode=blocked:lease | wait=0 | next=inspect x]\n\
+                     [STATE_SIGNATURE: verity|phase-old|head|blocked]\n";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-old", 1_754_000_000.0, older)],
+        );
+        let after = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(after.mode.as_deref(), Some("active"));
+        assert_eq!(after.wait_ticks, 2);
+    }
+
+    #[test]
+    fn http_set_mode_survives_older_ingest_callback() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        store
+            .set_mode("verity", "active", Some("continue"), None)
+            .expect("http");
+        // A regular (non-inspect) older blocked CTRL must still lose to the
+        // HTTP watermark — inspect callbacks are skipped earlier.
+        let older = "[Cron delivery: Verity]\nOld block\n\
+                     [CTRL: verity | mode=blocked:lease | wait=0 | next=wait]\n\
+                     [STATE_SIGNATURE: verity|old|head|blocked]\n";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-old", 1_754_000_000.0, older)],
+        );
+        let record = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(record.mode.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn inspect_callback_does_not_write_mode() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        store
+            .set_mode("verity", "active", Some("continue"), None)
+            .expect("http");
+        let callback = "[Mission callback: coldcard skip kernel]\n\
+                        status=failed mission=acfb03d2\n\
+                        Codex CLI not found\n\
+                        [CTRL: verity | mode=blocked | wait=0 | next=inspect acfb03d2]\n\
+                        [STATE_SIGNATURE: verity|mission-callback|acfb03d2|failed|inspect]\n";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-cb", 1_754_003_600.0, callback)],
+        );
+        let record = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(record.mode.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn newest_delivery_in_a_mixed_batch_wins_mode() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed roster");
+        let older = "[Cron delivery: Verity]\nOld block\n\
+                     [CTRL: verity | mode=blocked:lease | wait=0 | next=wait]\n\
+                     [STATE_SIGNATURE: verity|old|head|blocked]\n";
+        let newer = "[Cron delivery: Verity]\nMoved on\n\
+                     [CTRL: verity | mode=active | wait=0 | next=x]\n\
+                     [STATE_SIGNATURE: verity|new|head|clean]\n";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            // Newest-first, as read_deliveries returns them.
+            vec![
+                parse_delivery("sess-new", 1_754_003_600.0, newer),
+                parse_delivery("sess-old", 1_754_000_000.0, older),
+            ],
+        );
+        let record = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(record.mode.as_deref(), Some("active"));
+        assert_eq!(record.blocker, None);
+    }
+
+    #[test]
+    fn inspect_callback_does_not_add_blocker_reported() {
+        // Ingest never copies inspect onto the roster, so latest_update has
+        // no blocker to chip — even when the newest headline is a callback.
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.attach_store_update(
+            DeliveryUpdate {
+                headline: "[Mission callback: coldcard skip kernel]".into(),
+                body: None,
+                session_id: "s".into(),
+                at: "2026-08-04T11:50:00Z".into(),
+                signature: Some("verity".into()),
+                state: Some("mission-callback|acfb03d2|failed|inspect".into()),
+                mode: None,
+                blocker: None,
+                next_action: None,
+                decision: None,
+            },
+            1,
+            1,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(
+            !row.attention_reasons
+                .iter()
+                .any(|r| r.contains("blocker reported")),
+            "inspect callbacks must not raise blocker attention: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    #[test]
+    fn inspect_headline_does_not_hide_a_fresh_roster_blocker() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.attach_store_update(
+            DeliveryUpdate {
+                headline: "[Mission callback: coldcard skip kernel]".into(),
+                body: None,
+                session_id: "s".into(),
+                at: "2026-08-04T11:50:00Z".into(),
+                signature: Some("verity".into()),
+                state: Some("mission-callback|acfb03d2|failed|inspect".into()),
+                mode: Some("blocked".into()),
+                blocker: Some("transport-cap".into()),
+                next_action: None,
+                decision: None,
+            },
+            1,
+            1,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(
+            row.attention_reasons
+                .iter()
+                .any(|r| r.contains("blocker reported")),
+            "a genuine roster blocker must still chip: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    #[test]
+    fn stale_blocker_signal_does_not_raise_blocker_reported() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.controller_cron_id = Some("cron-1".into());
+        builder.mode_signal_at = Some("2026-08-02T11:00:00Z".into());
+        builder.attach_store_update(
+            active_update("2026-08-02T11:00:00Z", Some("waiting on CI")),
+            1,
+            5,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(
+            !row.attention_reasons
+                .iter()
+                .any(|r| r.contains("blocker reported")),
+            "a 24h-stale mode signal must not paint a fresh BLOCKED: {:?}",
+            row.attention_reasons
+        );
+        assert_eq!(row.controller_health, Some("stale"));
+    }
+
+    #[test]
+    fn stale_roster_blocker_does_not_chip_when_state_event_is_fresh() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.mode_signal_at = Some("2026-08-02T11:00:00Z".into());
+        builder.attach_store_update(
+            active_update("2026-08-04T11:50:00Z", Some("waiting on CI")),
+            1,
+            5,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(
+            !row.attention_reasons
+                .iter()
+                .any(|r| r.contains("blocker reported")),
+            "a stale roster blocker must not look new just because a callback refreshed latest.at: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    #[test]
+    fn fresh_mode_signal_chips_even_when_state_event_is_old() {
+        let mut builder = ProjectRowBuilder::new("verity".into());
+        builder.mode_signal_at = Some("2026-08-04T11:50:00Z".into());
+        builder.attach_store_update(
+            active_update("2026-08-02T11:00:00Z", Some("waiting on CI")),
+            1,
+            5,
+        );
+        let row = builder.finish(&[], None, None, "2026-08-04T12:00:00Z");
+        assert!(
+            row.attention_reasons
+                .iter()
+                .any(|r| r.contains("blocker reported")),
+            "a fresh HTTP/mode signal must chip even when the last state event is old: {:?}",
+            row.attention_reasons
+        );
+    }
+
+    #[test]
+    fn already_counted_delivery_retries_deferred_mode_write() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("seed");
+        let content = "[Cron delivery: Verity]\nBlocked\n\
+                       [CTRL: verity | mode=blocked:lease | wait=0 | next=wait]\n\
+                       [STATE_SIGNATURE: verity|phase|head|blocked]\n";
+        let delivery = parse_delivery("sess", 1_754_003_600.0, content);
+        // State committed, mode write lost — the crash window the next scan
+        // must retry instead of treating observations==0 as completion.
+        let descriptor = delivery.state.clone().expect("descriptor");
+        assert_eq!(
+            store
+                .record_state(
+                    "verity",
+                    &descriptor,
+                    Some(delivery.headline.as_str()),
+                    &delivery.at,
+                    Some("sess"),
+                )
+                .expect("pre-record"),
+            1
+        );
+        assert_eq!(
+            store
+                .get_project("verity")
+                .expect("read")
+                .expect("present")
+                .mode,
+            None
+        );
+        ingest_deliveries(&store, &HashMap::new(), &HashMap::new(), vec![delivery]);
+        let record = store.get_project("verity").expect("read").expect("present");
+        assert_eq!(record.mode.as_deref(), Some("blocked"));
+        assert_eq!(record.blocker.as_deref(), Some("lease"));
+        assert_eq!(record.wait_ticks, 0);
+        assert!(record.mode_signal_at.is_some());
+    }
+
+    #[test]
+    fn replaying_an_already_applied_mode_does_not_reset_wait() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("lido", None, None, None, None)
+            .expect("seed roster");
+        for i in 0..3 {
+            let tick = "[Cron delivery: Lido]\n[SILENT]\n[CTRL: lido | mode=blocked:transport-cap | wait=0 | next=x]";
+            ingest_deliveries(
+                &store,
+                &HashMap::new(),
+                &HashMap::new(),
+                vec![parse_delivery(
+                    &format!("sess-{i}"),
+                    1_754_000_000.0 + (i as f64) * 60.0,
+                    tick,
+                )],
+            );
+        }
+        let before = store.get_project("lido").expect("read").expect("present");
+        assert_eq!(before.wait_ticks, 2);
+        let last = "[Cron delivery: Lido]\n[SILENT]\n[CTRL: lido | mode=blocked:transport-cap | wait=0 | next=x]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("sess-2", 1_754_000_000.0 + 120.0, last)],
+        );
+        let after = store.get_project("lido").expect("read").expect("present");
+        assert_eq!(after.mode.as_deref(), Some("blocked"));
+        assert_eq!(after.blocker.as_deref(), Some("transport-cap"));
+        assert_eq!(after.wait_ticks, 2);
+    }
+
+    #[test]
+    fn an_unknown_signature_is_unrouted_with_a_reason_not_a_phantom_project() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        let wake = "[Mission callback: synthetic origin-wake]\n\
+                    [STATE_SIGNATURE: unknown|mission-callback|testwake-1111|completed|inspect]";
+        ingest_deliveries(
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            vec![parse_delivery("20260815_testwake", 1_754_000_000.0, wake)],
+        );
+        assert!(
+            store.get_project("unknown").expect("read").is_none(),
+            "a delivery never creates a project"
+        );
+        assert!(store
+            .latest_states()
+            .expect("latest")
+            .get("unknown")
+            .is_none());
+        let inbox = store.unrouted(10).expect("unrouted");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].signature.as_deref(), Some("unknown"));
+        assert_eq!(inbox[0].reason.as_deref(), Some("unknown_slug"));
+    }
+
+    #[test]
+    fn a_registered_or_aliased_slug_still_routes() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity-core", None, None, None, None)
+            .expect("seed roster");
+        let mut aliases = HashMap::new();
+        aliases.insert("copilot-verity-core".to_string(), "verity-core".to_string());
+        let direct = "Core: PR merged.\n[STATE_SIGNATURE: verity-core|main|abc|none|next]";
+        let via_alias =
+            "Copilot: slice running.\n[STATE_SIGNATURE: copilot-verity-core|main|abc|none|next]";
+        ingest_deliveries(
+            &store,
+            &aliases,
+            &HashMap::new(),
+            vec![
+                parse_delivery("s2", 1_754_000_100.0, via_alias),
+                parse_delivery("s1", 1_754_000_000.0, direct),
+            ],
+        );
+        let latest = store.latest_states().expect("latest");
+        assert!(latest.contains_key("verity-core"));
+        assert!(!latest.contains_key("copilot-verity-core"));
+        assert!(store
+            .get_project("copilot-verity-core")
+            .expect("read")
+            .is_none());
+        assert!(store.unrouted(10).expect("unrouted").is_empty());
+    }
+
+    #[test]
+    fn attention_items_carry_the_subject_and_the_clearing_call() {
+        let mut builder = ProjectRowBuilder::new("eip-8282".into());
+        builder
+            .missions
+            .push(failed_chip("1971a723-8f02-4179-bbe9-54e5585fe5b3"));
+        builder.pending_decisions = 1;
+        let row = builder.finish(&[], None, None, "2026-08-02T01:00:00Z");
+        assert_eq!(row.attention_reasons.len(), 2);
+        assert_eq!(row.attention.len(), 2);
+        let failed = row
+            .attention
+            .iter()
+            .find(|item| item.kind == "mission_failed")
+            .expect("failed item");
+        assert_eq!(
+            failed.mission_id.as_deref(),
+            Some("1971a723-8f02-4179-bbe9-54e5585fe5b3")
+        );
+        let action = failed.action.as_ref().expect("action");
+        assert_eq!(
+            action.path,
+            "/api/control/missions/1971a723-8f02-4179-bbe9-54e5585fe5b3/status"
+        );
+        assert_eq!(
+            action.body,
+            Some(serde_json::json!({ "status": "acknowledged" }))
+        );
+        assert_eq!(
+            failed.key(),
+            "mission_failed|1971a723-8f02-4179-bbe9-54e5585fe5b3"
+        );
+        let decision = row
+            .attention
+            .iter()
+            .find(|item| item.kind == "decision_pending")
+            .expect("decision item");
+        assert_eq!(
+            decision.action.as_ref().map(|a| a.path.as_str()),
+            Some("/api/projects/eip-8282/decision/answer")
+        );
+        // The plain-text list stays byte-identical to what cards rendered before.
+        assert!(row
+            .attention_reasons
+            .iter()
+            .any(|reason| reason == "mission 1971a723 is Failed"));
+    }
+
+    #[test]
+    fn resolved_keys_are_the_reasons_that_went_away() {
+        let previous: HashSet<String> = ["mission_failed|a", "no_controller|", "decision_pending|"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let current: HashSet<String> = ["decision_pending|", "mission_failed|b"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            resolved_keys(&previous, &current),
+            vec!["mission_failed|a".to_string(), "no_controller|".to_string()]
+        );
+        assert!(resolved_keys(&current, &current).is_empty());
+    }
+
+    #[test]
+    fn incomplete_wait_inventory_preserves_stored_decision_mode() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().unwrap();
+        store
+            .upsert_project("verity", None, None, None, None)
+            .unwrap();
+        store
+            .set_mode("verity", "blocked", None, Some("decision"))
+            .unwrap();
+        let record = store.get_project("verity").unwrap().unwrap();
+        let mut with_complete = record.clone();
+        project_mode_projection(&mut with_complete, Some(&[]), &HashMap::new(), 0);
+        assert_eq!(
+            with_complete.mode, None,
+            "complete empty roster clears decision"
+        );
+
+        let mut with_incomplete = record.clone();
+        project_mode_projection(&mut with_incomplete, None, &HashMap::new(), 0);
+        assert_eq!(
+            with_incomplete.mode.as_deref(),
+            Some("blocked"),
+            "unavailable evidence preserves stored mode"
+        );
+        assert_eq!(with_incomplete.blocker.as_deref(), Some("decision"));
+    }
+
+    #[test]
+    fn alias_decisions_aggregate_across_tag_keys() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().unwrap();
+        store
+            .upsert_project("verity", None, None, None, None)
+            .unwrap();
+        store
+            .upsert_project("verity-lido", None, None, None, None)
+            .unwrap();
+        store
+            .record_decision(
+                "verity-lido",
+                &super::super::projects_store::NewDecision {
+                    question: "merge lido PR?".into(),
+                    rationale: None,
+                    kind: None,
+                    authority: "escalation".into(),
+                    status: "pending_user".into(),
+                    evidence: None,
+                },
+            )
+            .unwrap();
+        let canonical_only = store.open_decisions("verity").unwrap();
+        let alias_only = store.open_decisions("verity-lido").unwrap();
+        assert!(canonical_only.is_empty());
+        assert_eq!(alias_only.len(), 1);
+    }
+
+    #[test]
+    fn incomplete_wait_scan_keeps_board_row_from_projecting_active_or_clearing_decision() {
+        let now = chrono::Utc::now().to_rfc3339();
+        // An Active mission that is really parked in AskUserQuestion, but the
+        // wait scan failed so it carries no wait entry.
+        let mission: Mission = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "status": "active",
+            "history": [], "created_at": now, "updated_at": now,
+            "last_status_change_at": now,
+        }))
+        .unwrap();
+
+        let mut complete = ProjectRowBuilder::new("verity".into());
+        complete.mode = Some("blocked".into());
+        complete.mode_blocker = Some("decision".into());
+        complete.missions.push(mission_chip(&mission, false, None));
+        let row = complete.finish(&[], None, None, &now);
+        assert_eq!(
+            row.mode.as_deref(),
+            Some("active"),
+            "complete scan: live work wins"
+        );
+
+        let mut incomplete = ProjectRowBuilder::new("verity".into());
+        incomplete.mode = Some("blocked".into());
+        incomplete.mode_blocker = Some("decision".into());
+        incomplete
+            .missions
+            .push(mission_chip(&mission, false, None));
+        incomplete.mission_evidence_complete = false;
+        let row = incomplete.finish(&[], None, None, &now);
+        assert_eq!(
+            row.mode.as_deref(),
+            Some("blocked"),
+            "incomplete scan must not project active from unverified live work"
+        );
+
+        // A ledger decision still wins over the stored mode when evidence is unknown.
+        let mut ledger = ProjectRowBuilder::new("verity".into());
+        ledger.mode = Some("active".into());
+        ledger.pending_decisions = 1;
+        ledger.missions.push(mission_chip(&mission, false, None));
+        ledger.mission_evidence_complete = false;
+        let row = ledger.finish(&[], None, None, &now);
+        assert_eq!(row.mode.as_deref(), Some("blocked:decision"));
+    }
+
+    #[test]
+    fn family_decisions_are_visible_from_the_canonical_slug() {
+        let store = super::super::projects_store::ProjectsStore::open_in_memory().unwrap();
+        store
+            .upsert_project("verity", None, None, None, None)
+            .unwrap();
+        store
+            .record_decision(
+                "verity",
+                &super::super::projects_store::NewDecision {
+                    question: "merge core PR?".into(),
+                    rationale: None,
+                    kind: None,
+                    authority: "escalation".into(),
+                    status: "pending_user".into(),
+                    evidence: None,
+                },
+            )
+            .unwrap();
+        // With no alias map the family is just the slug itself; the helper
+        // must still return the canonical decisions exactly once.
+        let open = open_family_decisions(&store, "verity").unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].question, "merge core PR?");
+    }
+}

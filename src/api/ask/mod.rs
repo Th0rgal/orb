@@ -12,6 +12,7 @@
 //!
 //! See `ASK_ASSISTANT_DESIGN.md` for the full design.
 
+pub mod btw;
 pub mod client;
 pub mod http;
 pub mod store;
@@ -1008,28 +1009,30 @@ async fn execute_tool(turn: &AskTurn, name: &str, arguments: &str) -> String {
             }
             use crate::api::control::UserMessageAck;
             match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
-                Ok(Ok(UserMessageAck::Queued)) => match (interrupt, &interrupt_error) {
-                    (true, None) => {
-                        "Steering message delivered after interrupting the current turn — \
+                Ok(Ok(UserMessageAck::Queued | UserMessageAck::Continued { queued: true, .. })) => {
+                    match (interrupt, &interrupt_error) {
+                        (true, None) => {
+                            "Steering message delivered after interrupting the current turn — \
                          the agent will act on it as soon as the cancellation settles."
-                            .to_string()
-                    }
-                    (true, Some(err)) => format!(
-                        "Steering message queued, but the requested interrupt FAILED \
+                                .to_string()
+                        }
+                        (true, Some(err)) => format!(
+                            "Steering message queued, but the requested interrupt FAILED \
                          ({err}) — the agent may still be mid-turn and will only act on \
                          the message at the next turn boundary. Verify with read_history; \
                          retry stop_agent if it must stop now."
-                    ),
-                    (false, _) => {
-                        "Steering message queued — the working agent is mid-turn and will \
+                        ),
+                        (false, _) => {
+                            "Steering message queued — the working agent is mid-turn and will \
                          act on it at the next turn boundary. Pass interrupt=true if it \
                          must take effect immediately."
-                            .to_string()
+                                .to_string()
+                        }
                     }
-                },
-                Ok(Ok(UserMessageAck::Delivered)) => {
-                    "Steering message delivered — a turn is starting on it now.".to_string()
                 }
+                Ok(Ok(
+                    UserMessageAck::Delivered | UserMessageAck::Continued { queued: false, .. },
+                )) => "Steering message delivered — a turn is starting on it now.".to_string(),
                 Ok(Ok(UserMessageAck::Dropped)) => {
                     "Error: the steering message was DROPPED — it never reached the \
                      working agent (parallel mission cap, mission load failure, or a \
@@ -1110,6 +1113,8 @@ async fn execute_tool(turn: &AskTurn, name: &str, arguments: &str) -> String {
                     working_directory: None,
                     scheduling: Default::default(),
                     requires_local_disk: true,
+                    estimated_disk_gib: None,
+                    admission_tags: Vec::new(),
                     respond: tx,
                 })
                 .await
@@ -1467,10 +1472,18 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
             }
             Ok(out) => {
                 log_sandbox_command_failure("copy", &out);
+                // The copy command creates the destination before filling it,
+                // so a failure part-way through (a full `/tmp` is the usual
+                // one) strands a partial tree that nothing else will ever
+                // collect — the caller only tears down sandboxes it was
+                // handed. That turns one failed Ask into permanently lost
+                // scratch space, which makes the next Ask likelier to fail.
+                cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
                 None
             }
             Err(error) => {
                 tracing::warn!(stage = "copy", %error, "Ask sandbox command failed to start");
+                cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
                 None
             }
         };
@@ -1496,10 +1509,12 @@ pub async fn prepare_sandbox(exec: &WorkspaceExec, base_work_dir: &Path) -> Opti
         }
         Ok(out) => {
             log_sandbox_command_failure("git-worktree", &out);
+            cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
             None
         }
         Err(error) => {
             tracing::warn!(stage = "git-worktree", %error, "Ask sandbox command failed to start");
+            cleanup_sandbox(exec, base_work_dir, &sandbox_host).await;
             None
         }
     }
@@ -1543,8 +1558,13 @@ fn log_sandbox_command_failure(stage: &str, output: &std::process::Output) {
 pub async fn cleanup_sandbox(exec: &WorkspaceExec, base_work_dir: &Path, sandbox: &Path) {
     let base_str = exec.translate_path_for_container(base_work_dir);
     let sandbox_str = exec.translate_path_for_container(sandbox);
+    // `prune` matters for the failure path: a `worktree add` that died partway
+    // leaves an admin entry in `.git/worktrees` that `rm -rf` alone cannot
+    // clear, and which then blocks re-using that path. It only drops entries
+    // whose directory is already gone, so healthy worktrees are untouched.
     let cmd = format!(
-        "git -C {b} worktree remove --force {s} 2>/dev/null || rm -rf {s}",
+        "git -C {b} worktree remove --force {s} 2>/dev/null || rm -rf {s}; \
+         git -C {b} worktree prune 2>/dev/null || true",
         b = single_quote(&base_str),
         s = single_quote(&sandbox_str)
     );

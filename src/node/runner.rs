@@ -55,6 +55,16 @@ struct QueuedJob {
     payload: JobPayload,
 }
 
+fn persisted_payload_json(payload: &JobPayload) -> anyhow::Result<String> {
+    let mut persisted_payload = payload.clone();
+    if let JobPayload::LeanBuild { source, .. } = &mut persisted_payload {
+        if let Some(archive) = &mut source.archive {
+            archive.data_base64.clear();
+        }
+    }
+    Ok(serde_json::to_string(&persisted_payload)?)
+}
+
 /// Shared job runner; construct with [`JobRunner::spawn`].
 pub struct JobRunner {
     store: JobStore,
@@ -66,6 +76,12 @@ pub struct JobRunner {
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
     queued: AtomicU32,
     active: AtomicU32,
+    /// External slot provider (`SANDBOXED_NODE_SLOT_PROVIDER`); `None` means
+    /// the node admits on its own.
+    slot_provider: Option<Arc<super::slot::SlotProvider>>,
+    /// Operator-configured credential profiles raw jobs may request by name
+    /// (`SANDBOXED_NODE_GROK_HOME`, ...). See `super::managed_auth`.
+    managed_auth: super::managed_auth::ManagedAuth,
 }
 
 impl JobRunner {
@@ -96,6 +112,26 @@ impl JobRunner {
         max_job_secs: u64,
         admission: Arc<Semaphore>,
     ) -> Arc<Self> {
+        Self::spawn_with_options(
+            store,
+            work_root,
+            capacity,
+            max_job_secs,
+            admission,
+            super::managed_auth::ManagedAuth::from_env(),
+        )
+    }
+
+    /// [`JobRunner::spawn_with_admission`] with explicit managed-auth
+    /// configuration instead of reading it from the environment.
+    pub fn spawn_with_options(
+        store: JobStore,
+        work_root: PathBuf,
+        capacity: u32,
+        max_job_secs: u64,
+        admission: Arc<Semaphore>,
+        managed_auth: super::managed_auth::ManagedAuth,
+    ) -> Arc<Self> {
         let max_queued = std::env::var("SANDBOXED_NODE_MAX_QUEUED")
             .ok()
             .and_then(|raw| raw.trim().parse::<usize>().ok())
@@ -112,6 +148,14 @@ impl JobRunner {
             cancels: Mutex::new(HashMap::new()),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
+            slot_provider: match super::slot::SlotProvider::from_env() {
+                Ok(provider) => provider.map(Arc::new),
+                Err(error) => {
+                    tracing::error!(%error, "slot provider misconfigured; node admits on its own");
+                    None
+                }
+            },
+            managed_auth,
         });
         let dispatcher = Arc::clone(&runner);
         tokio::spawn(async move {
@@ -171,7 +215,10 @@ impl JobRunner {
         mission_id: Uuid,
         payload: JobPayload,
     ) -> anyhow::Result<()> {
-        let payload_json = serde_json::to_string(&payload)?;
+        // The executable payload remains only in the in-memory queue. Durable
+        // rows are status receipts (in-flight jobs become `lost` on restart),
+        // so never retain commit-pack source bytes in jobs.db.
+        let payload_json = persisted_payload_json(&payload)?;
         // The dispatcher drains the mpsc channel into semaphore waiters so a
         // cancelled queued job releases its channel slot immediately. Keep an
         // explicit atomic bound across both locations.
@@ -291,17 +338,37 @@ impl JobRunner {
         job: &QueuedJob,
         token: &CancellationToken,
     ) -> anyhow::Result<(JobState, Option<i32>, Option<String>, Option<String>)> {
+        let _software_execution =
+            crate::agent_software::begin(&job.id.to_string(), "node-job", None)
+                .map_err(anyhow::Error::msg)?;
         let log_path = self.log_path(job.id);
+        // Ask the external slot provider (the Spark arbiter) to make room
+        // before anything runs; the lease releases the slot when we return.
+        let _slot = match &self.slot_provider {
+            Some(provider) => Some(provider.acquire(job.id, token).await?),
+            None => None,
+        };
         match &job.payload {
             JobPayload::RawCommand {
                 command,
                 timeout_secs,
                 env,
+                managed_auth,
             } => {
+                // Resolve managed-auth profiles before anything runs; a
+                // profile this node cannot honour fails the job with a clear
+                // error instead of a CLI hanging on an interactive login.
+                let managed_env = self
+                    .managed_auth
+                    .env_for(managed_auth)
+                    .map_err(|error| anyhow::anyhow!(error))?;
                 let mission_dir = self.work_root.join(job.mission_id.to_string());
                 tokio::fs::create_dir_all(&mission_dir).await?;
 
-                let cmd = crate::remote_node::raw_command(command, &mission_dir, env.as_ref());
+                let mut cmd = crate::remote_node::raw_command(command, &mission_dir, env.as_ref());
+                // Applied last: the payload env cannot redirect a managed
+                // profile to a mission-controlled path.
+                cmd.envs(managed_env);
                 let limit_secs = clamp_timeout(*timeout_secs, self.max_job_secs);
                 let outcome = run_logged_command(
                     cmd,
@@ -431,7 +498,10 @@ pub(crate) async fn run_logged_command(
                     kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
                     RunOutcome::Exited(status.code())
                 }
-                Ok(Err(err)) => return Err(err.into()),
+                Ok(Err(err)) => {
+                    kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
+                    return Err(err.into());
+                },
                 Err(_) => {
                     kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
                     RunOutcome::TimedOut { limit_secs }
@@ -656,42 +726,83 @@ async fn kill_contained_process(
 ) {
     #[cfg(target_os = "linux")]
     if let Some(scope) = _systemd_scope {
-        let mut stop_command = tokio::process::Command::new("systemctl");
+        retry_process_cleanup(pid, child, || stop_systemd_scope(scope)).await;
+        return;
+    }
+    retry_process_cleanup(pid, child, || std::future::ready(true)).await;
+}
+
+/// The job remains running (and keeps its capacity/ownership) until both the
+/// process group and containment scope have confirmed cleanup. Do not turn a
+/// failed stop request into a terminal execution response.
+async fn retry_process_cleanup<F, Fut>(
+    pid: Option<u32>,
+    child: &mut tokio::process::Child,
+    mut stop_scope: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut group_stopped = false;
+    let mut scope_stopped = false;
+    loop {
+        if !scope_stopped {
+            scope_stopped = stop_scope().await;
+        }
+        // Once retired, never signal a process-group id again: it can be
+        // reused while an unavailable scope manager is still being retried.
+        if !group_stopped {
+            group_stopped = kill_process_group(pid, child).await;
+        }
+        if group_stopped && scope_stopped {
+            return;
+        }
+        tracing::warn!(
+            ?pid,
+            group_stopped,
+            scope_stopped,
+            "node job cleanup is unconfirmed; retaining execution and retrying"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
+    let command = || {
+        let mut command = tokio::process::Command::new("systemctl");
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
         if scope.mode == SystemdScopeMode::User {
-            stop_command.arg("--user");
+            command.arg("--user");
             if let Some(runtime_dir) = &scope.user_runtime_dir {
-                stop_command.env("XDG_RUNTIME_DIR", runtime_dir).env(
+                command.env("XDG_RUNTIME_DIR", runtime_dir).env(
                     "DBUS_SESSION_BUS_ADDRESS",
                     format!("unix:path={}", runtime_dir.join("bus").display()),
                 );
             }
         }
-        let stop = stop_command
-            .arg("stop")
-            .arg(&scope.unit)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match tokio::time::timeout(KILL_GRACE, stop).await {
-            Ok(Ok(status)) if !status.success() => {
-                tracing::warn!(scope = %scope.unit, %status, "failed to stop node job systemd scope");
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(scope = %scope.unit, %error, "could not stop node job systemd scope");
-            }
-            Err(_) => {
-                tracing::warn!(scope = %scope.unit, "timed out stopping node job systemd scope");
-            }
-            Ok(Ok(_)) => {}
-        }
+        command
+    };
+    let mut stop = command();
+    stop.arg("stop").arg(&scope.unit).stdout(Stdio::null());
+    if matches!(tokio::time::timeout(KILL_GRACE, stop.status()).await, Ok(Ok(status)) if status.success())
+    {
+        return true;
     }
-    kill_process_group(pid, child).await;
+    // A failed scope launch may never have registered a unit. Verify absence
+    // with the manager; a failed connection/query itself is not that proof.
+    let mut show = command();
+    show.args(["show", "--property=LoadState", "--value", &scope.unit]);
+    matches!(tokio::time::timeout(KILL_GRACE, show.output()).await,
+        Ok(Ok(output)) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "not-found")
 }
 
 /// SIGTERM the job's process group, escalating to SIGKILL after a grace
 /// period. Falls back to killing the direct child when the pid is unknown.
-async fn kill_process_group(pid: Option<u32>, child: &mut tokio::process::Child) {
+async fn kill_process_group(pid: Option<u32>, child: &mut tokio::process::Child) -> bool {
     if let Some(pid) = pid {
         unsafe {
             libc::kill(-(pid as i32), libc::SIGTERM);
@@ -708,14 +819,55 @@ async fn kill_process_group(pid: Option<u32>, child: &mut tokio::process::Child)
             }
         }
         let _ = child.wait().await;
+        !process_group_has_live_members(pid)
     } else {
-        let _ = child.kill().await;
+        child.kill().await.is_ok()
     }
 }
 
-fn process_group_exists(pid: u32) -> bool {
+fn process_group_has_live_members(pid: u32) -> bool {
     let result = unsafe { libc::kill(-(pid as i32), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // An orphaned zombie can keep a process-group id observable until
+        // init reaps it, but it can no longer execute or mutate the assignment.
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return true;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return true;
+            };
+            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                continue;
+            }
+            let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return true,
+            };
+            let Some((_, fields)) = stat.rsplit_once(") ") else {
+                return true;
+            };
+            let mut fields = fields.split_whitespace();
+            let state = fields.next();
+            let _parent = fields.next();
+            let Some(group) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+                return true;
+            };
+            if group == pid && !matches!(state, Some("Z" | "X")) {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
 }
 
 async fn wait_for_process_group_exit(
@@ -728,7 +880,7 @@ async fn wait_for_process_group_exit(
         // Reap the leader promptly; an unreaped zombie keeps the process
         // group observable even after every live process has exited.
         let _ = child.try_wait();
-        if !process_group_exists(pid) {
+        if !process_group_has_live_members(pid) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -756,9 +908,185 @@ pub async fn read_log_tail(path: &Path) -> Option<String> {
     .flatten()
 }
 
+/// Upper bound of one `GET /jobs/:id/log` chunk.
+pub const LOG_CHUNK_MAX_BYTES: u64 = 256 * 1024;
+
+/// Read a bounded range of a job log starting at `offset`. Returns
+/// `(data, next_offset, log_len)`. A chunk that does not reach the current
+/// end of the log is cut back to its last newline so consumers can parse it
+/// line by line; a chunk with no newline at all is returned as-is (a caller
+/// must then buffer it until more arrives). `offset` past the end yields an
+/// empty chunk positioned at the end.
+pub async fn read_log_chunk(
+    path: &Path,
+    offset: u64,
+    max_bytes: u64,
+    terminal: bool,
+) -> Option<(String, u64, u64)> {
+    let path = path.to_path_buf();
+    let max_bytes = max_bytes.clamp(4, LOG_CHUNK_MAX_BYTES);
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(&path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let start = offset.min(len);
+        let want = (len - start).min(max_bytes);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = vec![0u8; want as usize];
+        let mut read = 0usize;
+        while read < buf.len() {
+            match file.read(&mut buf[read..]) {
+                Ok(0) => break,
+                Ok(n) => read += n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+        buf.truncate(read);
+        let reached_end = start + read as u64 >= len;
+        if !reached_end {
+            if let Some(cut) = buf.iter().rposition(|byte| *byte == b'\n') {
+                buf.truncate(cut + 1);
+            }
+        }
+        // A UTF-8 scalar can straddle either our byte limit or a concurrent
+        // write. Leave an incomplete suffix unread; never advance past it.
+        let mut valid = 0;
+        while valid < buf.len() {
+            match std::str::from_utf8(&buf[valid..]) {
+                Ok(_) => break,
+                Err(error) => {
+                    valid += error.valid_up_to();
+                    match error.error_len() {
+                        Some(invalid) => valid += invalid,
+                        None => {
+                            if !terminal || !reached_end {
+                                buf.truncate(valid);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let next = start + buf.len() as u64;
+        Some((String::from_utf8_lossy(&buf).into_owned(), next, len))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_node::{JobSource, SourceArchive};
+
+    #[test]
+    fn persisted_lean_payload_redacts_source_archive_bytes() {
+        let payload = JobPayload::LeanBuild {
+            source: Box::new(JobSource {
+                repo: "https://example.invalid/private.git".to_string(),
+                commit: "a".repeat(40),
+                archive: Some(Box::new(SourceArchive {
+                    sha256: "b".repeat(64),
+                    size_bytes: 18,
+                    data_base64: "private-source-data".to_string(),
+                })),
+                bundle: None,
+                base_tree_sha: None,
+            }),
+            cwd_rel: None,
+            command: vec!["lake".to_string(), "build".to_string()],
+            timeout_secs: None,
+            estimated_disk_bytes: None,
+            cache_key: None,
+            artifacts: Vec::new(),
+            env: HashMap::new(),
+        };
+
+        let persisted = persisted_payload_json(&payload).unwrap();
+        assert!(!persisted.contains("private-source-data"));
+        let decoded: JobPayload = serde_json::from_str(&persisted).unwrap();
+        let JobPayload::LeanBuild { source, .. } = decoded else {
+            panic!("expected Lean payload");
+        };
+        let archive = source.archive.unwrap();
+        assert!(archive.data_base64.is_empty());
+        assert_eq!(archive.sha256, "b".repeat(64));
+        assert_eq!(archive.size_bytes, 18);
+    }
+
+    #[tokio::test]
+    async fn log_chunks_preserve_unicode_and_partial_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let original = "abc🦀你好\nsecond line without newline";
+        tokio::fs::write(&path, original).await.unwrap();
+        let mut offset = 0;
+        let mut text = String::new();
+        while offset < original.len() as u64 {
+            let (data, next, len) = read_log_chunk(&path, offset, 4, false).await.unwrap();
+            assert!(next > offset);
+            assert!(data.len() <= 4);
+            assert_eq!(len, original.len() as u64);
+            text.push_str(&data);
+            offset = next;
+        }
+        assert_eq!(text, original);
+        tokio::fs::write(&path, b"abc\xf0\x9f").await.unwrap();
+        let (data, next, _) = read_log_chunk(&path, 0, 20, false).await.unwrap();
+        assert_eq!(data, "abc");
+        assert_eq!(next, 3);
+        tokio::fs::write(&path, "abc🦀").await.unwrap();
+        assert_eq!(
+            read_log_chunk(&path, next, 20, false).await.unwrap().0,
+            "🦀"
+        );
+        tokio::fs::write(&path, b"abc\xf0\x9f").await.unwrap();
+        let (data, next, _) = read_log_chunk(&path, 3, 20, true).await.unwrap();
+        assert_eq!(data, "�");
+        assert_eq!(next, 5);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_grok_job_keeps_isolated_home_and_overrides_payload_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let auth_home = dir.path().join("trusted-grok");
+        std::fs::create_dir(&auth_home).unwrap();
+        std::fs::write(
+            auth_home.join("auth.json"),
+            "fixture credential never printed",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            auth_home.join("auth.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn_with_options(
+            store.clone(),
+            dir.path().into(),
+            1,
+            30,
+            Arc::new(Semaphore::new(1)),
+            super::super::managed_auth::ManagedAuth::with_grok_home(&auth_home),
+        );
+        let job_id = Uuid::new_v4();
+        runner.submit(job_id, Uuid::new_v4(), JobPayload::RawCommand {
+            command: format!("test \"$HOME\" = \"$PWD\" && test \"$GROK_HOME\" = '{}' && test -r \"$GROK_HOME/auth.json\" && printf managed-ok", auth_home.display()),
+            timeout_secs: Some(30),
+            env: Some(std::collections::HashMap::from([("GROK_HOME".into(), "/untrusted-payload-path".into())])),
+            managed_auth: vec!["grok".into()],
+        }).await.unwrap();
+        let record = wait_for_terminal(&store, job_id).await;
+        let tail = read_log_tail(&runner.log_path(job_id)).await.unwrap();
+        assert_eq!(record.state, JobState::Succeeded, "{tail}");
+        assert_eq!(tail, "managed-ok");
+    }
 
     #[tokio::test]
     async fn runs_a_job_and_captures_its_log() {
@@ -780,6 +1108,7 @@ mod tests {
                     command: "echo hello-from-job && pwd".to_string(),
                     timeout_secs: Some(30),
                     env: None,
+                    managed_auth: Vec::new(),
                 },
             )
             .await
@@ -815,6 +1144,7 @@ mod tests {
                     command: "sleep 30".to_string(),
                     timeout_secs: None,
                     env: None,
+                    managed_auth: Vec::new(),
                 },
             )
             .await
@@ -859,6 +1189,7 @@ mod tests {
                         command: "sleep 30".to_string(),
                         timeout_secs: None,
                         env: None,
+                        managed_auth: Vec::new(),
                     },
                 )
                 .await
@@ -915,6 +1246,7 @@ mod tests {
                     command: "sleep 20".to_string(),
                     timeout_secs: Some(600),
                     env: None,
+                    managed_auth: Vec::new(),
                 },
             )
             .await
@@ -922,6 +1254,51 @@ mod tests {
         let record = wait_for_terminal(&store, job_id).await;
         assert_eq!(record.state, JobState::Failed);
         assert!(record.error.as_deref().unwrap_or("").contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_complete_until_scope_stop_is_confirmed() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let confirmed = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let cleanup = tokio::spawn({
+            let confirmed = confirmed.clone();
+            let attempts = attempts.clone();
+            async move {
+                retry_process_cleanup(pid, &mut child, || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(confirmed.load(Ordering::SeqCst))
+                })
+                .await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !cleanup.is_finished(),
+            "a failed scope stop cannot authorize terminal state"
+        );
+        assert!(
+            !process_group_has_live_members(pid.unwrap()),
+            "the actual process group has already stopped"
+        );
+        confirmed.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), cleanup)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -14,9 +15,44 @@ use uuid::Uuid;
 use crate::agents::{AgentResult, CompletionConfidence, CompletionSignal, TerminalReason};
 use crate::api::control::AgentEvent;
 use crate::api::mission_runner::*;
+use crate::backend::codex::continuity;
 use crate::cost::resolve_cost_cents_and_source;
 use crate::workspace::{Workspace, WorkspaceType};
 use crate::workspace_exec::WorkspaceExec;
+
+fn continuity_failure(error: impl std::fmt::Display) -> AgentResult {
+    AgentResult::failure(format!("Codex native continuity: {error}"), 0).with_turn_outcome(
+        crate::agents::TurnOutcome::Interrupted {
+            reason: TerminalReason::CodexContinuityRequired,
+            message: Some(
+                "Reconcile native identity/history before resuming; no fresh thread was created"
+                    .into(),
+            ),
+        },
+    )
+}
+
+fn credential_identity(
+    credential: &crate::api::ai_providers::CodexCredentialOverride<'_>,
+) -> String {
+    match credential {
+        crate::api::ai_providers::CodexCredentialOverride::OAuth(account) => {
+            continuity::account_fingerprint("oauth", &account.chatgpt_account_id)
+        }
+        crate::api::ai_providers::CodexCredentialOverride::ApiKey(key) => {
+            continuity::account_fingerprint("apikey", key)
+        }
+        crate::api::ai_providers::CodexCredentialOverride::CliProxy(endpoint) => {
+            continuity::account_fingerprint("cliproxy", &endpoint.base_url)
+        }
+    }
+}
+
+struct NativeTurnInput<'a> {
+    path: PathBuf,
+    current_message: &'a str,
+    enabled: bool,
+}
 
 /// Stable Codex transport failures emitted by the app-server/ChatGPT stream.
 /// Keep this narrow so ordinary model or tool failures never become retryable.
@@ -269,7 +305,7 @@ fn user_without_negated_tool_clauses(user_lower: &str) -> String {
         .replace(" however, ", ". however, ");
     let mut actionable = String::with_capacity(clause_separated.len());
 
-    for clause in clause_separated.split_inclusive(['.', '!', '?', ';', '\n']) {
+    for clause in clause_separated.split_inclusive(['.', '!', '?', ';', ':', '\n']) {
         let trimmed = clause.trim_start();
         let directive = trimmed
             .strip_prefix("but ")
@@ -582,6 +618,24 @@ pub(crate) fn summarize_codex_usage_caps(
     msg
 }
 
+/// Select native continuity without mistaking MissionStore's initial UUID for
+/// evidence that Codex already ran. All stores allocate that bookkeeping id at
+/// creation. Prior assistant history or any legacy rollout directory still
+/// requires an explicit migration; unknown session identifiers stay legacy.
+pub(crate) fn native_continuity_enabled(
+    has_binding: bool,
+    session_id: Option<&str>,
+    is_continuation: bool,
+    legacy_rollouts: bool,
+) -> bool {
+    let unexecuted_bookkeeping_id = session_id.is_none_or(|id| {
+        Uuid::parse_str(id).is_ok_and(|id| id.get_version() == Some(uuid::Version::Random))
+    });
+    has_binding
+        || session_id.is_some_and(|id| id.starts_with(continuity::SESSION_PREFIX))
+        || (!is_continuation && unexecuted_bookkeeping_id && !legacy_rollouts)
+}
+
 /// Run a codex turn through the unified credential pool with rotation and
 /// account-level cooldown handling. Shared by the initial mission dispatch
 /// and the control-channel follow-up path so a usage-capped ChatGPT account
@@ -600,7 +654,30 @@ pub(crate) async fn run_codex_turn_with_rotation(
     cancel: CancellationToken,
     app_working_dir: &std::path::Path,
     session_id: Option<&str>,
+    current_message: &str,
+    is_continuation: bool,
+    tool_hub: Option<Arc<crate::api::control::FrontendToolHub>>,
 ) -> AgentResult {
+    let path = continuity::binding_path(app_working_dir, mission_id);
+    let binding = match continuity::read(&path) {
+        Ok(binding) => binding,
+        Err(error) => return continuity_failure(error),
+    };
+    let legacy_rollouts = mission_work_dir.join(".codex/sessions").is_dir();
+    let enabled = native_continuity_enabled(
+        binding.is_some(),
+        session_id,
+        is_continuation,
+        legacy_rollouts,
+    );
+    let native_input = NativeTurnInput {
+        path,
+        current_message,
+        enabled,
+    };
+    if !enabled {
+        tracing::warn!(%mission_id, "Codex legacy mission has no verified native binding; preserving legacy continuation until an explicit checkpoint migration");
+    }
     'codex_arm: {
         let mut all_creds = collect_codex_credentials(app_working_dir);
         let mut prior_empty_result: Option<AgentResult> = None;
@@ -619,6 +696,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                 app_working_dir,
                 session_id,
                 None,
+                &native_input,
+                tool_hub.clone(),
             )
             .await;
 
@@ -645,6 +724,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     app_working_dir,
                     session_id,
                     None,
+                    &native_input,
+                    tool_hub.clone(),
                 )
                 .await;
             } else if codex_tool_stall_should_retry_with_default_model(requested_model, &result) {
@@ -671,6 +752,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     app_working_dir,
                     session_id,
                     None,
+                    &native_input,
+                    tool_hub.clone(),
                 )
                 .await;
             }
@@ -714,6 +797,29 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     break last_constrained_result.unwrap_or_else(cancel_or_shutdown_failure);
                 }
 
+                // Once a native thread exists it stays on its stable account.
+                // Refresh-token rotation does not change this fingerprint.
+                match continuity::read(&native_input.path) {
+                    Ok(Some(binding)) => {
+                        for credential in &all_creds {
+                            if credential_identity(&credential.as_override())
+                                != binding.identity.account
+                            {
+                                attempted_credentials.insert(credential.fingerprint());
+                            }
+                        }
+                        if all_creds.iter().all(|credential| {
+                            credential_identity(&credential.as_override())
+                                != binding.identity.account
+                        }) {
+                            break continuity_failure(
+                                "bound native account is unavailable; no account was substituted",
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => break continuity_failure(error),
+                }
                 let lease =
                     lease_codex_account(app_working_dir, &attempted_credentials, &cancel).await;
                 let Some(lease) = lease else {
@@ -756,6 +862,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     app_working_dir,
                     session_id,
                     Some(&credential_override),
+                    &native_input,
+                    tool_hub.clone(),
                 )
                 .await;
 
@@ -784,6 +892,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         app_working_dir,
                         session_id,
                         Some(&credential_override),
+                        &native_input,
+                        tool_hub.clone(),
                     )
                     .await;
                 } else if codex_tool_stall_should_retry_with_default_model(requested_model, &result)
@@ -812,6 +922,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         app_working_dir,
                         session_id,
                         Some(&credential_override),
+                        &native_input,
+                        tool_hub.clone(),
                     )
                     .await;
                 }
@@ -886,7 +998,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run_codex_turn(
+async fn run_codex_turn(
     workspace: &Workspace,
     mission_work_dir: &std::path::Path,
     user_message: &str,
@@ -898,11 +1010,12 @@ pub async fn run_codex_turn(
     events_tx: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
     app_working_dir: &std::path::Path,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
     override_credential: Option<&crate::api::ai_providers::CodexCredentialOverride<'_>>,
+    native_input: &NativeTurnInput<'_>,
+    tool_hub: Option<Arc<crate::api::control::FrontendToolHub>>,
 ) -> AgentResult {
     use crate::backend::codex::CodexBackend;
-    use crate::backend::events::ExecutionEvent;
     use crate::backend::{Backend, SessionConfig};
 
     let model = model.map(str::trim).filter(|m| !m.is_empty());
@@ -927,10 +1040,18 @@ pub async fn run_codex_turn(
     // ChatGPT OAuth account. Minting an API key refreshes/rotates the same
     // refresh token, then the selected credential can become stale before it
     // is written into Codex auth.json.
-    let should_try_mint_api_key = !matches!(
-        override_credential,
-        Some(crate::api::ai_providers::CodexCredentialOverride::OAuth(_))
-    );
+    let codex_proxy = match override_credential {
+        Some(crate::api::ai_providers::CodexCredentialOverride::CliProxy(endpoint)) => {
+            Some((*endpoint).clone())
+        }
+        Some(_) => None,
+        None => crate::api::oauth_owner::codex_via_cli_proxy(),
+    };
+    let should_try_mint_api_key = codex_proxy.is_none()
+        && !matches!(
+            override_credential,
+            Some(crate::api::ai_providers::CodexCredentialOverride::OAuth(_))
+        );
     if should_try_mint_api_key {
         if let Err(e) =
             crate::api::ai_providers::ensure_openai_api_key_for_codex(app_working_dir).await
@@ -946,7 +1067,9 @@ pub async fn run_codex_turn(
         Some(crate::api::ai_providers::CodexCredentialOverride::OAuth(account)) => {
             Some((*account).clone())
         }
-        Some(crate::api::ai_providers::CodexCredentialOverride::ApiKey(_)) => None,
+        Some(crate::api::ai_providers::CodexCredentialOverride::ApiKey(_))
+        | Some(crate::api::ai_providers::CodexCredentialOverride::CliProxy(_)) => None,
+        None if codex_proxy.is_some() => None,
         None => {
             if crate::api::ai_providers::get_openai_api_key_for_codex_default(app_working_dir)
                 .is_none()
@@ -983,7 +1106,13 @@ pub async fn run_codex_turn(
     let prepared_override = prepared_oauth_account
         .as_ref()
         .map(crate::api::ai_providers::CodexCredentialOverride::OAuth);
-    let workspace_override = prepared_override.as_ref().or(override_credential);
+    let proxy_override = codex_proxy
+        .as_ref()
+        .map(crate::api::ai_providers::CodexCredentialOverride::CliProxy);
+    let workspace_override = prepared_override
+        .as_ref()
+        .or(proxy_override.as_ref())
+        .or(override_credential);
 
     // Ensure Codex auth.json is present in the workspace context (host or container).
     if let Err(e) = crate::api::ai_providers::write_codex_credentials_for_workspace(
@@ -997,6 +1126,35 @@ pub async fn run_codex_turn(
             0,
         )
         .with_terminal_reason(TerminalReason::LlmError);
+    }
+
+    // A non-proxy attempt (explicit rotation override, or no CLIProxyAPI
+    // ownership at all) must not inherit the `model_provider = "cliproxy"`
+    // stanza baked into the mission config at prepare time: its
+    // `env_key = "OPENAI_API_KEY"` would resolve against a missing env var
+    // and the fallback attempt would fail instead of authenticating with
+    // its own credential. Strip only our own stanza; an operator-set
+    // provider is left untouched.
+    if codex_proxy.is_none() {
+        let config_path = mission_work_dir.join(".codex").join("config.toml");
+        if let Ok(existing) = std::fs::read_to_string(&config_path) {
+            let stripped = crate::workspace::config::strip_codex_cli_proxy_provider(&existing);
+            if stripped != existing {
+                if let Err(e) = std::fs::write(&config_path, &stripped) {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        path = %config_path.display(),
+                        error = %e,
+                        "Failed to strip CLIProxyAPI model provider from Codex config for non-proxy attempt"
+                    );
+                } else {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        "Stripped CLIProxyAPI model provider from Codex config for non-proxy attempt"
+                    );
+                }
+            }
+        }
     }
 
     let workspace_exec = WorkspaceExec::new(workspace.clone());
@@ -1027,6 +1185,66 @@ pub async fn run_codex_turn(
     // `database is locked` before the mission starts.
     let mut extra_env =
         prepare_codex_per_mission_home(workspace, &workspace_exec, mission_work_dir, mission_id);
+    if native_input.enabled {
+        extra_env.insert(
+            "CODEX_HOME".into(),
+            workspace_exec.translate_path_for_container(&mission_work_dir.join(".codex")),
+        );
+    }
+    if let Some(endpoint) = codex_proxy.as_ref() {
+        // `config.toml` declares `[model_providers.cliproxy]` with
+        // `env_key = "OPENAI_API_KEY"`; Codex resolves it from the process env.
+        extra_env.insert("OPENAI_API_KEY".into(), endpoint.api_key.clone());
+        tracing::info!(
+            mission_id = %mission_id,
+            base_url = %endpoint.base_url,
+            "Codex routed through CLIProxyAPI (ChatGPT OAuth owned by the proxy)"
+        );
+    }
+
+    let mut codex_work_dir = crate::workspace::configured_project_dir(workspace, mission_work_dir);
+    let continuity = if native_input.enabled {
+        let account = match workspace_override {
+            Some(credential) => credential_identity(credential),
+            None => match crate::api::ai_providers::get_openai_api_key_for_codex_default(
+                app_working_dir,
+            ) {
+                Some(key) => continuity::account_fingerprint("apikey", &key),
+                None => {
+                    return continuity_failure(
+                        "native account identity is unavailable; refusing an unbound launch",
+                    )
+                }
+            },
+        };
+        let identity = match continuity::Identity::new(
+            mission_id,
+            workspace.id,
+            &codex_work_dir,
+            mission_work_dir,
+            account,
+        ) {
+            Ok(identity) => identity,
+            Err(error) => return continuity_failure(error),
+        };
+        codex_work_dir = identity.cwd.clone();
+        extra_env.insert(
+            "HOME".into(),
+            workspace_exec.translate_path_for_container(&identity.home),
+        );
+        extra_env.insert(
+            "CODEX_HOME".into(),
+            workspace_exec.translate_path_for_container(&identity.codex_home),
+        );
+        Some(continuity::Config {
+            path: native_input.path.clone(),
+            identity,
+            projected_session: session_id.map(str::to_string),
+            current_message: native_input.current_message.to_string(),
+        })
+    } else {
+        None
+    };
 
     // DGX Spark build offload (opt-in per workspace) — see
     // Workspace::spark_offload_env. Exported to the codex app-server process so
@@ -1042,12 +1260,36 @@ pub async fn run_codex_turn(
         extra_env.extend(remote_build_env);
     }
 
+    let interactive = tool_hub.map(|hub| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::backend::codex::client::NativeRequest>(8);
+        let events = events_tx.clone();
+        let cancellation = cancel.clone();
+        tokio::spawn(async move {
+            while let Some(mut request) = rx.recv().await {
+                let id = format!("native-{}", Uuid::new_v4());
+                let waiter = hub.register(id.clone()).await;
+                let _guard = crate::api::control::FrontendToolHub::begin_waiting(&hub, mission_id);
+                let name = "ui_native_request".to_string();
+                let _ = events.send(AgentEvent::ToolCall {tool_call_id:id.clone(),name:name.clone(),args:serde_json::json!({"method":request.method,"params":request.params}),mission_id:Some(mission_id)});
+                let answer = tokio::select! {_ = cancellation.cancelled() => None, _=request.reply.closed()=>None, answer=waiter => answer.ok()};
+                hub.unregister(&id).await;
+                let Some(answer)=answer else {break};
+                if request.reply.send(answer.clone()).is_ok() {
+                    let _ = events.send(AgentEvent::ToolResult {tool_call_id:id,name,result:answer,mission_id:Some(mission_id)});
+                }
+            }
+        });
+        tx
+    });
+
     let codex_config = crate::backend::codex::client::CodexConfig {
+        interactive,
         cli_path,
         model_effort: model_effort.map(|s| s.to_string()),
         fast_mode,
         cancel_token: Some(cancel.clone()),
         extra_env,
+        continuity,
         external_chatgpt_auth: prepared_oauth_account.as_ref().map(|account| {
             crate::backend::codex::client::CodexExternalChatgptAuth {
                 access_token: account.access_token.clone(),
@@ -1066,8 +1308,6 @@ pub async fn run_codex_turn(
     // the agent from an explicitly configured project checkout when present.
     // Verity's lean-lsp MCP uses the same LEAN_PROJECT_PATH, so this keeps
     // Codex file tools and Lean requests on one mounted project tree.
-    let codex_work_dir = crate::workspace::configured_project_dir(workspace, mission_work_dir);
-
     // Create session
     let session = match backend
         .create_session(SessionConfig {
@@ -1090,12 +1330,22 @@ pub async fn run_codex_turn(
     // driver ends the mission on the first `turn/completed`, so an injected
     // `turn/start` would be abandoned. Steers fall back to the authoritative
     // next-turn path (see effective_mid_turn_kind).
-    let (mut event_rx, _handle) = match backend.send_message_streaming(&session, user_message).await
-    {
+    let (event_rx, handle) = match backend.send_message_streaming(&session, user_message).await {
         Ok(result) => result,
         Err(e) => {
+            if let Some(stop) = e.downcast_ref::<continuity::NativeGoalStop>() {
+                return AgentResult::failure(stop.evidence.clone(), 0)
+                    .with_terminal_evidence(stop.evidence.clone())
+                    .with_turn_outcome(crate::agents::TurnOutcome::Interrupted {
+                        reason: TerminalReason::NativeGoalStopped,
+                        message: Some(stop.evidence.clone()),
+                    });
+            }
             let message = format!("Codex execution failed: {}", e);
             tracing::error!("Failed to send message to Codex: {}", e);
+            if message.contains("codex_continuity_") {
+                return continuity_failure(message);
+            }
             let reason = if is_capacity_limited_error(&message) {
                 TerminalReason::CapacityLimited
             } else if is_rate_limited_error(&message) {
@@ -1118,6 +1368,27 @@ pub async fn run_codex_turn(
         }
     };
 
+    let result =
+        consume_codex_events(event_rx, events_tx, cancel, mission_id, user_message, model).await;
+    // Release the native attachment only after the process actually stops.
+    if let Err(error) = handle.await {
+        return continuity_failure(format!("native driver teardown failed: {error}"));
+    }
+    result
+}
+
+/// Drain the native driver before classifying its result. Shared with transcript
+/// regressions so stopped-goal tests exercise the production final-response path.
+pub(crate) async fn consume_codex_events(
+    mut event_rx: tokio::sync::mpsc::Receiver<crate::backend::events::ExecutionEvent>,
+    events_tx: broadcast::Sender<AgentEvent>,
+    cancel: CancellationToken,
+    mission_id: Uuid,
+    user_message: &str,
+    model: Option<&str>,
+) -> AgentResult {
+    use crate::backend::events::ExecutionEvent;
+    let resolved_model = model.map(str::to_owned);
     // Process events until completion or cancellation
     let mut assistant_message = String::new();
     let mut raw_error_message: Option<String> = None;
@@ -1147,28 +1418,30 @@ pub async fn run_codex_turn(
     // closing audit lives in `thinking_accumulated`), we break out of the
     // loop and let the post-loop finalization recover whatever it can.
     let mut cancelled = false;
-    let mut codex_goal_cancel_deferred = false;
-    let is_goal_request = codex_is_goal_request(user_message);
+    let mut codex_cancel_deferred = false;
+    let mut native_goal_stop = None;
+    let mut is_goal_request = codex_is_goal_request(user_message);
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled(), if !codex_goal_cancel_deferred => {
+            _ = cancel.cancelled(), if !codex_cancel_deferred => {
                 tracing::info!("Codex turn cancelled for mission {}", mission_id);
-                if is_goal_request && !codex_goal_cancel_deferred {
-                    // Goal-mode cancellation must be handled by the app-server
-                    // task because it owns the live thread id needed for
-                    // `thread/goal/clear`. Keep draining events until it emits
-                    // `ExecutionEvent::Cancelled` (or the channel closes).
-                    codex_goal_cancel_deferred = true;
-                    continue;
-                }
-                // Note: Codex process will be cleaned up automatically when
-                // the event stream task ends.
-                cancelled = true;
-                break;
+                // The driver owns the native thread and confirms pause/interrupt.
+                // Drain its outcome even when a bound-goal event is still queued.
+                codex_cancel_deferred = true;
+                continue;
             }
             Some(event) = event_rx.recv() => {
                 match event {
+                    ExecutionEvent::CodexSessionBound { thread_id, goal_mode } => {
+                        is_goal_request = goal_mode;
+                        let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+                            run: crate::api::runners::session_update_run(),
+                            backend: "codex".to_string(),
+                            mission_id,
+                            session_id: format!("{}{thread_id}", continuity::SESSION_PREFIX),
+                        });
+                    }
                     ExecutionEvent::TextDelta { content } => {
                         // For Codex backend, TextDelta is handled as the latest snapshot for
                         // the currently active assistant message item. Replacing here avoids
@@ -1289,6 +1562,9 @@ pub async fn run_codex_turn(
                         });
                     }
                     ExecutionEvent::GoalStatus { status, objective } => {
+                        native_goal_stop = if is_goal_request && matches!(status.as_str(), "blocked" | "paused" | "usageLimited" | "budgetLimited") {
+                            Some(format!("Native Codex goal status={status}; objective: {objective}"))
+                        } else { None };
                         let _ = events_tx.send(AgentEvent::GoalStatus {
                             status,
                             objective,
@@ -1335,9 +1611,12 @@ pub async fn run_codex_turn(
                         // forces the user (and our `is_*_error` classifiers)
                         // to debug from log lines instead of the surfaced
                         // assistant_message.
-                        if let Some(surfaced_message) =
+                        let surfaced = if message.starts_with("codex_continuity_") {
+                            Some(message.clone())
+                        } else {
                             codex_error_message_to_surface(&assistant_message, &pending_tools, &message)
-                        {
+                        };
+                        if let Some(surfaced_message) = surfaced {
                             let recorded = record_codex_error_message(
                                 &mut error_message,
                                 surfaced_message.clone(),
@@ -1413,7 +1692,7 @@ pub async fn run_codex_turn(
     let no_output = assistant_message.trim().is_empty()
         && last_summary.is_none()
         && thinking_for_fallback.is_none();
-    if no_output && error_message.is_none() && !cancelled {
+    if no_output && error_message.is_none() && !cancelled && native_goal_stop.is_none() {
         success = false;
         error_message = Some(
             "Codex produced no output. This usually means the Codex CLI failed before emitting JSON (often authentication). Check that the host has a valid `~/.codex/auth.json` and that the backend can access it."
@@ -1438,7 +1717,7 @@ pub async fn run_codex_turn(
     } else if let Some(summary) = last_summary {
         summary
     } else if let Some(thinking_text) = thinking_for_fallback {
-        if success && codex_is_goal_request(user_message) && !cancelled {
+        if success && is_goal_request && !cancelled && native_goal_stop.is_none() {
             codex_missing_goal_final_response_message()
         } else {
             // Surface the model's reasoning as the assistant message so the
@@ -1446,6 +1725,8 @@ pub async fn run_codex_turn(
             // the thinking panel.
             thinking_text
         }
+    } else if let Some(evidence) = native_goal_stop.as_ref() {
+        evidence.clone()
     } else if let Some(marker) = cancel_marker.as_ref() {
         // Mid-turn cancellation with nothing accumulated — preserve the
         // historical "Mission cancelled" / shutdown text for the UI.
@@ -1454,7 +1735,8 @@ pub async fn run_codex_turn(
         "No response from Codex".to_string()
     };
 
-    let tool_activity_required = codex_turn_requires_tool_activity(user_message, &final_message);
+    let tool_activity_required = native_goal_stop.is_none()
+        && codex_turn_requires_tool_activity(user_message, &final_message);
     let stopped_before_required_tools = success && tool_events_seen == 0 && tool_activity_required;
     let stopped_on_progress_update = success
         && tool_activity_required
@@ -1480,7 +1762,7 @@ pub async fn run_codex_turn(
     if lower_final.contains("does not exist or you do not have access")
         || lower_final.contains("model_not_found")
     {
-        final_message.push_str("\n\nTry model `gpt-5.6-sol` or `gpt-5-codex` for Codex missions.");
+        final_message.push_str("\n\nTry model `gpt-6-astra` or `gpt-5.6-sol` for Codex missions.");
         if matches!(
             model,
             Some("gpt-5.3-codex" | "gpt-5.4-codex" | "gpt-5.5-codex")
@@ -1514,6 +1796,10 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         // text/reason pair consistent if shutdown fires mid-finalize.
         let cancel_reason = marker.terminal_reason.unwrap_or(TerminalReason::Cancelled);
         AgentResult::failure(final_message, cost_cents).with_terminal_reason(cancel_reason)
+    } else if let Some(evidence) = native_goal_stop.filter(|_| success) {
+        AgentResult::failure(final_message, cost_cents)
+            .with_terminal_reason(TerminalReason::NativeGoalStopped)
+            .with_terminal_evidence(evidence)
     } else if success {
         AgentResult::success(final_message, cost_cents)
             .with_terminal_reason(TerminalReason::TurnComplete)
@@ -1522,7 +1808,9 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         // Refresh-token reuse (ChatGPT OAuth races between sibling missions)
         // is_auth_error-classified so the codex arm rotates to another
         // configured account instead of surfacing the bare error.
-        let reason = if stopped_before_required_tools || stopped_on_progress_update {
+        let reason = if classification_message.starts_with("codex_continuity_") {
+            TerminalReason::CodexContinuityRequired
+        } else if stopped_before_required_tools || stopped_on_progress_update {
             TerminalReason::Stalled
         } else if is_capacity_limited_error(classification_message) {
             TerminalReason::CapacityLimited
@@ -1540,7 +1828,18 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         } else {
             TerminalReason::LlmError
         };
-        AgentResult::failure(final_message, cost_cents).with_terminal_reason(reason)
+        let mut failure =
+            AgentResult::failure(final_message, cost_cents).with_terminal_reason(reason);
+        if reason == TerminalReason::Stalled {
+            // Guard contract: say what was observed, not just the verdict.
+            failure = failure.with_terminal_evidence(if stopped_before_required_tools {
+                "Codex stopped before completing required workspace/tool steps \
+                 (no required tool call was made after the last response)"
+            } else {
+                "Codex stopped on a progress-update message without resuming work"
+            });
+        }
+        failure
     };
 
     let outcome = turn_outcome_for_result(
@@ -1587,6 +1886,46 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
 mod tests {
     use super::{codex_transport_failure_stage, codex_transport_reason_is_retryable};
     use crate::agents::TerminalReason;
+
+    #[tokio::test]
+    async fn native_goal_stop_without_chat_output_is_resumable_not_auth_failure() {
+        use crate::backend::events::ExecutionEvent;
+        for status in ["blocked", "paused", "usageLimited", "budgetLimited"] {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(ExecutionEvent::GoalStatus {
+                status: status.into(),
+                objective: "keep objective".into(),
+            })
+            .await
+            .unwrap();
+            tx.send(ExecutionEvent::MessageComplete {
+                session_id: "native".into(),
+            })
+            .await
+            .unwrap();
+            drop(tx);
+            let (events, _) = tokio::sync::broadcast::channel(16);
+            let result = super::consume_codex_events(
+                rx,
+                events,
+                tokio_util::sync::CancellationToken::new(),
+                uuid::Uuid::new_v4(),
+                "/goal keep objective",
+                None,
+            )
+            .await;
+            assert!(!result.success);
+            assert_eq!(
+                result.terminal_reason,
+                Some(TerminalReason::NativeGoalStopped)
+            );
+            assert!(result.output.contains(&format!("status={status}")));
+            assert_eq!(
+                result.terminal_evidence.as_deref(),
+                Some(result.output.as_str())
+            );
+        }
+    }
 
     #[test]
     fn classifies_codex_stream_disconnect_before_tools() {

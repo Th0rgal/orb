@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use jsonwebtoken::{EncodingKey, Header};
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -81,6 +82,186 @@ struct MissionIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProjectSlugParams {
+    slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProjectStatusParams {
+    #[serde(default)]
+    consumed_steer_ids: Vec<String>,
+    slug: String,
+    mode: String,
+    #[serde(default)]
+    next_action: Option<String>,
+    #[serde(default)]
+    blocker: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptProjectTrackParams {
+    slug: String,
+    track: String,
+    idempotency_key: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    evidence: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvalidateProjectTrackEvidenceParams {
+    slug: String,
+    track: String,
+    receipt_id: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetProjectTrackParams {
+    slug: String,
+    track: String,
+    #[serde(default)]
+    desired_state: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptProjectTrackEvidenceParams {
+    slug: String,
+    track: String,
+    #[serde(default)]
+    criterion: Option<String>,
+    verifier_class: String,
+    evidence_ref: String,
+    artifact_version: String,
+    #[serde(default)]
+    observed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReopenProjectTrackParams {
+    slug: String,
+    track: String,
+    reason: String,
+    #[serde(default)]
+    governed_artifact_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetProjectGrantParams {
+    slug: String,
+    #[serde(default)]
+    merge_authority: Option<String>,
+    #[serde(default)]
+    budget_per_tick: Option<String>,
+    #[serde(default)]
+    parallel_missions: Option<i64>,
+    #[serde(default)]
+    pause_reason: Option<String>,
+    #[serde(default)]
+    resume_condition: Option<String>,
+    #[serde(default)]
+    material_bar: Option<String>,
+    #[serde(default)]
+    autonomy_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddProjectSteerParams {
+    slug: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProposalTaskInput {
+    task_key: String,
+    title: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanProjectTasksParams {
+    slug: String,
+    tasks: Vec<ProposalTaskInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProjectTaskParams {
+    slug: String,
+    task_key: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Option<Vec<String>>,
+    #[serde(default)]
+    depends_on: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelProjectTaskParams {
+    slug: String,
+    task_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordProjectDecisionParams {
+    slug: String,
+    question: String,
+    #[serde(default)]
+    rationale: Option<String>,
+    /// merge | dispatch | abandon | pause | resume | scope | budget | retry | …
+    #[serde(default)]
+    kind: Option<String>,
+    /// granted (autonomous act) | escalation (question for the owner, default).
+    #[serde(default)]
+    authority: Option<String>,
+    /// decided | pending_user; defaults follow the authority.
+    #[serde(default)]
+    status: Option<String>,
+    /// {"pr_url": …, "mission_id": …}
+    #[serde(default)]
+    evidence: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnswerProjectDecisionParams {
+    slug: String,
+    /// The decision's `at` key, as returned by record/get_project.
+    at: String,
+    answer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkMissionToProjectParams {
+    mission_id: String,
+    slug: String,
+    #[serde(default)]
+    track: Option<String>,
+    #[serde(default)]
+    writer: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptMissionParams {
+    mission_id: String,
+    /// The Hermes session that should own this mission's callbacks from now
+    /// on. The sandboxed-origin-session plugin stamps it exactly as it does
+    /// for start_mission; the model itself should not pass it.
+    #[serde(default)]
+    origin_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ListMissionsParams {
     #[serde(default)]
     status: Option<String>,
@@ -88,8 +269,16 @@ struct ListMissionsParams {
     limit: usize,
     #[serde(default)]
     project: Option<String>,
+    /// Project family: matches `X` and `X-*`.
+    #[serde(default)]
+    project_prefix: Option<String>,
+    #[serde(default)]
+    track: Option<String>,
     #[serde(default)]
     tag: Option<String>,
+    /// The Hermes conversation a mission was launched from.
+    #[serde(default)]
+    origin_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +339,10 @@ struct StartMissionParams {
     #[serde(default)]
     track: Option<String>,
     #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    supersedes_mission_id: Option<String>,
+    #[serde(default)]
     intent: Option<String>,
     #[serde(default)]
     github_pr: Option<String>,
@@ -164,9 +357,75 @@ struct StartMissionParams {
     #[serde(default)]
     desired_state: Option<String>,
     #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
     next_check_at: Option<String>,
     #[serde(default)]
     estimated_disk_gib: Option<u64>,
+    /// Hermes session that spawned this mission. Forwarded as the mission's
+    /// `origin_session_id` so clients group it as a worker of that session.
+    #[serde(default)]
+    origin_session_id: Option<String>,
+    #[serde(default)]
+    attachments: Option<Vec<Value>>,
+}
+
+/// PR writers own an outcome, not one conversational turn. Make that runtime
+/// invariant explicit even when a controller forgets the `/goal` prefix; a
+/// bounded reviewer (`writer: false`) remains a normal one-turn mission.
+fn writer_goal_prompt(prompt: String, writer: bool) -> String {
+    if !writer {
+        return prompt;
+    }
+    let trimmed = prompt.trim_start();
+    let already_goal = trimmed
+        .strip_prefix("/goal")
+        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace));
+    if already_goal {
+        prompt
+    } else {
+        format!("/goal {prompt}")
+    }
+}
+
+/// Deserialize a tool's arguments, naming the offending field when it fails.
+///
+/// `serde_json::from_value` reports the shape mismatch but not its location:
+/// `invalid type: map, expected a string` for a struct with fourteen string
+/// fields. An agent that reads that has no way to know which argument to fix.
+///
+/// Measured 2026-08-05: a controller called `start_mission` seven times in
+/// ninety seconds, each time getting exactly that sentence back, until the
+/// tool-loop guard cut it off. It was never told which field was wrong, so
+/// each retry was a guess.
+///
+/// `serde_path_to_error` wraps the deserializer and tracks the path, turning
+/// the same failure into `desired_state: invalid type: map, expected a
+/// string` — actionable on the first read.
+fn parse_params<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, String> {
+    let deserializer = arguments.into_deserializer();
+    serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        // The path is "." for a failure on the root value itself (arguments
+        // that are not an object at all). Naming "." there would be noise.
+        if path.is_empty() || path == "." {
+            format!("Invalid params: {}", error.inner())
+        } else {
+            format!("Invalid params: {path}: {}", error.inner())
+        }
+    })
+}
+
+/// Accept only conservative session identifiers for `origin_session_id`
+/// (Hermes session ids look like `20260803_150605_59ab72`; channel-keyed
+/// sessions contain `:`). Keeping the shape tight means the value stays
+/// machine-routable by the delivery handler.
+fn valid_origin_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
 }
 
 fn native_backend_from_agent(agent: Option<&str>) -> Option<String> {
@@ -301,8 +560,49 @@ fn canonical_github_pr_ref(value: &str) -> bool {
     valid_component(owner) && valid_component(repo)
 }
 
+/// Shared by send and resume so both HTTP stages carry the same contract.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct DispatchIdentityParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continue_identity: Option<sandboxed_sh::api::writer_recycle::WriterContinuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_pr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    track: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+impl DispatchIdentityParams {
+    fn add_to(&self, body: &mut Value) {
+        body.as_object_mut().expect("request object").extend(
+            serde_json::to_value(self)
+                .expect("identity serialization")
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+    }
+}
+
+fn dispatch_identity_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "track", "github_pr"],
+        "properties": {
+            "project": {"type": ["string", "null"]},
+            "track": {"type": "string", "minLength": 1},
+            "github_pr": {"type": ["string", "null"]}
+        },
+        "description": "Trusted caller assertion, not proof of unchanged objective. Assert this turn continues the mission's existing work. Copy the exact stored project, track and github_pr (explicit null if unset) from get_mission. Prose may mention excluded or collaborating PRs. Cannot accompany title/track/github_pr updates; never use for different work. Does not grant PR ownership."
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct SendMessageParams {
+    #[serde(flatten)]
+    identity: DispatchIdentityParams,
     mission_id: String,
     content: String,
 }
@@ -321,6 +621,18 @@ struct AskMissionParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AnswerMissionQuestionParams {
+    mission_id: String,
+    /// Target a specific AskUserQuestion call. Omit to auto-resolve the
+    /// mission's single unanswered question.
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    /// One inner array per question; each entry is an option label or free
+    /// text.
+    answers: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkspaceBashParams {
     command: String,
     #[serde(default)]
@@ -329,6 +641,11 @@ struct WorkspaceBashParams {
     cwd: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Supplying both ownership fields selects restart-safe execution.
+    #[serde(default)]
+    mission_id: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,25 +698,6 @@ fn workspace_job_command(
         (Some(_), Some(_)) => Err("Pass exactly one of command or argv, not both".to_string()),
         _ => Err("Pass a non-empty command or argv".to_string()),
     }
-}
-
-fn is_heavy_workspace_command(command: &str) -> bool {
-    let normalized = command
-        .split_whitespace()
-        .map(|part| part.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join(" ");
-    [
-        "lake build",
-        "lake test",
-        "cargo build --release",
-        "cargo test --all",
-        "npm run build",
-        "bun run build",
-        "next build",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 fn compact_workspace_job(job: Value) -> Value {
@@ -565,6 +863,8 @@ struct UpdateSettingsParams {
 
 #[derive(Debug, Deserialize)]
 struct ResumeMissionParams {
+    #[serde(flatten)]
+    identity: DispatchIdentityParams,
     mission_id: String,
     /// Optional steering message delivered as the resume turn's prompt instead
     /// of the default "continue where you left off" text.
@@ -585,6 +885,65 @@ struct MissionDiagnosticsParams {
     mission_id: String,
     #[serde(default = "default_diagnostics_limit")]
     limit: usize,
+}
+
+/// Readable projection only: the persisted trace remains the raw receipt.
+fn diagnostic_result_snippet(content: &str) -> String {
+    fn collect(value: &Value, parts: &mut Vec<String>, depth: usize) {
+        if depth > 12 {
+            return;
+        }
+        match value {
+            Value::String(text) => {
+                if !text.trim().is_empty() && !parts.contains(text) {
+                    parts.push(text.clone());
+                }
+            }
+            Value::Array(values) => {
+                // Node Buffer/byte output must not become hundreds of integer tokens.
+                if !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| value.as_u64().is_some_and(|byte| byte <= 255))
+                {
+                    let bytes: Vec<u8> = values
+                        .iter()
+                        .map(|value| value.as_u64().unwrap() as u8)
+                        .collect();
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        collect(&Value::String(text), parts, depth + 1);
+                    }
+                } else {
+                    for value in values {
+                        collect(value, parts, depth + 1);
+                    }
+                }
+            }
+            Value::Object(fields) => {
+                for key in ["text", "content", "stdout", "stderr", "output", "rawOutput"] {
+                    if let Some(value) = fields.get(key) {
+                        collect(value, parts, depth + 1);
+                    }
+                }
+                if fields.get("type").and_then(Value::as_str) == Some("Buffer") {
+                    if let Some(value) = fields.get("data") {
+                        collect(value, parts, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    if let Ok(value) = serde_json::from_str::<Value>(content) {
+        collect(&value, &mut parts, 0);
+    }
+    let text = if parts.is_empty() {
+        content.to_string()
+    } else {
+        parts.join("\n")
+    };
+    truncate_snippet(&text, 800)
 }
 
 fn default_diagnostics_limit() -> usize {
@@ -621,12 +980,82 @@ fn mission_events_path(
     } else if let Some(since_seq) = since_seq {
         path.push_str(&format!("&since_seq={since_seq}"));
     } else {
-        // The public events endpoint intentionally starts at the oldest row
-        // when no cursor is supplied. Hermes uses this bounded tool for live
-        // reconciliation, so its useful default is the newest page.
+        // The events endpoint already defaults to the newest page when no
+        // cursor is supplied, but Hermes uses this bounded tool for live
+        // reconciliation, so we pin the tail explicitly to stay robust against
+        // any future change to the server-side default.
         path.push_str(&format!("&before_seq={}", i64::MAX));
     }
     path
+}
+
+/// One unanswered AskUserQuestion tool call found in a mission's events.
+#[derive(Debug, PartialEq, Eq)]
+struct PendingAskQuestion {
+    tool_call_id: String,
+    sequence: i64,
+    /// Question texts parsed from the call args, best-effort.
+    questions: Vec<String>,
+}
+
+impl PendingAskQuestion {
+    fn summary(&self) -> String {
+        if self.questions.is_empty() {
+            "(question text unavailable)".to_string()
+        } else {
+            self.questions.join(" | ")
+        }
+    }
+}
+
+/// Unanswered AskUserQuestion calls in `events`, newest first. A call is
+/// unanswered when no tool_result event anywhere in the page shares its
+/// tool_call_id.
+fn pending_ask_user_questions(events: &[Value]) -> Vec<PendingAskQuestion> {
+    let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for event in events {
+        if event.get("event_type").and_then(Value::as_str) == Some("tool_result") {
+            if let Some(id) = event.get("tool_call_id").and_then(Value::as_str) {
+                answered.insert(id);
+            }
+        }
+    }
+    let mut pending = Vec::new();
+    for event in events {
+        if event.get("event_type").and_then(Value::as_str) != Some("tool_call")
+            || event.get("tool_name").and_then(Value::as_str) != Some("AskUserQuestion")
+        {
+            continue;
+        }
+        let Some(id) = event.get("tool_call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if answered.contains(id) {
+            continue;
+        }
+        let questions = event
+            .get("content")
+            .and_then(Value::as_str)
+            .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            .as_ref()
+            .and_then(|args| args.get("questions"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("question").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        pending.push(PendingAskQuestion {
+            tool_call_id: id.to_string(),
+            sequence: event.get("sequence").and_then(Value::as_i64).unwrap_or(0),
+            questions,
+        });
+    }
+    pending.sort_by_key(|question| std::cmp::Reverse(question.sequence));
+    pending
 }
 
 fn insert_optional<T: Serialize>(
@@ -844,6 +1273,10 @@ struct AssistantMcp {
     api_url: String,
     api_token: Option<String>,
     jwt_secret: Option<String>,
+    /// Slugs this instance may MUTATE (`SANDBOXED_PROJECT_SCOPE`, comma-list).
+    /// None = unrestricted (the owner's interactive Hermes). Reads are never
+    /// scoped — cross-project awareness is a feature, not a leak.
+    project_scope: Option<std::collections::HashSet<String>>,
     client: reqwest::Client,
 }
 
@@ -863,14 +1296,68 @@ impl AssistantMcp {
         let jwt_secret = std::env::var("JWT_SECRET")
             .ok()
             .filter(|secret| !secret.trim().is_empty());
+        let project_scope = std::env::var("SANDBOXED_PROJECT_SCOPE")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|slug| slug.trim().to_string())
+                    .filter(|slug| !slug.is_empty())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .filter(|scope| !scope.is_empty());
         Self {
             api_url,
             api_token,
             jwt_secret,
+            project_scope,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    /// Scope gate for mission-level mutators. A scoped controller may only
+    /// touch missions tagged with one of its projects — anything else
+    /// (another project's mission, or an untagged one it cannot prove it
+    /// owns) is refused. Unscoped instances skip the lookup entirely.
+    async fn assert_mission_scope(&self, mission_id: Uuid) -> Result<(), String> {
+        if self.project_scope.is_none() {
+            return Ok(());
+        }
+        let response = self
+            .api_get(&format!("/api/control/missions/{mission_id}"))
+            .await?;
+        let mission = Self::response_value(response, "load mission for scope check").await?;
+        let project = mission
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty());
+        match project {
+            Some(slug) => self.assert_project_scope(slug),
+            None => Err(format!(
+                "mission {mission_id} carries no project tag — a scoped controller may only \
+                 act on missions tagged with its own project"
+            )),
+        }
+    }
+
+    /// Gate for MUTATING project tools. Scoped controllers stay inside their
+    /// own project; unscoped instances (owner chat) pass untouched.
+    fn assert_project_scope(&self, slug: &str) -> Result<(), String> {
+        let slug = slug.trim();
+        match &self.project_scope {
+            Some(scope) if !scope.contains(slug) => {
+                let mut allowed: Vec<&str> = scope.iter().map(String::as_str).collect();
+                allowed.sort_unstable();
+                Err(format!(
+                    "project '{slug}' is outside this controller's scope ({}). \
+                     Mutating tools are limited to your own project; reads are unrestricted.",
+                    allowed.join(", ")
+                ))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -881,6 +1368,64 @@ impl AssistantMcp {
             .clone()
             .or_else(|| self.jwt_secret.as_deref().and_then(mint_service_jwt))
             .map(|token| ("Authorization".to_string(), format!("Bearer {token}")))
+    }
+
+    /// Turn whatever the caller has into a mission UUID.
+    ///
+    /// Dashboards, logs and transcripts all show the 8-character prefix, so a
+    /// controller keeping notes across days inevitably feeds one back. A full
+    /// UUID resolves locally with no round trip; anything else asks the
+    /// server, which is the only party that can tell whether the fragment is
+    /// unambiguous. Ambiguity surfaces the candidates instead of guessing.
+    async fn resolve_mission_id(&self, raw: &str) -> Result<Uuid, String> {
+        let trimmed = raw.trim();
+        if let Ok(id) = Uuid::parse_str(trimmed) {
+            return Ok(id);
+        }
+        let response = self
+            .api_get(&format!(
+                "/api/control/missions/resolve?id={}",
+                urlencoding::encode(trimmed)
+            ))
+            .await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if status.is_success() {
+            let value: Value = serde_json::from_str(&body)
+                .map_err(|error| format!("Failed to parse mission resolve response: {error}"))?;
+            return value
+                .get("mission_id")
+                .and_then(Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .ok_or_else(|| format!("Mission resolve returned no id for '{trimmed}'"));
+        }
+        // Name the candidates so the next call can be exact.
+        if let Ok(value) = serde_json::from_str::<Value>(&body) {
+            if value.get("error").and_then(Value::as_str) == Some("ambiguous") {
+                let listed = value
+                    .get("candidates")
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| {
+                                let id = row.get("id")?.as_str()?;
+                                let title = row.get("title").and_then(Value::as_str).unwrap_or("");
+                                let mission_status =
+                                    row.get("status").and_then(Value::as_str).unwrap_or("");
+                                Some(format!("{id} ({mission_status}, {title:?})"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Ambiguous mission id '{trimmed}' — candidates: {listed}. Pass the full id."
+                ));
+            }
+        }
+        Err(format!(
+            "Failed to resolve mission '{trimmed}' ({status}): {body}"
+        ))
     }
 
     async fn api_get(&self, path: &str) -> Result<reqwest::Response, String> {
@@ -909,10 +1454,27 @@ impl AssistantMcp {
     }
 
     async fn api_post(&self, path: &str, body: Value) -> Result<reqwest::Response, String> {
+        self.api_post_with_timeout(path, body, None).await
+    }
+
+    /// POST with an optional per-request timeout override. The shared client's
+    /// default is 120s; synchronous long-running endpoints (`/ask`) need more
+    /// headroom than that but must still resolve before the Hermes-side MCP
+    /// request timeout (600s in the generated config) so the caller gets a
+    /// clean error instead of a severed stdio call.
+    async fn api_post_with_timeout(
+        &self,
+        path: &str,
+        body: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<reqwest::Response, String> {
         let mut req = self
             .client
             .post(format!("{}{}", self.api_url, path))
             .json(&body);
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, value);
         }
@@ -983,45 +1545,51 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "list_active_missions".to_string(),
-                description: "List active, pending, blocked, or awaiting-user missions in sandboxed.sh.".to_string(),
+                description: "List active, pending, blocked, or awaiting-user missions in sandboxed.sh. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "limit": {"type": "integer", "description": "Maximum missions to return, default 50."},
-                        "project": {"type": "string", "description": "Optional filter: only missions with this project."},
-                        "tag": {"type": "string", "description": "Optional filter: only missions carrying this tag."}
+                        "project": {"type": "string", "description": "Optional filter: exact project id."},
+                        "project_prefix": {"type": "string", "description": "Optional filter: project FAMILY — matches the id and its `-` suffixed variants (e.g. verity covers verity-core, verity-phase1d). Use this when a project's work is still split across per-phase ids."},
+                        "track": {"type": "string", "description": "Optional filter: exact track within a project."},
+                        "tag": {"type": "string", "description": "Optional filter: only missions carrying this tag."},
+                        "origin_session_id": {"type": "string", "description": "Optional filter: only missions launched from this Hermes conversation."}
                     }
                 }),
             },
             ToolDefinition {
                 name: "list_missions".to_string(),
-                description: "List recent missions, optionally filtered by status, project, or tag.".to_string(),
+                description: "List missions on the attention horizon: live, waiting, blocked, and unabsorbed failed/interrupted attempts. Acknowledged, completed, and replaced attempts are omitted unless you pass an explicit status. Filter by project or track to see attempts on one item. Prefer get_project for the item-first inventory. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "status": {"type": "string", "description": "Optional mission status filter."},
                         "limit": {"type": "integer", "description": "Maximum missions to return, default 50."},
-                        "project": {"type": "string", "description": "Optional filter: only missions with this project."},
-                        "tag": {"type": "string", "description": "Optional filter: only missions carrying this tag."}
+                        "project": {"type": "string", "description": "Optional filter: exact project id."},
+                        "project_prefix": {"type": "string", "description": "Optional filter: project FAMILY — matches the id and its `-` suffixed variants (e.g. verity covers verity-core, verity-phase1d). Use this when a project's work is still split across per-phase ids."},
+                        "track": {"type": "string", "description": "Optional filter: exact track within a project."},
+                        "tag": {"type": "string", "description": "Optional filter: only missions carrying this tag."},
+                        "origin_session_id": {"type": "string", "description": "Optional filter: only missions launched from this Hermes conversation."}
                     }
                 }),
             },
             ToolDefinition {
                 name: "get_mission".to_string(),
-                description: "Compatibility alias for the compact ~2KB mission digest. It never returns the full history; use get_mission_events with a bounded limit for transcript or trace details.".to_string(),
+                description: "Compatibility alias for the compact ~2KB mission digest. It never returns the full history; use get_mission_events with a bounded limit for transcript or trace details. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
                 }),
             },
             ToolDefinition {
                 name: "get_mission_digest".to_string(),
-                description: "Compact ~2KB mission status: state, awaiting_kind, last user/assistant messages (truncated), GitHub PR links, project metadata. Use this instead of get_mission/get_mission_events for recaps and 'where is it?' checks — it avoids pulling whole transcripts into context.".to_string(),
+                description: "Compact ~2KB mission status: state, awaiting_kind, last user/assistant messages (truncated), GitHub PR links, project metadata. Use this instead of get_mission/get_mission_events for recaps and 'where is it?' checks — it avoids pulling whole transcripts into context. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
                 }),
             },
             ToolDefinition {
@@ -1072,13 +1640,13 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "start_mission".to_string(),
-                description: "Create a new sandboxed.sh mission and send its initial prompt. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. Use backend=chatgpt_ui with model_override=gpt-5.6-pro only for exceptionally difficult read-only synthesis, research, or design-conflict questions; keep writer=false, then retrieve any generated files with list_mission_shared_files and download_shared_file. For compatibility, a native agent name (codex/claudecode/gemini/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Mark PR-changing work with writer=true; the API rejects concurrent writers for the same PR.".to_string(),
+                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. Use backend=chatgpt_ui with model_override=gpt-5.6-pro only for exceptionally difficult read-only synthesis, research, or design-conflict questions; keep writer=false, then retrieve any generated files with list_mission_shared_files and download_shared_file. For compatibility, a native agent name (codex/claudecode/gemini/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
                     "properties": {
                         "title": {"type": "string"},
-                        "prompt": {"type": "string"},
+                        "prompt": {"type": "string", "description": "Codex native /goal objective: maximum 4000 Unicode characters, including automatic writer promotion. Put supporting detail in referenced artifacts; never rely on truncation."},
                         "workspace_id": {"type": "string"},
                         "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "gemini", "grok", "chatgpt_ui"]},
                         "model_override": {"type": "string", "description": "Exact account-supported model ID. For ChatGPT UI Pro use the canonical ID gpt-5.6-pro; the harness verifies the visible Pro picker option. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol."},
@@ -1090,22 +1658,42 @@ impl AssistantMcp {
                         "track": {"type": "string", "description": "Track/workstream (e.g. \"core-c3\")."},
                         "intent": {"type": "string", "description": "Intent (e.g. \"review_merge_pr\")."},
                         "github_pr": {"type": "string", "description": "Associated PR ref (e.g. \"owner/repo#123\")."},
-                        "writer": {"type": "boolean", "description": "Whether this mission may modify the associated PR branch. Concurrent writers for one PR are rejected."},
+                        "writer": {"type": "boolean", "description": "Capability boundary for the associated PR. Use false for every reviewer/certifier (server-enforced read-only git/gh); use true for any branch, comment, thread, approval, or merge mutation. Concurrent writers for one PR are rejected."},
                         "request_merge_authority": {"type": "boolean", "description": "Request final guarded merge capability for a dedicated integrator. This is not self-authorization: the trusted Hermes client grants it only when github_pr matches the operator-configured repository allowlist."},
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "desired_state": {"type": "string", "description": "Track state, e.g. waiting_ci / waiting_review / blocked_external."},
+                        "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Outcome contract used when this dispatch declares the track. Existing satisfied tracks are never reopened implicitly."},
+                        "idempotency_key": {"type": "string", "description": "Stable retry key for one logical dispatch. Reusing it returns the existing mission receipt instead of starting a duplicate."},
+                        "supersedes_mission_id": {"type": "string", "description": "The failed/interrupted attempt this mission relays (same project). It is tagged superseded_by and acknowledged, so the board stops flagging it. Use this on every handoff/relay instead of a separate acknowledge_mission call."},
                         "next_check_at": {"type": "string", "description": "When the track should next be checked (RFC3339)."},
-                        "estimated_disk_gib": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Expected peak local scratch use. Set this for Lean/build-heavy missions; omit for small/no-build work."}
+                        "estimated_disk_gib": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Expected peak local scratch use. Set this for Lean/build-heavy missions; omit for small/no-build work."},
+                        "origin_session_id": {"type": "string", "description": "Implementation routing hint (Hermes session id). Injected by the Hermes plugin when present. Controllers should pass project/track instead; completion is a mission row, not a chat callback. Never invent another session's id."},
+                        "attachments": {
+                            "type": "array",
+                            "description": "Ordinary files to materialize under .paloma/ before the harness starts. Not vendor-CLI @ syntax.",
+                            "items": {
+                                "type": "object",
+                                "required": ["kind"],
+                                "properties": {
+                                    "kind": {"type": "string", "enum": ["file", "folder", "controller"]},
+                                    "path": {"type": "string", "description": "Project-relative path for file/folder chips."}
+                                }
+                            }
+                        }
                     }
                 }),
             },
             ToolDefinition {
                 name: "send_message_to_mission".to_string(),
-                description: "Send a follow-up message to an existing mission.".to_string(),
+                description: "Send a follow-up message to an existing mission, waking it if it is idle. This is the general way to restart a parked mission and KEEP THE SAME mission id: it activates pending, awaiting_user, acknowledged, waiting_background, interrupted, blocked, completed and failed missions alike. If the mission is already running the message is delivered to the live turn. There is no idle status that requires starting a new mission just to get the agent's attention. For existing work with excluded/collaborating PR references, read get_mission and pass continue_identity with the exact stored project, track and github_pr (null if unset). For different work use explicit github_pr/track identity updates instead; ownership checks still apply.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id", "content"],
                     "properties": {
+                        "continue_identity": dispatch_identity_schema(),
+                        "github_pr": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
+                        "track": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
+                        "title": {"type": "string", "description": "Explicit identity title update. Cannot accompany continue_identity."},
                         "mission_id": {"type": "string"},
                         "content": {"type": "string"}
                     }
@@ -1126,27 +1714,320 @@ impl AssistantMcp {
                 }),
             },
             ToolDefinition {
+                name: "answer_mission_question".to_string(),
+                description: "Answer a mission's pending AskUserQuestion so its blocked turn resumes immediately. A mission parked on a question cannot be unblocked with send_message_to_mission — plain messages QUEUE BEHIND the blocked turn — so this is the way a controller answers instead of leaving the mission in awaiting_user. `answers` is an array of arrays: one inner array per question, each entry an option label (preferred) or free text. Omit tool_call_id to auto-target the mission's single unanswered question; if several are pending you get an error listing them.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["mission_id", "answers"],
+                    "properties": {
+                        "mission_id": {"type": "string", "description": "Mission UUID or an unambiguous leading fragment."},
+                        "tool_call_id": {"type": "string", "description": "Optional: the AskUserQuestion tool_call id to answer. Omit to use the newest unanswered one."},
+                        "answers": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "One inner array per question, e.g. [[\"Option A\"]]."}
+                    }
+                }),
+            },
+            ToolDefinition {
                 name: "cancel_mission".to_string(),
                 description: "Cancel a running or pending mission.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
                 }),
             },
             ToolDefinition {
                 name: "acknowledge_mission".to_string(),
-                description: "Acknowledge a mission only after independently verifying its terminal result. This is the safe host-authenticated replacement for asking a workspace container to use the service JWT. It accepts only awaiting_user missions whose awaiting_kind is ack; decision waits and live missions are refused.".to_string(),
+                description: "Acknowledge a mission only after independently verifying its terminal result. This is the safe host-authenticated replacement for asking a workspace container to use the service JWT. It accepts awaiting_user missions whose awaiting_kind is ack, and failed/interrupted missions once you have relayed or abandoned their work (prefer start_mission with supersedes_mission_id for a relay); decision waits and live missions are refused.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
+                }),
+            },
+            ToolDefinition {
+                name: "adopt_mission".to_string(),
+                description: "Re-point a mission's origin to THIS conversation so its completion callback lands here. Use when you are waiting on a mission that was dispatched from another session (or with no origin): without adoption, its terminal webhook pins into the conversation that started it — or nowhere — and this conversation is never woken. After adopting, do not poll: the mission-complete callback will arrive as a delivery in this conversation.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["mission_id"],
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
                 }),
             },
             ToolDefinition {
                 name: "get_compute_fleet".to_string(),
                 description: "Get a compact live view of sandboxed.sh compute capacity: remote node health, labels, Lean readiness/toolchains, available slots, active/queued jobs, and recent placement receipts. Use this before dispatching parallel compute or choosing a remote validation node. Ordinary CPU/Lean work should prefer non-GPU nodes while they have immediate capacity; request the gpu label only for GPU work.".to_string(),
                 input_schema: json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "list_projects".to_string(),
+                description: "List the projects you supervise (the authoritative roster): slug, status, mode (active/blocked/paused), how many consecutive ticks in that mode, and the next action. Read this at the start of a tick instead of scanning tracker files.".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "get_project".to_string(),
+                description: "Get one project's compact snapshot: slug, mode, next_action, blocker, grant, pending operator steers, open decisions, bound conversation, and the highest-priority items (live / awaiting / recent unabsorbed attempts). `items` are the durable work — do not treat the mission list as the inventory. Pending steers outrank “nothing to do”. The snapshot is capped (see items_omitted / item_counts); call list_missions with a track filter for one item. Prefer this over an unfiltered list_missions and over markdown trackers.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {"slug": {"type": "string", "description": "Project slug, e.g. 'verity' or 'coldcard-rng-cracker'."}}
+                }),
+            },
+            ToolDefinition {
+                name: "get_situation".to_string(),
+                description: "One bounded read of a project's plan: `summary` (total, verified_satisfied, claim_only, open, blocked, live_attempts, source_unavailable, cursor), `steers` (pending operator orders for this tick, plus last consumed), and every track with its derived_state (ready | executing | waiting | blocked | satisfied | claim_only | cancelled), origin (declared | absorbed), owner attempt, and title. Read pending steers first — they outrank “nothing to do” / [SILENT]. This is the only progress number to quote; do not recount items yourself. `claim_only` tracks were marked done without evidence — never report them as verified. An unchanged `cursor` since your last tick means nothing moved. Steers are not standing authority; the grant still wins.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {"slug": {"type": "string", "description": "Project slug or alias."}}
+                }),
+            },
+            ToolDefinition {
+                name: "update_project_status".to_string(),
+                description: "Report your project's state for this tick: mode (active | blocked | paused), the next action, and the blocker if any. Replaces the [CTRL:] trailer with a structured write; the store counts how long you have been in this mode, so blocked/paused staleness is visible without parsing your reports.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "mode"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["active", "blocked", "paused"]},
+                        "next_action": {"type": "string", "description": "The next concrete step, or the resume/unblock condition."},
+                        "blocker": {"type": "string", "description": "What you are blocked on. Set only when mode=blocked."},
+                        "consumed_steer_ids": {"type": "array", "items": {"type": "string"}, "description": "IDs from steers.pending that this tick actually read and handled. Omit to leave all pending."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "set_project_track".to_string(),
+                description: "Declare or update one workstream using the validated lifecycle. This cannot mark a track satisfied without accepted criterion evidence and cannot reopen a satisfied track; use accept_project_track_evidence or reopen_project_track for those transitions.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "track"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "desired_state": {"type": "string"},
+                        "status": {"type": "string", "enum": ["planned", "ready", "executing", "waiting", "blocked", "satisfied", "cancelled"]}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "accept_project_track_evidence".to_string(),
+                description: "Accept immutable evidence for one track criterion. The server derives satisfaction only when every current criterion has accepted evidence at the governed artifact version; a mission self-report alone is not evidence.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "track", "verifier_class", "evidence_ref", "artifact_version"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "criterion": {"type": "string", "description": "Exact acceptance criterion. May be omitted for a zero- or one-criterion track."},
+                        "verifier_class": {"type": "string", "enum": ["external_state", "command", "review", "operator", "manual"]},
+                        "evidence_ref": {"type": "string", "description": "Immutable receipt/URL/commit/job/review reference."},
+                        "artifact_version": {"type": "string", "description": "Immutable governed version, normally a full commit SHA."},
+                        "observed_at": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "reopen_project_track".to_string(),
+                description: "Explicitly reopen a satisfied or cancelled track. Requires a reason, records the authenticated actor, increments the contract revision, and prevents old evidence from satisfying the new revision.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "track", "reason"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "governed_artifact_version": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "accept_project_track".to_string(),
+                description: "Satisfy a track with evidence — the ONLY way a track becomes satisfied (set_project_track rejects done/closed). Pass one evidence entry per declared acceptance criterion (criterion_id = the criterion text or c1, c2, …; omit when the track declares none). Each entry names an immutable handle: kind pr_merged | pr_head_review | review with subject_id 'owner/repo#233@<head sha>', or command / external_state / operator / manual with a job id, commit, or named decision. Head-bound evidence is invalidated automatically when the PR head moves. Use a stable idempotency_key per acceptance (retry-safe); pass expected_revision from get_situation to detect concurrent edits (409 on mismatch).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "track", "idempotency_key", "evidence"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "idempotency_key": {"type": "string"},
+                        "expected_revision": {"type": "integer"},
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["kind", "subject_id"],
+                                "properties": {
+                                    "criterion_id": {"type": "string"},
+                                    "kind": {"type": "string", "enum": ["pr_merged", "pr_head_review", "review", "command", "external_state", "operator", "manual"]},
+                                    "subject_id": {"type": "string", "description": "Immutable handle, e.g. 'lfglabs-dev/verity#233@20494801f6e2'."},
+                                    "verifier": {"type": "string", "description": "Who or what verified it (reviewer, check name, mission id)."},
+                                    "payload": {"type": "object"}
+                                }
+                            }
+                        }
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "invalidate_project_track_evidence".to_string(),
+                description: "Withdraw one piece of evidence on a track (receipt_id from get_situation / the track's receipts) with a reason. Appends an invalidate receipt; the track reopens if no other evidence stands. Use when a certification turned out wrong or the governed artifact changed in a way the watcher cannot see.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "track", "receipt_id", "reason"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "receipt_id": {"type": "string"},
+                        "reason": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "get_project_grant".to_string(),
+                description: "Read your project's autonomy grant: merge authority (full | repo:… | review-first), budget per tick, parallel missions, and the structured PAUSED(pause_reason; resume_condition). This is the durable source of what you are authorized to do — it survives prompt rewrites. Read it at your first tick.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {"slug": {"type": "string"}}
+                }),
+            },
+            ToolDefinition {
+                name: "set_project_grant".to_string(),
+                description: "Record the owner's autonomy grant for a project after they answer the setup questions: the normalized autonomy level, merge authority, budget, parallel missions, pause reason + machine-checkable resume condition, and the material-report bar. The project must already exist.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "autonomy_level": {"type": "string", "enum": ["observe", "propose", "act_reversible", "act_full"], "description": "What the controller may do without asking: observe (report only), propose (escalate every act), act_reversible (act, but irreversible kinds — merge/abandon/delete/publish/deploy/force_push — still escalate), act_full."},
+                        "merge_authority": {"type": "string", "description": "full | repo:a,b | review-first"},
+                        "budget_per_tick": {"type": "string"},
+                        "parallel_missions": {"type": "integer"},
+                        "pause_reason": {"type": "string"},
+                        "resume_condition": {"type": "string", "description": "A condition you can check yourself, e.g. 'FTDI device enumerates on spark-de79'."},
+                        "material_bar": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "add_project_steer".to_string(),
+                description: "Queue a one-off operator order for the project's next controller tick. Pending steers appear on get_situation / get_project and outrank “nothing to do”; acknowledge only handled IDs using update_project_status.consumed_steer_ids. This is not a grant — standing authority still uses set_project_grant.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "body"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "body": {"type": "string", "description": "What the next tick must acknowledge and act on."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "record_project_decision".to_string(),
+                description: "Write to the project's decision ledger. Two uses: (1) declare an autonomous act BEFORE doing it (authority=granted, status=decided, kind, evidence with pr_url/mission_id) — if the response says coerced=true your grant does not cover it, treat it as an escalation and do NOT execute; (2) ask the owner a question (authority=escalation or just omit the new fields — the legacy shape still means 'ask'). Non-blocking either way.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "question"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "question": {"type": "string", "description": "The question for the owner, or the past-tense statement of the act ('Merged verity#2213')."},
+                        "rationale": {"type": "string"},
+                        "kind": {"type": "string", "description": "merge | dispatch | abandon | pause | resume | scope | budget | retry | ..."},
+                        "authority": {"type": "string", "enum": ["granted", "escalation"]},
+                        "status": {"type": "string", "enum": ["decided", "pending_user"]},
+                        "evidence": {"type": "object", "description": "Supporting links, e.g. {\"pr_url\": ..., \"mission_id\": ...}."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "answer_project_decision".to_string(),
+                description: "Resolve a pending owner escalation in a project's decision ledger with the owner's answer. Use only when relaying a decision the owner actually expressed.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "at", "answer"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "at": {"type": "string", "description": "The decision's 'at' timestamp key from get_project/record_project_decision."},
+                        "answer": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "get_project_tasks".to_string(),
+                description: "The project's roadmap: every board task planned under the project's boss missions, with status, dependencies, result digest, PR link, and worker mission. Read this to see what is done/running/failed across the whole project without walking individual mission boards.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {"slug": {"type": "string"}}
+                }),
+            },
+            ToolDefinition {
+                name: "plan_project_tasks".to_string(),
+                description: "Declare or revise project tracks. These rows are the only roadmap denominator. Re-planning preserves terminal lifecycle and current evidence; use explicit reopen for terminal work. Set position when the operator declares an exact sequence.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "tasks"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["task_key", "title"],
+                                "properties": {
+                                    "task_key": {"type": "string", "description": "Stable kebab-case key, unique within the project."},
+                                    "title": {"type": "string"},
+                                    "prompt": {"type": "string", "description": "What a worker should actually do, if known."},
+                                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                                    "position": {"type": "integer", "minimum": 0, "description": "Optional zero-based declarative order. Omission preserves an existing position or appends a new track."}
+                                }
+                            }
+                        }
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "update_project_task".to_string(),
+                description: "Edit an open roadmap proposal (title, prompt, acceptance criteria, dependencies). Only proposals are editable — once a boss mission plans the key as a real board task, edits flow through that mission.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "task_key"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "task_key": {"type": "string"},
+                        "title": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                        "depends_on": {"type": "array", "items": {"type": "string"}}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "cancel_project_task".to_string(),
+                description: "Cancel an open roadmap proposal. Board tasks already adopted by a boss mission are not touched — cancel those through the mission's own board.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slug", "task_key"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "task_key": {"type": "string"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "link_mission_to_project".to_string(),
+                description: "Tag a mission as belonging to your project (and optionally a track), so it appears in the project's inventory. Optional writer=false persists read-only capability, including when no PR is attached; writer=true requests writer capability through the existing ownership checks. Capability or assignment changes require stopped, drained work; Pending work must be cancelled first and resumed on the same mission after the update.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["mission_id", "slug"],
+                    "properties": {
+                        "mission_id": {"type": "string", "description": "Mission UUID or an unambiguous leading fragment."},
+                        "slug": {"type": "string"},
+                        "track": {"type": "string"},
+                        "writer": {"type": "boolean", "description": "Explicit capability update. False persists read-only; true requests writer ownership. Omit to preserve existing behavior."}
+                    }
+                }),
             },
             ToolDefinition {
                 name: "list_workspaces".to_string(),
@@ -1287,7 +2168,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "workspace_bash".to_string(),
-                description: "Run a short diagnostic command inside a sandboxed.sh workspace. Defaults to 60 seconds and never exceeds 120 seconds. Heavy commands such as `lake build` are rejected; use start_workspace_job for long work.".to_string(),
+                description: "Run a command inside a sandboxed.sh workspace. For builds or any work that must survive this call, supply both mission_id and idempotency_key: returns a durable job id immediately, with no polling. Without those fields, runs a bounded diagnostic (default 60 seconds, maximum 120) and kills it at timeout. Command text is never used to guess execution mode.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["command"],
@@ -1295,7 +2176,9 @@ impl AssistantMcp {
                         "command": {"type": "string", "description": "Shell command to run in the workspace."},
                         "workspace_id": {"type": "string", "description": "Workspace UUID. Defaults to the assistant's default workspace."},
                         "cwd": {"type": "string", "description": "Working directory relative to the workspace root."},
-                        "timeout_secs": {"type": "integer", "description": "Timeout in seconds, default 60, max 120."}
+                        "timeout_secs": {"type": "integer", "description": "Runtime limit: diagnostic default 60/max 120; durable default 7200/max 86400."},
+                        "mission_id": {"type": "string", "description": "Owning mission UUID; supply together with idempotency_key for durable execution."},
+                        "idempotency_key": {"type": "string", "description": "Stable retry key for durable execution; requires mission_id. Reuse after a lost response."}
                     }
                 }),
             },
@@ -1340,16 +2223,16 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "get_mission_health".to_string(),
-                description: "Diagnose where a mission stands: live run state, stall severity, detected error signals (rate limit / auth / capacity / context-limit / network), suspected tool loops, the last assistant message, and a one-line recommendation. Use this first when babysitting a long-running mission — it summarizes 'where it is struggling' instead of making you read raw events.".to_string(),
+                description: "Diagnose where a mission stands: live run state, stall severity, detected error signals (rate limit / auth / capacity / context-limit / network), suspected tool loops, the last assistant message, and a one-line recommendation. Use this first when babysitting a long-running mission — it summarizes 'where it is struggling' instead of making you read raw events. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "properties": {"mission_id": {"type": "string", "description": "Mission UUID, or an unambiguous leading fragment of one (the 8-character form dashboards and logs display)."}}
                 }),
             },
             ToolDefinition {
                 name: "get_mission_diagnostics".to_string(),
-                description: "Deep-dive a mission: a compact timeline of the most recent tool calls (with result snippets), per-tool call counts, repeated/looping calls, and full error events. Use when get_mission_health flags a problem and you need to see exactly what the model is doing.".to_string(),
+                description: "Deep-dive a mission: recent tool calls, deduplicated result snippets, per-tool counts, repeated calls, and bounded error summaries. Use get_mission_events for raw receipts. Use when get_mission_health flags a problem and you need to see exactly what the model is doing.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
@@ -1361,7 +2244,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "update_mission_settings".to_string(),
-                description: "Change a mission's run settings for its NEXT turn: switch backend (claudecode/codex/opencode/gemini/grok/chatgpt_ui), model, reasoning effort, fast mode, or agent. Applies between turns — the mission must be idle (awaiting_user/acknowledged/interrupted), not actively running. If it is running, cancel_mission first (or wait), then update, then send_message_to_mission or resume_mission to kick the next turn. model_effort applies to claudecode/codex; fast_mode applies only to Codex GPT-5.6/5.5/5.4 and consumes ChatGPT credits faster.".to_string(),
+                description: "Change a mission's run settings for its NEXT turn: switch backend (claudecode/codex/opencode/gemini/grok/chatgpt_ui), model, reasoning effort, fast mode, or agent. On a failed or interrupted mission the server resumes it on the new settings automatically (resume_queued in the response) — a handoff is one call, no separate resume_mission. Applies between turns — the mission must be idle (awaiting_user/acknowledged/interrupted/failed), not actively running. If it is running, cancel_mission first (or wait), then update, then send_message_to_mission or resume_mission to kick the next turn. model_effort applies to claudecode/codex; fast_mode applies only to Codex GPT-5.6/5.5/5.4 and consumes ChatGPT credits faster.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
@@ -1371,18 +2254,22 @@ impl AssistantMcp {
                         "model_override": {"type": "string", "description": "Model id. Empty string clears it. When backend changes this is reset unless set explicitly."},
                         "model_effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                         "fast_mode": {"type": "boolean", "description": "Enable or disable Codex fast mode for future turns. Only backend=codex with GPT-5.6/5.5/5.4."},
-                        "agent": {"type": "string", "description": "Agent name. Empty string clears it."},
+                        "agent": {"type": "string", "description": "Agent name. Omission preserves it on the same backend and clears it on a backend switch. Empty string clears it."},
                         "config_profile": {"type": "string"}
                     }
                 }),
             },
             ToolDefinition {
                 name: "resume_mission".to_string(),
-                description: "Restart an interrupted, blocked, or failed mission. Reconstructs context from history and the work directory, then runs the next turn. Pass `content` to steer the resume with a concrete hint (e.g. 'you still have budget — keep going until the build passes; do not stop to ask'). Without `content` it sends the default continue-where-you-left-off prompt.".to_string(),
+                description: "Resume an interrupted, blocked or failed mission. Bound Codex missions reattach to the same native thread, cwd, HOME and account; existing native goals preserve their objective, token budget and accumulated usage. Grok resumes its recorded native session; a first handoff creates a Grok session while preserving other harness identities. For a mission parked in awaiting_user or acknowledged, send_message_to_mission wakes it on the same id and is the normal choice. Pass `content` as the exact current steering input; on a bound native goal it steers that goal's turn. A new Codex /goal objective must be at most 4000 Unicode characters; oversized objectives are rejected without truncation. Without `content`, persisted Codex goal missions resume the full stored /goal objective; other missions receive the default continue-where-you-left-off prompt. Native blocked/paused/usageLimited/budgetLimited stops park as blocked with terminal_reason=native_goal_stopped after the final response drains; they never mean goal completion. Resolve the reported stop before resuming. codex_continuity_required or native_continuity_required means native identity/history or a tool outcome requires reconciliation: do not repeat identical resumes, change accounts, or assume a fresh thread or reset budget. Queued steering retains its durable order; unconfirmed native delivery is reported explicitly. For existing work with excluded/collaborating PR references, read get_mission and pass continue_identity with the exact stored project, track and github_pr (null if unset). For different work use explicit github_pr/track identity updates instead; ownership checks still apply.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
                     "properties": {
+                        "continue_identity": dispatch_identity_schema(),
+                        "github_pr": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
+                        "track": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
+                        "title": {"type": "string", "description": "Explicit identity title update. Cannot accompany continue_identity."},
                         "mission_id": {"type": "string"},
                         "content": {"type": "string", "description": "Optional steering message used as the resume turn's prompt."},
                         "clean_workspace": {"type": "boolean", "description": "Wipe the work directory before resuming. Rarely needed; default false."}
@@ -1404,8 +2291,20 @@ impl AssistantMcp {
         if let Some(project) = params.project.as_deref() {
             path.push_str(&format!("&project={}", urlencoding::encode(project)));
         }
+        if let Some(prefix) = params.project_prefix.as_deref() {
+            path.push_str(&format!("&project_prefix={}", urlencoding::encode(prefix)));
+        }
+        if let Some(track) = params.track.as_deref() {
+            path.push_str(&format!("&track={}", urlencoding::encode(track)));
+        }
         if let Some(tag) = params.tag.as_deref() {
             path.push_str(&format!("&tag={}", urlencoding::encode(tag)));
+        }
+        if let Some(session) = params.origin_session_id.as_deref() {
+            path.push_str(&format!(
+                "&origin_session_id={}",
+                urlencoding::encode(session)
+            ));
         }
         let response = self.api_get(&path).await?;
         if !response.status().is_success() {
@@ -1422,12 +2321,18 @@ impl AssistantMcp {
         Ok(json!({ "missions": missions }))
     }
 
-    async fn list_active_missions(
-        &self,
-        limit: usize,
-        project: Option<String>,
-        tag: Option<String>,
-    ) -> Result<Value, String> {
+    /// Takes the whole filter set so an active-mission query can be narrowed
+    /// exactly like a full listing (by conversation, family, track, …).
+    async fn list_active_missions(&self, params: ListMissionsParams) -> Result<Value, String> {
+        let ListMissionsParams {
+            limit,
+            project,
+            project_prefix,
+            track,
+            tag,
+            origin_session_id,
+            ..
+        } = params;
         let requested = limit.clamp(1, 100);
         // The API returns the most recent missions regardless of status, so a
         // narrow fetch limit can be fully consumed by recent completed missions
@@ -1439,7 +2344,10 @@ impl AssistantMcp {
                 status: None,
                 limit: fetch_limit,
                 project,
+                project_prefix,
+                track,
                 tag,
+                origin_session_id,
             })
             .await?;
         if let Some(missions) = result["missions"].as_array_mut() {
@@ -1463,7 +2371,7 @@ impl AssistantMcp {
     }
 
     async fn get_mission_digest(&self, params: MissionIdParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
         let response = self
             .api_get(&format!("/api/control/missions/{id}/digest"))
             .await?;
@@ -1477,7 +2385,7 @@ impl AssistantMcp {
     }
 
     async fn get_mission_events(&self, params: MissionEventsParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
         let limit = params.limit.clamp(1, 200);
         // Validate against the declared enum rather than interpolating a
         // free-form string into the URL, which would let a caller smuggle
@@ -1518,7 +2426,7 @@ impl AssistantMcp {
         &self,
         params: MissionSharedFilesParams,
     ) -> Result<Value, String> {
-        let mission_id = parse_uuid(&params.mission_id)?;
+        let mission_id = self.resolve_mission_id(&params.mission_id).await?;
         // Page backwards from the end of the transcript: shared files are
         // "current attachments", so we must scan the NEWEST `limit` events —
         // the default (no cursor) pagination returns the oldest rows and would
@@ -1562,7 +2470,7 @@ impl AssistantMcp {
         &self,
         params: DownloadSharedFileParams,
     ) -> Result<Value, String> {
-        let mission_id = parse_uuid(&params.mission_id)?;
+        let mission_id = self.resolve_mission_id(&params.mission_id).await?;
         let path = shared_file_download_path(&params.url)?;
         let filename = params
             .filename
@@ -1586,17 +2494,49 @@ impl AssistantMcp {
     }
 
     async fn start_mission(&self, params: StartMissionParams) -> Result<Value, String> {
+        // A scoped controller must launch work under its own project — an
+        // untagged mission would escape both the roster and this scope.
+        if self.project_scope.is_some() {
+            match params.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                Some(project) => self.assert_project_scope(project)?,
+                None => {
+                    return Err(
+                        "scoped controllers must pass `project` on start_mission so the                          mission stays inside their scope"
+                            .to_string(),
+                    )
+                }
+            }
+        }
         let workspace_id = resolve_default_workspace_id(params.workspace_id);
         let backend = params
             .backend
             .or_else(|| native_backend_from_agent(params.agent.as_deref()));
+        let writer = params.writer.unwrap_or(false);
+        let prompt = writer_goal_prompt(params.prompt, writer);
+        if backend.as_deref() == Some("codex") {
+            sandboxed_sh::backend::codex::validate_goal_message(&prompt)?;
+        }
         let tags = mission_start_tags(
             params.tags,
             params.request_merge_authority.unwrap_or(false),
-            params.writer.unwrap_or(false),
+            writer,
             params.github_pr.as_deref(),
             MergeGrantConfig::from_environment().as_ref(),
         )?;
+        // An explicitly supplied origin session must be usable for routing:
+        // silently dropping a blank/malformed id would create exactly the
+        // unreachable mission this field exists to prevent. Only omitting the
+        // field opts out.
+        let origin_session_id = match params.origin_session_id.as_deref().map(str::trim) {
+            Some(session) if valid_origin_session_id(session) => Some(session),
+            Some(session) => {
+                return Err(format!(
+                    "origin_session_id `{session}` is invalid: use 1-128 chars of \
+                     [A-Za-z0-9._:-]"
+                ))
+            }
+            None => None,
+        };
         let body = json!({
             "title": params.title,
             "workspace_id": workspace_id,
@@ -1610,18 +2550,28 @@ impl AssistantMcp {
             // deferred goal and the scheduler dispatches it as soon as
             // capacity allows. The old create-then-send_message pattern could
             // be dropped at capacity, leaving zombie Pending missions.
-            "prompt": params.prompt,
+            "prompt": prompt,
             // Project tagging at creation so the mission isn't born with null
             // metadata (Paloma watchdogs then route by these, not titles).
             "project": params.project,
             "track": params.track,
+            "idempotency_key": params.idempotency_key,
+            "supersedes_mission_id": params.supersedes_mission_id,
             "intent": params.intent,
             "github_pr": params.github_pr,
-            "writer": params.writer,
+            "writer": writer,
             "tags": tags,
             "desired_state": params.desired_state,
+            "acceptance_criteria": params.acceptance_criteria,
             "next_check_at": params.next_check_at,
             "estimated_disk_gib": params.estimated_disk_gib,
+            // Mission-level provenance. `origin` is fixed by this server (not
+            // model-controlled); the session id ties the mission to the Hermes
+            // conversation that spawned it, and the mission-status webhook
+            // carries it back so the result reaches that conversation.
+            "origin": "hermes",
+            "origin_session_id": origin_session_id,
+            "attachments": params.attachments,
         });
         let response = self.api_post("/api/control/missions", body).await?;
         if !response.status().is_success() {
@@ -1647,12 +2597,26 @@ impl AssistantMcp {
         if params.command.trim().is_empty() {
             return Err("Command is empty".to_string());
         }
-        if is_heavy_workspace_command(&params.command) {
-            return Err(serde_json::to_string(&json!({
-                "error": "heavy_command_requires_durable_job",
-                "message": "This command can outlive a synchronous Hermes MCP call. Use start_workspace_job and poll get_workspace_job.",
-                "tool": "start_workspace_job"
-            })).unwrap_or_else(|_| "heavy command requires start_workspace_job".to_string()));
+        match (params.mission_id, params.idempotency_key) {
+            (Some(mission_id), Some(idempotency_key)) => {
+                if mission_id.trim().is_empty() || idempotency_key.trim().is_empty() {
+                    return Err("mission_id and idempotency_key must both be non-empty".into());
+                }
+                // Reuse the durable admission API: never submit synchronously first
+                // and then retry in the background, which could execute twice.
+                return self.start_workspace_job(StartWorkspaceJobParams {
+                    command: Some(params.command),
+                    argv: None,
+                    workspace_id: params.workspace_id,
+                    mission_id,
+                    cwd: params.cwd,
+                    timeout_secs: params.timeout_secs,
+                    resource_class: None,
+                    idempotency_key,
+                }).await;
+            }
+            (None, None) => {}
+            _ => return Err("Supply both mission_id and idempotency_key for durable execution, or omit both for a bounded diagnostic".into()),
         }
         let workspace_id = resolve_default_workspace_id(params.workspace_id).ok_or_else(|| {
             "No workspace_id given and no default workspace configured \
@@ -1686,7 +2650,8 @@ impl AssistantMcp {
             "No workspace_id given and no default workspace configured (HERMES_DEFAULT_WORKSPACE_ID / ASSISTANT_DEFAULT_WORKSPACE_ID)".to_string()
         })?;
         let workspace_id = parse_uuid(&workspace_id)?;
-        let mission_id = parse_uuid(&params.mission_id)?;
+        let mission_id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(mission_id).await?;
         let command = workspace_job_command(params.command, params.argv)?;
         let key = params.idempotency_key.trim();
         if key.is_empty() {
@@ -1734,16 +2699,11 @@ impl AssistantMcp {
     }
 
     async fn send_message(&self, params: SendMessageParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
-        let response = self
-            .api_post(
-                "/api/control/message",
-                json!({
-                    "mission_id": id.to_string(),
-                    "content": params.content,
-                }),
-            )
-            .await?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
+        let mut body = json!({"mission_id": id.to_string(), "content": params.content});
+        params.identity.add_to(&mut body);
+        let response = self.api_post("/api/control/message", body).await?;
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
             return Err(format!("Failed to send message: {text}"));
@@ -1755,7 +2715,8 @@ impl AssistantMcp {
     }
 
     async fn ask_mission(&self, params: AskMissionParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
         let mut body = json!({
             "content": params.content,
             "sandbox": params.sandbox,
@@ -1764,8 +2725,23 @@ impl AssistantMcp {
             let tid = parse_uuid(tid)?;
             body["thread_id"] = json!(tid.to_string());
         }
+        // Ask turns make multiple sequential LLM/tool calls, so the shared
+        // client default of 120s would abort long asks. But TWO budgets sit
+        // above this call, and both are 600s: the Hermes-side MCP request
+        // timeout, and the cron scheduler's idle watchdog — which counts from
+        // the moment the tool STARTS, so id resolution, connect time and this
+        // whole request all spend it. At 570s the margin was 30s; measured
+        // 2026-08-06 05:18, a busy mission ate it and the watchdog killed the
+        // whole tick ("idle for 600s — last activity: executing tool:
+        // ask_mission"), turning one slow answer into a failed controller
+        // run. 450s keeps ample room for real asks and returns a clean
+        // "mission busy" error while both outer budgets still have 150s left.
         let response = self
-            .api_post(&format!("/api/control/missions/{id}/ask"), body)
+            .api_post_with_timeout(
+                &format!("/api/control/missions/{id}/ask"),
+                body,
+                Some(std::time::Duration::from_secs(450)),
+            )
             .await?;
         if !response.status().is_success() {
             let status = response.status();
@@ -1784,8 +2760,105 @@ impl AssistantMcp {
         }))
     }
 
+    async fn answer_mission_question(
+        &self,
+        params: AnswerMissionQuestionParams,
+    ) -> Result<Value, String> {
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
+        if params.answers.is_empty() || params.answers.iter().any(Vec::is_empty) {
+            return Err(
+                "answers must contain one non-empty inner array per question, e.g. [[\"Option A\"]]"
+                    .to_string(),
+            );
+        }
+        let tool_call_id =
+            match params
+                .tool_call_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(explicit) => explicit.to_string(),
+                None => {
+                    // Page backwards from the end of the transcript: the pending
+                    // question is by definition among the NEWEST events, and the
+                    // default (no cursor) pagination returns the oldest rows.
+                    let events = self
+                        .get_mission_events(MissionEventsParams {
+                            mission_id: id.to_string(),
+                            limit: 200,
+                            view: Some("transcript".to_string()),
+                            since_seq: None,
+                            before_seq: Some(i64::MAX),
+                        })
+                        .await?;
+                    let empty = Vec::new();
+                    let events = events.as_array().unwrap_or(&empty);
+                    let pending = pending_ask_user_questions(events);
+                    match pending.as_slice() {
+                        [] => return Err(
+                            "No unanswered AskUserQuestion found in the mission's recent events. \
+                             If the mission is merely idle or awaiting an ack, use \
+                             send_message_to_mission / acknowledge_mission instead."
+                                .to_string(),
+                        ),
+                        [only] => only.tool_call_id.clone(),
+                        many => {
+                            let listing = many
+                                .iter()
+                                .map(|question| {
+                                    format!("{} — {}", question.tool_call_id, question.summary())
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Err(format!(
+                                "Multiple unanswered AskUserQuestion calls are pending; pass \
+                             tool_call_id explicitly. Pending (newest first): {listing}"
+                            ));
+                        }
+                    }
+                }
+            };
+        let body = json!({
+            "tool_call_id": tool_call_id,
+            "name": "AskUserQuestion",
+            "result": { "answers": params.answers },
+        });
+        let response = self.api_post("/api/control/tool_result", body).await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to submit answer ({status}): {text}"));
+        }
+        let result: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Failed to parse tool_result response: {error}"))?;
+        // `delivered: false` means no live turn was parked on that call (the
+        // mission ended or was interrupted) and the answer was dropped.
+        let delivered = result
+            .get("delivered")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut out = json!({
+            "mission_id": id.to_string(),
+            "tool_call_id": tool_call_id,
+            "delivered": delivered,
+        });
+        if !delivered {
+            out["note"] = json!(
+                "The answer did not reach a live parked turn — the mission has likely ended or \
+                 been interrupted. Use resume_mission or send_message_to_mission to wake it, \
+                 then answer again if it re-asks."
+            );
+        }
+        Ok(out)
+    }
+
     async fn cancel_mission(&self, params: MissionIdParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
         let response = self
             .api_post(&format!("/api/control/missions/{id}/cancel"), json!({}))
             .await?;
@@ -1796,8 +2869,49 @@ impl AssistantMcp {
         Ok(json!({ "success": true, "cancelled": id.to_string() }))
     }
 
+    async fn adopt_mission(&self, params: AdoptMissionParams) -> Result<Value, String> {
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
+        // The session id is stamped by the sandboxed-origin-session plugin,
+        // exactly as for start_mission. Refuse to adopt into nothing: an
+        // adoption without a session would silently CLEAR the mission's
+        // origin, which is the opposite of what the caller wanted.
+        let session = params
+            .origin_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "adopt_mission needs the calling session's id; it is normally \
+                 injected automatically. If you see this, the origin-session \
+                 plugin did not stamp the call — report that rather than \
+                 passing a session id by hand."
+                    .to_string()
+            })?;
+        if !valid_origin_session_id(session) {
+            return Err(format!(
+                "origin_session_id {session:?} is not a valid session id"
+            ));
+        }
+        let response = self
+            .api_post(
+                &format!("/api/control/missions/{id}/origin"),
+                json!({ "origin": "hermes", "origin_session_id": session }),
+            )
+            .await?;
+        let mission = Self::response_value(response, "adopt mission").await?;
+        Ok(json!({
+            "success": true,
+            "adopted": id.to_string(),
+            "origin_session_id": session,
+            "mission": mission,
+            "note": "This conversation now receives the mission's completion callback; do not poll.",
+        }))
+    }
+
     async fn acknowledge_mission(&self, params: MissionIdParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
         let response = self
             .api_get(&format!("/api/control/missions/{id}/digest"))
             .await?;
@@ -1851,6 +2965,349 @@ impl AssistantMcp {
             .await
             .map_err(|error| format!("Failed to parse compute fleet: {error}"))?;
         Ok(compact_compute_fleet(&fleet))
+    }
+
+    // ---- Project roster tools (see projects_store.rs / projects_overview.rs) ----
+
+    async fn list_projects(&self) -> Result<Value, String> {
+        // Reuse the overview endpoint, but return only the light roster fields
+        // a controller needs at the top of a tick — not the full board payload.
+        let response = self.api_get("/api/projects/overview").await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to list projects ({status}): {text}"));
+        }
+        let overview: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Failed to parse projects: {error}"))?;
+        let rows: Vec<Value> = overview
+            .get("projects")
+            .and_then(Value::as_array)
+            .map(|projects| {
+                projects
+                    .iter()
+                    .map(|p| {
+                        let latest = p.get("latest_update");
+                        json!({
+                            "slug": p.get("slug"),
+                            "bucket": p.get("bucket"),
+                            "mode": latest.and_then(|u| u.get("mode")),
+                            "health": p.get("health").and_then(|h| h.get("tracks_needing_attention")),
+                            "latest_at": latest.and_then(|u| u.get("at")),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(json!({ "projects": rows }))
+    }
+
+    async fn get_project(&self, params: ProjectSlugParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        let response = self.api_get(&format!("/api/projects/{slug}")).await?;
+        let raw = Self::response_value(response, "get project").await?;
+        Ok(compact_project(raw))
+    }
+
+    async fn get_situation(&self, params: ProjectSlugParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        let response = self
+            .api_get(&format!("/api/projects/{slug}/situation"))
+            .await?;
+        let raw = Self::response_value(response, "get situation").await?;
+        Ok(compact_situation(raw))
+    }
+
+    async fn update_project_status(
+        &self,
+        params: UpdateProjectStatusParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({
+            "mode": params.mode,
+            "next_action": params.next_action,
+            "blocker": params.blocker,
+            "consumed_steer_ids": params.consumed_steer_ids,
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/status"), body)
+            .await?;
+        Self::response_value(response, "update project status").await
+    }
+
+    async fn set_project_track(&self, params: SetProjectTrackParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({
+            "track": params.track,
+            "desired_state": params.desired_state,
+            "status": params.status,
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/track"), body)
+            .await?;
+        Self::response_value(response, "set project track").await
+    }
+
+    async fn accept_project_track(
+        &self,
+        params: AcceptProjectTrackParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let track = params.track.trim();
+        let body = json!({
+            "idempotency_key": params.idempotency_key,
+            "expected_revision": params.expected_revision,
+            "evidence": params.evidence,
+            "actor_type": "controller",
+            "actor_id": self.actor_id(),
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/tracks/{track}/accept"), body)
+            .await?;
+        Self::response_value(response, "accept project track").await
+    }
+
+    async fn invalidate_project_track_evidence(
+        &self,
+        params: InvalidateProjectTrackEvidenceParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let track = params.track.trim();
+        let body = json!({
+            "receipt_id": params.receipt_id,
+            "reason": params.reason,
+            "actor": self.actor_id(),
+        });
+        let response = self
+            .api_post(
+                &format!("/api/projects/{slug}/tracks/{track}/invalidate"),
+                body,
+            )
+            .await?;
+        Self::response_value(response, "invalidate project track evidence").await
+    }
+
+    /// Per-criterion acceptance (the 2026-09-01 tool shape). Delegates to the
+    /// same receipt store as `accept_project_track`.
+    async fn accept_project_track_evidence(
+        &self,
+        params: AcceptProjectTrackEvidenceParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let track = params.track.trim();
+        let response = self
+            .api_post(
+                &format!("/api/projects/{slug}/tracks/{track}/evidence"),
+                json!({
+                    "criterion": params.criterion,
+                    "verifier_class": params.verifier_class,
+                    "evidence_ref": params.evidence_ref,
+                    "artifact_version": params.artifact_version,
+                    "observed_at": params.observed_at,
+                }),
+            )
+            .await?;
+        Self::response_value(response, "accept project track evidence").await
+    }
+
+    async fn reopen_project_track(
+        &self,
+        params: ReopenProjectTrackParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let track = params.track.trim();
+        let response = self
+            .api_post(
+                &format!("/api/projects/{slug}/tracks/{track}/reopen"),
+                json!({
+                    "reason": params.reason,
+                    "governed_artifact_version": params.governed_artifact_version,
+                }),
+            )
+            .await?;
+        Self::response_value(response, "reopen project track").await
+    }
+
+    /// Who this MCP acts as, for receipts: the bound project scope or the
+    /// generic connector identity.
+    fn actor_id(&self) -> String {
+        std::env::var("HERMES_CONTROLLER_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "assistant-mcp".to_string())
+    }
+
+    async fn get_project_grant(&self, params: ProjectSlugParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        let response = self.api_get(&format!("/api/projects/{slug}/grant")).await?;
+        Self::response_value(response, "get project grant").await
+    }
+
+    async fn set_project_grant(&self, params: SetProjectGrantParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({
+            "merge_authority": params.merge_authority,
+            "budget_per_tick": params.budget_per_tick,
+            "parallel_missions": params.parallel_missions,
+            "pause_reason": params.pause_reason,
+            "resume_condition": params.resume_condition,
+            "material_bar": params.material_bar,
+            "autonomy_level": params.autonomy_level,
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/grant"), body)
+            .await?;
+        Self::response_value(response, "set project grant").await
+    }
+
+    async fn add_project_steer(&self, params: AddProjectSteerParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({
+            "body": params.body,
+            "origin": "mcp",
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/steers"), body)
+            .await?;
+        Self::response_value(response, "add project steer").await
+    }
+
+    async fn record_project_decision(
+        &self,
+        params: RecordProjectDecisionParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({
+            "question": params.question,
+            "rationale": params.rationale,
+            "kind": params.kind,
+            "authority": params.authority,
+            "status": params.status,
+            "evidence": params.evidence,
+        });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/decision"), body)
+            .await?;
+        Self::response_value(response, "record project decision").await
+    }
+
+    async fn answer_project_decision(
+        &self,
+        params: AnswerProjectDecisionParams,
+    ) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let body = json!({ "at": params.at, "answer": params.answer });
+        let response = self
+            .api_post(&format!("/api/projects/{slug}/decision/answer"), body)
+            .await?;
+        Self::response_value(response, "answer project decision").await
+    }
+
+    async fn get_project_tasks(&self, params: ProjectSlugParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        let response = self.api_get(&format!("/api/projects/{slug}/tasks")).await?;
+        Self::response_value(response, "get project tasks").await
+    }
+
+    async fn plan_project_tasks(&self, params: PlanProjectTasksParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let tasks: Vec<Value> = params
+            .tasks
+            .iter()
+            .map(|task| {
+                json!({
+                    "task_key": task.task_key,
+                    "title": task.title,
+                    "prompt": task.prompt,
+                    "acceptance_criteria": task.acceptance_criteria,
+                    "depends_on": task.depends_on,
+                    "position": task.position,
+                })
+            })
+            .collect();
+        let response = self
+            .api_post(
+                &format!("/api/projects/{slug}/tasks"),
+                json!({ "tasks": tasks }),
+            )
+            .await?;
+        Self::response_value(response, "plan project tasks").await
+    }
+
+    async fn update_project_task(&self, params: UpdateProjectTaskParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let task_key = params.task_key.trim();
+        let response = self
+            .api_patch(
+                &format!("/api/projects/{slug}/tasks/{task_key}"),
+                json!({
+                    "title": params.title,
+                    "prompt": params.prompt,
+                    "acceptance_criteria": params.acceptance_criteria,
+                    "depends_on": params.depends_on,
+                }),
+            )
+            .await?;
+        Self::response_value(response, "update project task").await
+    }
+
+    async fn cancel_project_task(&self, params: CancelProjectTaskParams) -> Result<Value, String> {
+        let slug = params.slug.trim();
+        self.assert_project_scope(slug)?;
+        let task_key = params.task_key.trim();
+        let response = self
+            .api_delete(&format!("/api/projects/{slug}/tasks/{task_key}"))
+            .await?;
+        Self::response_value(response, "cancel project task").await
+    }
+
+    async fn link_mission_to_project(
+        &self,
+        params: LinkMissionToProjectParams,
+    ) -> Result<Value, String> {
+        self.assert_project_scope(&params.slug)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        let mut body = serde_json::Map::new();
+        body.insert("project".to_string(), json!(params.slug.trim()));
+        if let Some(track) = params
+            .track
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            body.insert("track".to_string(), json!(track));
+        }
+        if let Some(writer) = params.writer {
+            body.insert("writer".to_string(), json!(writer));
+        }
+        let response = self
+            .api_post(
+                &format!("/api/control/missions/{id}/project"),
+                Value::Object(body),
+            )
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to link mission to project ({status}): {text}"
+            ));
+        }
+        Ok(json!({ "success": true, "mission_id": id.to_string(), "project": params.slug.trim() }))
     }
 
     async fn list_workspaces(&self) -> Result<Value, String> {
@@ -2013,7 +3470,8 @@ impl AssistantMcp {
     }
 
     async fn update_mission_settings(&self, params: UpdateSettingsParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
         let mut body = serde_json::Map::new();
         if let Some(backend) = params
             .backend
@@ -2075,7 +3533,8 @@ impl AssistantMcp {
     }
 
     async fn resume_mission(&self, params: ResumeMissionParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        self.assert_mission_scope(id).await?;
         let hint = params
             .content
             .as_deref()
@@ -2083,13 +3542,16 @@ impl AssistantMcp {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
         let has_hint = hint.is_some();
-        // With a steering hint we suppress the default resume prompt and deliver
-        // our own message as the next turn instead.
+        // The backend admits the custom prompt and identity in the same actor
+        // command. Never replay identity edits in a second HTTP send.
+        let mut body = json!({
+            "clean_workspace": params.clean_workspace,
+            "skip_message": false,
+            "content": hint,
+        });
+        params.identity.add_to(&mut body);
         let response = self
-            .api_post(
-                &format!("/api/control/missions/{id}/resume"),
-                json!({ "clean_workspace": params.clean_workspace, "skip_message": has_hint }),
-            )
+            .api_post(&format!("/api/control/missions/{id}/resume"), body)
             .await?;
         if !response.status().is_success() {
             let status = response.status();
@@ -2099,36 +3561,35 @@ impl AssistantMcp {
                  Only interrupted, blocked, or failed missions can be resumed."
             ));
         }
-        let mission: Value = response
+        let _accepted_mission: Value = response
             .json()
             .await
             .map_err(|error| format!("Failed to parse resumed mission: {error}"))?;
-        // If we have a steering hint, deliver it as the next turn. If the post
-        // fails, the mission is already active — surface that as a soft warning
-        // (not an error) so the caller knows resume succeeded but the hint did
-        // not land. They can retry the hint without re-resuming.
-        let steer_warning = if let Some(content) = hint {
-            match self
-                .send_message(SendMessageParams {
-                    mission_id: id.to_string(),
-                    content,
-                })
-                .await
-            {
-                Ok(_) => None,
-                Err(error) => Some(format!(
-                    "Mission resumed, but steering hint could not be delivered: {error}. \
-                     The mission is already active; retry send_message_to_mission to land \
-                     the hint."
+        // Mutation success and state readback failure are different outcomes:
+        // do not invite a duplicate resume if only this GET failed, and do not
+        // substitute the old interrupted snapshot for an unknown current state.
+        let (mission, state_warning) = match self
+            .get_mission_digest(MissionIdParams {
+                mission_id: id.to_string(),
+            })
+            .await
+        {
+            Ok(digest) => (compact_digest_mission_summary(digest), None),
+            Err(error) => (
+                Value::Null,
+                Some(format!(
+                    "Resume request accepted, but current mission state could not be read: {error}. \
+                     Check get_mission_health; do not repeat the resume solely for this readback failure."
                 )),
-            }
-        } else {
-            None
+            ),
         };
         let response_body = json!({
-            "mission": compact_mission_summary(mission),
-            "steered": has_hint && steer_warning.is_none(),
-            "steer_warning": steer_warning,
+            "mission_id": id,
+            "resume_accepted": true,
+            "mission": mission,
+            "steered": has_hint,
+            "steer_warning": Value::Null,
+            "state_warning": state_warning,
         });
         Ok(response_body)
     }
@@ -2191,7 +3652,7 @@ impl AssistantMcp {
     }
 
     async fn get_mission_health(&self, params: MissionHealthParams) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
         let mission = self
             .get_mission(MissionIdParams {
                 mission_id: id.to_string(),
@@ -2234,6 +3695,9 @@ impl AssistantMcp {
             "mission_id": id.to_string(),
             "title": mission.get("title").cloned().unwrap_or(Value::Null),
             "status": status,
+            "mission_mode": mission.get("mission_mode").cloned().unwrap_or(Value::Null),
+            "goal_mode": mission.get("goal_mode").cloned().unwrap_or(Value::Null),
+            "goal_objective": compact_opt_text(mission.get("goal_objective"), 1000),
             "backend": mission.get("backend").cloned().unwrap_or(Value::Null),
             "model_override": mission.get("model_override").cloned().unwrap_or(Value::Null),
             "model_effort": mission.get("model_effort").cloned().unwrap_or(Value::Null),
@@ -2252,7 +3716,7 @@ impl AssistantMcp {
         &self,
         params: MissionDiagnosticsParams,
     ) -> Result<Value, String> {
-        let id = parse_uuid(&params.mission_id)?;
+        let id = self.resolve_mission_id(&params.mission_id).await?;
         let limit = params.limit.clamp(10, 300);
         let events = self
             .get_mission_events(MissionEventsParams {
@@ -2272,6 +3736,7 @@ impl AssistantMcp {
         let mut repeat_counts: std::collections::BTreeMap<(String, String), usize> =
             std::collections::BTreeMap::new();
         let mut errors = Vec::new();
+        let mut results = Vec::new();
 
         for event in events {
             let event_type = event
@@ -2294,6 +3759,14 @@ impl AssistantMcp {
                         "sequence": event.get("sequence").cloned().unwrap_or(Value::Null),
                         "tool": tool,
                         "args": truncate_snippet(args, 200),
+                    }));
+                }
+                "tool_result" => {
+                    let content = event.get("content").and_then(Value::as_str).unwrap_or("");
+                    results.push(json!({
+                        "sequence": event.get("sequence"),
+                        "tool_call_id": event.get("tool_call_id"),
+                        "snippet": diagnostic_result_snippet(content),
                     }));
                 }
                 "error" => {
@@ -2327,6 +3800,7 @@ impl AssistantMcp {
             "mission_id": id.to_string(),
             "events_scanned": events.len(),
             "tool_timeline": timeline_tail,
+            "tool_results": results.into_iter().rev().take(30).collect::<Vec<_>>(),
             "tool_counts": tool_counts,
             "repeated_calls": repeated,
             "errors": errors,
@@ -2336,148 +3810,200 @@ impl AssistantMcp {
     async fn handle_call(&self, name: &str, arguments: Value) -> Result<Value, String> {
         match name {
             "list_active_missions" => {
-                let params: ListMissionsParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
-                self.list_active_missions(params.limit, params.project, params.tag)
-                    .await
+                let params: ListMissionsParams = parse_params(arguments)?;
+                self.list_active_missions(params).await
             }
             "list_missions" => {
-                let params: ListMissionsParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: ListMissionsParams = parse_params(arguments)?;
                 self.list_missions(params).await
             }
             "get_mission" => {
-                let params: MissionIdParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionIdParams = parse_params(arguments)?;
                 self.get_mission(params).await
             }
             "get_mission_digest" => {
-                let params: MissionIdParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionIdParams = parse_params(arguments)?;
                 self.get_mission_digest(params).await
             }
             "get_mission_events" => {
-                let params: MissionEventsParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionEventsParams = parse_params(arguments)?;
                 self.get_mission_events(params).await
             }
             "get_chatgpt_ui_pool_status" => self.get_chatgpt_ui_pool_status().await,
             "list_mission_shared_files" => {
-                let params: MissionSharedFilesParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionSharedFilesParams = parse_params(arguments)?;
                 self.list_mission_shared_files(params).await
             }
             "download_shared_file" => {
-                let params: DownloadSharedFileParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: DownloadSharedFileParams = parse_params(arguments)?;
                 self.download_shared_file(params).await
             }
             "start_mission" => {
-                let params: StartMissionParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: StartMissionParams = parse_params(arguments)?;
                 self.start_mission(params).await
             }
             "send_message_to_mission" => {
-                let params: SendMessageParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: SendMessageParams = parse_params(arguments)?;
                 self.send_message(params).await
             }
             "ask_mission" => {
-                let params: AskMissionParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: AskMissionParams = parse_params(arguments)?;
                 self.ask_mission(params).await
             }
+            "answer_mission_question" => {
+                let params: AnswerMissionQuestionParams = parse_params(arguments)?;
+                self.answer_mission_question(params).await
+            }
             "cancel_mission" => {
-                let params: MissionIdParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionIdParams = parse_params(arguments)?;
                 self.cancel_mission(params).await
             }
             "acknowledge_mission" => {
-                let params: MissionIdParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionIdParams = parse_params(arguments)?;
                 self.acknowledge_mission(params).await
             }
+            "adopt_mission" => {
+                let params: AdoptMissionParams = parse_params(arguments)?;
+                self.adopt_mission(params).await
+            }
             "get_compute_fleet" => self.get_compute_fleet().await,
+            "list_projects" => self.list_projects().await,
+            "get_project" => {
+                let params: ProjectSlugParams = parse_params(arguments)?;
+                self.get_project(params).await
+            }
+            "get_situation" => {
+                let params: ProjectSlugParams = parse_params(arguments)?;
+                self.get_situation(params).await
+            }
+            "update_project_status" => {
+                let params: UpdateProjectStatusParams = parse_params(arguments)?;
+                self.update_project_status(params).await
+            }
+            "set_project_track" => {
+                let params: SetProjectTrackParams = parse_params(arguments)?;
+                self.set_project_track(params).await
+            }
+            "accept_project_track" => {
+                let params: AcceptProjectTrackParams = parse_params(arguments)?;
+                self.accept_project_track(params).await
+            }
+            "invalidate_project_track_evidence" => {
+                let params: InvalidateProjectTrackEvidenceParams = parse_params(arguments)?;
+                self.invalidate_project_track_evidence(params).await
+            }
+            "accept_project_track_evidence" => {
+                let params: AcceptProjectTrackEvidenceParams = parse_params(arguments)?;
+                self.accept_project_track_evidence(params).await
+            }
+            "reopen_project_track" => {
+                let params: ReopenProjectTrackParams = parse_params(arguments)?;
+                self.reopen_project_track(params).await
+            }
+            "get_project_grant" => {
+                let params: ProjectSlugParams = parse_params(arguments)?;
+                self.get_project_grant(params).await
+            }
+            "set_project_grant" => {
+                let params: SetProjectGrantParams = parse_params(arguments)?;
+                self.set_project_grant(params).await
+            }
+            "add_project_steer" => {
+                let params: AddProjectSteerParams = parse_params(arguments)?;
+                self.add_project_steer(params).await
+            }
+            "record_project_decision" => {
+                let params: RecordProjectDecisionParams = parse_params(arguments)?;
+                self.record_project_decision(params).await
+            }
+            "answer_project_decision" => {
+                let params: AnswerProjectDecisionParams = parse_params(arguments)?;
+                self.answer_project_decision(params).await
+            }
+            "get_project_tasks" => {
+                let params: ProjectSlugParams = parse_params(arguments)?;
+                self.get_project_tasks(params).await
+            }
+            "plan_project_tasks" => {
+                let params: PlanProjectTasksParams = parse_params(arguments)?;
+                self.plan_project_tasks(params).await
+            }
+            "update_project_task" => {
+                let params: UpdateProjectTaskParams = parse_params(arguments)?;
+                self.update_project_task(params).await
+            }
+            "cancel_project_task" => {
+                let params: CancelProjectTaskParams = parse_params(arguments)?;
+                self.cancel_project_task(params).await
+            }
+            "link_mission_to_project" => {
+                let params: LinkMissionToProjectParams = parse_params(arguments)?;
+                self.link_mission_to_project(params).await
+            }
             "list_workspaces" => self.list_workspaces().await,
             "get_workspace" => {
-                let params: WorkspaceIdParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: WorkspaceIdParams = parse_params(arguments)?;
                 self.get_workspace(params).await
             }
             "create_workspace" => {
-                let params: CreateWorkspaceParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: CreateWorkspaceParams = parse_params(arguments)?;
                 self.create_workspace(params).await
             }
             "update_workspace" => {
-                let params: UpdateWorkspaceParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: UpdateWorkspaceParams = parse_params(arguments)?;
                 self.update_workspace(params).await
             }
             "delete_workspace" => {
-                let params: DeleteWorkspaceParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: DeleteWorkspaceParams = parse_params(arguments)?;
                 self.delete_workspace(params).await
             }
             "list_workspace_templates" => self.list_workspace_templates().await,
             "get_workspace_template" => {
-                let params: WorkspaceTemplateNameParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: WorkspaceTemplateNameParams = parse_params(arguments)?;
                 self.get_workspace_template(params).await
             }
             "save_workspace_template" => {
-                let params: SaveWorkspaceTemplateParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: SaveWorkspaceTemplateParams = parse_params(arguments)?;
                 self.save_workspace_template(params).await
             }
             "delete_workspace_template" => {
-                let params: DeleteWorkspaceTemplateParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: DeleteWorkspaceTemplateParams = parse_params(arguments)?;
                 self.delete_workspace_template(params).await
             }
             "rebuild_workspace_from_template" => {
-                let params: RebuildWorkspaceFromTemplateParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: RebuildWorkspaceFromTemplateParams = parse_params(arguments)?;
                 self.rebuild_workspace_from_template(params).await
             }
             "workspace_bash" => {
-                let params: WorkspaceBashParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: WorkspaceBashParams = parse_params(arguments)?;
                 self.workspace_bash(params).await
             }
             "start_workspace_job" => {
-                let params: StartWorkspaceJobParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: StartWorkspaceJobParams = parse_params(arguments)?;
                 self.start_workspace_job(params).await
             }
             "get_workspace_job" => {
-                let params: WorkspaceJobParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: WorkspaceJobParams = parse_params(arguments)?;
                 self.get_workspace_job(params).await
             }
             "cancel_workspace_job" => {
-                let params: WorkspaceJobParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: WorkspaceJobParams = parse_params(arguments)?;
                 self.cancel_workspace_job(params).await
             }
             "get_mission_health" => {
-                let params: MissionHealthParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionHealthParams = parse_params(arguments)?;
                 self.get_mission_health(params).await
             }
             "get_mission_diagnostics" => {
-                let params: MissionDiagnosticsParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: MissionDiagnosticsParams = parse_params(arguments)?;
                 self.get_mission_diagnostics(params).await
             }
             "update_mission_settings" => {
-                let params: UpdateSettingsParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: UpdateSettingsParams = parse_params(arguments)?;
                 self.update_mission_settings(params).await
             }
             "resume_mission" => {
-                let params: ResumeMissionParams = serde_json::from_value(arguments)
-                    .map_err(|error| format!("Invalid params: {error}"))?;
+                let params: ResumeMissionParams = parse_params(arguments)?;
                 self.resume_mission(params).await
             }
             other => Err(format!("Unknown tool: {other}")),
@@ -2560,6 +4086,7 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
                 "disk_available_bytes": node.get("disk_available_bytes").cloned().unwrap_or(Value::Null),
                 "cached_toolchains": node.get("cached_toolchains").cloned().unwrap_or_else(|| json!([])),
                 "lean_runtime_ready": node.get("lean_runtime_ready").cloned().unwrap_or(Value::Null),
+                "source_bundle_capacity": node.get("source_bundle_capacity").cloned().unwrap_or(Value::Null),
                 "error": node.get("error").cloned().unwrap_or(Value::Null),
             })
         })
@@ -2610,9 +4137,11 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
             "ordinary_cpu_work": "prefer online non-GPU nodes with immediate capacity, then lowest normalized utilization",
             "gpu_work": "request the gpu label explicitly",
             "parallel_clean_builds": "use distinct missions and verify distinct node/job/head receipts",
+            "lean_builds": "workspaces listed under spark_offload.enabled_workspaces can also offload Lean builds to the DGX Spark lane (separate from these nodes)",
         },
         "nodes": compact_nodes,
         "recent_jobs": fleet.get("recent_jobs").cloned().unwrap_or_else(|| json!([])),
+        "spark_offload": fleet.get("spark_offload").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -2622,6 +4151,8 @@ fn compact_mission_summary(mission: Value) -> Value {
         "title": mission.get("title").cloned().unwrap_or(Value::Null),
         "status": mission.get("status").cloned().unwrap_or(Value::Null),
         "mission_mode": mission.get("mission_mode").cloned().unwrap_or(Value::Null),
+        "goal_mode": mission.get("goal_mode").cloned().unwrap_or(Value::Null),
+        "goal_objective": compact_opt_text(mission.get("goal_objective"), 1000),
         "backend": mission.get("backend").cloned().unwrap_or(Value::Null),
         "model_override": mission.get("model_override").cloned().unwrap_or(Value::Null),
         "model_effort": mission.get("model_effort").cloned().unwrap_or(Value::Null),
@@ -2640,10 +4171,324 @@ fn compact_mission_summary(mission: Value) -> Value {
         "tags": mission.get("tags").cloned().unwrap_or_else(|| json!([])),
         "desired_state": mission.get("desired_state").cloned().unwrap_or(Value::Null),
         "next_check_at": mission.get("next_check_at").cloned().unwrap_or(Value::Null),
+        // Creation provenance. Hermes is what SETS this, and until now could
+        // not read it back — so it could not tell which of its own
+        // conversations a mission belonged to.
+        "origin": mission.get("origin").cloned().unwrap_or(Value::Null),
+        "origin_session_id": mission.get("origin_session_id").cloned().unwrap_or(Value::Null),
         "awaiting_kind": mission.get("awaiting_kind").cloned().unwrap_or(Value::Null),
         "last_activity_at": mission.get("last_activity_at").cloned().unwrap_or(Value::Null),
         "last_status_change_at": mission.get("last_status_change_at").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// The digest nests project tags; retain the mutation tools' flat summary
+/// shape while projecting only fields present in the fresh readback.
+fn compact_digest_mission_summary(digest: Value) -> Value {
+    let mut mission = digest.get("mission").cloned().unwrap_or(digest);
+    if let Some(project) = mission
+        .get("project")
+        .filter(|value| value.is_object())
+        .cloned()
+    {
+        for key in [
+            "project",
+            "track",
+            "intent",
+            "tags",
+            "github_pr",
+            "desired_state",
+            "next_check_at",
+        ] {
+            mission[key] = project.get(key).cloned().unwrap_or_else(|| {
+                // MissionProject omits empty tags during serialization. Keep
+                // the existing array contract for an untagged mission.
+                if key == "tags" {
+                    json!([])
+                } else {
+                    Value::Null
+                }
+            });
+        }
+    }
+    // Today's digest does not expose fast_mode. Missing means unknown, not
+    // the false default used when projecting a full Mission response.
+    let fast_mode = mission.get("fast_mode").cloned().unwrap_or(Value::Null);
+    let mut summary = compact_mission_summary(mission);
+    summary["fast_mode"] = fast_mode;
+    summary
+}
+
+/// Verity's HTTP `get_project` is ~120 unabsorbed tracks / ~64KB. Dumping that
+/// on every controller tick is what exhausted the bound Hermes session
+/// (159,959 tokens, "Cannot compress further"). The dashboard still reads the
+/// full HTTP payload; MCP gets a ranked, capped snapshot.
+const MCP_PROJECT_ITEM_CAP: usize = 20;
+const MCP_PROJECT_ATTEMPT_CAP: usize = 2;
+const MCP_PROJECT_DECISION_CAP: usize = 8;
+const MCP_PROJECT_TEXT_CAP: usize = 200;
+
+fn attempt_priority(status: &str) -> u8 {
+    match status {
+        "active" | "starting" | "queued" | "running" => 0,
+        "awaiting_user" => 1,
+        "paused" => 2,
+        "failed" | "interrupted" => 3,
+        _ => 4,
+    }
+}
+
+fn item_status_bucket(item: &Value) -> &'static str {
+    let Some(attempts) = item.get("attempts").and_then(Value::as_array) else {
+        return "other";
+    };
+    let best = attempts
+        .iter()
+        .map(|row| row.get("status").and_then(Value::as_str).unwrap_or(""))
+        .min_by_key(|status| attempt_priority(status))
+        .unwrap_or("");
+    match best {
+        "active" | "starting" | "queued" | "running" => "active",
+        "awaiting_user" => "awaiting_user",
+        "paused" => "paused",
+        "failed" => "failed",
+        "interrupted" => "interrupted",
+        _ => "other",
+    }
+}
+
+fn item_sort_key(item: &Value) -> (u8, std::cmp::Reverse<String>) {
+    let attempts = item.get("attempts").and_then(Value::as_array);
+    let best = attempts
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    attempt_priority(row.get("status").and_then(Value::as_str).unwrap_or(""))
+                })
+                .min()
+                .unwrap_or(5)
+        })
+        .unwrap_or(5);
+    let latest = attempts
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("updated_at"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    (best, std::cmp::Reverse(latest))
+}
+
+fn compact_opt_text(value: Option<&Value>, max: usize) -> Value {
+    match value.and_then(Value::as_str) {
+        Some(text) => Value::String(truncate_snippet(text, max)),
+        None => Value::Null,
+    }
+}
+
+fn compact_attempt(attempt: &Value) -> Value {
+    json!({
+        "id": attempt.get("id").cloned().unwrap_or(Value::Null),
+        "status": attempt.get("status").cloned().unwrap_or(Value::Null),
+        "title": compact_opt_text(attempt.get("title"), 80),
+        "updated_at": attempt.get("updated_at").cloned().unwrap_or(Value::Null),
+        "role": attempt.get("role").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn compact_item(item: &Value) -> Value {
+    let attempts = item
+        .get("attempts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let kept: Vec<Value> = attempts
+        .iter()
+        .take(MCP_PROJECT_ATTEMPT_CAP)
+        .map(compact_attempt)
+        .collect();
+    let omitted = attempts.len().saturating_sub(kept.len());
+    let mut out = json!({
+        "key": item.get("key").cloned().unwrap_or(Value::Null),
+        "kind": item.get("kind").cloned().unwrap_or(Value::Null),
+        "open": item.get("open").cloned().unwrap_or(Value::Null),
+        "status": compact_opt_text(item.get("status"), MCP_PROJECT_TEXT_CAP),
+        "desired_state": compact_opt_text(item.get("desired_state"), MCP_PROJECT_TEXT_CAP),
+        "title": compact_opt_text(item.get("title"), 120),
+        "derived_state": item.get("derived_state").cloned().unwrap_or(Value::Null),
+        "origin": item.get("origin").cloned().unwrap_or(Value::Null),
+        "attempts": kept,
+    });
+    if omitted > 0 {
+        out["attempts_omitted"] = json!(omitted);
+    }
+    out
+}
+
+fn compact_grant(grant: &Value) -> Value {
+    if grant.is_null() {
+        return Value::Null;
+    }
+    json!({
+        "autonomy_level": grant.get("autonomy_level").cloned().unwrap_or(Value::Null),
+        "merge_authority": grant.get("merge_authority").cloned().unwrap_or(Value::Null),
+        "budget_per_tick": grant.get("budget_per_tick").cloned().unwrap_or(Value::Null),
+        "parallel_missions": grant.get("parallel_missions").cloned().unwrap_or(Value::Null),
+        "pause_reason": compact_opt_text(grant.get("pause_reason"), MCP_PROJECT_TEXT_CAP),
+        "resume_condition": compact_opt_text(grant.get("resume_condition"), MCP_PROJECT_TEXT_CAP),
+    })
+}
+
+fn compact_decision(decision: &Value) -> Value {
+    json!({
+        "at": decision.get("at").cloned().unwrap_or(Value::Null),
+        "question": compact_opt_text(decision.get("question"), MCP_PROJECT_TEXT_CAP),
+        "status": decision.get("status").cloned().unwrap_or(Value::Null),
+        "authority": decision.get("authority").cloned().unwrap_or(Value::Null),
+        "kind": decision.get("kind").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn compact_project(raw: Value) -> Value {
+    let project = raw.get("project").cloned().unwrap_or(json!({}));
+    let mut items = raw
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut counts = serde_json::Map::new();
+    for item in &items {
+        let bucket = item_status_bucket(item).to_string();
+        let next = counts.get(&bucket).and_then(Value::as_u64).unwrap_or(0) + 1;
+        counts.insert(bucket, json!(next));
+    }
+    items.sort_by_key(item_sort_key);
+    let items_total = items.len();
+    let kept_items: Vec<Value> = items
+        .iter()
+        .take(MCP_PROJECT_ITEM_CAP)
+        .map(compact_item)
+        .collect();
+
+    let decisions = raw
+        .get("open_decisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let decisions_total = decisions.len();
+    let kept_decisions: Vec<Value> = decisions
+        .iter()
+        .take(MCP_PROJECT_DECISION_CAP)
+        .map(compact_decision)
+        .collect();
+
+    let conversation = raw.get("conversation").map(|conversation| {
+        json!({
+            "session_id": conversation.get("session_id").cloned().unwrap_or(Value::Null),
+            "source": conversation.get("source").cloned().unwrap_or(Value::Null),
+        })
+    });
+
+    json!({
+        "slug": project.get("slug").cloned().unwrap_or(Value::Null),
+        "title": project.get("title").cloned().unwrap_or(Value::Null),
+        "objective": compact_opt_text(project.get("objective"), 400),
+        "status": project.get("status").cloned().unwrap_or(Value::Null),
+        "mode": project.get("mode").cloned().unwrap_or(Value::Null),
+        "wait_ticks": project.get("wait_ticks").cloned().unwrap_or(Value::Null),
+        "next_action": compact_opt_text(project.get("next_action"), MCP_PROJECT_TEXT_CAP),
+        "blocker": compact_opt_text(project.get("blocker"), MCP_PROJECT_TEXT_CAP),
+        "repository": project.get("repository").cloned().unwrap_or(Value::Null),
+        "grant": compact_grant(raw.get("grant").unwrap_or(&Value::Null)),
+        "items": kept_items,
+        "items_total": items_total,
+        "items_omitted": items_total.saturating_sub(kept_items.len()),
+        "item_counts": counts,
+        "summary": raw.get("summary").cloned().unwrap_or(Value::Null),
+        "open_decisions": kept_decisions,
+        "open_decisions_omitted": decisions_total.saturating_sub(kept_decisions.len()),
+        "conversation": conversation,
+        "steers": compact_steers(raw.get("steers")),
+    })
+}
+
+/// The situation is already bounded server-side; only trim prose and cap
+/// the item list so a 200-track project cannot flood the controller's turn.
+fn compact_situation(raw: Value) -> Value {
+    let items = raw
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let items_total = items.len();
+    // Dormant absorbed rows are history, not work: hide them from the compact
+    // view so an agent never mistakes them for pending items.
+    let dormant_hidden = items
+        .iter()
+        .filter(|item| item.get("derived_state").and_then(Value::as_str) == Some("dormant"))
+        .count();
+    let kept: Vec<Value> = items
+        .iter()
+        .filter(|item| item.get("derived_state").and_then(Value::as_str) != Some("dormant"))
+        .take(MCP_PROJECT_ITEM_CAP)
+        .map(|item| {
+            let mut out = json!({
+                "key": item.get("key").cloned().unwrap_or(Value::Null),
+                "title": compact_opt_text(item.get("title"), 120),
+                "derived_state": item.get("derived_state").cloned().unwrap_or(Value::Null),
+                "origin": item.get("origin").cloned().unwrap_or(Value::Null),
+                "acceptance": item.get("acceptance").cloned().unwrap_or(Value::Null),
+                "updated_at": item.get("updated_at").cloned().unwrap_or(Value::Null),
+            });
+            if let Some(owner) = item.get("owner") {
+                out["owner"] = owner.clone();
+            }
+            if let Some(blocked_by) = item.get("blocked_by") {
+                out["blocked_by"] = blocked_by.clone();
+            }
+            out
+        })
+        .collect();
+    json!({
+        "slug": raw.get("slug").cloned().unwrap_or(Value::Null),
+        "summary": raw.get("summary").cloned().unwrap_or(Value::Null),
+        "items": kept,
+        "items_total": items_total,
+        "items_omitted": items_total.saturating_sub(kept.len()),
+        "dormant_hidden": dormant_hidden,
+        "steers": compact_steers(raw.get("steers")),
+    })
+}
+
+fn compact_steers(raw: Option<&Value>) -> Value {
+    let Some(raw) = raw else {
+        return json!({ "pending": [], "recent": [] });
+    };
+    let compact_row = |row: &Value| {
+        json!({
+            "id": row.get("id").cloned().unwrap_or(Value::Null),
+            "body": row.get("body").cloned().unwrap_or(Value::Null),
+            "created_at": row.get("created_at").cloned().unwrap_or(Value::Null),
+            "consumed_at": row.get("consumed_at").cloned().unwrap_or(Value::Null),
+            "origin": row.get("origin").cloned().unwrap_or(Value::Null),
+        })
+    };
+    let pending: Vec<Value> = raw
+        .get("pending")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(compact_row)
+        .collect();
+    let recent: Vec<Value> = raw
+        .get("recent")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(compact_row)
+        .collect();
+    json!({ "pending": pending, "recent": recent })
 }
 
 fn truncate_snippet(text: &str, max: usize) -> String {
@@ -2662,9 +4507,15 @@ fn truncate_snippet(text: &str, max: usize) -> String {
 /// stream.
 fn error_signals_in(text: &str) -> Vec<&'static str> {
     let lower = text.to_ascii_lowercase();
+    // Match complete tokens: mission IDs and hashes often contain HTTP digits.
+    let has_code = |code: &str| {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .any(|token| token == code)
+    };
     let mut signals = Vec::new();
-    if lower.contains("429")
-        || lower.contains("529")
+    if has_code("429")
+        || has_code("529")
         || lower.contains("rate limit")
         || lower.contains("rate-limit")
         || lower.contains("rate_limit")
@@ -2680,13 +4531,17 @@ fn error_signals_in(text: &str) -> Vec<&'static str> {
         || lower.contains("hit your usage limit")
         || lower.contains("out of extra usage")
         || lower.contains("out of regular usage")
+        || lower.contains("weekly quota exhausted")
+        || lower.contains("weekly quota exceeded")
+        || lower.contains("weekly limit reached")
+        || lower.contains("weekly usage limit reached")
         || lower.contains("purchase more credits")
         || lower.contains("settings/usage")
     {
         signals.push("rate_limited");
     }
-    if lower.contains(" 401")
-        || lower.contains(" 403")
+    if has_code("401")
+        || has_code("403")
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
         || lower.contains("invalid api key")
@@ -2699,7 +4554,7 @@ fn error_signals_in(text: &str) -> Vec<&'static str> {
         signals.push("auth_error");
     }
     if lower.contains("capacity")
-        || lower.contains("503")
+        || has_code("503")
         || lower.contains("service unavailable")
         || lower.contains("no capacity")
         || lower.contains("already have five missions running")
@@ -2723,10 +4578,9 @@ fn error_signals_in(text: &str) -> Vec<&'static str> {
     // (e.g. OpenCode "idle timeout: the model stopped producing output") are
     // harness-level problems, not routing/edge issues. Only tag network_error
     // for clear transport indicators.
-    let has_edge_code = lower.contains("502")
-        || lower.contains("520")
-        || lower.contains("521")
-        || lower.contains("522");
+    let has_edge_code = ["502", "520", "521", "522"]
+        .iter()
+        .any(|code| has_code(code));
     let is_transport_timeout = lower.contains("connection timed out")
         || lower.contains("request timed out")
         || lower.contains("read timeout")
@@ -2851,6 +4705,20 @@ fn build_recommendation(
     analysis: &TraceAnalysis,
 ) -> String {
     let live_state = live.get("state").and_then(Value::as_str);
+    if status == "pending"
+        && live_state != Some("running")
+        && analysis.recent_errors.iter().any(|error| {
+            error
+                .get("snippet")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("queued_assignment_unowned:"))
+        })
+    {
+        return "Queued mission could not acquire its admitted track assignment. Inspect the \
+                recorded reader/writer capability and track lease before retrying; the \
+                queued_assignment_unowned error does not by itself prove the lease was released."
+            .to_string();
+    }
     if backend == Some("chatgpt_ui") && live_state == Some("running") {
         return "ChatGPT UI Pro is still generating. The web UI may expose only a generic \
                 `Pro thinking` marker until the final answer begins, so event silence is not \
@@ -3057,6 +4925,13 @@ fn mission_requires_acknowledgement(digest: &Value) -> Result<bool, String> {
     if status == "awaiting_user" && awaiting_kind == Some("ack") {
         return Ok(true);
     }
+    // A failed or interrupted attempt is terminal too: acknowledging it is
+    // how a controller that relayed the work elsewhere clears the board's
+    // "mission … is Failed" reason. Live missions and decision waits stay
+    // refused.
+    if status == "failed" || status == "interrupted" {
+        return Ok(true);
+    }
 
     Err(format!(
         "Mission cannot be ACKed from status={status}, awaiting_kind={}",
@@ -3070,6 +4945,809 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct MockControl {
+        requests: std::sync::Mutex<Vec<(String, Value)>>,
+        mission: Value,
+        refuse_resume: bool,
+    }
+
+    async fn mock_control(
+        axum::extract::State(state): axum::extract::State<std::sync::Arc<MockControl>>,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        bytes: axum::body::Bytes,
+    ) -> (axum::http::StatusCode, axum::Json<Value>) {
+        let path = uri.path();
+        if method == axum::http::Method::POST {
+            let body = serde_json::from_slice(&bytes).unwrap();
+            state.requests.lock().unwrap().push((path.into(), body));
+            if state.refuse_resume && path.ends_with("/resume") {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(json!({"error": "writer_identity_stale"})),
+                );
+            }
+        }
+        let value = if path == "/api/control/missions" {
+            json!([state.mission.clone()])
+        } else if path.ends_with("/events") || path.ends_with("/running") {
+            json!([])
+        } else {
+            state.mission.clone()
+        };
+        (axum::http::StatusCode::OK, axum::Json(value))
+    }
+
+    async fn mock_assistant(
+        mission: Value,
+        refuse_resume: bool,
+    ) -> (
+        AssistantMcp,
+        std::sync::Arc<MockControl>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = std::sync::Arc::new(MockControl {
+            requests: Default::default(),
+            mission,
+            refuse_resume,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .fallback(mock_control)
+            .with_state(state.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            AssistantMcp {
+                api_url: format!("http://{addr}"),
+                api_token: None,
+                jwt_secret: None,
+                project_scope: None,
+                client: reqwest::Client::new(),
+            },
+            state,
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn send_message_preserves_authoritative_idle_continuation_receipt() {
+        let mission_id = Uuid::new_v4().to_string();
+        let reply = json!({
+            "id": Uuid::new_v4(), "mission_id": mission_id,
+            "queued": true, "message_accepted": true,
+            "previous_execution": {"run_id": Uuid::new_v4(), "generation": 7}
+        });
+        let (mcp, state, server) = mock_assistant(reply.clone(), false).await;
+        let result = mcp
+            .send_message(
+                parse_params(json!({
+                    "mission_id": mission_id, "content": "Continue the same work"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, reply);
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "/api/control/message");
+        assert_eq!(requests[0].1["mission_id"], mission_id);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn link_project_transports_explicit_reader_and_preserves_omission() {
+        let id = Uuid::new_v4().to_string();
+        let (mcp, state, server) = mock_assistant(json!({"id": id}), false).await;
+        let tool = AssistantMcp::tools()
+            .into_iter()
+            .find(|tool| tool.name == "link_mission_to_project")
+            .unwrap();
+        assert_eq!(tool.input_schema["properties"]["writer"]["type"], "boolean");
+        for writer in [None, Some(false), Some(true)] {
+            let mut input = json!({"mission_id":id,"slug":"lido","track":"review"});
+            if let Some(writer) = writer {
+                input["writer"] = json!(writer);
+            }
+            let params = parse_params::<LinkMissionToProjectParams>(input).unwrap();
+            mcp.link_mission_to_project(params).await.unwrap();
+            let requests = state.requests.lock().unwrap();
+            let (path, body) = requests.last().unwrap();
+            assert_eq!(path, &format!("/api/control/missions/{id}/project"));
+            assert_eq!(body["project"], "lido");
+            assert_eq!(body["track"], "review");
+            assert_eq!(
+                body.get("writer"),
+                writer.map(|value| json!(value)).as_ref()
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn continuation_and_retag_identity_use_one_atomic_resume_request() {
+        let id = Uuid::new_v4().to_string();
+        let (mcp, state, task) = mock_assistant(json!({"id": id}), false).await;
+        for identity in [
+            json!({"continue_identity": {"project": null, "track": "trio-reserve1", "github_pr": null}}),
+            json!({"github_pr": "", "track": "new-track", "title": "New work"}),
+        ] {
+            let mut input =
+                json!({"mission_id": id, "content": "Continue RESERVE-1 PR 244; exclude PR #230."});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(identity.as_object().unwrap().clone());
+            let result = mcp
+                .resume_mission(parse_params(input).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(result["steered"], true);
+            let requests = state.requests.lock().unwrap();
+            let (path, body) = requests.last().unwrap();
+            assert!(path.ends_with("/resume"));
+            assert_eq!(body["skip_message"], false);
+            assert!(body["content"].as_str().unwrap().contains("PR 244"));
+            assert!(!requests
+                .iter()
+                .any(|(path, _)| path == "/api/control/message"));
+            for (key, expected) in identity.as_object().unwrap() {
+                assert_eq!(&body[key], expected);
+            }
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn refused_resume_does_not_send_a_steering_message() {
+        let id = Uuid::new_v4().to_string();
+        let (mcp, state, task) = mock_assistant(json!({"id": id}), true).await;
+        let err = mcp
+            .resume_mission(
+                parse_params(json!({
+                    "mission_id": id, "content": "Switch this writer to PR #90",
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("writer_identity_stale"));
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1["content"], "Switch this writer to PR #90");
+        assert!(requests[0].1.get("continue_identity").is_none());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn goal_persistence_is_visible_in_get_list_and_health() {
+        let id = Uuid::new_v4().to_string();
+        for goal_mode in [true, false] {
+            let objective = if goal_mode {
+                json!("Finish ALLOC-1")
+            } else {
+                Value::Null
+            };
+            let (mcp, _, task) = mock_assistant(
+                json!({
+                    "id": id, "status": "awaiting_user", "mission_mode": "task",
+                    "goal_mode": goal_mode, "goal_objective": objective,
+                }),
+                false,
+            )
+            .await;
+            let get = mcp
+                .get_mission(MissionIdParams {
+                    mission_id: id.clone(),
+                })
+                .await
+                .unwrap();
+            let list = mcp
+                .list_missions(parse_params(json!({})).unwrap())
+                .await
+                .unwrap();
+            let health = mcp
+                .get_mission_health(MissionHealthParams {
+                    mission_id: id.clone(),
+                })
+                .await
+                .unwrap();
+            for summary in [&get, &list["missions"][0], &health] {
+                assert_eq!(summary["mission_mode"], "task");
+                assert_eq!(summary["goal_mode"], goal_mode);
+                assert_eq!(summary["goal_objective"], objective);
+            }
+            task.abort();
+        }
+        let long = "🦀".repeat(1500);
+        let summary = compact_mission_summary(json!({"goal_mode": true, "goal_objective": long}));
+        assert_eq!(
+            summary["goal_objective"].as_str().unwrap().chars().count(),
+            1001
+        );
+        assert!(summary["goal_objective"].as_str().unwrap().ends_with('…'));
+        let legacy = compact_mission_summary(json!({}));
+        assert!(
+            legacy["goal_mode"].is_null(),
+            "missing data must not claim goal mode is disabled"
+        );
+        assert!(legacy["goal_objective"].is_null());
+    }
+
+    #[tokio::test]
+    async fn promoted_codex_goal_is_rejected_before_any_dispatch_request() {
+        let (assistant, state, task) = mock_assistant(json!({}), false).await;
+        let params = parse_params(json!({
+            "title": "oversized native goal", "backend": "codex",
+            "writer": true, "prompt": "🦀".repeat(4001),
+        }))
+        .unwrap();
+        let error = assistant.start_mission(params).await.unwrap_err();
+        task.abort();
+        assert!(error.contains("4000"), "{error}");
+        assert!(state.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn diagnostic_projection_deduplicates_text_bytes_and_raw_output() {
+        let receipt = json!({
+            "content": [{"type": "content", "content": {"type": "text", "text": "done\n"}}],
+            "rawOutput": {"stdout": {"type": "Buffer", "data": [100,111,110,101,10]}, "stderr": "warning"}
+        }).to_string();
+        assert_eq!(diagnostic_result_snippet(&receipt), "done\n\nwarning");
+        assert!(receipt.contains("rawOutput"));
+        assert_eq!(diagnostic_result_snippet("plain result"), "plain result");
+        assert_eq!(
+            diagnostic_result_snippet(r#"{"exitCode":2}"#),
+            r#"{"exitCode":2}"#
+        );
+    }
+
+    #[test]
+    fn dispatch_tools_declare_and_parse_the_same_identity_contract() {
+        for tool in AssistantMcp::tools().into_iter().filter(|t| {
+            matches!(
+                t.name.as_str(),
+                "send_message_to_mission" | "resume_mission"
+            )
+        }) {
+            assert_eq!(
+                tool.input_schema["properties"]["continue_identity"],
+                dispatch_identity_schema()
+            );
+            for field in ["github_pr", "track", "title"] {
+                assert_eq!(tool.input_schema["properties"][field]["type"], "string");
+            }
+        }
+        let incomplete = json!({"mission_id": "m", "content": "continue", "continue_identity": {"track": "trio-reserve1"}});
+        assert!(parse_params::<SendMessageParams>(incomplete.clone()).is_err());
+        assert!(parse_params::<ResumeMissionParams>(incomplete).is_err());
+    }
+
+    #[test]
+    fn writers_are_goal_mode_even_when_controller_omits_prefix() {
+        assert_eq!(
+            writer_goal_prompt("finish the PR".into(), true),
+            "/goal finish the PR"
+        );
+        assert_eq!(
+            writer_goal_prompt("  /goal finish the PR".into(), true),
+            "  /goal finish the PR"
+        );
+        assert_eq!(
+            writer_goal_prompt("review the PR".into(), false),
+            "review the PR"
+        );
+    }
+
+    /// `adopt_mission` without a stamped session must refuse, not clear.
+    #[test]
+    fn adopt_without_a_session_is_refused() {
+        let params: AdoptMissionParams =
+            parse_params(json!({"mission_id": "57c1dfb4"})).expect("parse");
+        assert!(params.origin_session_id.is_none());
+        // The handler itself needs a live API to run; pin the refusal message
+        // contract here instead: an empty stamp must not silently clear.
+        let session = params
+            .origin_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        assert!(session.is_none(), "an absent stamp must read as absent");
+    }
+
+    #[test]
+    fn adopt_params_accept_the_stamped_shape() {
+        let params: AdoptMissionParams = parse_params(json!({
+            "mission_id": "57c1dfb4-a782-4010-9f8b-aaa7f88afa7e",
+            "origin_session_id": "20260805_190902_361101",
+        }))
+        .expect("parse");
+        assert_eq!(
+            params.origin_session_id.as_deref(),
+            Some("20260805_190902_361101")
+        );
+        assert!(valid_origin_session_id(
+            params.origin_session_id.as_deref().unwrap()
+        ));
+    }
+
+    /// The 2026-08-05 incident: seven identical retries in ninety seconds,
+    /// because the error named no field.
+    #[test]
+    fn a_params_error_names_the_offending_field() {
+        let arguments = json!({
+            "title": "t",
+            "prompt": "p",
+            "desired_state": {"status": "running"},
+        });
+        let error = parse_params::<StartMissionParams>(arguments)
+            .expect_err("a map where a string belongs must not deserialize");
+        assert!(
+            error.contains("desired_state"),
+            "the field must be named, got: {error}"
+        );
+        assert!(error.contains("invalid type: map"), "got: {error}");
+    }
+
+    #[test]
+    fn a_nested_field_reports_its_path() {
+        let arguments = json!({"title": "t", "prompt": "p", "tags": ["ok", {"a": 1}]});
+        let error = parse_params::<StartMissionParams>(arguments).expect_err("a map is not a tag");
+        assert!(error.contains("tags[1]"), "got: {error}");
+    }
+
+    #[test]
+    fn a_missing_required_field_is_named_too() {
+        let error = parse_params::<StartMissionParams>(json!({"title": "t"}))
+            .expect_err("prompt is required");
+        assert!(error.contains("prompt"), "got: {error}");
+    }
+
+    #[test]
+    fn valid_params_still_deserialize() {
+        let params: StartMissionParams =
+            parse_params(json!({"title": "t", "prompt": "p", "tags": ["a"]}))
+                .expect("valid arguments must parse");
+        assert_eq!(params.title, "t");
+        assert_eq!(params.tags.as_deref(), Some(&["a".to_string()][..]));
+    }
+
+    /// Arguments that are not an object at all have no field to name, and a
+    /// bare "." would be noise rather than information.
+    #[test]
+    fn a_root_level_failure_reports_no_path() {
+        let error = parse_params::<StartMissionParams>(json!("not an object"))
+            .expect_err("a string is not a params object");
+        assert!(
+            error.starts_with("Invalid params: invalid type"),
+            "got: {error}"
+        );
+    }
+
+    /// A tool description is the only thing an autonomous agent knows about
+    /// what a tool can do. When it understates the tool, the agent reasons
+    /// correctly from wrong premises and gives up.
+    ///
+    /// That is not hypothetical. `resume_mission` said "interrupted, blocked,
+    /// or failed" and `send_message_to_mission` said only "Send a follow-up
+    /// message", so a controller holding an `acknowledged` mission concluded
+    /// it could not be woken at all and reported the benchmark campaign
+    /// blocked — while the server would have activated it on the same id.
+    #[test]
+    fn the_wake_tool_advertises_every_status_it_actually_wakes() {
+        let tools = AssistantMcp::tools();
+        let send = tools
+            .iter()
+            .find(|t| t.name == "send_message_to_mission")
+            .expect("send_message_to_mission is registered");
+
+        // These are exactly the statuses `message_activates_mission` accepts.
+        // If that list grows, this description has to grow with it.
+        for status in [
+            "pending",
+            "awaiting_user",
+            "acknowledged",
+            "waiting_background",
+            "interrupted",
+            "blocked",
+            "completed",
+            "failed",
+        ] {
+            assert!(
+                send.description.contains(status),
+                "send_message_to_mission wakes `{status}` but does not say so; \
+                 an agent reading this will believe it cannot: {}",
+                send.description
+            );
+        }
+
+        // And the recovery tool must not read as the only way to wake a
+        // mission, which is the inference that cost the benchmark track.
+        let resume = tools
+            .iter()
+            .find(|t| t.name == "resume_mission")
+            .expect("resume_mission is registered");
+        assert!(
+            resume.description.contains("send_message_to_mission"),
+            "resume_mission should point at the normal wake path: {}",
+            resume.description
+        );
+    }
+
+    /// The binary's tool table IS the curated Hermes surface; the generated
+    /// config allowlists are pinned to `HERMES_ASSISTANT_TOOL_ALLOWLIST`.
+    /// Adding/removing a tool here must go through the canonical list.
+    /// A full UUID must resolve without a round trip: no HTTP client is
+    /// configured in tests, so any network attempt would fail here.
+    #[tokio::test]
+    async fn full_uuid_resolves_without_calling_the_server() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_env();
+        let mcp = AssistantMcp::new();
+        let id = Uuid::new_v4();
+        assert_eq!(
+            mcp.resolve_mission_id(&id.to_string())
+                .await
+                .expect("resolve"),
+            id
+        );
+        // Mixed case with surrounding whitespace is the shape humans paste.
+        assert_eq!(
+            mcp.resolve_mission_id(&format!("  {}  ", id.to_string().to_uppercase()))
+                .await
+                .expect("resolve"),
+            id
+        );
+    }
+
+    async fn exercise_resume_readback(
+        with_hint: bool,
+        with_tags: bool,
+        resume_status: axum::http::StatusCode,
+        readback_status: axum::http::StatusCode,
+        fast_mode: Option<bool>,
+    ) -> (Result<Value, String>, Vec<String>) {
+        use axum::{
+            extract::State,
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Fixture {
+            id: Uuid,
+            with_hint: bool,
+            with_tags: bool,
+            resume_status: axum::http::StatusCode,
+            readback_status: axum::http::StatusCode,
+            fast_mode: Option<bool>,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        async fn resume(
+            State(state): State<Fixture>,
+            Json(body): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            assert_eq!(body["skip_message"], false);
+            if state.with_hint {
+                assert_eq!(body["content"], "Continue the existing proof");
+            } else {
+                assert!(body["content"].is_null());
+            }
+            state.calls.lock().unwrap().push("resume".into());
+            (
+                state.resume_status,
+                Json(json!({"id": state.id, "status": "interrupted", "updated_at": "before"})),
+            )
+        }
+        async fn readback(State(state): State<Fixture>) -> (axum::http::StatusCode, Json<Value>) {
+            state.calls.lock().unwrap().push("readback".into());
+            let status = if state.resume_status.is_success() {
+                "active"
+            } else {
+                "interrupted"
+            };
+            let mut digest = json!({
+                "id": state.id, "status": status, "updated_at": "after",
+                "backend": "grok", "model_override": "verified-model",
+                "project": {"project": "example", "track": "existing", "intent": "implementation", "tags": ["example"],
+                    "github_pr": "https://github.com/example/repo/pull/1",
+                    "desired_state": "running", "next_check_at": "later"}
+            });
+            if !state.with_tags {
+                digest["project"].as_object_mut().unwrap().remove("tags");
+            }
+            if let Some(fast_mode) = state.fast_mode {
+                digest["fast_mode"] = json!(fast_mode);
+            }
+            (state.readback_status, Json(digest))
+        }
+        let fixture = Fixture {
+            id: Uuid::new_v4(),
+            with_hint,
+            with_tags,
+            resume_status,
+            readback_status,
+            fast_mode,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let router = Router::new()
+            .route("/api/control/missions/:id/resume", post(resume))
+            .route("/api/control/missions/:id/digest", get(readback))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mcp = AssistantMcp {
+            api_url,
+            api_token: None,
+            jwt_secret: None,
+            project_scope: None,
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+        let result = mcp
+            .resume_mission(ResumeMissionParams {
+                mission_id: fixture.id.to_string(),
+                identity: Default::default(),
+                clean_workspace: false,
+                content: with_hint.then(|| "Continue the existing proof".to_string()),
+            })
+            .await;
+        server.abort();
+        let calls = fixture.calls.lock().unwrap().clone();
+        (result, calls)
+    }
+
+    #[tokio::test]
+    async fn resume_reads_state_after_atomic_resume_with_hint() {
+        use axum::http::StatusCode;
+        let (result, calls) =
+            exercise_resume_readback(true, true, StatusCode::OK, StatusCode::OK, None).await;
+        let result = result.expect("accepted resume");
+        assert_eq!(calls, ["resume", "readback"]);
+        assert_eq!(result["mission"]["status"], "active");
+        assert_eq!(result["mission"]["updated_at"], "after");
+        assert_eq!(result["mission"]["project"], "example");
+        assert_eq!(result["mission"]["track"], "existing");
+        assert_eq!(
+            result["mission"]["github_pr"],
+            "https://github.com/example/repo/pull/1"
+        );
+        assert_eq!(result["mission"]["desired_state"], "running");
+        assert_eq!(result["mission"]["next_check_at"], "later");
+        assert!(result["mission"]["fast_mode"].is_null());
+        assert_eq!(result["steered"], true);
+        assert!(result["state_warning"].is_null());
+    }
+
+    #[tokio::test]
+    async fn resume_without_hint_also_returns_fresh_state() {
+        use axum::http::StatusCode;
+        let (result, calls) =
+            exercise_resume_readback(false, true, StatusCode::OK, StatusCode::OK, None).await;
+        let result = result.expect("accepted resume");
+        assert_eq!(calls, ["resume", "readback"]);
+        assert_eq!(result["mission"]["updated_at"], "after");
+        assert_eq!(result["steered"], false);
+        assert!(result["steer_warning"].is_null());
+    }
+
+    #[tokio::test]
+    async fn resume_refusal_does_not_read_or_claim_current_state() {
+        use axum::http::StatusCode;
+        let (result, calls) =
+            exercise_resume_readback(true, true, StatusCode::CONFLICT, StatusCode::OK, None).await;
+        assert_eq!(calls, ["resume"]);
+        assert!(result
+            .unwrap_err()
+            .contains("Failed to resume mission (409"));
+    }
+
+    #[tokio::test]
+    async fn resume_readback_failure_does_not_return_the_old_snapshot() {
+        use axum::http::StatusCode;
+        let (result, calls) = exercise_resume_readback(
+            true,
+            true,
+            StatusCode::OK,
+            StatusCode::SERVICE_UNAVAILABLE,
+            None,
+        )
+        .await;
+        let result = result.expect("accepted resume");
+        assert_eq!(calls, ["resume", "readback"]);
+        assert_eq!(result["resume_accepted"], true);
+        assert_eq!(result["steered"], true);
+        assert!(result["mission"].is_null());
+        assert!(result["state_warning"]
+            .as_str()
+            .unwrap()
+            .contains("do not repeat"));
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_fast_mode_when_readback_exposes_it() {
+        use axum::http::StatusCode;
+        for enabled in [true, false] {
+            let (result, _) =
+                exercise_resume_readback(true, true, StatusCode::OK, StatusCode::OK, Some(enabled))
+                    .await;
+            let result = result.expect("accepted resume");
+            assert_eq!(result["mission"]["fast_mode"], enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_untagged_digest_preserves_empty_array() {
+        use axum::http::StatusCode;
+        let (result, _) =
+            exercise_resume_readback(true, false, StatusCode::OK, StatusCode::OK, None).await;
+        let result = result.expect("accepted resume");
+        assert_eq!(result["mission"]["tags"], json!([]));
+        assert!(result["mission"]["tags"].is_array());
+    }
+
+    #[test]
+    fn compact_summary_exposes_creation_origin() {
+        let summary = compact_mission_summary(json!({
+            "id": "11111111-2222-3333-4444-555555555555",
+            "status": "active",
+            "origin": "hermes",
+            "origin_session_id": "20260804_103847_86ca5c",
+            "prompt": "secret",
+            "api_token": "secret",
+        }));
+        assert_eq!(summary["origin"], "hermes");
+        assert_eq!(summary["origin_session_id"], "20260804_103847_86ca5c");
+        // The summary stays a projection, not a passthrough.
+        assert!(summary.get("prompt").is_none());
+        assert!(summary.get("api_token").is_none());
+    }
+
+    fn seeded_event(
+        sequence: i64,
+        event_type: &str,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        content: &str,
+    ) -> Value {
+        json!({
+            "sequence": sequence,
+            "event_type": event_type,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "content": content,
+        })
+    }
+
+    #[test]
+    fn pending_question_lookup_finds_unanswered_call() {
+        let events = vec![
+            seeded_event(1, "user_message", None, None, "go"),
+            // An older, already-answered question must NOT be pending.
+            seeded_event(
+                2,
+                "tool_call",
+                Some("AskUserQuestion"),
+                Some("q-old"),
+                r#"{"questions":[{"question":"Old?"}]}"#,
+            ),
+            seeded_event(
+                3,
+                "tool_result",
+                Some("AskUserQuestion"),
+                Some("q-old"),
+                r#"{"answers":[["A"]]}"#,
+            ),
+            // An ordinary in-flight tool call is not a question.
+            seeded_event(4, "tool_call", Some("Bash"), Some("b-1"), r#"{"cmd":"x"}"#),
+            seeded_event(
+                5,
+                "tool_call",
+                Some("AskUserQuestion"),
+                Some("q-new"),
+                r#"{"questions":[{"question":"Deploy to prod?"},{"question":"Which region?"}]}"#,
+            ),
+        ];
+        let pending = pending_ask_user_questions(&events);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_call_id, "q-new");
+        assert_eq!(pending[0].sequence, 5);
+        assert_eq!(pending[0].summary(), "Deploy to prod? | Which region?");
+    }
+
+    #[test]
+    fn pending_question_lookup_orders_newest_first_and_survives_bad_args() {
+        let events = vec![
+            // Unparseable args must still surface the pending call.
+            seeded_event(
+                1,
+                "tool_call",
+                Some("AskUserQuestion"),
+                Some("q-1"),
+                "not json",
+            ),
+            seeded_event(
+                7,
+                "tool_call",
+                Some("AskUserQuestion"),
+                Some("q-2"),
+                r#"{"questions":[{"question":"Second?"}]}"#,
+            ),
+        ];
+        let pending = pending_ask_user_questions(&events);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|q| q.tool_call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["q-2", "q-1"]
+        );
+        assert_eq!(pending[1].summary(), "(question text unavailable)");
+    }
+
+    #[test]
+    fn pending_question_lookup_empty_when_all_answered() {
+        let events = vec![
+            seeded_event(
+                1,
+                "tool_call",
+                Some("AskUserQuestion"),
+                Some("q-1"),
+                r#"{"questions":[{"question":"Only?"}]}"#,
+            ),
+            seeded_event(
+                2,
+                "tool_result",
+                None,
+                Some("q-1"),
+                r#"{"answers":[["A"]]}"#,
+            ),
+        ];
+        assert!(pending_ask_user_questions(&events).is_empty());
+    }
+
+    #[test]
+    fn answer_mission_question_params_parse_with_and_without_tool_call_id() {
+        let params: AnswerMissionQuestionParams = parse_params(json!({
+            "mission_id": "abc",
+            "answers": [["Option A"], ["free text"]],
+        }))
+        .expect("parse without tool_call_id");
+        assert!(params.tool_call_id.is_none());
+        assert_eq!(params.answers, vec![vec!["Option A"], vec!["free text"]]);
+
+        let params: AnswerMissionQuestionParams = parse_params(json!({
+            "mission_id": "abc",
+            "tool_call_id": "q-1",
+            "answers": [["Yes"]],
+        }))
+        .expect("parse with tool_call_id");
+        assert_eq!(params.tool_call_id.as_deref(), Some("q-1"));
+    }
+
+    #[test]
+    fn tool_table_matches_canonical_allowlist() {
+        let names: Vec<String> = AssistantMcp::tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            sandboxed_sh::hermes_tools::HERMES_ASSISTANT_TOOL_ALLOWLIST,
+            "assistant-mcp tool table diverged from \
+             src/hermes_tools.rs::HERMES_ASSISTANT_TOOL_ALLOWLIST — update both together"
+        );
+    }
 
     const ENV_KEYS: &[&str] = &[
         "HERMES_SANDBOXED_API_URL",
@@ -3245,6 +5923,22 @@ mod tests {
     }
 
     #[test]
+    fn error_signals_do_not_classify_mission_identifiers_as_http_errors() {
+        for fragment in [
+            "b522", "a502", "a520", "a521", "a503", "a429", "a529", "401", "403",
+        ] {
+            assert!(error_signals_in(&format!(
+                "Parallel mission {fragment}0000-dc42-49c3-88a0-26934b2255ce cancellation requested"
+            ))
+            .is_empty());
+        }
+        for code in ["502", "520", "521", "522"] {
+            assert!(error_signals_in(&format!("HTTP {code}: upstream failed"))
+                .contains(&"network_error"));
+        }
+    }
+
+    #[test]
     fn error_signals_classify_known_failure_modes() {
         assert_eq!(
             error_signals_in("HTTP 429 Too Many Requests"),
@@ -3314,6 +6008,25 @@ mod tests {
         assert!(analysis.signals.contains("rate_limited"));
         assert_eq!(analysis.recent_errors.len(), 1);
         assert!(analysis.loop_tool.is_none());
+    }
+
+    #[test]
+    fn recommendation_reports_pending_assignment_failure_without_poisoning_active_run() {
+        let analysis = analyze_trace_events(&[json!({
+            "event_type":"error", "sequence":3,
+            "content":"Cannot activate mission: queued_assignment_unowned: original track claim is no longer held"
+        })]);
+        let pending = build_recommendation("pending", None, &Value::Null, &analysis);
+        assert!(pending.contains("Queued mission could not acquire"));
+        assert!(!pending.contains("healthy"));
+        let active = build_recommendation("active", None, &json!({"state":"running"}), &analysis);
+        assert!(!active.contains("Queued mission could not acquire"));
+        let starting =
+            build_recommendation("pending", None, &json!({"state":"running"}), &analysis);
+        assert!(!starting.contains("Queued mission could not acquire"));
+        let ordinary_pending =
+            build_recommendation("pending", None, &Value::Null, &TraceAnalysis::default());
+        assert!(!ordinary_pending.contains("Queued mission could not acquire"));
     }
 
     #[test]
@@ -3448,6 +6161,61 @@ mod tests {
     }
 
     #[test]
+    fn project_roster_tools_are_exposed() {
+        let tools = AssistantMcp::tools();
+        let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        for expected in [
+            "list_projects",
+            "get_project",
+            "update_project_status",
+            "set_project_track",
+            "accept_project_track",
+            "invalidate_project_track_evidence",
+            "accept_project_track_evidence",
+            "reopen_project_track",
+            "get_project_grant",
+            "set_project_grant",
+            "add_project_steer",
+            "record_project_decision",
+            "answer_project_decision",
+            "get_project_tasks",
+            "plan_project_tasks",
+            "update_project_task",
+            "cancel_project_task",
+            "link_mission_to_project",
+        ] {
+            assert!(names.contains(&expected), "missing project tool {expected}");
+        }
+        // The ledger tool exposes the authority split, and the grant tool the
+        // normalized autonomy level — controllers discover both from schema.
+        let decision = tools
+            .iter()
+            .find(|tool| tool.name == "record_project_decision")
+            .unwrap();
+        let authorities = decision.input_schema["properties"]["authority"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(authorities.contains(&json!("granted")));
+        let grant = tools
+            .iter()
+            .find(|tool| tool.name == "set_project_grant")
+            .unwrap();
+        let levels = grant.input_schema["properties"]["autonomy_level"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(levels.contains(&json!("act_reversible")));
+        // The status tool constrains mode to the three known regimes.
+        let status = tools
+            .iter()
+            .find(|tool| tool.name == "update_project_status")
+            .unwrap();
+        let modes = status.input_schema["properties"]["mode"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(modes.contains(&json!("blocked")));
+    }
+
+    #[test]
     fn mission_tools_expose_codex_fast_mode() {
         let tools = AssistantMcp::tools();
         assert!(tools
@@ -3464,16 +6232,125 @@ mod tests {
     }
 
     #[test]
-    fn workspace_bash_rejects_heavy_commands_and_job_argv_is_quoted() {
-        assert!(is_heavy_workspace_command("lake build Verity"));
-        assert!(is_heavy_workspace_command("cd repo && cargo test --all"));
-        assert!(!is_heavy_workspace_command("git status --short"));
+    fn workspace_job_argv_is_quoted() {
         assert_eq!(
             workspace_job_command(None, Some(vec!["printf".into(), "%s".into(), "a'b".into()]))
                 .unwrap(),
             "'printf' '%s' 'a'\\''b'"
         );
         assert!(workspace_job_command(Some("true".into()), Some(vec!["true".into()])).is_err());
+    }
+
+    #[tokio::test]
+    async fn workspace_diagnostics_do_not_classify_quoted_command_text() {
+        let workspace_id = Uuid::new_v4().to_string();
+        let (mcp, state, task) = mock_assistant(json!({"exit_code": 0}), false).await;
+        let command = "ps -eo pid,args | rg 'lake build|cargo test --all'";
+        mcp.workspace_bash(
+            parse_params(json!({
+                "workspace_id": workspace_id, "command": command, "timeout_secs": 1000
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].0,
+            format!("/api/workspaces/{workspace_id}/exec")
+        );
+        assert_eq!(requests[0].1["command"], command);
+        assert_eq!(requests[0].1["timeout_secs"], 120);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn workspace_durable_execution_routes_each_call_with_the_same_retry_key() {
+        let mission_id = Uuid::new_v4().to_string();
+        let workspace_id = Uuid::new_v4().to_string();
+        let (mcp, state, task) =
+            mock_assistant(json!({"id": mission_id, "status": "queued"}), false).await;
+        // A build and an unrecognizable script use exactly the same durable route.
+        for (index, command) in ["lake build Target", "./long-running-script"]
+            .iter()
+            .enumerate()
+        {
+            for _ in 0..2 {
+                let result = mcp.workspace_bash(parse_params(json!({
+                    "workspace_id": workspace_id, "mission_id": mission_id,
+                    "idempotency_key": format!("build-input-sha-{index}"), "command": command,
+                    "cwd": "/workspaces/proof"
+                })).unwrap()).await.unwrap();
+                assert_eq!(result["job"]["id"], mission_id);
+            }
+        }
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for (index, (path, body)) in requests.iter().enumerate() {
+            assert_eq!(path, "/api/durable-jobs");
+            assert_eq!(
+                body["idempotency_key"],
+                format!("build-input-sha-{}", index / 2)
+            );
+            assert_eq!(body["started_by_mission_id"], mission_id);
+            assert_eq!(body["workspace_id"], workspace_id);
+            assert_eq!(body["cwd"], "/workspaces/proof");
+            assert_eq!(body["timeout_secs"], 7200);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn workspace_partial_durable_ownership_never_executes_a_command() {
+        let (mcp, state, task) = mock_assistant(json!({}), false).await;
+        for fields in [
+            json!({"mission_id": Uuid::new_v4().to_string()}),
+            json!({"idempotency_key": "input-sha"}),
+            json!({"mission_id": "", "idempotency_key": "input-sha"}),
+            json!({"mission_id": Uuid::new_v4().to_string(), "idempotency_key": " "}),
+        ] {
+            let mut input = fields;
+            input["command"] = json!("./long-running-script");
+            assert!(mcp
+                .workspace_bash(parse_params(input).unwrap())
+                .await
+                .is_err());
+        }
+        assert!(state.requests.lock().unwrap().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn workspace_durable_execution_respects_project_scope_on_both_entrypoints() {
+        let mission_id = Uuid::new_v4().to_string();
+        let workspace_id = Uuid::new_v4().to_string();
+        for project in [json!("eip-8282"), Value::Null, json!("verity-lido")] {
+            let (mut mcp, state, task) = mock_assistant(
+                json!({
+                    "id": mission_id, "project": project
+                }),
+                false,
+            )
+            .await;
+            mcp.project_scope = Some(["verity-lido".to_string()].into_iter().collect());
+            let input = json!({
+                "workspace_id": workspace_id, "mission_id": mission_id,
+                "idempotency_key": "same-command", "command": "./build"
+            });
+            let via_bash = mcp
+                .workspace_bash(parse_params(input.clone()).unwrap())
+                .await;
+            let direct = mcp.start_workspace_job(parse_params(input).unwrap()).await;
+            let allowed = project == json!("verity-lido");
+            assert_eq!(via_bash.is_ok(), allowed);
+            assert_eq!(direct.is_ok(), allowed);
+            assert_eq!(
+                state.requests.lock().unwrap().len(),
+                if allowed { 2 } else { 0 }
+            );
+            task.abort();
+        }
     }
 
     #[test]
@@ -3494,6 +6371,7 @@ mod tests {
                     "disk_available_bytes": 100_u64 << 30,
                     "cached_toolchains": ["leanprover--lean4---v4.24.0"],
                     "lean_runtime_ready": true,
+                    "source_bundle_capacity": {"overlay_bytes": 1048576, "complete_bytes": 8388608},
                     "base_url": "must-not-leak"
                 },
                 {
@@ -3537,8 +6415,158 @@ mod tests {
         assert_eq!(compact["summary"]["lean_slots_available"], 2);
         assert_eq!(compact["summary"]["active_remote_jobs"], 1);
         assert!(compact["nodes"][0].get("base_url").is_none());
+        assert_eq!(
+            compact["nodes"][0]["source_bundle_capacity"]["complete_bytes"],
+            8388608
+        );
+        assert!(compact["nodes"][3]["source_bundle_capacity"].is_null());
         assert_eq!(compact["nodes"][2]["error"], "probe degraded");
         assert_eq!(compact["recent_jobs"][0]["node_id"], "cpu");
+    }
+
+    #[test]
+    fn compact_project_ranks_live_items_and_caps_the_dump() {
+        let mut items = Vec::new();
+        for i in 0..30 {
+            items.push(json!({
+                "key": format!("old-{i}"),
+                "kind": "track",
+                "open": true,
+                "status": "failed",
+                "desired_state": "x".repeat(400),
+                "attempts": [{
+                    "id": format!("fail-{i}"),
+                    "status": "failed",
+                    "title": "old failure",
+                    "updated_at": format!("2026-08-01T00:{i:02}:00Z"),
+                    "role": "pr-writer",
+                    "prompt": "secret"
+                }]
+            }));
+        }
+        items.push(json!({
+            "key": "live-writer",
+            "kind": "track",
+            "open": true,
+            "status": "working",
+            "attempts": [
+                {
+                    "id": "live-1",
+                    "status": "active",
+                    "title": "Grok #2332",
+                    "updated_at": "2026-08-14T20:00:00Z",
+                    "role": "pr-writer"
+                },
+                {
+                    "id": "live-old",
+                    "status": "interrupted",
+                    "title": "previous",
+                    "updated_at": "2026-08-14T18:00:00Z"
+                },
+                {
+                    "id": "live-older",
+                    "status": "failed",
+                    "title": "older",
+                    "updated_at": "2026-08-14T16:00:00Z"
+                }
+            ]
+        }));
+        items.push(json!({
+            "key": "needs-owner",
+            "kind": "track",
+            "open": true,
+            "attempts": [{
+                "id": "ask-1",
+                "status": "awaiting_user",
+                "title": "question",
+                "updated_at": "2026-08-14T19:00:00Z"
+            }]
+        }));
+
+        let compact = compact_project(json!({
+            "project": {
+                "slug": "verity",
+                "title": "Verity",
+                "objective": "prove the world",
+                "status": "active",
+                "mode": "active",
+                "wait_ticks": 2,
+                "next_action": "rebase/repair #2332 onto main after #2333",
+                "blocker": "source #2332 dirty",
+                "repository": "lfglabs-dev/verity",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-08-14T20:00:00Z"
+            },
+            "grant": {
+                "autonomy_level": "act_full",
+                "merge_authority": "full",
+                "budget_per_tick": "generous",
+                "material_bar": "omit me",
+                "answered_at": "2026-08-01T00:00:00Z"
+            },
+            "tracks": [{"track": "noise", "status": "done", "updated_at": "2026-01-01T00:00:00Z"}],
+            "items": items,
+            "open_decisions": [{
+                "at": "2026-08-14T12:00:00Z",
+                "question": "merge #69?",
+                "status": "pending_user",
+                "authority": "escalation",
+                "rationale": "long rationale that controllers do not need here"
+            }],
+            "recent_decisions": [{"at": "2026-07-01T00:00:00Z", "question": "old"}],
+            "conversation": {
+                "session_id": "20260813_213628_202eac",
+                "source": "binding",
+                "bound_at": "2026-08-13T20:57:04Z"
+            },
+            "steers": {
+                "pending": [{
+                    "id": "steer-1",
+                    "body": format!("look at {}", "notes/".repeat(80)),
+                    "created_at": "2026-09-21T11:00:00Z",
+                    "origin": "orb"
+                }],
+                "recent": []
+            }
+        }));
+
+        assert_eq!(compact["slug"], "verity");
+        assert_eq!(compact["mode"], "active");
+        assert_eq!(
+            compact["next_action"],
+            "rebase/repair #2332 onto main after #2333"
+        );
+        assert_eq!(compact["items_total"], 32);
+        assert_eq!(compact["items_omitted"], 12);
+        assert_eq!(compact["items"].as_array().unwrap().len(), 20);
+        assert_eq!(compact["items"][0]["key"], "live-writer");
+        assert_eq!(compact["items"][1]["key"], "needs-owner");
+        assert_eq!(compact["items"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(compact["items"][0]["attempts_omitted"], 1);
+        assert_eq!(compact["item_counts"]["active"], 1);
+        assert_eq!(compact["item_counts"]["awaiting_user"], 1);
+        assert_eq!(compact["item_counts"]["failed"], 30);
+        assert_eq!(compact["grant"]["autonomy_level"], "act_full");
+        assert!(compact["grant"].get("material_bar").is_none());
+        assert!(compact.get("tracks").is_none());
+        assert!(compact.get("recent_decisions").is_none());
+        assert!(compact["open_decisions"][0].get("rationale").is_none());
+        assert_eq!(
+            compact["conversation"]["session_id"],
+            "20260813_213628_202eac"
+        );
+        assert!(compact["conversation"].get("bound_at").is_none());
+        assert!(compact["items"][0]["attempts"][0].get("prompt").is_none());
+        let desired = compact["items"][2]["desired_state"].as_str().unwrap();
+        assert!(desired.chars().count() <= 201, "{desired}");
+        assert!(desired.ends_with('…'));
+        assert_eq!(compact["steers"]["pending"][0]["id"], "steer-1");
+        let body = compact["steers"]["pending"][0]["body"].as_str().unwrap();
+        assert_eq!(
+            body,
+            format!("look at {}", "notes/".repeat(80)),
+            "operator instructions must not be truncated"
+        );
     }
 
     #[test]
@@ -3554,6 +6582,33 @@ mod tests {
         let backwards = mission_events_path(id, 40, "all", Some(99), Some(17));
         assert!(backwards.ends_with("&before_seq=99"));
         assert!(!backwards.contains("since_seq"));
+    }
+
+    #[test]
+    fn project_scope_gates_mutations_only() {
+        let scoped = AssistantMcp {
+            api_url: "http://127.0.0.1:3000".to_string(),
+            api_token: None,
+            jwt_secret: None,
+            project_scope: Some(["verity".to_string()].into_iter().collect()),
+            client: reqwest::Client::new(),
+        };
+        assert!(scoped.assert_project_scope("verity").is_ok());
+        assert!(
+            scoped.assert_project_scope(" verity ").is_ok(),
+            "slugs are trimmed"
+        );
+        let err = scoped.assert_project_scope("lido").unwrap_err();
+        assert!(err.contains("outside this controller's scope"), "{err}");
+
+        let open = AssistantMcp {
+            api_url: "http://127.0.0.1:3000".to_string(),
+            api_token: None,
+            jwt_secret: None,
+            project_scope: None,
+            client: reqwest::Client::new(),
+        };
+        assert!(open.assert_project_scope("anything").is_ok());
     }
 
     #[test]
@@ -3611,6 +6666,18 @@ mod tests {
     }
 
     #[test]
+    fn origin_session_ids_are_validated_not_silently_dropped() {
+        assert!(valid_origin_session_id("20260803_150605_59ab72"));
+        assert!(valid_origin_session_id("agent:main:telegram:dm:1139694048"));
+        // A blank or malformed id must not pass as "no origin": the mission
+        // would complete with nowhere to report back to.
+        assert!(!valid_origin_session_id(""));
+        assert!(!valid_origin_session_id("   ".trim()));
+        assert!(!valid_origin_session_id("bad session id"));
+        assert!(!valid_origin_session_id(&"x".repeat(129)));
+    }
+
+    #[test]
     fn mission_acknowledgement_accepts_only_ack_waits_and_is_idempotent() {
         assert!(mission_requires_acknowledgement(&json!({
             "status": "awaiting_user",
@@ -3634,6 +6701,16 @@ mod tests {
             "awaiting_kind": null
         }))
         .is_err());
+        assert!(mission_requires_acknowledgement(&json!({
+            "status": "failed",
+            "awaiting_kind": null
+        }))
+        .unwrap());
+        assert!(mission_requires_acknowledgement(&json!({
+            "status": "interrupted",
+            "awaiting_kind": null
+        }))
+        .unwrap());
     }
 
     #[test]

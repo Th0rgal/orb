@@ -20,6 +20,12 @@ const METADATA_SOURCE_USER: &str = "user";
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MissionStoreSnapshot {
     missions: HashMap<Uuid, Mission>,
+    #[serde(default)]
+    harness_sessions: HashMap<Uuid, HashMap<String, String>>,
+    #[serde(default)]
+    native_prompts: HashMap<Uuid, std::collections::HashSet<String>>,
+    #[serde(default)]
+    native_prompt_claims: HashMap<Uuid, HashMap<String, super::NativePromptClaim>>,
     trees: HashMap<Uuid, AgentTreeNode>,
     #[serde(default)]
     runs: HashMap<Uuid, MissionRun>,
@@ -33,6 +39,9 @@ struct MissionStoreSnapshot {
 pub struct FileMissionStore {
     path: PathBuf,
     missions: Arc<RwLock<HashMap<Uuid, Mission>>>,
+    harness_sessions: Arc<RwLock<HashMap<Uuid, HashMap<String, String>>>>,
+    native_prompts: Arc<RwLock<HashMap<Uuid, std::collections::HashSet<String>>>>,
+    native_prompt_claims: Arc<RwLock<HashMap<Uuid, HashMap<String, super::NativePromptClaim>>>>,
     trees: Arc<RwLock<HashMap<Uuid, AgentTreeNode>>>,
     runs: Arc<RwLock<HashMap<Uuid, MissionRun>>>,
     deferred_goals: Arc<RwLock<HashMap<Uuid, String>>>,
@@ -46,7 +55,7 @@ impl FileMissionStore {
             .map_err(|e| format!("Failed to create mission store dir: {}", e))?;
         let filename = format!("missions-{}.json", sanitize_filename(user_id));
         let path = base_dir.join(filename);
-        let snapshot = match fs::read(&path).await {
+        let mut snapshot = match fs::read(&path).await {
             Ok(bytes) => match serde_json::from_slice::<MissionStoreSnapshot>(&bytes) {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
@@ -63,25 +72,60 @@ impl FileMissionStore {
             }
         };
 
-        Ok(Self {
+        // Old stores preallocated a random ID even before Grok ever ran.
+        // Only untouched pending records without execution/native-ID evidence
+        // can discard that placeholder. Empty transcript alone is insufficient.
+        let mut migrated = false;
+        for mission in snapshot.missions.values_mut() {
+            if super::is_untouched_grok_placeholder(mission)
+                && snapshot
+                    .harness_sessions
+                    .get(&mission.id)
+                    .is_none_or(|s| s.is_empty())
+                && !snapshot
+                    .runs
+                    .values()
+                    .any(|run| run.mission_id == mission.id)
+                && !snapshot.native_prompts.contains_key(&mission.id)
+                && !snapshot.trees.contains_key(&mission.id)
+            {
+                mission.session_id = None;
+                migrated = true;
+            }
+        }
+        let store = Self {
             path,
             missions: Arc::new(RwLock::new(snapshot.missions)),
+            harness_sessions: Arc::new(RwLock::new(snapshot.harness_sessions)),
+            native_prompts: Arc::new(RwLock::new(snapshot.native_prompts)),
+            native_prompt_claims: Arc::new(RwLock::new(snapshot.native_prompt_claims)),
             trees: Arc::new(RwLock::new(snapshot.trees)),
             runs: Arc::new(RwLock::new(snapshot.runs)),
             deferred_goals: Arc::new(RwLock::new(snapshot.deferred_goals)),
             persist_lock: Arc::new(Mutex::new(())),
-        })
+        };
+        if migrated {
+            store.persist().await?;
+        }
+        Ok(store)
     }
 
     async fn persist(&self) -> Result<(), String> {
         let _guard = self.persist_lock.lock().await;
         let snapshot = MissionStoreSnapshot {
             missions: self.missions.read().await.clone(),
+            harness_sessions: self.harness_sessions.read().await.clone(),
+            native_prompts: self.native_prompts.read().await.clone(),
+            native_prompt_claims: self.native_prompt_claims.read().await.clone(),
             trees: self.trees.read().await.clone(),
             runs: self.runs.read().await.clone(),
             deferred_goals: self.deferred_goals.read().await.clone(),
         };
-        let data = serde_json::to_vec_pretty(&snapshot)
+        self.write_snapshot(&snapshot).await
+    }
+
+    async fn write_snapshot(&self, snapshot: &MissionStoreSnapshot) -> Result<(), String> {
+        let data = serde_json::to_vec_pretty(snapshot)
             .map_err(|e| format!("Failed to serialize mission store: {}", e))?;
         let tmp_path = self.path.with_extension("json.tmp");
         fs::write(&tmp_path, data)
@@ -114,12 +158,7 @@ impl MissionStore for FileMissionStore {
             ..MissionStatusCounts::default()
         };
         for mission in missions.values() {
-            match mission.status {
-                MissionStatus::Active => counts.active += 1,
-                MissionStatus::Completed => counts.completed += 1,
-                MissionStatus::Failed => counts.failed += 1,
-                _ => {}
-            }
+            counts.record(mission.status);
         }
         Ok(counts)
     }
@@ -204,6 +243,17 @@ impl MissionStore for FileMissionStore {
             .cloned())
     }
 
+    async fn get_latest_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
+        Ok(self
+            .runs
+            .read()
+            .await
+            .values()
+            .filter(|run| run.mission_id == mission_id)
+            .max_by_key(|run| run.generation)
+            .cloned())
+    }
+
     async fn list_active_mission_runs(&self) -> Result<Vec<MissionRun>, String> {
         Ok(self
             .runs
@@ -265,7 +315,7 @@ impl MissionStore for FileMissionStore {
         Ok(true)
     }
 
-    async fn create_mission_with_parent(
+    async fn create_mission_with_parent_and_placement(
         &self,
         title: Option<&str>,
         workspace_id: Option<Uuid>,
@@ -277,6 +327,8 @@ impl MissionStore for FileMissionStore {
         config_profile: Option<&str>,
         parent_mission_id: Option<Uuid>,
         working_directory: Option<&str>,
+        requires_local_disk: bool,
+        assigned_id: Option<Uuid>,
     ) -> Result<Mission, String> {
         let now = now_string();
         let metadata_source = title.and_then(|value| {
@@ -289,7 +341,7 @@ impl MissionStore for FileMissionStore {
         });
         let metadata_updated_at = metadata_source.as_ref().map(|_| now.clone());
         let mission = Mission {
-            id: Uuid::new_v4(),
+            id: assigned_id.unwrap_or_else(Uuid::new_v4),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
             short_description: None,
@@ -312,10 +364,12 @@ impl MissionStore for FileMissionStore {
             paused_at: None,
             resumable: false,
             desktop_sessions: Vec::new(),
-            session_id: Some(Uuid::new_v4().to_string()),
+            session_id: (backend != Some("grok")).then(|| Uuid::new_v4().to_string()),
             terminal_reason: None,
+            terminal_evidence: None,
             parent_mission_id,
             working_directory: working_directory.map(|s| s.to_string()),
+            requires_local_disk,
             mission_mode: super::MissionMode::default(),
             goal_mode: false,
             goal_objective: None,
@@ -327,6 +381,8 @@ impl MissionStore for FileMissionStore {
                 ..Default::default()
             },
             awaiting_kind: None,
+            origin: None,
+            origin_session_id: None,
         };
         self.missions
             .write()
@@ -334,6 +390,36 @@ impl MissionStore for FileMissionStore {
             .insert(mission.id, mission.clone());
         self.persist().await?;
         Ok(mission)
+    }
+
+    async fn create_mission_with_parent(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        fast_mode: bool,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+    ) -> Result<Mission, String> {
+        self.create_mission_with_parent_and_placement(
+            title,
+            workspace_id,
+            agent,
+            model_override,
+            model_effort,
+            fast_mode,
+            backend,
+            config_profile,
+            parent_mission_id,
+            working_directory,
+            true,
+            None,
+        )
+        .await
     }
 
     async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
@@ -345,9 +431,69 @@ impl MissionStore for FileMissionStore {
             .collect())
     }
 
+    async fn set_mission_requires_local_disk(
+        &self,
+        id: Uuid,
+        requires_local_disk: bool,
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        mission.requires_local_disk = requires_local_disk;
+        mission.updated_at = now_string();
+        drop(missions);
+        self.persist().await
+    }
+
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String> {
         self.update_mission_status_with_reason(id, status, None)
             .await
+    }
+
+    async fn restore_mission_status(
+        &self,
+        id: Uuid,
+        snapshot: &super::MissionStatusSnapshot,
+    ) -> Result<(), String> {
+        let _persist = self.persist_lock.lock().await;
+        let mut missions = self.missions.write().await;
+        let mut next = missions.clone();
+        let mission = next
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        if mission.status != MissionStatus::Active && mission.status != snapshot.status {
+            return Err("mission status changed during rejected activation".into());
+        }
+        snapshot.restore(mission);
+        let snapshot = MissionStoreSnapshot {
+            missions: next.clone(),
+            harness_sessions: self.harness_sessions.read().await.clone(),
+            native_prompts: self.native_prompts.read().await.clone(),
+            native_prompt_claims: self.native_prompt_claims.read().await.clone(),
+            trees: self.trees.read().await.clone(),
+            runs: self.runs.read().await.clone(),
+            deferred_goals: self.deferred_goals.read().await.clone(),
+        };
+        let data = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
+        let tmp_path = self.path.with_extension("json.tmp");
+        fs::write(&tmp_path, data)
+            .await
+            .map_err(|e| e.to_string())?;
+        fs::rename(&tmp_path, &self.path)
+            .await
+            .map_err(|e| e.to_string())?;
+        *missions = next;
+        Ok(())
+    }
+
+    async fn set_terminal_evidence(&self, id: Uuid, evidence: &str) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission not found: {id}"))?;
+        mission.terminal_evidence = Some(evidence.chars().take(2000).collect());
+        Ok(())
     }
 
     async fn update_mission_status_with_reason(
@@ -400,7 +546,8 @@ impl MissionStore for FileMissionStore {
             mission.awaiting_kind = None;
         }
         drop(missions);
-        self.persist().await
+        self.persist().await?;
+        Ok(())
     }
 
     async fn set_mission_first_viewed_at_if_unset(
@@ -539,6 +686,16 @@ impl MissionStore for FileMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
 
+        let selected_session = {
+            let mut sessions = self.harness_sessions.write().await;
+            super::select_harness_session(
+                mission,
+                backend,
+                session_id,
+                sessions.entry(id).or_default(),
+            )
+        };
+
         if let Some(backend) = backend {
             mission.backend = backend.to_string();
         }
@@ -557,10 +714,7 @@ impl MissionStore for FileMissionStore {
         if let Some(config_profile) = config_profile {
             mission.config_profile = config_profile.map(ToString::to_string);
         }
-        mission.session_id = Some(session_id.to_string());
-        mission.resumable = false;
-        mission.interrupted_at = None;
-        mission.terminal_reason = None;
+        mission.session_id = selected_session;
         mission.updated_at = now_string();
         let updated = mission.clone();
         drop(missions);
@@ -622,10 +776,15 @@ impl MissionStore for FileMissionStore {
         if patch.is_empty() {
             return Ok(());
         }
+        let _persist = self.persist_lock.lock().await;
         let mut missions = self.missions.write().await;
-        let mission = missions
+        let mut next = missions.clone();
+        let mission = next
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
+        if let Some(title) = patch.title {
+            mission.title = title;
+        }
         if let Some(project) = patch.project {
             mission.project.project = project;
         }
@@ -641,15 +800,37 @@ impl MissionStore for FileMissionStore {
         if let Some(tags) = patch.tags {
             mission.project.tags = tags;
         }
+        if let Some(delta) = patch.tag_patch {
+            delta.apply(&mut mission.project.tags);
+        }
         if let Some(desired_state) = patch.desired_state {
             mission.project.desired_state = desired_state;
         }
         if let Some(next_check_at) = patch.next_check_at {
             mission.project.next_check_at = next_check_at;
         }
-        mission.updated_at = now_string();
-        drop(missions);
-        self.persist().await
+        if !patch.preserve_updated_at {
+            mission.updated_at = now_string();
+        }
+        let snapshot = MissionStoreSnapshot {
+            missions: next.clone(),
+            harness_sessions: self.harness_sessions.read().await.clone(),
+            native_prompts: self.native_prompts.read().await.clone(),
+            native_prompt_claims: self.native_prompt_claims.read().await.clone(),
+            trees: self.trees.read().await.clone(),
+            runs: self.runs.read().await.clone(),
+            deferred_goals: self.deferred_goals.read().await.clone(),
+        };
+        let data = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
+        let tmp_path = self.path.with_extension("json.tmp");
+        fs::write(&tmp_path, data)
+            .await
+            .map_err(|e| e.to_string())?;
+        fs::rename(&tmp_path, &self.path)
+            .await
+            .map_err(|e| e.to_string())?;
+        *missions = next;
+        Ok(())
     }
 
     async fn set_mission_awaiting_kind(
@@ -666,15 +847,190 @@ impl MissionStore for FileMissionStore {
         self.persist().await
     }
 
-    async fn update_mission_session_id(&self, id: Uuid, session_id: &str) -> Result<(), String> {
+    async fn set_mission_origin(
+        &self,
+        id: Uuid,
+        origin: &str,
+        origin_session_id: Option<&str>,
+    ) -> Result<(), String> {
         let mut missions = self.missions.write().await;
         let mission = missions
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
-        mission.session_id = Some(session_id.to_string());
-        mission.updated_at = now_string();
+        mission.origin = Some(origin.to_string());
+        mission.origin_session_id = origin_session_id.map(ToString::to_string);
         drop(missions);
         self.persist().await
+    }
+
+    async fn native_prompt_attempted(&self, id: Uuid, backend: &str) -> Result<bool, String> {
+        if !self.missions.read().await.contains_key(&id) {
+            return Err("mission not found".into());
+        }
+        Ok(self
+            .native_prompts
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|p| p.contains(backend)))
+    }
+
+    async fn claim_native_prompt(
+        &self,
+        id: Uuid,
+        backend: &str,
+        session_id: Option<&str>,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let _persist = self.persist_lock.lock().await;
+        let missions = self.missions.write().await;
+        let mission = missions.get(&id).ok_or("mission not found")?;
+        if backend.is_empty() || mission.backend != backend {
+            return Ok(false);
+        }
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run || mission.session_id.as_deref() != session_id {
+            return Ok(false);
+        }
+        let mut prompts = self.native_prompts.write().await;
+        let mut claims = self.native_prompt_claims.write().await;
+        let mut next = prompts.clone();
+        let mut next_claims = claims.clone();
+        let attempted = next.entry(id).or_default();
+        if attempted.contains(backend) {
+            // A bound continuation may proceed, but cannot own rollback of old evidence.
+            return Ok(session_id.is_some());
+        }
+        attempted.insert(backend.to_string());
+        next_claims.entry(id).or_default().insert(
+            backend.to_string(),
+            super::NativePromptClaim {
+                claim_id,
+                run: run.cloned(),
+            },
+        );
+        let snapshot = MissionStoreSnapshot {
+            missions: missions.clone(),
+            harness_sessions: self.harness_sessions.read().await.clone(),
+            native_prompts: next.clone(),
+            native_prompt_claims: next_claims.clone(),
+            trees: self.trees.read().await.clone(),
+            runs: runs.clone(),
+            deferred_goals: self.deferred_goals.read().await.clone(),
+        };
+        self.write_snapshot(&snapshot).await?;
+        *prompts = next;
+        *claims = next_claims;
+        Ok(true)
+    }
+
+    async fn release_native_prompt_no_launch(
+        &self,
+        id: Uuid,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+        claim_id: Uuid,
+    ) -> Result<bool, String> {
+        let _persist = self.persist_lock.lock().await;
+        let missions = self.missions.write().await;
+        let mission = missions.get(&id).ok_or("mission not found")?;
+        if backend.is_empty() || mission.backend != backend {
+            return Ok(false);
+        }
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run || mission.session_id.is_some() {
+            return Ok(false);
+        }
+        let mut prompts = self.native_prompts.write().await;
+        let mut claims = self.native_prompt_claims.write().await;
+        if claims.get(&id).and_then(|c| c.get(backend))
+            != Some(&super::NativePromptClaim {
+                claim_id,
+                run: run.cloned(),
+            })
+        {
+            return Ok(false);
+        }
+        let mut next = prompts.clone();
+        let mut next_claims = claims.clone();
+        if let Some(p) = next.get_mut(&id) {
+            p.remove(backend);
+            if p.is_empty() {
+                next.remove(&id);
+            }
+        }
+        if let Some(c) = next_claims.get_mut(&id) {
+            c.remove(backend);
+            if c.is_empty() {
+                next_claims.remove(&id);
+            }
+        }
+        let snapshot = MissionStoreSnapshot {
+            missions: missions.clone(),
+            harness_sessions: self.harness_sessions.read().await.clone(),
+            native_prompts: next.clone(),
+            native_prompt_claims: next_claims.clone(),
+            trees: self.trees.read().await.clone(),
+            runs: runs.clone(),
+            deferred_goals: self.deferred_goals.read().await.clone(),
+        };
+        self.write_snapshot(&snapshot).await?;
+        *prompts = next;
+        *claims = next_claims;
+        Ok(true)
+    }
+
+    async fn update_mission_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: Option<&super::SessionUpdateRun>,
+    ) -> Result<bool, String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+        if backend.is_empty() {
+            return Err("native session update requires harness provenance".into());
+        }
+        // Same lock order as begin_mission_run: mission before runs.
+        // Keep the run read guard through the identity write so acquisition of
+        // a newer generation cannot race this check.
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        if latest.as_ref() != run {
+            return Ok(false);
+        }
+        self.harness_sessions
+            .write()
+            .await
+            .entry(id)
+            .or_default()
+            .insert(backend.to_string(), session_id.to_string());
+        if mission.backend == backend {
+            mission.session_id = Some(session_id.to_string());
+            mission.updated_at = now_string();
+        }
+        drop(runs);
+        drop(missions);
+        self.persist().await?;
+        Ok(true)
     }
 
     async fn update_mission_tree(&self, id: Uuid, tree: &AgentTreeNode) -> Result<(), String> {
@@ -689,6 +1045,7 @@ impl MissionStore for FileMissionStore {
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String> {
         let removed = self.missions.write().await.remove(&id).is_some();
         self.trees.write().await.remove(&id);
+        self.harness_sessions.write().await.remove(&id);
         self.persist().await?;
         Ok(removed)
     }
@@ -805,7 +1162,13 @@ impl MissionStore for FileMissionStore {
             .read()
             .await
             .values()
-            .filter(|m| m.status == MissionStatus::Pending && goals.contains_key(&m.id))
+            .filter(|m| {
+                crate::api::control::client_placement::scheduler_accepts(
+                    m.status == MissionStatus::Pending,
+                    goals.contains_key(&m.id),
+                    &m.project.tags,
+                )
+            })
             .cloned()
             .collect();
         missions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -826,6 +1189,124 @@ impl MissionStore for FileMissionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_claim_write_failure_is_atomic_and_release_failure_retains_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileMissionStore::new(dir.path().into(), "claims")
+            .await
+            .unwrap();
+        let m = store
+            .create_mission(Some("new"), None, None, None, None, Some("grok"), None)
+            .await
+            .unwrap();
+        let old = store
+            .create_mission(Some("old"), None, None, None, None, Some("grok"), None)
+            .await
+            .unwrap();
+        let old_receipt = Uuid::new_v4();
+        assert!(store
+            .claim_native_prompt(old.id, "grok", None, None, old_receipt)
+            .await
+            .unwrap());
+        let blocker = store.path.with_extension("json.tmp");
+        fs::create_dir(&blocker).await.unwrap();
+        let failed = Uuid::new_v4();
+        assert!(store
+            .claim_native_prompt(m.id, "grok", None, None, failed)
+            .await
+            .is_err());
+        assert!(!store.native_prompt_attempted(m.id, "grok").await.unwrap());
+        assert!(store.native_prompt_attempted(old.id, "grok").await.unwrap());
+        assert!(store
+            .release_native_prompt_no_launch(old.id, "grok", None, old_receipt)
+            .await
+            .is_err());
+        assert!(store.native_prompt_attempted(old.id, "grok").await.unwrap());
+        let reopened = FileMissionStore::new(dir.path().into(), "claims")
+            .await
+            .unwrap();
+        assert!(!reopened
+            .native_prompt_attempted(m.id, "grok")
+            .await
+            .unwrap());
+        assert!(reopened
+            .native_prompt_attempted(old.id, "grok")
+            .await
+            .unwrap());
+        fs::remove_dir(&blocker).await.unwrap();
+        // A final rename failure must also leave the new insertion unpublished.
+        let backup = store.path.with_extension("saved");
+        fs::rename(&store.path, &backup).await.unwrap();
+        fs::create_dir(&store.path).await.unwrap();
+        assert!(store
+            .claim_native_prompt(m.id, "grok", None, None, Uuid::new_v4())
+            .await
+            .is_err());
+        assert!(!store.native_prompt_attempted(m.id, "grok").await.unwrap());
+        assert!(store.native_prompt_attempted(old.id, "grok").await.unwrap());
+        fs::remove_dir(&store.path).await.unwrap();
+        fs::rename(&backup, &store.path).await.unwrap();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let (ra, rb) = tokio::join!(
+            store.claim_native_prompt(m.id, "grok", None, None, a),
+            store.claim_native_prompt(m.id, "grok", None, None, b)
+        );
+        assert_ne!(ra.unwrap(), rb.unwrap());
+        assert!(!store
+            .release_native_prompt_no_launch(m.id, "grok", None, failed)
+            .await
+            .unwrap());
+        assert!(store.native_prompt_attempted(m.id, "grok").await.unwrap());
+        let reopened = FileMissionStore::new(dir.path().into(), "claims")
+            .await
+            .unwrap();
+        assert!(reopened
+            .native_prompt_attempted(m.id, "grok")
+            .await
+            .unwrap());
+        assert!(reopened
+            .native_prompt_attempted(old.id, "grok")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn assignment_write_failure_preserves_memory_and_disk_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileMissionStore::new(dir.path().to_path_buf(), "assignment")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(Some("Original"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        fs::create_dir(store.path.with_extension("json.tmp"))
+            .await
+            .unwrap();
+        let error = store
+            .update_mission_project(
+                mission.id,
+                super::super::MissionProjectPatch {
+                    title: Some(Some("Changed".into())),
+                    track: Some(Some("changed".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(!error.is_empty());
+        let current = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(current.title, mission.title);
+        assert_eq!(current.project, mission.project);
+        let reopened = FileMissionStore::new(dir.path().to_path_buf(), "assignment")
+            .await
+            .unwrap();
+        let current = reopened.get_mission(mission.id).await.unwrap().unwrap();
+        assert_eq!(current.title, mission.title);
+        assert_eq!(current.project, mission.project);
+    }
 
     #[tokio::test]
     async fn update_mission_metadata_is_noop_when_fields_missing() {
@@ -991,7 +1472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_mission_run_settings_clears_terminal_reason() {
+    async fn update_mission_run_settings_preserves_stop_until_dispatch() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
             .await
@@ -1024,10 +1505,10 @@ mod tests {
             .await
             .expect("update run settings");
 
-        assert_eq!(updated.terminal_reason, None);
+        assert_eq!(updated.terminal_reason.as_deref(), Some("rate_limited"));
         assert_eq!(updated.session_id.as_deref(), Some("new-session"));
-        assert!(!updated.resumable);
-        assert_eq!(updated.interrupted_at, None);
+        assert!(updated.resumable);
+        assert!(updated.interrupted_at.is_none());
     }
 
     #[tokio::test]

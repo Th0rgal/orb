@@ -11,6 +11,49 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+fn claude_process_exited(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if matches!(
+            stat.rsplit_once(") ")
+                .and_then(|(_, rest)| rest.chars().next()),
+            Some('Z' | 'X')
+        ) {
+            return true;
+        }
+    }
+    unsafe {
+        libc::kill(pid as i32, 0) != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn claude_exit_monitor_recognizes_unreaped_child() {
+    assert!(!claude_process_exited(std::process::id()));
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !claude_process_exited(child.id()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let exited_before_reaping = claude_process_exited(child.id());
+    child.wait().unwrap();
+    assert!(exited_before_reaping);
+}
+
+fn successful_empty_terminal_result(
+    cancelled: bool,
+    had_error: bool,
+    saw_terminal_result_event: bool,
+    final_result: &str,
+) -> bool {
+    !cancelled && !had_error && saw_terminal_result_event && final_result.trim().is_empty()
+}
+
 use crate::agents::{AgentResult, CompletionConfidence, CompletionSignal, TerminalReason};
 use crate::api::control::AgentEvent;
 use tokio::sync::RwLock;
@@ -35,7 +78,10 @@ use crate::workspace_exec::WorkspaceExec;
 /// thinking block every turn, so thoughts are captured deterministically.
 ///
 /// Returns 0 for unknown efforts, leaving thinking fully adaptive.
-fn claude_thinking_budget(effort: &str) -> u32 {
+fn claude_thinking_budget(model: Option<&str>, effort: &str) -> u32 {
+    if model.is_some_and(crate::model_policy::requires_adaptive_thinking) {
+        return 0;
+    }
     match effort.trim().to_ascii_lowercase().as_str() {
         "max" => 32_000,
         "xhigh" => 24_000,
@@ -371,6 +417,32 @@ pub fn run_claudecode_turn<'a>(
         // host credentials into the mission directory if needed.
         let mission_creds_path = work_dir.join(".claude").join(".credentials.json");
         let using_override_auth = override_auth.is_some();
+        // Credential-owner policy: when CLIProxyAPI owns the Anthropic
+        // credential, this harness talks to the proxy with the proxy key and
+        // never receives an OAuth file. Any mission-local `.credentials.json`
+        // is removed so Claude Code cannot prefer it over
+        // ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY, and the host tiers are neither
+        // read, copied nor back-synced (they are not the owner any more).
+        let proxy_owned = !using_override_auth
+            && crate::api::oauth_owner::cli_proxy_owns(
+                crate::ai_providers::ProviderType::Anthropic,
+            )
+            && claudecode_cli_proxy_config().is_some();
+        if proxy_owned && mission_creds_path.exists() {
+            match std::fs::remove_file(&mission_creds_path) {
+                Ok(_) => tracing::info!(
+                    mission_id = %mission_id,
+                    path = %mission_creds_path.display(),
+                    "Removed mission Claude CLI credentials: Anthropic OAuth is owned by CLIProxyAPI"
+                ),
+                Err(e) => tracing::warn!(
+                    mission_id = %mission_id,
+                    path = %mission_creds_path.display(),
+                    error = %e,
+                    "Failed to remove mission Claude CLI credentials (proxy-owned mode)"
+                ),
+            }
+        }
         if using_override_auth && mission_creds_path.exists() {
             match std::fs::remove_file(&mission_creds_path) {
                 Ok(_) => {
@@ -397,7 +469,7 @@ pub fn run_claudecode_turn<'a>(
         // still holds the old (now-invalid) refresh_token. Without this back-sync
         // the next backend refresh — or any sibling mission that copies host
         // creds — would hit "refresh_token already used" / invalid_grant.
-        if !using_override_auth {
+        if !using_override_auth && !proxy_owned {
             if let (Some(host_path), Some((m_access, m_expires, m_refresh, m_has_refresh))) = (
                 find_host_claude_cli_credentials(),
                 read_claude_cli_credentials(&mission_creds_path),
@@ -461,7 +533,7 @@ pub fn run_claudecode_turn<'a>(
         }
 
         // Copy host credentials if missing OR if the existing ones are expired/near-expiry.
-        let needs_copy = if using_override_auth {
+        let needs_copy = if using_override_auth || proxy_owned {
             false
         } else if !looks_like_claude_cli_credentials(&mission_creds_path) {
             true
@@ -548,8 +620,9 @@ pub fn run_claudecode_turn<'a>(
                 }
             }
         }
-        let mut has_cli_creds =
-            !using_override_auth && looks_like_claude_cli_credentials(&mission_creds_path);
+        let mut has_cli_creds = !using_override_auth
+            && !proxy_owned
+            && looks_like_claude_cli_credentials(&mission_creds_path);
         if let Some((expires_at, has_refresh)) = claude_cli_credentials_info(&mission_creds_path) {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let is_expired = expires_at < now_ms;
@@ -597,7 +670,8 @@ pub fn run_claudecode_turn<'a>(
                 tracing::info!(
                     mission_id = %mission_id,
                     base_url = %proxy.base_url,
-                    "Using Claude Code via CLI Proxy API fallback"
+                    proxy_owned,
+                    "Using Claude Code via CLI Proxy API"
                 );
             }
             config
@@ -901,19 +975,21 @@ pub fn run_claudecode_turn<'a>(
 
         // Check for Claude Code builtin slash commands that need special handling
         let trimmed_message = message.trim();
-        let (effective_message, permission_mode) =
-            if trimmed_message == "/plan" || trimmed_message.starts_with("/plan ") {
-                // /plan triggers plan mode via --permission-mode plan
-                let rest = trimmed_message.strip_prefix("/plan").unwrap_or("").trim();
-                let msg = if rest.is_empty() {
-                    "Please analyze the codebase and create a plan for the task.".to_string()
-                } else {
-                    rest.to_string()
-                };
-                (msg, Some("plan"))
+        let (effective_message, permission_mode) = if trimmed_message
+            .strip_prefix("/plan")
+            .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+        {
+            // /plan triggers plan mode via --permission-mode plan
+            let rest = trimmed_message.strip_prefix("/plan").unwrap_or("").trim();
+            let msg = if rest.is_empty() {
+                "Please analyze the codebase and create a plan for the task.".to_string()
             } else {
-                (message.to_string(), None)
+                rest.to_string()
             };
+            (msg, Some("plan"))
+        } else {
+            (message.to_string(), None)
+        };
 
         // Build CLI arguments
         let mut args = vec![
@@ -932,7 +1008,15 @@ pub fn run_claudecode_turn<'a>(
 
         // Skip all permission checks. IS_SANDBOX=1 is set in env vars below
         // to allow --dangerously-skip-permissions even when running as root.
-        args.push("--dangerously-skip-permissions".to_string());
+        let native_plan = permission_mode == Some("plan");
+        if native_plan {
+            if tool_hub.is_none() {
+                return AgentResult::failure("Native plan interactions are unavailable", 0);
+            }
+            args.extend(["--permission-prompt-tool".to_string(), "stdio".to_string()]);
+        } else {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
 
         // Claude Code settings and MCP config are loaded via CLAUDE_CONFIG_DIR
         // which points to the per-mission .claude directory. Claude Code auto-discovers
@@ -1099,8 +1183,9 @@ pub fn run_claudecode_turn<'a>(
         // MID-TURN (picked up after the current tool call completes, like
         // typing in the interactive CLI). The positional prompt is ignored
         // by the CLI in this mode, so it is not added.
-        let stream_input = crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
-            && !force_argv_prompt;
+        let stream_input = native_plan
+            || (crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
+                && !force_argv_prompt);
         if stream_input {
             args.push("--input-format".to_string());
             args.push("stream-json".to_string());
@@ -1168,6 +1253,12 @@ pub fn run_claudecode_turn<'a>(
         // as inline JSON (not a file path), causing a SyntaxError at startup.
         // CLAUDE_CONFIG_DIR + --settings flag are sufficient.
 
+        // Opus 5.5/Fable 5.1 reject manual budgets, including inherited profile settings.
+        if model.is_some_and(crate::model_policy::requires_adaptive_thinking) {
+            env.remove("MAX_THINKING_TOKENS");
+            env.remove("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING");
+        }
+
         // Set effort level via environment variable.
         // Claude Code reads CLAUDE_CODE_EFFORT_LEVEL to control adaptive reasoning depth.
         if let Some(effort) = model_effort {
@@ -1179,7 +1270,7 @@ pub fn run_claudecode_turn<'a>(
             // block we can capture and stream. (The capture pipeline already
             // handles thinking_delta — see backend/shared.rs — the CLI just
             // wasn't emitting any.)
-            let thinking_tokens = claude_thinking_budget(effort);
+            let thinking_tokens = claude_thinking_budget(model, effort);
             if thinking_tokens > 0 {
                 env.insert(
                     "MAX_THINKING_TOKENS".to_string(),
@@ -1399,6 +1490,21 @@ pub fn run_claudecode_turn<'a>(
         // Claude Code 2.1.x can hang indefinitely when stdout is a pipe (non-tty),
         // even in `--print --output-format stream-json` mode. Running it under a PTY
         // fixes this and restores streaming.
+        // SDK stream-json requires non-TTY stdin. Retain the PTY output for
+        // streaming, but pipe its raw input through cat. All CLI arguments are
+        // positional shell parameters, never interpolated into shell source.
+        let (program, full_args) = if native_plan {
+            let mut piped = vec![
+                "-c".to_string(),
+                "cat | \"$@\"".to_string(),
+                "orb-native-plan".to_string(),
+                program,
+            ];
+            piped.extend(full_args);
+            ("/bin/sh".to_string(), piped)
+        } else {
+            (program, full_args)
+        };
         let mut pty = match workspace_exec
             .spawn_streaming_pty(work_dir, &program, &full_args, env)
             .await
@@ -1436,6 +1542,14 @@ pub fn run_claudecode_turn<'a>(
             }
             let mut initial_prompt_delivered = false;
             if let Some(w) = stdin_writer.as_mut() {
+                if native_plan {
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        w,
+                        "{}",
+                        serde_json::json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}})
+                    );
+                }
                 let init = serde_json::json!({
                     "type": "user",
                     "message": { "role": "user", "content": [{ "type": "text", "text": effective_message }] }
@@ -1478,7 +1592,8 @@ pub fn run_claudecode_turn<'a>(
             }
         };
 
-        let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (line_tx, mut line_rx) =
+            tokio::sync::mpsc::channel::<(std::time::Instant, String)>(256);
         let reader_mission_id = mission_id.to_string();
         let reader_handle = tokio::task::spawn_blocking(move || {
             use std::io::BufRead;
@@ -1508,7 +1623,10 @@ pub fn run_claudecode_turn<'a>(
                             );
                         }
                         let s = String::from_utf8_lossy(&buf).to_string();
-                        if line_tx.send(s).is_err() {
+                        if line_tx
+                            .blocking_send((std::time::Instant::now(), s))
+                            .is_err()
+                        {
                             tracing::debug!(
                                 mission_id = %reader_mission_id,
                                 "PTY reader: channel closed"
@@ -1535,7 +1653,7 @@ pub fn run_claudecode_turn<'a>(
         // Track tool calls for result mapping
         let mut pending_tools: HashMap<String, String> = HashMap::new();
         // Track Claude Code's built-in ScheduleWakeup calls so we can convert
-        // a successful tool result into an open_agent wakeup automation.
+        // a successful tool result into a sandboxed.sh wakeup automation.
         // Maps tool_use_id -> (delay_seconds, prompt, reason).
         let mut pending_wakeups: HashMap<String, (u64, String, String)> = HashMap::new();
         let mut total_cost_usd: Option<f64> = None;
@@ -1547,6 +1665,7 @@ pub fn run_claudecode_turn<'a>(
         let mut final_result = String::new();
         let mut had_error = false;
         let mut saw_terminal_result_event = false;
+        let mut implement_after_plan = false;
         let mut process_exited_without_result = false;
         let mut idle_timeout_triggered = false;
         let mut transport_failure_stage: Option<ClaudeTransportFailureStage> = None;
@@ -1564,7 +1683,8 @@ pub fn run_claudecode_turn<'a>(
         // surface a marker instead of a silently empty thoughts panel.
         let mut thinking_audit = crate::backend::shared::ThinkingDeltaAudit::default();
         let mut encrypted_marker_emitted = false;
-        let mut text_buffer: HashMap<u32, String> = HashMap::new();
+        let mut text_buffer: std::collections::BTreeMap<u32, String> =
+            std::collections::BTreeMap::new();
         let mut active_thinking_index: Option<u32> = None; // Track which thinking block is active
         let mut finalized_thinking_indices: std::collections::HashSet<u32> =
             std::collections::HashSet::new(); // Blocks already sent done:true during streaming
@@ -1597,7 +1717,14 @@ pub fn run_claudecode_turn<'a>(
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(4096);
         let mut first_text_delta_at: Option<Instant> = None;
+        let mut repetition_guard = super::stream_guard::Guard::new();
+        let mut guard_tick = tokio::time::interval(Duration::from_secs(1));
+        guard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut text_tick = tokio::time::interval(Duration::from_millis(50));
+        text_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut text_coalescer = TextDeltaCoalescer::new();
         let mut degenerate_stage_triggered: bool = false;
+        let mut degenerate_evidence: Option<String> = None;
 
         let mut saw_non_init_event = false;
         let startup_timeout = Duration::from_secs(
@@ -1655,33 +1782,29 @@ pub fn run_claudecode_turn<'a>(
         // (e.g. while `gh` is still running), child processes can keep the PTY
         // slave fd open, preventing the PTY reader from getting EOF. We detect
         // the main process exit and break the loop with a grace period.
-        let process_exit_notify = {
-            let notify = Arc::new(tokio::sync::Notify::new());
-            if let Some(pid) = pty.process_id() {
-                let notify_clone = Arc::clone(&notify);
-                let exit_mission_id = mission_id.to_string();
-                tokio::task::spawn_blocking(move || {
-                    let pid = pid as i32;
-                    loop {
-                        // kill(pid, 0) checks if the process exists without
-                        // actually sending a signal.
-                        let alive = unsafe { libc::kill(pid, 0) } == 0;
-                        if !alive {
-                            tracing::debug!(
-                                mission_id = %exit_mission_id,
-                                pid = pid,
-                                "PTY child process has exited"
-                            );
-                            notify_clone.notify_one();
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+        let process_exit_notify = Arc::new(tokio::sync::Notify::new());
+        let process_monitor_cancel = CancellationToken::new();
+        let _process_monitor_guard = process_monitor_cancel.clone().drop_guard();
+        if let Some(pid) = pty.process_id() {
+            let notify = process_exit_notify.clone();
+            let stopped = process_monitor_cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    // kill(pid, 0) also succeeds for a zombie. Recognize exit
+                    // before wait() reaps it, and never leak a blocking monitor.
+                    if claude_process_exited(pid) {
+                        notify.notify_one();
+                        break;
                     }
-                });
-            }
-            notify
-        };
+                    tokio::select! {
+                        _ = stopped.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+            });
+        }
         let mut process_exited = false;
+        let mut last_queue_report = Instant::now();
         // Grace period: after process exits, wait briefly for remaining events
         // before breaking the loop. This lets us capture any final `result` event
         // that may already be buffered in the PTY/channel.
@@ -1763,7 +1886,7 @@ pub fn run_claudecode_turn<'a>(
                         "PTY child process exited, draining remaining events (3s grace)"
                     );
                 }
-                _ = tokio::time::sleep_until(process_exit_grace_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86400))), if process_exited => {
+                _ = tokio::time::sleep_until(process_exit_grace_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86400))), if process_exited && line_rx.is_empty() => {
                     // Grace period expired after process exit — no `result` event arrived.
                     tracing::warn!(
                         mission_id = %mission_id,
@@ -1832,12 +1955,52 @@ pub fn run_claudecode_turn<'a>(
                     });
                     last_heartbeat_at = Instant::now();
                 }
+                _ = text_tick.tick() => {
+                    let total_len = text_buffer.values().map(|s| s.len()).sum::<usize>();
+                    if total_len > last_text_len && text_coalescer.should_emit() {
+                        last_text_len = total_len;
+                        let _ = events_tx.send(AgentEvent::TextDelta {
+                            content: text_buffer.values().cloned().collect::<String>(),
+                            mission_id: Some(mission_id),
+                        });
+                    }
+                }
+                _ = guard_tick.tick() => {
+                    if !process_exited && !degenerate_stage_triggered && repetition_guard.dirty
+                        && first_text_delta_at.is_some_and(|t| t.elapsed() >= degenerate_min_duration) {
+                        repetition_guard.start(super::stream_guard::tail(&text_buffer, degenerate_window_chars),
+                            degenerate_window_chars, degenerate_min_substring_len, degenerate_min_repeats);
+                    }
+                }
+                verdict = repetition_guard.result() => {
+                    if let super::stream_guard::Verdict::Repeated { needle, evidence } = verdict {
+                        // A completed worker is advisory. Only act while this same
+                        // turn is alive and its exact evidence is still in the current tail.
+                        if !process_exited && !cancel.is_cancelled()
+                            && !pty.process_id().is_some_and(claude_process_exited)
+                            && super::stream_guard::tail(&text_buffer, degenerate_window_chars).contains(&evidence) {
+                            tracing::warn!(mission_id = %mission_id, repeated_substring = %needle,
+                                "Claude Code stream repeats adjacent meaningful text; stopping CLI");
+                            degenerate_stage_triggered = true;
+                            degenerate_evidence = Some(needle);
+                            pty.kill();
+                            reader_handle.abort();
+                            break;
+                        }
+                    }
+                }
                 line_opt = line_rx.recv() => {
-                    let Some(raw_line) = line_opt else {
+                    let Some((read_at, raw_line)) = line_opt else {
                         // EOF - PTY closed
                         break;
                     };
 
+                    if last_queue_report.elapsed() >= Duration::from_secs(1) {
+                        tracing::debug!(mission_id = %mission_id, queue_depth = line_rx.len(),
+                            processing_delay_us = read_at.elapsed().as_micros() as u64,
+                            "Claude output dequeued");
+                        last_queue_report = Instant::now();
+                    }
                     let raw_line = raw_line.trim_end_matches(&['\r', '\n'][..]);
                     let cleaned = strip_ansi_codes(raw_line);
                     let line = cleaned.trim();
@@ -1856,6 +2019,61 @@ pub fn run_claudecode_turn<'a>(
                             });
                         }
                         continue;
+                    }
+
+                    if native_plan {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                            if event["type"] == "control_response" {
+                                if event["response"]["subtype"] == "error" {
+                                    pty.kill();return AgentResult::failure(format!("Native plan initialization failed: {}",event["response"]["error"]),0);
+                                }
+                                continue;
+                            }
+                            // Newer SDKs execute immediately after ExitPlanMode.
+                            // Only send a continuation if this version ended the
+                            // turn without starting any execution tools.
+                            if implement_after_plan && event["type"]=="assistant" && event["message"]["content"].as_array().is_some_and(|blocks|blocks.iter().any(|b|b["type"]=="tool_use" && b["name"]!="ExitPlanMode" && b["name"]!="AskUserQuestion")) {
+                                implement_after_plan=false;
+                            }
+                            if event["type"] == "result" && implement_after_plan {
+                                implement_after_plan = false;
+                                if let Some(w)=stdin_writer.as_mut() {
+                                    use std::io::Write as _;
+                                    let _=writeln!(w,"{}",serde_json::json!({"type":"control_request","request_id":"orb-execute","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}));
+                                    let _=writeln!(w,"{}",serde_json::json!({"type":"user","message":{"role":"user","content":"Implement the approved plan."}}));
+                                    let _=w.flush();
+                                }
+                                continue;
+                            }
+                            if event["type"] == "control_request" && event["request"]["subtype"] == "can_use_tool" {
+                                let input=event["request"]["input"].clone();
+                                let tool=event["request"]["tool_name"].as_str().unwrap_or("");
+                                let method=match tool {"AskUserQuestion"=>"claude_questions","ExitPlanMode"=>"plan",_=>"permission"};
+                                let id=format!("native-{}",Uuid::new_v4());
+                                let hub=tool_hub.as_ref().expect("checked native plan hub");
+                                let rx=hub.register(id.clone()).await;
+                                let _guard=FrontendToolHub::begin_waiting(hub,mission_id);
+                                let name="ui_native_request".to_string();
+                                let _=events_tx.send(AgentEvent::ToolCall{tool_call_id:id.clone(),name:name.clone(),args:serde_json::json!({"method":method,"params":if method=="permission" {serde_json::json!({"tool":tool,"input":input})}else{input.clone()}}),mission_id:Some(mission_id)});
+                                let answer=tokio::select! {_=cancel.cancelled()=>{hub.unregister(&id).await;pty.kill();return AgentResult::failure("Cancelled",0).with_terminal_reason(TerminalReason::Cancelled);},_=process_exit_notify.notified()=>{hub.unregister(&id).await;return AgentResult::failure("The session exited while waiting for your response",0);},answer=rx=>answer.unwrap_or(serde_json::Value::Null)};
+                                let response=if tool=="AskUserQuestion" {
+                                    let mut updated=input;updated["answers"]=answer["answers"].clone();serde_json::json!({"behavior":"allow","updatedInput":updated})
+                                }else if answer["action"]=="accept" {
+                                    if tool=="ExitPlanMode" {implement_after_plan=true;}
+                                    serde_json::json!({"behavior":"allow","updatedInput":input})
+                                }else {serde_json::json!({"behavior":"deny","message":answer["feedback"].as_str().unwrap_or("The user declined this action.")})};
+                                if let Some(w)=stdin_writer.as_mut() {
+                                    use std::io::Write as _;
+                                    if writeln!(w,"{}",serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}})).and_then(|_|w.flush()).is_err() {
+                                        pty.kill();return AgentResult::failure("The native request could not receive your answer",0);
+                                    }
+                                }
+                                let _=events_tx.send(AgentEvent::ToolResult{tool_call_id:id,name,result:answer,mission_id:Some(mission_id)});
+                                idle_deadline = claudecode_idle_deadline(turn_wait_state,Instant::now(),idle_timeout,tool_idle_timeout,post_tool_result_idle_timeout,tool_timeout_override);
+
+                                continue;
+                            }
+                        }
                     }
 
                     let claude_event: ClaudeEvent = match serde_json::from_str(line) {
@@ -1970,7 +2188,7 @@ pub fn run_claudecode_turn<'a>(
                                                         // Stream text deltas similar to thinking panel
                                                         // This allows users to see tool use descriptions as they're generated
                                                         let total_len = text_buffer.values().map(|s| s.len()).sum::<usize>();
-                                                        if total_len > last_text_len {
+                                                        if total_len > last_text_len && text_coalescer.should_emit() {
                                                             let accumulated: String = text_buffer.values().cloned().collect::<Vec<_>>().join("");
                                                             last_text_len = total_len;
 
@@ -1980,54 +2198,8 @@ pub fn run_claudecode_turn<'a>(
                                                             });
                                                         }
 
-                                                        // Degenerate-stream detector. Some models enter a
-                                                        // tight loop emitting the same short string over
-                                                        // and over (e.g. "Yielding pending your choice.")
-                                                        // and never emit a terminal result. The per-turn
-                                                        // idle timer never fires because events keep
-                                                        // arriving, so the user is stuck watching a
-                                                        // streaming view that never finalises and is
-                                                        // billed for the full token burn. Once we see the
-                                                        // same meaningful substring repeated several
-                                                        // times in a sliding window past a minimum
-                                                        // streaming duration we kill the CLI, surface a
-                                                        // clear "model entered a degenerate loop"
-                                                        // failure, and let the user send a new turn.
-                                                        if !degenerate_stage_triggered {
-                                                            if first_text_delta_at.is_none() {
-                                                                first_text_delta_at = Some(Instant::now());
-                                                            }
-                                                            let streaming_for = first_text_delta_at
-                                                                .map(|t| t.elapsed())
-                                                                .unwrap_or(Duration::ZERO);
-                                                            let total_acc: String = text_buffer
-                                                                .values()
-                                                                .cloned()
-                                                                .collect::<Vec<_>>()
-                                                                .join("");
-                                                            if streaming_for >= degenerate_min_duration
-                                                                && text_buffer_stream_looks_degenerate(
-                                                                    &total_acc,
-                                                                    degenerate_window_chars,
-                                                                    degenerate_min_substring_len,
-                                                                    degenerate_min_repeats,
-                                                                )
-                                                            {
-                                                                tracing::warn!(
-                                                                    mission_id = %mission_id,
-                                                                    streaming_for_secs = streaming_for.as_secs(),
-                                                                    total_text_chars = total_len,
-                                                                    window_chars = degenerate_window_chars,
-                                                                    min_substring_len = degenerate_min_substring_len,
-                                                                    min_repeats = degenerate_min_repeats,
-                                                                    "Claude Code stream looks degenerate (same substring repeated); killing CLI"
-                                                                );
-                                                                degenerate_stage_triggered = true;
-                                                                pty.kill();
-                                                                reader_handle.abort();
-                                                                break;
-                                                            }
-                                                        }
+                                                        first_text_delta_at.get_or_insert_with(Instant::now);
+                                                        repetition_guard.dirty = true;
                                                     }
                                                 }
                                             }
@@ -2062,6 +2234,13 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                 }
                                 ClaudeEvent::Assistant(evt) => {
+                                    if text_buffer.values().map(|s| s.len()).sum::<usize>() > last_text_len {
+                                        let _ = events_tx.send(AgentEvent::TextDelta {
+                                            content: text_buffer.values().cloned().collect::<String>(),
+                                            mission_id: Some(mission_id),
+                                        });
+                                    }
+
                                     if let Some(m) = evt.message.model.as_ref() {
                                         observed_model = Some(m.clone());
                                     }
@@ -2149,7 +2328,7 @@ pub fn run_claudecode_turn<'a>(
                                                     }
                                                 }
 
-                                                if name == "question" || name == "AskUserQuestion" || name.starts_with("ui_") {
+                                                if !native_plan && (name == "question" || name == "AskUserQuestion" || name.starts_with("ui_")) {
                                                     if let Some(ref hub) = tool_hub {
                                                         tracing::info!(
                                                             mission_id = %mission_id,
@@ -2340,6 +2519,7 @@ pub fn run_claudecode_turn<'a>(
                                     // starts fresh (block indices restart from 0 each turn)
                                     thinking_buffer.clear();
                                     text_buffer.clear();
+                                    repetition_guard.reset();
                                     active_thinking_index = None;
                                     finalized_thinking_indices.clear();
                                     last_text_len = 0;
@@ -2363,7 +2543,7 @@ pub fn run_claudecode_turn<'a>(
                                             }
 
                                             // Convert a successful Claude built-in
-                                            // ScheduleWakeup into an open_agent wakeup
+                                            // ScheduleWakeup into a sandboxed.sh wakeup
                                             // automation. Claude Code's CLI handles the
                                             // tool locally and emits a confirmation result
                                             // but no further re-invocation happens in
@@ -2485,6 +2665,17 @@ pub fn run_claudecode_turn<'a>(
             mission_id = %mission_id,
             "Event loop completed, waiting for Claude Code process"
         );
+        repetition_guard.reset();
+        process_monitor_cancel.cancel();
+        line_rx.close();
+        drop(line_rx);
+        if text_buffer.values().map(|s| s.len()).sum::<usize>() > last_text_len {
+            let _ = events_tx.send(AgentEvent::TextDelta {
+                content: text_buffer.values().cloned().collect::<String>(),
+                mission_id: Some(mission_id),
+            });
+        }
+
         // The final result has already been parsed at this point — the only
         // thing left is process teardown. The CLI can fail to exit when a
         // spawned MCP server (or any child) keeps running and holds the PTY
@@ -2499,18 +2690,21 @@ pub fn run_claudecode_turn<'a>(
         if stream_input {
             drop(stdin_writer.take());
         }
-        const CLI_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+        // The SDK session intentionally keeps reading for its next turn. Once
+        // its terminal result is captured, retire this process promptly; the
+        // next user turn resumes the durable session.
+        let cli_exit_grace = std::time::Duration::from_secs(if native_plan { 1 } else { 30 });
         let child_pid = pty.process_id();
         let mut wait_handle = tokio::task::spawn_blocking(move || {
             let mut pty = pty;
             pty.wait()
         });
-        let exit_status = match tokio::time::timeout(CLI_EXIT_GRACE, &mut wait_handle).await {
+        let exit_status = match tokio::time::timeout(cli_exit_grace, &mut wait_handle).await {
             Ok(joined) => joined,
             Err(_) => {
                 tracing::warn!(
                     mission_id = %mission_id,
-                    grace_secs = CLI_EXIT_GRACE.as_secs(),
+                    grace_secs = cli_exit_grace.as_secs(),
                     "Claude CLI did not exit after final result; killing leftover process tree"
                 );
                 #[cfg(unix)]
@@ -2618,10 +2812,27 @@ pub fn run_claudecode_turn<'a>(
                     "Claude Code stream looked degenerate; killed CLI and treating as degenerate-stream failure"
                 );
                 let partial_chars = final_result.chars().count();
-                final_result = format!(
-                    "Claude Code entered a degenerate output loop (the same short string was repeated many times in the streamed response) and the turn was cut short to avoid a runaway 50-minute bill — see mission ab260b2e for the canonical example.\n\nThe model never produced a terminal result event. Partial output ({} chars) was preserved; resend your last message to try again.",
-                    partial_chars
+                // Keep the partial output. The previous message claimed it
+                // was "preserved" while overwriting it — mission 7fb8970f
+                // lost five minutes of verified findings to that word.
+                let evidence_line = degenerate_evidence
+                    .as_deref()
+                    .map(|needle| {
+                        format!(
+                            "\nRepeated substring (the guard's evidence): {:?}",
+                            needle.chars().take(120).collect::<String>()
+                        )
+                    })
+                    .unwrap_or_default();
+                let notice = format!(
+                    "Claude Code entered a degenerate output loop (the same short string was repeated many times in the streamed response) and the turn was cut short to avoid a runaway 50-minute bill — see mission ab260b2e for the canonical example.{}\n\nThe model never produced a terminal result event. Partial output ({} chars) is preserved below; resend your last message to try again.",
+                    evidence_line, partial_chars
                 );
+                final_result = if final_result.trim().is_empty() {
+                    notice
+                } else {
+                    format!("{notice}\n\n--- partial output ---\n{final_result}")
+                };
             } else if !saw_non_init_event {
                 transport_failure_stage = Some(ClaudeTransportFailureStage::Startup);
                 tracing::warn!(
@@ -2676,8 +2887,28 @@ pub fn run_claudecode_turn<'a>(
         }
 
         if !cancelled && final_result.trim().is_empty() && !had_error {
-            had_error = true;
-            if !non_json_output.is_empty() {
+            // A successful terminal Result is the protocol-level completion
+            // signal. Claude may legitimately leave its `result` field empty
+            // after a tool-only/background-task notification, and lingering
+            // descendants can then make our bounded teardown SIGKILL the PTY
+            // process group. Do not reinterpret that runner-owned cleanup as
+            // an LLM/OS failure (mission 822c46f4 did exactly this after it had
+            // already pushed its successor and emitted a successful Result).
+            if successful_empty_terminal_result(
+                cancelled,
+                had_error,
+                saw_terminal_result_event,
+                &final_result,
+            ) {
+                tracing::info!(
+                    mission_id = %mission_id,
+                    exit_status = ?exit_status,
+                    "Claude Code completed successfully without textual output"
+                );
+                final_result =
+                    "Claude Code completed successfully without a textual response.".to_string();
+            } else if !non_json_output.is_empty() {
+                had_error = true;
                 tracing::warn!(
                     mission_id = %mission_id,
                     exit_status = ?exit_status,
@@ -2688,6 +2919,7 @@ pub fn run_claudecode_turn<'a>(
                     non_json_output.join(" | ")
                 );
             } else if !malformed_json_output.is_empty() {
+                had_error = true;
                 tracing::warn!(
                     mission_id = %mission_id,
                     exit_status = ?exit_status,
@@ -2698,6 +2930,7 @@ pub fn run_claudecode_turn<'a>(
                     malformed_json_output.join(" | ")
                 );
             } else {
+                had_error = true;
                 let exit_summary = describe_pty_exit_status(&exit_status);
                 let mut message = format!(
                     "Claude Code produced no output. Exit status: {}.",
@@ -2777,7 +3010,15 @@ pub fn run_claudecode_turn<'a>(
             } else {
                 TerminalReason::LlmError
             };
-            AgentResult::failure(final_result, cost_cents).with_terminal_reason(reason)
+            let mut failure =
+                AgentResult::failure(final_result, cost_cents).with_terminal_reason(reason);
+            if let Some(needle) = degenerate_evidence.as_deref() {
+                failure = failure.with_terminal_evidence(format!(
+                    "repeated substring: {:?}",
+                    needle.chars().take(200).collect::<String>()
+                ));
+            }
+            failure
         } else if is_success_path_rate_limited_error(&final_result) {
             // Claude Code sometimes surfaces subscription quota exhaustion as a
             // normal assistant message (e.g. "You've hit your limit · resets
@@ -2900,6 +3141,7 @@ fn claudecode_oversized_resume_transcript(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_claudecode_turn_with_recovery(
+    mission_store: Option<std::sync::Arc<dyn crate::api::mission_store::MissionStore>>,
     workspace: &Workspace,
     work_dir: &std::path::Path,
     message: &str,
@@ -2918,6 +3160,10 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
     history: &[(String, String)],
     max_history_total_chars: usize,
 ) -> AgentResult {
+    let native_plan_request = message
+        .trim()
+        .strip_prefix("/plan")
+        .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace));
     // Track the effective message and session used for the most recent
     // attempt, so account rotation uses the right context (e.g. after
     // session corruption recovery rebuilds the message).
@@ -2933,7 +3179,11 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
     // up front (same mechanism as the ResetSessionFresh recovery arm below) so
     // the first attempt starts clean with rebuilt history instead of hanging.
     let mut first_turn_is_continuation = is_continuation;
-    if is_continuation && !cancel.is_cancelled() && !crate::api::routes::is_shutdown_initiated() {
+    if !native_plan_request
+        && is_continuation
+        && !cancel.is_cancelled()
+        && !crate::api::routes::is_shutdown_initiated()
+    {
         if let Some(sid) = effective_sid.clone() {
             if let Some(size) = claudecode_oversized_resume_transcript(work_dir, &sid) {
                 let new_session_id = Uuid::new_v4().to_string();
@@ -2944,10 +3194,17 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     transcript_bytes = size,
                     "Resume transcript exceeds cap; rotating to a fresh session before first attempt"
                 );
-                let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+                if let Err(failure) = super::persist_and_publish_native_session(
+                    mission_store.as_ref(),
                     mission_id,
-                    session_id: new_session_id.clone(),
-                });
+                    "claudecode",
+                    &new_session_id,
+                    &events_tx,
+                )
+                .await
+                {
+                    return *failure;
+                }
                 let session_marker = work_dir.join(".claude-session-initiated");
                 if session_marker.exists() {
                     let _ = std::fs::remove_file(&session_marker);
@@ -3001,6 +3258,11 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
     )
     .await;
 
+    // A native interactive session must never fall back to an argv-only
+    // session or lose its permission mode during recovery.
+    if native_plan_request {
+        return result;
+    }
     let mut force_argv_prompt = false;
     if crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
         && claudecode_result_is_startup_transport_failure(&result)
@@ -3093,10 +3355,17 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     "Claude transport recovery is rotating to a fresh session"
                 );
 
-                let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+                if let Err(failure) = super::persist_and_publish_native_session(
+                    mission_store.as_ref(),
                     mission_id,
-                    session_id: new_session_id.clone(),
-                });
+                    "claudecode",
+                    &new_session_id,
+                    &events_tx,
+                )
+                .await
+                {
+                    return *failure;
+                }
 
                 let session_marker = work_dir.join(".claude-session-initiated");
                 if session_marker.exists() {
@@ -3155,37 +3424,102 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
     // detect "auth error" in the output, preemptively refresh credentials so
     // the transport recovery retry (above) uses fresh tokens. This is cheap
     // (just a token validity check) and prevents cascading auth failures.
+    //
+    // When CLIProxyAPI owns the Anthropic credential there is no local token
+    // to refresh — the mission never received one. Re-probe the proxy instead
+    // so the logs show whether the proxy/upstream is the failure point.
+    let anthropic_owned_by_cli_proxy =
+        crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic);
     if !cancel.is_cancelled()
         && result.terminal_reason == Some(TerminalReason::LlmError)
         && result.output.contains("signal: Some(\"Killed\")")
     {
-        tracing::info!(
-            mission_id = %mission_id,
-            "SIGKILL detected — preemptively refreshing OAuth credentials"
-        );
-        let mission_creds = work_dir.join(".claude").join(".credentials.json");
-        if mission_creds.exists() {
-            let _ = std::fs::remove_file(&mission_creds);
-        }
-        if let Err(e) = crate::api::ai_providers::force_refresh_anthropic_oauth_token().await {
-            tracing::debug!(
-                "Preemptive OAuth refresh after SIGKILL failed (non-fatal): {}",
-                e
+        if anthropic_owned_by_cli_proxy {
+            tracing::info!(
+                mission_id = %mission_id,
+                "SIGKILL detected with CLIProxyAPI-owned Anthropic auth — probing proxy health"
             );
+            if let Some(endpoint) = crate::api::oauth_owner::cli_proxy_endpoint() {
+                let probe_exec = WorkspaceExec::new(workspace.clone());
+                if let Err(err) = check_claudecode_proxy_health(
+                    &probe_exec,
+                    work_dir,
+                    &endpoint.base_url,
+                    &endpoint.api_key,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        "{}",
+                        err
+                    );
+                }
+            }
+        } else {
+            tracing::info!(
+                mission_id = %mission_id,
+                "SIGKILL detected — preemptively refreshing OAuth credentials"
+            );
+            let mission_creds = work_dir.join(".claude").join(".credentials.json");
+            if mission_creds.exists() {
+                let _ = std::fs::remove_file(&mission_creds);
+            }
+            if let Err(e) = crate::api::ai_providers::force_refresh_anthropic_oauth_token().await {
+                tracing::debug!(
+                    "Preemptive OAuth refresh after SIGKILL failed (non-fatal): {}",
+                    e
+                );
+            }
         }
     }
 
     // Auth error recovery: if the token was revoked server-side but the
     // local expiry hadn't passed yet, invalidate stale credentials, force
     // an OAuth refresh, and retry once.
+    //
+    // When CLIProxyAPI owns the credential an auth error came *from the
+    // proxy*: do not invalidate host files or force-refresh (that would touch
+    // a token family sandboxed.sh no longer owns). Re-probe proxy health and
+    // retry the turn once; if the proxy itself is down the probe surfaces it.
+    // Cooling down the synthetic `anthropic-cli-proxy` account on persistent
+    // failure is a 3D item (it needs the shared provider health tracker).
     if result.terminal_reason == Some(TerminalReason::AuthError) && !cancel.is_cancelled() {
         tracing::warn!(
             mission_id = %mission_id,
+            anthropic_owned_by_cli_proxy,
             "Auth error detected — invalidating stale credentials and retrying"
         );
 
-        refresh_claude_credentials_after_auth_error(work_dir, "mission_runner_initial_auth_error")
+        if anthropic_owned_by_cli_proxy {
+            if let Some(endpoint) = crate::api::oauth_owner::cli_proxy_endpoint() {
+                let probe_exec = WorkspaceExec::new(workspace.clone());
+                match check_claudecode_proxy_health(
+                    &probe_exec,
+                    work_dir,
+                    &endpoint.base_url,
+                    &endpoint.api_key,
+                )
+                .await
+                {
+                    Ok(()) => tracing::info!(
+                        mission_id = %mission_id,
+                        "CLIProxyAPI is healthy; retrying the turn once through the proxy"
+                    ),
+                    Err(err) => tracing::warn!(
+                        mission_id = %mission_id,
+                        "{}",
+                        err
+                    ),
+                }
+            }
+        } else {
+            refresh_claude_credentials_after_auth_error(
+                work_dir,
+                "mission_runner_initial_auth_error",
+            )
             .await;
+        }
 
         // Retry with fresh credentials (override_auth=None forces re-resolution)
         result = run_claudecode_turn(
@@ -3327,7 +3661,22 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
 
 #[cfg(test)]
 mod background_task_tests {
-    use super::parse_background_task_start;
+    use super::{parse_background_task_start, successful_empty_terminal_result};
+
+    #[test]
+    fn successful_empty_terminal_result_survives_runner_teardown() {
+        assert!(successful_empty_terminal_result(false, false, true, " \n"));
+    }
+
+    #[test]
+    fn empty_output_without_successful_terminal_result_remains_an_error() {
+        assert!(!successful_empty_terminal_result(false, false, false, ""));
+        assert!(!successful_empty_terminal_result(false, true, true, ""));
+        assert!(!successful_empty_terminal_result(true, false, true, ""));
+        assert!(!successful_empty_terminal_result(
+            false, false, true, "answer"
+        ));
+    }
 
     #[test]
     fn parses_real_marker() {
@@ -3469,5 +3818,23 @@ mod resilience_tests {
             None
         );
         std::env::remove_var("SANDBOXED_SH_CLAUDECODE_MAX_RESUME_TRANSCRIPT_BYTES");
+    }
+}
+
+#[cfg(test)]
+mod opus_55_tests {
+    use super::*;
+    #[test]
+    fn opus_55_effort_never_forces_a_manual_thinking_budget() {
+        for model in [
+            "claude-opus-5-5",
+            "anthropic/claude-opus-5-5",
+            "claude-fable-5-1",
+        ] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                assert_eq!(claude_thinking_budget(Some(model), effort), 0);
+            }
+        }
+        assert_eq!(claude_thinking_budget(Some("claude-opus-5"), "high"), 16000);
     }
 }

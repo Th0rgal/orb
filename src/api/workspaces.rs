@@ -531,6 +531,7 @@ async fn create_workspace(
             mcps_replace_defaults,
             config_profile: config_profile.clone(),
             resolved_git_credentials: None,
+            read_only_command_guard_dir: None,
             harness_versions: None,
         },
         WorkspaceType::Container => {
@@ -550,6 +551,20 @@ async fn create_workspace(
             ws
         }
     };
+
+    // Ready is a filesystem promise: admission immediately stats this root.
+    // Only explicit creation may provision it; resuming a missing workspace
+    // must not recreate a config-only replacement for lost source.
+    if workspace.workspace_type == WorkspaceType::Host {
+        tokio::fs::create_dir_all(&workspace.path)
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot create host workspace directory: {error}"),
+                )
+            })?;
+    }
 
     let id = state.workspaces.add(workspace.clone()).await;
 
@@ -731,16 +746,18 @@ async fn update_workspace(
         }
     }
 
-    // Merge freeform config (shallow merge of top-level keys)
+    // Merge freeform config (shallow merge of top-level keys). The control
+    // registry path is server-owned and must not move with a client edit.
     if let Some(config) = req.config {
         if let Some(new_obj) = config.as_object() {
             let mut existing = workspace.config.as_object().cloned().unwrap_or_default();
             for (k, v) in new_obj {
+                if k == "mission_workspace_registry_control_root" {
+                    continue;
+                }
                 existing.insert(k.clone(), v.clone());
             }
             workspace.config = serde_json::Value::Object(existing);
-        } else {
-            workspace.config = config;
         }
     }
 
