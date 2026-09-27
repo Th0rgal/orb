@@ -22,6 +22,7 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["project.orb-test"].tap()
         XCTAssertTrue(app.otherElements["conversations-loading"].exists || app.staticTexts["Loading conversations…"].exists)
         XCTAssertFalse(app.staticTexts["No conversations yet"].exists)
+        capture(app, "conversation-loading-skeletons")
         XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 15))
         app.buttons["mission.long-chat"].tap()
         let latest = app.staticTexts["Message 080 — conversation history"]
@@ -61,6 +62,26 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Loading conversations…"].exists)
     }
+    @MainActor func testRichResponseStaysAtBottomAfterLayoutGrowth() async throws {
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
+        reset.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: reset)
+        let app = launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        let row = app.buttons["mission.rich-growth"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        let end = app.webViews.staticTexts["FINAL RESPONSE END"]
+        XCTAssertTrue(end.waitForExistence(timeout: 20))
+        let file = app.buttons["result.csv"]
+        await fulfillment(of: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: file)], timeout: 15)
+        try await Task.sleep(for: .seconds(3))
+        XCTAssertTrue(end.isHittable)
+        XCTAssertTrue(file.isHittable)
+        XCTAssertLessThanOrEqual(file.frame.maxY, app.otherElements["conversation-composer"].frame.minY)
+        capture(app, "rich-response-final-bottom")
+    }
     @MainActor func testCompactComposerKeyboardAndSettings() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
@@ -93,6 +114,10 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["Done"].tap()
     }
     @MainActor func testExpiredSessionAndServerPassword() throws {
+        addUIInterruptionMonitor(withDescription: "Password AutoFill prompt") { alert in
+            if alert.buttons["Not Now"].exists { alert.buttons["Not Now"].tap(); return true }
+            return false
+        }
         let app = XCUIApplication()
         app.launchArguments = ["-api_base_url", "http://127.0.0.1:18770", "-orb_test_reset", "YES"]
         app.launch()
@@ -119,7 +144,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["project.orb-test"].exists)
         app.buttons["Settings"].tap()
         XCTAssertTrue(password.waitForExistence(timeout: 10))
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: password)], timeout: 10), .completed)
+        if app.buttons["Not Now"].exists { app.buttons["Not Now"].tap() }
         password.tap(); password.typeText("orb-test-password")
         capture(app, "auth-server-password")
         app.buttons["Connect"].tap()

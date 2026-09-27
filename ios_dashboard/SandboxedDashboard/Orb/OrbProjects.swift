@@ -130,7 +130,7 @@ struct OrbProjectPage: View {
                     HStack { Text(filter).font(.subheadline); Spacer(); Button("Clear filter") { filter = "All" }.font(.subheadline) }.frame(minHeight: 44)
                 }
                 if !error.isEmpty { OrbNotice(message: error) }
-                if loading && missions.isEmpty { ProgressView("Loading conversations…").frame(maxWidth: .infinity).padding(.top, 32).accessibilityIdentifier("conversations-loading") }
+                if loading && missions.isEmpty { conversationSkeletons }
                 ForEach(visible.filter { $0.folder.isEmpty }) { row in missionLink(row) }
                 folderRows
                 if !loading && visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
@@ -152,6 +152,25 @@ struct OrbProjectPage: View {
         }
         .alert("New folder", isPresented: $newFolder) { TextField("Folder name", text: $folderName); Button("Create") { Task { await mkdir() } }; Button("Cancel", role: .cancel) {} }
         .task { await load() }.refreshable { await load(force: true) }
+    }
+    private var conversationSkeletons: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<5) { index in
+                HStack(alignment: .top, spacing: 14) {
+                    Circle().fill(Color.secondary.opacity(0.25)).frame(width: 8, height: 8).padding(.top, 9)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(index.isMultiple(of: 2) ? "Conversation title placeholder" : "Conversation title")
+                            .font(.body)
+                        Text("Agent · Conversation status").font(.subheadline).foregroundStyle(.secondary)
+                    }.redacted(reason: .placeholder)
+                    Spacer(minLength: 0)
+                }.padding(.vertical, 12)
+                    .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 22) }
+            }
+        }.allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading conversations")
+            .accessibilityIdentifier("conversations-loading")
     }
     private var folderRows: some View {
                 ForEach(paths.filter(shown), id: \.self) { folder in

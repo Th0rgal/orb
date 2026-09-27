@@ -119,24 +119,32 @@ struct SetupSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Server URL") {
-                    TextField("https://your-server.com", text: $serverURL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                        .accessibilityIdentifier("server-url")
-                }
-                Section("Sign in") {
-                    if api.authMode == .multiUser {
-                        TextField("Username", text: $username).textContentType(.username)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Server URL").font(.subheadline).foregroundStyle(.secondary)
+                        TextField("https://your-server.com", text: $serverURL)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                            .accessibilityIdentifier("server-url")
+                            .padding(16)
+                            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                     }
-                    SecureField("Password", text: $password).textContentType(.password)
-                        .accessibilityIdentifier("server-password")
-                    Text("Enter your password to reconnect or use different credentials.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
-            }.scrollContentBackground(.hidden).background(OrbStyle.background)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Sign in").font(.subheadline).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 16) {
+                            if api.authMode == .multiUser {
+                                TextField("Username", text: $username).textContentType(.username)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                Divider()
+                            }
+                            SecureField("Password", text: $password).textContentType(.password)
+                                .accessibilityIdentifier("server-password")
+                        }.padding(16)
+                            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
+                }.padding(20)
+            }.background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
                 .navigationTitle(allowsDismissal ? "Server" : "Connect to Orb")
                 .navigationBarTitleDisplayMode(.inline)

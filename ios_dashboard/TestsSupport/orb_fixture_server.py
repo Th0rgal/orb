@@ -15,12 +15,13 @@ PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
-    MISSIONS.clear(); RECEIPTS.clear()
+    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear()
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
     MISSIONS['long-chat']=dict(id='long-chat',title='Long conversation',status='awaiting_user',project='orb-test',backend='codex',tags=[],model_override='test-model',history=[dict(role='user',content=f'Message {i:03d} — conversation history') for i in range(1,81)])
     rich=Path(__file__).with_name('fixtures').joinpath('chatgpt-rich.md').read_text()
     MISSIONS['rich-chatgpt']=dict(id='rich-chatgpt',title='ChatGPT rich response',status='awaiting_user',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
+    MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})
     MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect ChatGPT',status='blocked',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your ChatGPT account in Orb on your Mac.','result':'','artifacts':[]}]})
 reset()
 class Handler(BaseHTTPRequestHandler):
@@ -59,6 +60,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'name':name,'content_base64':base64.b64encode(data).decode()})
             if p.endswith('/cloud'):
                 if not m['backend'].startswith('cloud_'): return self.send({},404)
+                if mid=='rich-growth' and COUNTS[p]>=2:
+                    result=json.loads(json.dumps(m['cloud_execution']))
+                    result['turns'][0].update(phase='response_complete',result=('## Rich layout section\n\nA paragraph with **bold text**, a list, and inline math $x^2+y^2=z^2$.\n\n' * 40)+'\nFINAL RESPONSE END',artifacts=[{'path':'/mnt/data/result.csv'}])
+                    return self.send(result)
                 return self.send(m['cloud_execution'])
             return self.send(m)
         return self.send({'error':'Not found'},404)

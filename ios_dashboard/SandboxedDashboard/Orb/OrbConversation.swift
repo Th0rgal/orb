@@ -8,6 +8,8 @@ struct OrbConversation: View {
     @State private var loading = true
     @State private var visibleCount = 20
     @State private var followsLatest = true
+    @State private var userScrolling = false
+    @State private var atBottom = true
     @State private var openedAtLatest = false
     @State private var mission: OrbJSON = .null
     @State private var execution: OrbJSON = .null
@@ -114,9 +116,27 @@ struct OrbConversation: View {
             }.padding(.horizontal, 20).padding(.vertical, 12)
         }
         .defaultScrollAnchor(.bottom)
+        .onScrollPhaseChange { _, phase in
+            userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+            if userScrolling { followsLatest = atBottom }
+        }
         .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 100
-        } action: { _, atBottom in followsLatest = atBottom }
+            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height + geometry.contentInsets.bottom - 32
+        } action: { _, value in
+            atBottom = value
+            // WebKit layout is not a user scroll: keep following while math/images resize.
+            if userScrolling { followsLatest = value }
+        }
+        .onScrollGeometryChange(for: CGSize.self) { geometry in
+            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
+        } action: { _, _ in
+            if followsLatest {
+                Task { @MainActor in
+                    await Task.yield()
+                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+                }
+            }
+        }
         .onChange(of: history.last?.0) { _, _ in
             if !openedAtLatest || followsLatest {
                 scroll.scrollTo("conversation-bottom", anchor: .bottom)

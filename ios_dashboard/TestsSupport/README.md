@@ -140,3 +140,21 @@ loading earlier messages without losing the reading position, the @ mode picker
 and /plan submission, compact keyboard/settings layout, and ChatGPT reopening
 with image/CSV previews. Screenshots `composer-mode-picker.png` and
 `conversation-latest-messages.png` show the final navigation/composer behavior.
+
+## Loading and bottom anchoring follow-up
+
+Cold conversation lists use five noninteractive skeleton rows with the real row
+spacing and a single VoiceOver loading label. Server settings use 14-point field
+corners without the redundant password helper.
+
+Bottom following now distinguishes user scrolling from content/viewport resizing.
+WebKit height updates keep following the end until the user scrolls away. The
+rich renderer contains collapsed block margins in its measured content box and
+disables nested automatic scroll insets, preventing the final paragraph from
+being clipped even when the artifact row is visible.
+
+`testRichResponseStaysAtBottomAfterLayoutGrowth` starts with a short running reply,
+then replaces it with 40 Markdown/math sections and a final marker. It verifies
+that the final marker and file button are both visible above the composer without
+a scroll gesture. This test and all seven native renderer tests passed; the
+existing loading/cache/earlier-history test also passed with the new scroll logic.
