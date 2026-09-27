@@ -16,6 +16,8 @@ commands.allow = [
   "local_run_reconcile",
   "local_bindings",
   "local_interaction",
+  "local_interaction_subscribe",
+  "local_interaction_unsubscribe",
   "local_interaction_answer",
   "local_session_git",
   "local_agents_scan",

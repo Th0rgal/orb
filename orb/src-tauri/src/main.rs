@@ -155,6 +155,8 @@ fn main() {
             run_recovery::local_run_launch,
             run_recovery::local_run_reconcile,
             interactions::local_interaction,
+            interactions::local_interaction_subscribe,
+            interactions::local_interaction_unsubscribe,
             interactions::local_interaction_answer,
             paloma_ssh_pubkey,
             session_preview::local_session_git,
