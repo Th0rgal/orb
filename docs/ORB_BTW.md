@@ -43,7 +43,10 @@ context. Reading the entire archive can still consume substantial tokens.
 
 The launch request sets `side_context_mode: "incremental"` so Core does not
 prepend the parent history a second time. Legacy callers retain their existing
-snapshot behavior. Attachments are uploaded to the target host and their paths
+snapshot behavior, capped to the first 4 KiB and latest 20 KiB of serialized
+history when it exceeds 24 KiB. The prompt explicitly marks omitted context;
+the current question is preserved. This prevents long-running parent sessions
+from exceeding the remote process argument limit. Attachments are uploaded to the target host and their paths
 passed to the agent; local images also use native harness attachment arguments.
 
 Core creates the side mission through `POST /api/control/missions/:id/btw/agent`.

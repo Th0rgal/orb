@@ -184,7 +184,24 @@ fn side_agent_prompt(
     if incremental {
         return Ok(question.to_owned());
     }
-    Ok(format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent automatically.\n\n<main_conversation>\n{}\n</main_conversation>\n\nCurrent request:\n{}", serde_json::to_string(&history).map_err(internal_error)?, question))
+    // Legacy clients send the full parent transcript. Keep it below the OS
+    // per-argument limit used by remote harness launches; current clients link
+    // an archive and send only an incremental summary instead.
+    let context = serde_json::to_string(history).map_err(internal_error)?;
+    let context = if context.len() > 24 * 1024 {
+        let mut head = 4 * 1024;
+        while !context.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = context.len() - 20 * 1024;
+        while !context.is_char_boundary(tail) {
+            tail += 1;
+        }
+        format!("{}\n[Middle of historical context omitted. These are excerpts, not complete JSON. Inspect workspace evidence as needed.]\n{}", &context[..head], &context[tail..])
+    } else {
+        context
+    };
+    Ok(format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent automatically.\n\n<main_conversation>\n{context}\n</main_conversation>\n\nCurrent request:\n{question}"))
 }
 
 #[cfg(test)]
@@ -198,7 +215,23 @@ mod side_context_tests {
             side_agent_prompt(&history, question, true).unwrap(),
             question
         );
-        assert!(side_agent_prompt(&history, question, false).unwrap().len() > 200_000);
+        let legacy = side_agent_prompt(&history, question, false).unwrap();
+        assert!(legacy.len() < 26 * 1024);
+        assert!(legacy.contains("historical context omitted"));
+        assert!(legacy.ends_with(question));
+    }
+    #[test]
+    fn legacy_context_preserves_objective_recent_evidence_and_unicode() {
+        let history = vec![
+            serde_json::json!({"role":"user", "content":"Original objective"}),
+            serde_json::json!({"role":"assistant", "content":"é🌲".repeat(60_000)}),
+            serde_json::json!({"role":"assistant", "content":"Latest validation receipt"}),
+        ];
+        let prompt = side_agent_prompt(&history, "Quel résultat ?", false).unwrap();
+        assert!(prompt.len() < 26 * 1024);
+        assert!(prompt.contains("Original objective"));
+        assert!(prompt.contains("Latest validation receipt"));
+        assert!(prompt.ends_with("Quel résultat ?"));
     }
 }
 
