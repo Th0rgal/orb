@@ -2433,3 +2433,12 @@ select.orb-select-native:disabled { cursor: default; }
 .followup-queue li { padding-right:48px; }
 .queue-edit { right:24px; }
 .followup-queue li:focus-within .queue-remove { opacity:1; }
+
+/* Image previews share the PDF viewer's floating controls. */
+.file-preview:has(.image-viewer) { padding:8px;overflow:hidden;display:flex;flex-direction:column; }
+.image-viewport { position:relative;flex:1;min-height:0;overflow:hidden;touch-action:none;cursor:grab;user-select:none; }
+.image-viewport.is-dragging { cursor:grabbing; }
+.image-viewport img { position:absolute;left:50%;top:50%;translate:-50% -50%;max-width:none;max-height:none;transform-origin:center;pointer-events:none; }
+.image-toolbar { white-space:nowrap; }
+.image-toolbar .image-percent { min-width:58px;font-variant-numeric:tabular-nums; }
+.image-status { position:absolute;top:16px;left:16px;right:16px;text-align:center; }

@@ -36,6 +36,8 @@ import { ErrorNotice } from "./ErrorNotice";
 import { connectionVersion } from "./api";
 import * as Ic from "./icons";
 
+import ImagePreview, { imageMime } from "./ImagePreview";
+
 const PdfPreview = lazy(() => import("./PdfPreview"));
 
 type Tab = FileRef & { pinned: boolean; scroll?: number };
@@ -661,10 +663,12 @@ export function FilePanelProvider(p: {
       </For>
     );
   }
+  const [showImage, setShowImage] = createSignal(true);
+  createEffect(on(() => [active(), scopeKey(), content()], () => setShowImage(true)));
   const [showPdf, setShowPdf] = createSignal(false);
   createEffect(on(() => [active(), scopeKey(), content()], () => setShowPdf(false)));
   const isLocalFile = () => sources().some(s => s.id === selected()?.source && s.local);
-  async function loadPdf(signal: AbortSignal): Promise<Uint8Array> {
+  async function loadPreviewBytes(signal: AbortSignal): Promise<Uint8Array> {
     const ref = selected();
     if (!ref) throw new Error("No file selected");
     const c = client;
@@ -674,8 +678,8 @@ export function FilePanelProvider(p: {
       signal.throwIfAborted();
       const part = await c.call(ref.source, {action:"download",path:ref.path,offset});
       signal.throwIfAborted();
-      if (part.size === undefined || part.size > 50 * 1024 * 1024) throw new Error("PDF preview is limited to 50 MB. Open the full file externally.");
-      if (!part.bytes?.length || part.next !== offset + part.bytes.length) throw new Error("Incomplete PDF download");
+      if (part.size === undefined || part.size > 50 * 1024 * 1024) throw new Error("File preview is limited to 50 MB. Open the full file externally.");
+      if (!part.bytes?.length || part.next !== offset + part.bytes.length) throw new Error("Incomplete file download");
       chunks.push(new Uint8Array(part.bytes));
       offset = part.next; total = part.size;
     }
@@ -993,20 +997,24 @@ export function FilePanelProvider(p: {
                         </p>
                       </Show>
                       <Show
-                        when={!data().binary}
+                        when={!data().binary && !imageMime(selected()?.name ?? "")}
                         fallback={
+                          <Show when={showImage() && imageMime(selected()?.name ?? "")} fallback={
                           <Show when={showPdf()} fallback={<div class="file-binary-state">
                             <div class="file-document-mark" aria-hidden="true"><Ic.FileIcon size={40} /><span>{selected()?.name.split(".").pop()?.slice(0, 8).toUpperCase() || "FILE"}</span></div>
                             <h3>{selected()?.name}</h3>
                             <div class="file-binary-details">{data().size < 1024 ? `${data().size} B` : data().size < 1048576 ? `${Math.round(data().size / 1024)} KB` : `${(data().size / 1048576).toFixed(1)} MB`}<span>·</span>{sources().find(s => s.id === selected()?.source)?.label}</div>
-                            <p>{/\.pdf$/i.test(selected()?.name ?? "") ? "View this document directly in Orb." : "Preview isn’t available for this file."}</p>
+                            <Show when={imageMime(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowImage(true)}>View image</button></Show>
+                            <p>{/\.pdf$/i.test(selected()?.name ?? "") || imageMime(selected()?.name ?? "") ? "View this document directly in Orb." : "Preview isn’t available for this file."}</p>
                             <Show when={/\.pdf$/i.test(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowPdf(true)}><Ic.FileIcon size={16} />View PDF</button></Show>
                             <button class="s-btn file-binary-action" onClick={() => void (isLocalFile() ? revealFile() : download())}>
                               <Ic.FolderOpenIcon size={16} />{isLocalFile() ? "Reveal in Finder" : "Download file"}
                             </button>
                             <Show when={data().modified}><small>Modified {new Date(data().modified! * 1000).toLocaleDateString(undefined, {day:"numeric", month:"short", year:"numeric"})}</small></Show>
                           </div>}>
-                            <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPdf} close={() => setShowPdf(false)} /></Suspense>
+                            <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} /></Suspense>
+                          </Show>}>
+                            <ImagePreview name={selected()?.name ?? "Image"} load={loadPreviewBytes} close={() => setShowImage(false)} />
                           </Show>
                         }
                       >
