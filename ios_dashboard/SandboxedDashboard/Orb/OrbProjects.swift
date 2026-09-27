@@ -3,6 +3,7 @@ import SwiftUI
 enum OrbStyle {
     static let background = Color(white: 0.073)
     static let surface = Color(white: 0.105)
+    static let icon = Color(red: 138 / 255, green: 138 / 255, blue: 138 / 255)
     static func serviceName(_ value: String) -> String {
         ["claudecode": "Claude Code", "codex": "Codex", "cloud_chatgpt": "ChatGPT", "cloud_cursor": "Cursor Cloud", "cloud_cursor_cloud": "Cursor Cloud", "cloud_grok_bot": "Grok Bot"][value] ?? value
     }
@@ -15,6 +16,18 @@ struct OrbNotice: View {
 struct OrbCircle: View {
     let symbol: String
     var body: some View { Image(systemName: symbol).font(.system(size: 18, weight: .regular)).frame(width: 26, height: 26) }
+}
+
+/// Match desktop's neutral leading glyph; reserve color for execution status.
+struct OrbListIcon: View {
+    let symbol: String
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 18, weight: .regular))
+            .foregroundStyle(OrbStyle.icon)
+            .frame(width: 22, height: 24)
+            .accessibilityHidden(true)
+    }
 }
 
 struct OrbHome: View {
@@ -37,7 +50,7 @@ struct OrbHome: View {
                     ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
                         NavigationLink { OrbProjectPage(project: project) } label: {
                             HStack(spacing: 16) {
-                                Image(systemName: "folder").font(.title2).foregroundStyle(.secondary)
+                                OrbListIcon(symbol: "folder")
                                 Text(project.name).font(.title3).foregroundStyle(.primary)
                                 Spacer(); Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                             }.padding(.vertical, 14).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 42) }
@@ -165,7 +178,7 @@ struct OrbProjectPage: View {
                     }.redacted(reason: .placeholder)
                     Spacer(minLength: 0)
                 }.padding(.vertical, 12)
-                    .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 22) }
+                    .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 36) }
             }
         }.allowsHitTesting(false)
             .accessibilityElement(children: .ignore)
@@ -176,7 +189,12 @@ struct OrbProjectPage: View {
                 ForEach(paths.filter(shown), id: \.self) { folder in
                     HStack {
                         Button { if !collapsed.insert(folder).inserted { collapsed.remove(folder) } } label: {
-                            Label(folder.split(separator: "/").last.map(String.init) ?? folder, systemImage: collapsed.contains(folder) ? "chevron.right" : "chevron.down").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                            HStack(spacing: 10) {
+                                OrbListIcon(symbol: "folder")
+                                Text(folder.split(separator: "/").last.map(String.init) ?? folder).font(.headline)
+                                Spacer()
+                                Image(systemName: collapsed.contains(folder) ? "chevron.right" : "chevron.down").font(.system(size: 11)).foregroundStyle(OrbStyle.icon)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
                         }.accessibilityIdentifier("folder.\(folder)")
                         NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: folder) } label: { Image(systemName: "plus").frame(width: 44, height: 44) }.accessibilityLabel("New agent in \(folder)")
                     }.padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 4)
@@ -186,12 +204,16 @@ struct OrbProjectPage: View {
     private func missionLink(_ row: OrbRow) -> some View {
         NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
             HStack(alignment: .top, spacing: 14) {
-                Circle().fill(row.active ? Color.blue : Color.gray).frame(width: 8, height: 8).padding(.top, 9)
+                OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
+                    .overlay(alignment: .bottomTrailing) {
+                        if row.active { Circle().fill(Color.blue).frame(width: 6, height: 6) }
+                        else if ["failed", "blocked", "not_feasible"].contains(row.state) { Circle().fill(Color.orange).frame(width: 6, height: 6) }
+                    }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.name).font(.body).lineLimit(2).foregroundStyle(.primary)
                     Text("\(OrbStyle.serviceName(row.backend)) · \(row.state.replacingOccurrences(of: "_", with: " "))").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }; Spacer(minLength: 0)
-            }.padding(.vertical, 12).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 22) }
+            }.padding(.vertical, 12).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 36) }
         }.accessibilityIdentifier("mission.\(row.id)")
     }
     private func apply(_ value: OrbJSON) {
