@@ -12,7 +12,7 @@ afterEach(()=>{stop?.();vi.useRealTimers();});
 it('persists active-run followups and drains them in order using the latest session',async()=>{
  await enqueueLocalMessage(request,'first');await enqueueLocalMessage({...request,prompt:'second'},'second');
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1000);expect(mocks.launch).not.toHaveBeenCalled();
- mocks.active=false;await vi.advanceTimersByTimeAsync(2500);
+ mocks.active=false;window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
  expect(mocks.launch.mock.calls.map(c=>c[0].prompt)).toEqual(['first','second']);expect(mocks.launch.mock.calls[0][0].sessionId).toBe('latest');expect(queuedLocalMessages('mission')).toEqual([]);
 });
 it('restores the queue after remount, permits removal, and Send now stops before sending',async()=>{
@@ -54,7 +54,7 @@ it('keeps accepted messages durable across sync failure and never launches them 
  stop=startLocalQueueWorker();await enqueueLocalMessage(request,'first');await vi.advanceTimersByTimeAsync(50);
  expect(queuedLocalMessages('mission')[0].state).toBe('accepted');
  expect(queuedLocalMessages('mission')[0].result?.text).toBe('Done');
- mocks.append.mockResolvedValue(undefined);await vi.advanceTimersByTimeAsync(1000);
+ mocks.append.mockResolvedValue(undefined);window.dispatchEvent(new Event('online'));await vi.advanceTimersByTimeAsync(1000);
  expect(mocks.launch).toHaveBeenCalledTimes(1);expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
 it('saves a stopped partial answer before closing the run receipt and releasing the next message',async()=>{

@@ -4,7 +4,7 @@ import {createSignal} from 'solid-js';
 import {ContextBadge} from '../src/ContextBadge';
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),conflicts:vi.fn()}));
 vi.mock('../src/clientRuns',()=>({nativeInvoke:()=>mocks.invoke}));
-vi.mock('../src/projectContext',()=>({contextConflicts:mocks.conflicts}));
+vi.mock('../src/projectContext',()=>({subscribeProjectContext:()=>()=>{},contextConflicts:mocks.conflicts}));
 vi.mock('../src/api',()=>({getApiUrl:()=> 'https://example.test',getJwt:()=> 'token',connectionVersion:()=>0}));
 afterEach(()=>{cleanup();vi.resetAllMocks();});
 it('reads native status without waiting for the server and retries an offline cache',async()=>{
