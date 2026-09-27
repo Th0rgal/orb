@@ -2483,3 +2483,5 @@ select.orb-select-native:disabled { cursor: default; }
 
 .queue-menu-help { max-width: 240px; padding: 8px; font-size: 12px; line-height: 1.5; color: var(--fg-3); }
 .project-option .row-project-color svg { color: inherit; }
+
+.row.drop-active { background: var(--bg-hover); outline: 1px solid var(--fg-3); outline-offset: -1px; }

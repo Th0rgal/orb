@@ -103,12 +103,12 @@ it("serializes local sends through native recovery and retains the exact receipt
 it("resolves context at the cursor token without consuming punctuation or copying snapshots", async()=>{
  const host=window as unknown as {__TAURI_INTERNALS__?:{invoke:ReturnType<typeof vi.fn>}};
  const previous=host.__TAURI_INTERNALS__;
- const invoke=vi.fn().mockResolvedValue({root:"/local/shared context",state:{}});host.__TAURI_INTERNALS__={invoke};
+ const invoke=vi.fn().mockResolvedValue({root:"/local/shared context",state:{},resolved_paths:["notes.md","a b.md",""]});host.__TAURI_INTERNALS__={invoke};
  try{
   const result=await materializeMentions("demo",'Read @context/notes.md. Then @"context/a b.md" and @context.',[]);
   expect(result.prompt).toBe('Read "/local/shared context/notes.md". Then "/local/shared context/a b.md" and "/local/shared context".');
   expect(result.files).toEqual([]);
-  expect(invoke.mock.calls[0][1].request.paths).toEqual(['/notes.md','/a b.md','']);
+  expect(invoke.mock.calls[0][1].request.paths).toEqual(['context/notes.md','context/a b.md','context']);
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
 

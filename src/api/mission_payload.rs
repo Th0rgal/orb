@@ -327,17 +327,9 @@ fn prepare(
         match attachment.kind {
             AttachmentKind::Context => {
                 let written = attachment.path.as_deref().unwrap_or("context");
-                let relative = written
-                    .strip_prefix("context/")
-                    .unwrap_or("")
-                    .trim_end_matches('/');
-                if !relative.is_empty() {
-                    crate::project_context::valid_path(relative)?;
-                }
-                let source = project_files_root.join(relative);
-                if !source.exists() {
-                    return Err(format!("context path does not exist: {written}"));
-                }
+                crate::project_context::resolve_reference(written, |path| {
+                    project_files_root.join(path).exists()
+                })?;
                 manifest.push_str(
                     "- Shared context paths in the message are writable and synchronized.\n",
                 );
@@ -705,6 +697,23 @@ pub fn materialize_turn(
 }
 
 fn rewrite_context(content: &str, root: &Path, payload: &MissionPayload) -> Result<String, String> {
+    let mut resolved = BTreeMap::new();
+    for item in payload
+        .attachments
+        .iter()
+        .filter(|item| item.kind == AttachmentKind::Context)
+    {
+        let path = item
+            .path
+            .as_deref()
+            .unwrap_or("context")
+            .trim_end_matches('/');
+        resolved.insert(
+            path,
+            crate::project_context::resolve_reference(path, |p| root.join(p).exists())?,
+        );
+    }
+
     let pattern = regex::Regex::new(r#"(^|[\s(])@(?:"([^"]+)"|([^\s)\]},;]+))"#)
         .map_err(|e| e.to_string())?;
     Ok(pattern
@@ -724,7 +733,7 @@ fn rewrite_context(content: &str, root: &Path, payload: &MissionPayload) -> Resu
                         .trim_end_matches('/')
                         == path
             }) {
-                let relative = path.strip_prefix("context/").unwrap_or("");
+                let relative = &resolved[path];
                 format!(
                     "{}{}",
                     &captures[1],
@@ -800,6 +809,28 @@ pub fn parse_attachments(value: Option<&serde_json::Value>) -> Vec<MissionAttach
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_reference_materializes_and_rewrites_existing_context_subfolder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("context")).unwrap();
+        std::fs::write(root.join("context/AGENTS.md"), "instructions").unwrap();
+        let payload = MissionPayload {
+            attachments: vec![MissionAttachment {
+                kind: AttachmentKind::Context,
+                path: Some("context/AGENTS.md".into()),
+            }],
+            ..Default::default()
+        };
+        prepare(&root, &payload).unwrap();
+        assert_eq!(
+            rewrite_context("Read @context/AGENTS.md", &root, &payload).unwrap(),
+            format!(
+                "Read {}",
+                serde_json::to_string(&root.join("context/AGENTS.md").to_string_lossy()).unwrap()
+            )
+        );
+    }
 
     #[test]
     fn secrets_and_git_are_skipped() {

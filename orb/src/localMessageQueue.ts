@@ -26,19 +26,30 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
  await locked(key,async()=>{const rows=await read(key);if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});await write(key,rows);});
  wake();return id;
 }
-export async function removeQueuedMessage(id:string){const key=storageKey();await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row?.state==='dispatching'||row?.state==='accepted')throw Error('This message has already been sent.');await write(key,rows.filter(row=>row.id!==id));});wake();}
-/** Claim a queued draft under the same lock as dispatch, so an edit can never
- * remove a message already being sent. Return the persisted text, not a stale UI copy. */
-export async function takeQueuedMessage(id:string){
- const key=storageKey();
+export const canDiscardQueuedMessage=(row:QueuedLocalMessage)=>!['dispatching','accepted'].includes(row.state)||!!row.interrupted||(row.state==='dispatching'&&!!row.error);
+/** An interrupted send is removable only after native recovery confirms it stopped.
+ * Keep its receipt/output in the recovery archive; never discard a newer attempt. */
+async function discardQueuedMessage(id:string):Promise<string|undefined>{
+ const key=storageKey(),snapshot=(await read(key)).find(row=>row.id===id);
+ if(!snapshot)return;
+ if(!canDiscardQueuedMessage(snapshot))throw Error('This message has already been sent.');
+ if(snapshot.interrupted||snapshot.state==='dispatching')await recoverLocalLaunch(snapshot.mission);
  const text=await locked(key,async()=>{
-  const rows=await read(key),row=rows.find(r=>r.id===id);
-  if(!row||row.state==='dispatching'||row.state==='accepted')throw Error('This message has already been sent.');
-  if(key!==storageKey())throw Error('Connection changed. The message is still queued.');
-  await write(key,rows.filter(r=>r.id!==id));
+  if(key!==storageKey())throw Error('Connection changed. The message is still saved.');
+  const rows=await read(key),row=rows.find(row=>row.id===id);
+  if(!row)return;
+  if(JSON.stringify(row)!==JSON.stringify(snapshot))throw Error('This message changed while checking the previous run. Try again.');
+  if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+  await write(key,rows.filter(row=>row.id!==id));
   return row.text;
  });
  wake();return text;
+}
+export async function removeQueuedMessage(id:string){await discardQueuedMessage(id);}
+export async function takeQueuedMessage(id:string){
+ const text=await discardQueuedMessage(id);
+ if(text===undefined)throw Error('This message is no longer queued.');
+ return text;
 }
 export async function retryQueuedMessage(id:string){
  const key=storageKey(),row=(await read(key)).find(row=>row.id===id);
@@ -124,7 +135,8 @@ export function startLocalQueueWorker(){
      try{await recoverLocalLaunch(row.mission);recovered=true;}
      catch(recovery){detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;}
      if(!valid())return;
-     recordLocalFailure(row.mission,recovered?null:'The local runner is no longer attached. Check the saved message below.');
+     // A missing attachment or a held recovery lock is not evidence of mission failure.
+     recordLocalFailure(row.mission,null);
      await update(key,row.id,stored=>{stored.interrupted=true;stored.error=detail;if(recovered)stored.state='error';});
      window.dispatchEvent(new Event('orb:refresh'));
     }else await syncFailed(row,error);

@@ -1,3 +1,5 @@
+import {MentionPicker} from "./MentionPicker";
+import {MentionProjectContext} from "./PromptEditor";
 import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
@@ -483,8 +485,9 @@ export function Composer(p: {
     let current = true;
     setAtItems([]);
     onCleanup(() => { current = false; });
-    attachmentLoad = loadAttachItems(slug).then(items => { if (current) setAtItems(items); })
-      .catch(() => { if (current) setAtItems([]); });
+    const reloadAttachments=()=>{attachmentLoad = loadAttachItems(slug).then(items => { if (current) setAtItems(items); }).catch(() => { if (current) setAtItems([]); });};
+    const imported=(event:Event)=>{if((event as CustomEvent).detail?.slug===slug)reloadAttachments();};
+    reloadAttachments();window.addEventListener('orb:context-imported',imported);onCleanup(()=>window.removeEventListener('orb:context-imported',imported));
   });
   /** What the current draft refers to, resolved against this project's files. */
   const mentioned = createMemo(() => mentionedChips(text(), atItems()));
@@ -856,42 +859,7 @@ export function Composer(p: {
       </div>
     </Show>
   );
-  const atMenu = (
-    <Show when={at()}>
-      {(s) => (
-        <div class="menu slash-menu" role="listbox" aria-label="Context" onPointerDown={(e) => e.stopPropagation()}>
-          <For each={["Context", "Controller", "Folders", "Files"] as const}>
-            {(section) => {
-              const rows = () => s().items.filter((it) => it.section === section);
-              return (
-                <Show when={rows().length}>
-                  <div class="slash-head">{section}</div>
-                  <For each={rows()}>
-                    {(it) => {
-                      const idx = () => s().items.indexOf(it);
-                      return (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={atHi() === idx()}
-                          class={`menu-item ${atHi() === idx() ? "on" : ""}`}
-                          onMouseEnter={() => setAtHi(idx())}
-                          onClick={() => pickAttach(it)}
-                        >
-                          <span class="menu-ico">{(it.kind === "folder" || it.kind === "context") ? <Ic.FolderIcon size={14} /> : it.kind === "controller" ? <Ic.TargetIcon size={14} /> : <Ic.FileIcon size={14} />}</span>
-                          {it.label}
-                        </button>
-                      );
-                    }}
-                  </For>
-                </Show>
-              );
-            }}
-          </For>
-        </div>
-      )}
-    </Show>
-  );
+  const atMenu=<Show when={at()}>{s=><MentionPicker items={s().items} index={atHi()} highlight={setAtHi} pick={pickAttach}/>}</Show>;
   const slashMenu = (
     <Show when={slash()}>
       {(s) => (
@@ -1554,6 +1522,7 @@ export default function App() {
 
   return (
     <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+      <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
       <FilePanelProvider scope={{ mission: currentMissionId() ? (openMission()?.id === currentMissionId() ? openMission() : missions().find(m => m.id === currentMissionId())) : undefined, project: currentController()?.slug, controller: currentController()?.id }}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
@@ -2090,6 +2059,7 @@ export default function App() {
       <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
 
       </FilePanelProvider>
+      </MentionProjectContext.Provider>
     </div>
   );
 }
@@ -2597,9 +2567,10 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
 
   const sendEditedPrompt = async (text: string) => {
     if (clientPlaced() && busy()) throw new Error("Wait for the local agent to finish or stop it before sending this follow-up.");
-    // The inline editor sends only this message's existing attachments, not
-    // unrelated context chips or an unsent draft in the main composer.
-    const accepted = await sendMsg(text, [], []);
+    // Resolve references from the edited message independently of the composer draft.
+    const project=mission()?.project;
+    const chips=project?mentionedChips(text,await loadAttachItems(project)):[];
+    const accepted = await sendMsg(text, [], chips);
     if (!accepted) throw new Error(sendError() || "The message was not sent. Your draft is kept.");
     return true;
   };

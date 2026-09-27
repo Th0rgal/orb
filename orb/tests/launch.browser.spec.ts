@@ -271,7 +271,7 @@ test("capability read failure refuses before POST and reports support as last kn
 
 test("empty failed mission shows recovered saved goal and honest terminal status",async({page})=>{
  await setup(page,{failed:true});await page.getByRole("button",{name:"Test",exact:true}).click();await page.getByRole("button",{name:/Remote task/}).click();
- await expect(page.getByRole("alert")).toContainText("Mission failed");await expect(page.getByRole("alert")).toContainText("could not find an active runner");
+ await expect(page.getByRole("alert")).toContainText("Mission interrupted");await expect(page.getByRole("alert")).toContainText("could not find an active runner");
  await expectGoalTurn(page,".user","Original saved objective");await expect(page.locator(".tb-title .goal-tag")).toHaveText("Goal");
  await expect(page.locator(".launch-pulse")).toHaveCount(0);await page.screenshot({path:"test-results/orb-launch-interrupted.png"});
 });
@@ -304,7 +304,7 @@ for(const status of ["failed","resuming"])test(`empty ${status} mission retains 
  await setup(page,{failed:true,emptyStatus:status});await page.getByRole("button",{name:"Test",exact:true}).click();
 
  await page.getByRole("button",{name:/Remote task/}).click();
- await expect(page.getByRole("alert")).toContainText("Mission failed");else await expect(phaseStatus(page)).toContainText("Resuming on DGX Spark");
+ if(status==="failed")await expect(page.getByRole("alert")).toContainText("Mission failed");else await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expectGoalTurn(page,".user","Original saved objective");
  await expect(page.locator(status==="failed"?".launch-pulse":".user.pending")).toHaveCount(status==="failed"?0:1);
 });

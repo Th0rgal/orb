@@ -41,7 +41,7 @@ pub async fn pick_upload_files() -> Result<Vec<Selection>, String> {
 }
 
 #[tauri::command]
-pub async fn read_upload_file(path: String) -> Result<String, String> {
+pub async fn read_upload_file(path: String, max_bytes: Option<u64>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(path);
         let canonical = path.canonicalize().map_err(|e| e.to_string())?;
@@ -57,12 +57,22 @@ pub async fn read_upload_file(path: String) -> Result<String, String> {
         if !file.metadata().map_err(|e| e.to_string())?.is_file() {
             return Err("Only regular files can be attached".into());
         }
+        let limit = max_bytes.unwrap_or(20 * 1024 * 1024).min(20 * 1024 * 1024);
+        if file.metadata().map_err(|e| e.to_string())?.len() > limit {
+            return Err(format!(
+                "File exceeds the {} MiB limit",
+                limit / 1024 / 1024
+            ));
+        }
         let mut bytes = Vec::new();
-        file.take(20 * 1024 * 1024 + 1)
+        file.take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        if bytes.len() > 20 * 1024 * 1024 {
-            return Err("Files must be 20 MiB or smaller".into());
+        if bytes.len() as u64 > limit {
+            return Err(format!(
+                "File exceeds the {} MiB limit",
+                limit / 1024 / 1024
+            ));
         }
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     })

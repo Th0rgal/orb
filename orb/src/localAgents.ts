@@ -229,17 +229,20 @@ export async function materializeMentions(
   const replacements: Array<{ raw: string; absolute: string }> = [];
   const contextMentions = mentions.filter(m => m.value === "context" || m.value.startsWith("context/"));
   let contextRoot: string | undefined;
+  const contextPaths=new Map<string,string>();
   if (contextMentions.length) {
     const invoke = tauriInvoke();
     if (!invoke) throw new Error("Shared context requires the Orb desktop app on this computer.");
-    const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value.slice(7).replace(/\/$/,""))}}) as {root:string;state:{error?:string}};
+    const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]};
+    if(!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
     contextRoot=result.root;
+    contextMentions.forEach((mention,index)=>contextPaths.set(mention.value.replace(/\/$/,""),result.resolved_paths[index]));
   }
   let folderBytes = 0;
   for (const mention of mentions) {
     const bare = mention.value.replace(/\/$/, "");
     if (contextRoot && (bare === "context" || bare.startsWith("context/"))) {
-      replacements.push({raw:mention.raw,absolute:`${contextRoot}${bare === "context" ? "" : "/"+bare.slice(8)}`});
+      replacements.push({raw:mention.raw,absolute:`${contextRoot}${contextPaths.get(bare) ? "/"+contextPaths.get(bare) : ""}`});
       continue;
     }
     const chip = chips.find((item) => {

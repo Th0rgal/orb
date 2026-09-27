@@ -142,7 +142,7 @@ export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
   let context: AttachItem[] = [];
   try {
     const manifest=await contextManifest(slug);
-    context=[{id:"context:root",kind:"context",path:"context",label:"context/",section:"Context"},...Object.entries(manifest.entries).map(([path,entry])=>({id:`context:${path}`,kind:"context" as const,path:`context/${path}`,label:`context/${path}${entry.directory?"/":""}`,section:"Context" as const}))];
+    context=[{id:"context:root",kind:"context",path:"context",label:"context/",section:"Context"},...Object.entries(manifest.entries).map(([path,entry])=>({id:`context:${path}`,kind:"context" as const,path:path.startsWith("context/")||path==="context"?path:`context/${path}`,label:`${path.startsWith("context/")||path==="context"?path:`context/${path}`}${entry.directory?"/":""}`,section:"Context" as const}))];
   } catch { /* Older servers do not advertise synchronized context. */ }
   try {
     const controller = await getProjectController(slug, 1);
@@ -158,7 +158,7 @@ export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
     /* no cron */
   }
   await walkFiles(slug, "", items, 0);
-  return [...context,...items];
+  return [...context,...items.filter(item=>!context.some(entry=>entry.path===item.path)&&!(/\.(pdf|png|jpe?g|gif|webp|heic|zip)$/i.test(item.path??"")&&context.some(entry=>entry.path===`context/${item.path}`)))];
 }
 
 async function walkFiles(slug: string, path: string, items: AttachItem[], depth: number) {

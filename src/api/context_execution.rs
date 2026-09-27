@@ -31,19 +31,9 @@ pub fn resolve(text: &str, root: &Path, manifest: &Manifest) -> Result<String, S
         } else {
             raw.trim_end_matches(['.', ',', ';', ':', '!', '?'])
         };
-        let relative = value
-            .strip_prefix("context/")
-            .unwrap_or("")
-            .trim_end_matches('/');
-        if value != "context" && !value.starts_with("context/") {
-            continue;
-        }
-        if !relative.is_empty() {
-            crate::project_context::valid_path(relative)?;
-            if !manifest.entries.contains_key(relative) {
-                return Err(format!("Context path not found: {relative}"));
-            }
-        }
+        let relative = crate::project_context::resolve_reference(value, |path| {
+            manifest.entries.contains_key(path)
+        })?;
         result.push_str(&text[last..whole.start()]);
         result.push_str(&captures[1]);
         result.push_str(
@@ -112,6 +102,23 @@ pub async fn remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_reference_preserves_real_context_directory() {
+        let mut manifest = Manifest::default();
+        manifest.entries.insert(
+            "context/AGENTS.md".into(),
+            crate::project_context::Entry {
+                hash: None,
+                directory: false,
+                revision: 1,
+                size: 12,
+            },
+        );
+        assert_eq!(
+            resolve("Read @context/AGENTS.md", Path::new("/project"), &manifest).unwrap(),
+            "Read \"/project/context/AGENTS.md\""
+        );
+    }
     #[test]
     fn resolution_is_bound_to_context_tokens() {
         let m = Manifest::default();

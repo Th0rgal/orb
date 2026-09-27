@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Composer } from '../src/App';
+import {nativeComposerDrop} from '../src/composerDrop';
 const handlers = new Map<string, (event: any) => void>();
 afterEach(() => { cleanup(); handlers.clear(); delete (window as any).__TAURI__; vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 it('inserts all native local paths while the agent runs and deduplicates the relay', async () => {
@@ -75,4 +76,20 @@ it('keeps typed text and reports a failed shared-context upload without sending'
   handlers.get('orb-upload-drop')!({payload:{paths:['/test/file.txt'],x:100,y:100}});
   await waitFor(()=>expect(screen.getByRole('alert').textContent).toContain('Upload unavailable'));
   expect(input.value).toBe('Keep this draft');expect(send).not.toHaveBeenCalled();
+});
+
+it('routes a Retina Finder drop to the selected nested folder only once',async()=>{
+ vi.spyOn(navigator,'platform','get').mockReturnValue('MacIntel');vi.stubGlobal('devicePixelRatio',2);
+ (window as any).__TAURI__={event:{listen:vi.fn(async(name,handler)=>{handlers.set(name,handler);return ()=>handlers.delete(name);})}};
+ const attach=vi.fn(async()=>{}),target=document.createElement('div');target.dataset.dropFolder='PPL';
+ vi.spyOn(target,'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+ vi.spyOn(target,'getBoundingClientRect').mockReturnValue({left:20,right:300,top:100,bottom:150} as DOMRect);
+ const find=vi.fn((x:number,y:number)=>x===80&&y===120?target:undefined);
+ function Tree(){let root!:HTMLDivElement;nativeComposerDrop(()=>root,attach,find);return <div ref={root}/>;}
+ render(()=><Tree/>);await waitFor(()=>expect(handlers.has('tauri://drag-drop')).toBe(true));
+ handlers.get('tauri://drag-drop')!({payload:{paths:['/Downloads/guide.pdf'],position:{x:80,y:120}}});
+ handlers.get('orb-upload-drop')!({payload:{paths:['/Downloads/guide.pdf'],x:80,y:120}});
+ expect(attach).toHaveBeenCalledExactlyOnceWith([{name:'guide.pdf',localPath:'/Downloads/guide.pdf'}],target);
+ handlers.get('orb-upload-drop')!({payload:{paths:['/Downloads/guide.pdf'],x:500,y:120}});
+ expect(attach).toHaveBeenCalledTimes(1);
 });

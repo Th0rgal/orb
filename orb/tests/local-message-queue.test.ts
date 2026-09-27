@@ -92,7 +92,7 @@ it('editing removes only a still-unsent message and rejects stale edits',async()
  const id=await enqueueLocalMessage(request,'editable');
  expect(await takeQueuedMessage(id)).toBe('editable');
  expect(queuedLocalMessages('mission')).toHaveLength(0);
- await expect(takeQueuedMessage(id)).rejects.toThrow('already been sent');
+ await expect(takeQueuedMessage(id)).rejects.toThrow('no longer queued');
  const pending=await enqueueLocalMessage(request,'sending');
  for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===pending)row.state='dispatching';
  await expect(takeQueuedMessage(pending)).rejects.toThrow('already been sent');
@@ -143,4 +143,35 @@ it('Send now recovers an already-ended run without trying to close a missing rec
  await expect(sendQueuedNow('mission')).resolves.toBeUndefined();
  expect(mocks.recover).toHaveBeenCalledWith('mission');
  expect(mocks.status).not.toHaveBeenCalled();
+});
+
+it('removes an interrupted accepted send only after recovery and archives unsynced output',async()=>{
+ const id=await enqueueLocalMessage(request,'saved');
+ const rows=mocks.store.get('followups:account:1') as any[];
+ Object.assign(rows[0],{state:'accepted',interrupted:true,error:'no local run',receipt:{run_id:'old',generation:1},result:{done:true,text:'Unsynced answer'}});
+ mocks.recover.mockRejectedValueOnce(new Error('still running'));
+ await expect(removeQueuedMessage(id)).rejects.toThrow('still running');
+ expect(rows).toHaveLength(1);
+ await removeQueuedMessage(id);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+ expect(mocks.store.get(`followups:account:1:recovered:${id}:old`)).toMatchObject({text:'saved',result:{text:'Unsynced answer'}});
+ expect(mocks.launch).not.toHaveBeenCalled();
+});
+it('does not delete a newer attempt while recovery is pending',async()=>{
+ const id=await enqueueLocalMessage(request,'saved');
+ const rows=mocks.store.get('followups:account:1') as any[];
+ Object.assign(rows[0],{state:'dispatching',error:'uncertain'});
+ mocks.recover.mockImplementationOnce(async()=>{rows[0].state='accepted';delete rows[0].error;});
+ await expect(removeQueuedMessage(id)).rejects.toThrow('changed while checking');
+ expect((mocks.store.get('followups:account:1') as any[])[0]).toMatchObject({id,state:'accepted'});
+});
+it('does not report an unattached run as a mission failure',async()=>{
+ const id=await enqueueLocalMessage(request,'saved');
+ const rows=mocks.store.get('followups:account:1') as any[];
+ Object.assign(rows[0],{state:'accepted',receipt:{run_id:'old',generation:1}});
+ mocks.follow.mockRejectedValueOnce(new Error('no local run'));
+ mocks.recover.mockRejectedValueOnce(new Error('another Orb window'));
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1);
+ expect(mocks.failure).toHaveBeenCalledWith('mission',null);
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({interrupted:true,error:expect.stringContaining('another Orb window')});
 });

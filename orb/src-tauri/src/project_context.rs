@@ -113,16 +113,16 @@ pub async fn project_context_prepare(request: Request) -> Result<serde_json::Val
         return Err("Context access was revoked".into());
     }
     let manifest = replica.store.manifest()?;
-    for path in &request.paths {
-        let path = path.trim_start_matches('/');
-        if !path.is_empty() {
-            crate::project_context_store::valid_path(path)?;
-            if !manifest.entries.contains_key(path) {
-                return Err(format!("Context path does not exist: {path}"));
-            }
-        }
-    }
-    Ok(serde_json::json!({"root":replica.store.root,"state":state}))
+    let resolved_paths = request
+        .paths
+        .iter()
+        .map(|path| {
+            crate::project_context_store::resolve_reference(path, |relative| {
+                manifest.entries.contains_key(relative)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({"root":replica.store.root,"state":state,"resolved_paths":resolved_paths}))
 }
 fn ensure_worker(request: &Request, replica: &Replica) -> Result<(), String> {
     let config = replica.store.metadata.join("connection.json");

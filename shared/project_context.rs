@@ -1,6 +1,33 @@
 #[path = "context_fs.rs"]
 mod secure_fs;
 // Versioned project context. Metadata and immutable blobs live outside the agent-visible tree.
+/// Existing project-relative paths win over the synthetic `context/` namespace.
+/// A project may itself contain a directory named `context`.
+pub fn resolve_reference(
+    value: &str,
+    exists: impl Fn(&str) -> bool,
+) -> std::result::Result<String, String> {
+    let value = value.trim_end_matches('/');
+    valid_path(value)?;
+    if exists(value) {
+        return Ok(value.into());
+    }
+    let relative = if value == "context" {
+        ""
+    } else {
+        value
+            .strip_prefix("context/")
+            .ok_or("Invalid context reference")?
+    };
+    if relative.is_empty() {
+        return Ok(String::new());
+    }
+    valid_path(relative)?;
+    if !exists(relative) {
+        return Err(format!("Context path does not exist: {value}"));
+    }
+    Ok(relative.into())
+}
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -564,6 +591,24 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_reference_prefers_existing_project_path() {
+        let exists =
+            |p: &str| ["context", "context/AGENTS.md", "AGENTS.md", "PPL/guide.pdf"].contains(&p);
+        assert_eq!(
+            resolve_reference("context/AGENTS.md", exists).unwrap(),
+            "context/AGENTS.md"
+        );
+        assert_eq!(
+            resolve_reference("context/PPL/guide.pdf", exists).unwrap(),
+            "PPL/guide.pdf"
+        );
+        assert_eq!(resolve_reference("context/", exists).unwrap(), "context");
+        assert_eq!(resolve_reference("context", |_| false).unwrap(), "");
+        assert!(resolve_reference("context/missing", exists).is_err());
+        assert!(resolve_reference("context/../outside", |_| true).is_err());
+    }
+
     fn setup() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("files"), dir.path().join("meta"));

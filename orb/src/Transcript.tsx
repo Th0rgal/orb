@@ -1,3 +1,4 @@
+import {PromptEditor} from "./PromptEditor";
 import {VirtualTurns} from "./VirtualTurns";
 import {anchoredDisclosure} from "./anchoredDisclosure";
 import { messageImages } from "./messageImages";
@@ -145,10 +146,6 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
     } catch (e) { setSendError(e instanceof Error ? e.message : String(e)); }
     finally { setSending(false); }
   };
-  const resizeEditor = (el: HTMLTextAreaElement) => {
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  };
   const edit = () => { if (fork()) return; bubble.style.setProperty("--editing-width", `${bubble.getBoundingClientRect().width}px`); setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true); };
   return (
     <div ref={bubble} onDblClick={() => { if (!editing()) edit(); }} class={`user ${editing() ? "editing" : ""} ${goal().kind === "goal" ? "goal" : ""} ${plan() !== null ? "plan" : ""} ${p.pending ? "pending" : ""}`}>
@@ -164,7 +161,8 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
       <Show when={p.attached || presentation().attached}><small class="user-context">Attached context</small></Show>
       <Show when={!fork()}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
       </>}>
-        <textarea class="prompt-editor" rows={1} aria-label="Edit prompt text" disabled={sending()} value={draft()} onInput={e => { setDraft(e.currentTarget.value); resizeEditor(e.currentTarget); }} onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); if (!sending()) setEditing(false); } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); void submit(); } }} ref={el => queueMicrotask(() => { resizeEditor(el); el.focus({ preventScroll: true }); })} />
+        <PromptEditor value={draft()} disabled={sending()} input={setDraft} cancel={()=>{if(!sending())setEditing(false);}} submit={()=>void submit()}/>
+
         <div class="prompt-editor-actions">
           <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={16} /></button>
           <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={15} /></button>

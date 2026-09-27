@@ -16,15 +16,15 @@ export async function pickNativeFiles(): Promise<UploadSource[]> {
   const files = await invoke<Array<{ name: string; path: string }>>("pick_upload_files");
   return files.map(file => ({ name: file.name, localPath: file.path }));
 }
-export async function encoded(source: UploadSource): Promise<string> {
+export async function encoded(source: UploadSource, maxBytes=MAX): Promise<string> {
   if (source.localPath) {
     const invoke = nativeInvoke();
     if (!invoke) throw new Error("Reopen this file in the desktop app.");
-    return invoke<string>("read_upload_file", { path: source.localPath });
+    return invoke<string>("read_upload_file", { path: source.localPath, ...(maxBytes===MAX?{}:{maxBytes}) });
   }
   const file = source.file;
   if (!file) throw new Error("Choose the file again.");
-  if (file.size > MAX) throw new Error("Files must be 20 MiB or smaller.");
+  if (file.size > maxBytes) throw new Error(`Files must be ${maxBytes/1024/1024} MiB or smaller.`);
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
   for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));

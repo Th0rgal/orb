@@ -1,3 +1,6 @@
+import {nativeComposerDrop} from "./composerDrop";
+import {importProjectFiles} from "./projectFileImport";
+import type {UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
 import { projectColor } from "./projectAppearance";
 import { ProviderLogo } from "./ProviderLogo";
@@ -870,7 +873,7 @@ export function LiveProjectsSection(p: {
     const key = `${slug}:${path}`;
     const work = path ? workNodes(slug, path) : [];
     if (dirErrors[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
-    if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, label: "Loading files…" } }];
+    if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
     const entries = [...dirs[key]];
     // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
     const paths = [...visibleMissions(slug).map(missionFolder), ...(crons[slug] ?? []).map(j => j.folder ?? "")];
@@ -879,7 +882,7 @@ export function LiveProjectsSection(p: {
       const name = relative.split("/")[0];
       if (name && !entries.some(e => e.name === name)) entries.push({ name, kind: "dir" });
     }
-    if (!entries.length && !work.length) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, label: "Empty folder" } }] : [];
+    if (!entries.length && !work.length) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
     return [...work, ...entries.map((entry): Node => {
       const childPath = path ? `${path}/${entry.name}` : entry.name;
       const open = !!expanded[`${slug}:${childPath}`];
@@ -944,6 +947,20 @@ export function LiveProjectsSection(p: {
       for (const project of projects()) void loadController(project.slug);
     }
   };
+  let dropTree:HTMLDivElement|undefined;
+  const [importing,setImporting]=createSignal(false),[importStatus,setImportStatus]=createSignal('');
+  const dropAt=(x:number,y:number)=>{const el=document.elementFromPoint(x,y)?.closest<HTMLElement>('[data-drop-project]');return el&&dropTree?.contains(el)?el:undefined;};
+  const importFiles=async(sources:UploadSource[],target:HTMLElement)=>{
+   if(importing()){setActionError('An import is already in progress. Wait before dropping more files.');return;}
+   const slug=target.dataset.dropProject!,folder=target.dataset.dropFolder??'',version=connectionVersion();
+   setImporting(true);setImportStatus('Importing files to shared context…');setActionError(null);
+   try{const result=await importProjectFiles(slug,folder,sources);if(!currentConnection(version))return;
+    await loadDir(slug,folder,true);setExpanded(`${slug}:${folder}`,true);
+    setImportStatus(result.paths.length?`${result.paths.length} file(s) saved to shared context. Available with @; connected agents synchronize automatically.`:'');
+    if(result.warnings.length)setActionError(result.warnings.join('\n'));
+   }catch(error){setImportStatus('');setActionError(String(error));}finally{setImporting(false);}
+  };
+  nativeComposerDrop(()=>dropTree,importFiles,dropAt);
   const renderRow = (row: TreeRow<RowData>) => {
     const d = row.data;
     const contextMenu = (e: MouseEvent) => {
@@ -955,7 +972,7 @@ export function LiveProjectsSection(p: {
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
-    if (d.kind === "project") return <div class="row project" onContextMenu={contextMenu}>
+    if (d.kind === "project") return <div class="row project" data-drop-project={d.slug} data-drop-folder="" onContextMenu={contextMenu}>
       <button class="row-main" aria-expanded={row.expanded} onClick={() => toggleProject(d.slug)}>
         <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
         <span class="row-label">{d.label}</span>
@@ -966,12 +983,12 @@ export function LiveProjectsSection(p: {
         onKeyDown={e => { if (e.key === "Enter" || e.key === " ") setActionFocus(true); }}
         onClick={e => { e.stopPropagation(); e.currentTarget.focus({ preventScroll: true }); const box = e.currentTarget.getBoundingClientRect(); setActionMenu({ x: Math.max(8, box.right - 176), y: box.bottom + 4, slug: d.slug, path: "" }); }}><Ic.PlusIcon size={13} /></button>
     </div>;
-    if (d.kind === "note") return <div class="row note" role="status">{d.label}<Show when={d.path !== undefined}><button onClick={() => void loadDir(d.slug, d.path!, true)}>Retry</button></Show></div>;
+    if (d.kind === "note") return <div class="row note" role="status" data-drop-project={d.slug} data-drop-folder={d.path??""}>{d.label}<Show when={d.path !== undefined && dirErrors[`${d.slug}:${d.path}`]}><button onClick={() => void loadDir(d.slug, d.path!, true)}>Retry</button></Show></div>;
     if (d.kind === "cron-error") return <div class="cron-unavailable row" role="status" title={cronUnsupported() ? "This backend does not support project crons yet. Update the backend, then check again. Existing project content is unchanged." : `Crons could not refresh. Cached jobs are retained. ${cronErrors[d.slug]}`}>
       <Ic.BellIcon size={12} /><button class="cron-status-label" onClick={() => setCronInfo(d.slug)}>{cronUnsupported() ? "Crons need backend update" : cronRetryable[d.slug] ? "Crons temporarily unavailable" : "Crons unavailable"}</button>
       <Show when={!cronUnsupported() && cronRetryable[d.slug]}><button class="cron-retry" aria-label="Retry crons" title="Retry crons" onClick={() => void loadCrons(d.slug, true)}>↻</button></Show>
     </div>;
-    if (d.kind === "folder") return <div class="row folder" onContextMenu={contextMenu}>
+    if (d.kind === "folder") return <div class="row folder" data-drop-project={d.slug} data-drop-folder={d.path} onContextMenu={contextMenu}>
       <button class="row-main" aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onClick={() => toggleDir(d.slug, d.path!)}>
         <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span><span class="row-label">{d.label}</span>
       </button>
@@ -1015,7 +1032,8 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
       <Show when={actionError()}><ErrorNotice error={actionError()!} /></Show>
-      <div onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectionActive() ? selectedAgents().map(id => `m:${id}`) : undefined} render={renderRow} /></div>
+      <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
+      <div ref={dropTree} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectionActive() ? selectedAgents().map(id => `m:${id}`) : undefined} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
       </Show>
