@@ -2,7 +2,7 @@ name: SandboxedDashboard
 options:
   bundleIdPrefix: md.thomas.openagent
   deploymentTarget:
-    iOS: "18.0"
+    iOS: "26.0"
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
 
@@ -16,16 +16,21 @@ targets:
   SandboxedDashboard:
     type: application
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: SandboxedDashboard
         excludes:
           - "**/.DS_Store"
+          - "Orb/MathAssets"
+      - path: SandboxedDashboard/Orb/MathAssets
+        type: folder
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: SandboxedDashboard/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openagent.dashboard
-        PRODUCT_NAME: "sandboxed.sh"
+        PRODUCT_NAME: "Orb"
+        PRODUCT_MODULE_NAME: sandboxed_sh
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_EMIT_LOC_STRINGS: "YES"
@@ -37,7 +42,7 @@ targets:
   SandboxedDashboardTests:
     type: bundle.unit-test
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: SandboxedDashboardTests
         excludes:
@@ -47,7 +52,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openagent.dashboard.tests
         PRODUCT_NAME: SandboxedDashboardTests
         GENERATE_INFOPLIST_FILE: "YES"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/sandboxed.sh.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/sandboxed.sh"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Orb.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Orb"
         BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
       - target: SandboxedDashboard
@@ -55,7 +60,7 @@ targets:
   SandboxedDashboardUITests:
     type: bundle.ui-testing
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: SandboxedDashboardUITests
         excludes:
@@ -68,3 +73,13 @@ targets:
         TEST_TARGET_NAME: SandboxedDashboard
     dependencies:
       - target: SandboxedDashboard
+
+schemes:
+  SandboxedDashboard:
+    build:
+      targets:
+        SandboxedDashboard: all
+    test:
+      targets:
+        - SandboxedDashboardTests
+        - SandboxedDashboardUITests

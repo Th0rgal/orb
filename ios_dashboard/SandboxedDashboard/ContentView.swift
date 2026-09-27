@@ -28,7 +28,7 @@ struct ContentView: View {
                     }
                 )
             } else {
-                MainTabView()
+                OrbHome()
             }
         }
         .task {
@@ -90,104 +90,33 @@ struct SetupSheet: View {
 
     private let api = APIService.shared
 
+    var allowsDismissal = false
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
         NavigationStack {
-            ZStack {
-                Theme.backgroundPrimary.ignoresSafeArea()
-
-                VStack(spacing: 32) {
-                    Spacer()
-
-                    // Welcome icon
-                    VStack(spacing: 16) {
-                        PhosphorIcon(symbol: .hardDrives, weight: .light, color: Theme.accent)
-                            .frame(width: 64, height: 64)
-
-                        VStack(spacing: 8) {
-                            Text("Welcome to sandboxed.sh")
-                                .font(.title2.bold())
-                                .foregroundStyle(Theme.textPrimary)
-
-                            Text("Enter your server URL to get started")
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                    }
-
-                    // Server URL input
-                    GlassCard(padding: 24, cornerRadius: 24) {
-                        VStack(spacing: 20) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Server URL")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(Theme.textSecondary)
-
-                                TextField("https://your-server.com", text: $serverURL)
-                                    .textFieldStyle(.plain)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                                    .keyboardType(.URL)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 14)
-                                    .background(Color.white.opacity(0.05))
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .stroke(Theme.border, lineWidth: 1)
-                                    )
-                            }
-
-                            if let error = errorMessage {
-                                HStack {
-                                    PhosphorIcon(symbol: .warning, weight: .fill, color: Theme.error)
-                                        .frame(width: 14, height: 14)
-                                    Text(error)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.error)
-                                    Spacer()
-                                }
-                            }
-
-                            if connectionSuccess {
-                                HStack {
-                                    PhosphorIcon(symbol: .checkCircle, weight: .fill, color: Theme.success)
-                                        .frame(width: 14, height: 14)
-                                    Text("Connection successful!")
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.success)
-                                    Spacer()
-                                }
-                            }
-
-                            Button {
-                                Task { await connectToServer() }
-                            } label: {
-                                HStack {
-                                    if isTestingConnection {
-                                        ProgressView()
-                                            .progressViewStyle(.circular)
-                                            .tint(.white)
-                                            .scaleEffect(0.8)
-                                    }
-                                    Text(isTestingConnection ? "Connecting..." : "Connect")
-                                        .fontWeight(.semibold)
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(GlassProminentButtonStyle())
-                            .disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-
-                    Spacer()
+            Form {
+                Section("Server URL") {
+                    TextField("https://your-server.com", text: $serverURL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                        .accessibilityIdentifier("server-url")
                 }
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .interactiveDismissDisabled()
+                if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
+                Section {
+                    Button { Task { await connectToServer() } } label: {
+                        HStack { Text(isTestingConnection ? "Connecting…" : "Connect"); Spacer(); if isTestingConnection { ProgressView() } }
+                    }.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
+                }
+            }.scrollContentBackground(.hidden).background(OrbStyle.background)
+                .scrollDismissesKeyboard(.interactively)
+                .navigationTitle(allowsDismissal ? "Server" : "Connect to Orb")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { if allowsDismissal { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() }.disabled(isTestingConnection) } } }
+                .interactiveDismissDisabled(!allowsDismissal || isTestingConnection)
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.hidden)
+        .onAppear { if serverURL.isEmpty { serverURL = api.baseURL } }
+        .presentationDetents(allowsDismissal ? [.medium, .large] : [.large])
+        .presentationDragIndicator(allowsDismissal ? .visible : .hidden)
     }
 
     private func connectToServer() async {
@@ -250,42 +179,21 @@ struct LoginView: View {
             // Background
             Theme.backgroundPrimary.ignoresSafeArea()
             
-            // Gradient accents
-            RadialGradient(
-                colors: [Theme.accent.opacity(0.15), .clear],
-                center: .topTrailing,
-                startRadius: 50,
-                endRadius: 400
-            )
-            .ignoresSafeArea()
-            
-            RadialGradient(
-                colors: [Color.purple.opacity(0.1), .clear],
-                center: .bottomLeading,
-                startRadius: 50,
-                endRadius: 400
-            )
-            .ignoresSafeArea()
-            
             ScrollView {
-                VStack(spacing: 32) {
+                VStack(spacing: 20) {
                     Spacer()
-                        .frame(height: 60)
+                        .frame(height: 16)
                     
                     // Logo
                     VStack(spacing: 16) {
                         PhosphorIcon(symbol: .brain, weight: .light, color: Theme.accent)
-                            .frame(width: 72, height: 72)
-                            .symbolEffect(.pulse, options: .repeating)
+                            .frame(width: 40, height: 40)
                         
                         VStack(spacing: 4) {
-                            Text("sandboxed.sh")
-                                .font(.largeTitle.bold())
+                            Text("Sign in to Orb")
+                                .font(.title2.bold())
                                 .foregroundStyle(Theme.textPrimary)
                             
-                            Text("Dashboard")
-                                .font(.title3)
-                                .foregroundStyle(Theme.textSecondary)
                         }
                     }
 
@@ -304,7 +212,7 @@ struct LoginView: View {
                     }
                     
                     // Login form
-                    GlassCard(padding: 24, cornerRadius: 28) {
+                    GlassCard(padding: 20, cornerRadius: 22) {
                         VStack(spacing: 20) {
                             // Server URL field
                             VStack(alignment: .leading, spacing: 8) {

@@ -118,8 +118,14 @@ final class APIService {
     }
     
     private var jwtToken: String? {
-        get { UserDefaults.standard.string(forKey: "jwt_token") }
-        set { UserDefaults.standard.set(newValue, forKey: "jwt_token") }
+        get {
+            if let legacy = UserDefaults.standard.string(forKey: "jwt_token") {
+                if OrbKeychain.save(legacy, for: baseURL) { UserDefaults.standard.removeObject(forKey: "jwt_token") }
+                return legacy
+            }
+            return OrbKeychain.token(for: baseURL)
+        }
+        set { if OrbKeychain.save(newValue, for: baseURL) { UserDefaults.standard.removeObject(forKey: "jwt_token") } }
     }
     
     var authToken: String? {

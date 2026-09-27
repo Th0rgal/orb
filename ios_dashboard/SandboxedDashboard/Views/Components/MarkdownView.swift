@@ -1,6 +1,7 @@
 import SwiftUI
 
 private enum MarkdownBlock {
+    case math(String)
     case paragraph(String)
     case heading(level: Int, text: String)
     case list(ordered: Bool, items: [String])
@@ -51,6 +52,8 @@ struct MarkdownView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
+                case .math(let source):
+                    OrbMath(source: source)
                 case .paragraph(let text):
                     MarkdownInlineText(text)
                 case .heading(let level, let text):
@@ -202,6 +205,7 @@ private struct MarkdownCodeBlock: View {
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .contextMenu { Button("Copy code") { UIPasteboard.general.string = code } }
         .background(Theme.backgroundTertiary)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
@@ -580,6 +584,20 @@ private enum MarkdownParser {
                 continue
             }
 
+            if trimmed.hasPrefix("$$") {
+                var expression = String(trimmed.dropFirst(2))
+                index += 1
+                if expression.hasSuffix("$$") { expression = String(expression.dropLast(2)) }
+                else {
+                    while index < lines.count {
+                        let next = lines[index]; index += 1
+                        if next.trimmingCharacters(in: .whitespaces).hasSuffix("$$") { expression += "\n" + String(next.trimmingCharacters(in: .whitespaces).dropLast(2)); break }
+                        expression += "\n" + next
+                    }
+                }
+                blocks.append(.math(expression)); continue
+            }
+
             if trimmed.hasPrefix("```") {
                 let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
                 var codeLines: [String] = []
@@ -719,7 +737,7 @@ private enum MarkdownParser {
     private static func isBlockStart(at index: Int, lines: [String]) -> Bool {
         let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return true }
-        if trimmed.hasPrefix("```") { return true }
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("$$") { return true }
         if parseHeading(trimmed) != nil { return true }
         if trimmed.hasPrefix(">") { return true }
         if parseListItem(trimmed) != nil { return true }
