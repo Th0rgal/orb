@@ -603,8 +603,8 @@ code {
 .dock .error-notice { position: relative; z-index: 1; }
 /* Fade the transcript beneath the controls without darkening the space above
    the composer. Use the surface color so this also works in light themes. */
-.dock .under { position: relative; }
-.dock .under::before {
+.dock :is(.under, .cloud-conversation-meta) { position: relative; }
+.dock :is(.under, .cloud-conversation-meta)::before {
   content: "";
   position: absolute;
   inset: -18px -24px -24px;
