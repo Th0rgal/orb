@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
+#[path = "../../../shared/file_notifications.rs"]
+pub mod file_notifications;
+
 mod local_origin;
 #[path = "../../../shared/local_origin.rs"]
 mod local_origin_wire;
@@ -75,32 +78,8 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-// Native storage is shared by packaged and development webview origins.
-static BINDINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-#[tauri::command]
-fn local_bindings(
-    id: Option<String>,
-    binding: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let _guard = BINDINGS_LOCK.lock().map_err(|e| e.to_string())?;
-    let dir =
-        std::path::PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?).join(".orb");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("local-bindings.json");
-    let mut all: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(e) => return Err(e.to_string()),
-    };
-    if let (Some(id), Some(binding)) = (id, binding) {
-        all.insert(id, binding);
-        let tmp = dir.join("local-bindings.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&all).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        std::fs::rename(tmp, path).map_err(|e| e.to_string())?;
-    }
-    Ok(serde_json::Value::Object(all))
-}
+mod bindings;
+use bindings::local_bindings;
 
 fn main() {
     agent_software::start_worker();
@@ -109,6 +88,14 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(voice::VoiceState::new())
+        .on_page_load(|_, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                bindings::clear_subscriptions();
+                context_service::clear_subscriptions();
+                interactions::clear_subscriptions();
+                local_agents::clear_subscriptions();
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) =
                 event
@@ -148,13 +135,17 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            local_bindings,
+            bindings::local_binding_set,
+            bindings::local_bindings_subscribe,
+            bindings::local_bindings_unsubscribe,
             local_origin::local_origin_launch,
             local_origin::local_origin_list,
             local_origin::local_origin_disconnect,
             run_recovery::local_run_launch,
             run_recovery::local_run_reconcile,
             interactions::local_interaction,
+            interactions::local_interaction_subscribe,
+            interactions::local_interaction_unsubscribe,
             interactions::local_interaction_answer,
             paloma_ssh_pubkey,
             session_preview::local_session_git,
@@ -173,6 +164,8 @@ fn main() {
             context_service::project_context_file,
             context_service::project_context_prepare,
             context_service::project_context_status,
+            context_service::project_context_subscribe,
+            context_service::project_context_unsubscribe,
             context_service::project_context_disconnect,
             software::software_inventory,
             software::software_update,
@@ -185,6 +178,7 @@ fn main() {
             transfers::local_machine_identity,
             local_agents::local_agents_poll,
             local_agents::local_agents_subscribe,
+            local_agents::local_agents_unsubscribe,
             local_agents::local_agents_stop
         ])
         .run(tauri::generate_context!())

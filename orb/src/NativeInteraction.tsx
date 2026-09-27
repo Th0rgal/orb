@@ -1,3 +1,4 @@
+import {followInteraction} from "./nativeInteractionStream";
 import {rememberApprovedPlan} from "./PlanProgress";
 import {For,Show,createEffect,createSignal,onCleanup,untrack} from 'solid-js';
 import {MdView} from './Markdown';
@@ -12,11 +13,17 @@ const invoke=(command:string,args:Record<string,unknown>) => {
  return host.__TAURI_INTERNALS__.invoke(command,args);
 };
 export function NativeInteraction(p:{mission:string;active:boolean;remote?:boolean;items?:StreamItem[]}) {
- const [request,setRequest]=createSignal<Request|null>(null);
+ // Native polling and remote snapshots deserialize fresh objects. Keep an
+ // unchanged request stable so Solid's question list retains its DOM/focus.
+ const [request,setRequest]=createSignal<Request|null>(null, {
+  equals:(previous,next)=>previous===next || JSON.stringify(previous)===JSON.stringify(next),
+ });
  const [answers,setAnswers]=createSignal<Record<string,string[]>>({});
  const [feedback,setFeedback]=createSignal('');
  const [sending,setSending]=createSignal(false);
  const [error,setError]=createSignal('');
+ const [subscriptionError,setSubscriptionError]=createSignal('');
+ const [retry,setRetry]=createSignal(0);
  const answered=new Set<string>();
  let currentMission=p.mission;
  let currentConnection=connectionVersion();
@@ -27,6 +34,8 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
  });
  createEffect(()=>{
   const id=p.mission;
+  retry();
+  setSubscriptionError('');
   const version=connectionVersion();
   if(version!==currentConnection){answered.clear();setRequest(null);currentConnection=version;}
   if(id!==currentMission){answered.clear();setRequest(null);currentMission=id;}
@@ -42,15 +51,10 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    return;
   }
   if(!p.active){setRequest(null);return;}
-  let live=true;
-  const refresh=async()=>{try{
-   const next=await invoke('local_interaction',{id}) as Request|null;
-   if(!live)return;
-   if(next?.id!==request()?.id){setAnswers({});setFeedback('');setError('');}
+  onCleanup(followInteraction<Request>(id,next=>{
+   if(next?.id!==untrack(request)?.id){setAnswers({});setFeedback('');setError('');}
    setRequest(next && !answered.has(next.id) ? next : null);
-  }catch{/* Old native builds do not advertise this capability. */}};
-  void refresh();const timer=setInterval(refresh,350);
-  onCleanup(()=>{live=false;clearInterval(timer);});
+  },failure=>setSubscriptionError(`Couldn’t receive interaction updates: ${String(failure)}`)));
  });
  const reply=async(action?:string)=>{
   const current=request();if(!current||sending())return;
@@ -76,7 +80,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
   }
   catch(e){setError(String(e));}finally{setSending(false);}
  };
- return <Show when={request()}>{r=><section class="native-question" aria-label="Waiting for your response">
+ return <><Show when={subscriptionError()}><section class="native-question" role="alert"><p>{subscriptionError()}</p><button class="s-btn" onClick={()=>setRetry(n=>n+1)}>Retry</button></section></Show><Show when={request()}>{r=><section class="native-question" aria-label="Waiting for your response">
   <div class="native-question-heading">{r().method==='plan'?'Review the plan':r().method==='permission'?'Permission requested':'Questions'}</div>
   <Show when={r().method==='plan'||r().method==='permission'} fallback={<For each={r().params.questions}>{(q,i)=>{
    const key=()=>q.id??String(i());
@@ -97,5 +101,5 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    <button class="s-btn native-primary" disabled={sending()} onClick={()=>void reply('accept')}>{r().method==='plan'?'Implement plan':'Allow once'}</button>
   </Show><Show when={sending()}><span role="status">Sending…</span></Show></div>
   <Show when={error()}><div role="alert">{error()}</div></Show>
- </section>}</Show>;
+ </section>}</Show></>;
 }

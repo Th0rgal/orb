@@ -31,8 +31,23 @@ describe("pageCache", () => {
 
   it("keeps the previous hit when a refresh fails", async () => {
     cachePut("k", "old");
-    await expect(cacheLoad("k", () => Promise.reject(new Error("no")))).resolves.toBe("old");
+    await expect(cacheLoad("k", () => Promise.reject(new Error("no")))).rejects.toThrow("no");
     expect(cachePeek("k")).toBe("old");
+  });
+
+  it("bounds retained payload bytes as well as entry count", () => {
+    const value="x".repeat(17*1024*1024);
+    cachePut("first",value);cachePut("second",value);
+    expect(cachePeek("first")).toBeUndefined();
+    expect(cachePeek("second")).toBe(value);
+  });
+
+  it("does not repopulate a reset cache from an old request", async () => {
+    let finish!:(value:string)=>void;
+    const old=cacheLoad("key",()=>new Promise<string>(resolve=>finish=resolve));
+    cacheReset();cachePut("key","new");finish("old");
+    await old;
+    expect(cachePeek("key")).toBe("new");
   });
 
   it("remembers recent pages", () => {

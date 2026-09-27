@@ -111,7 +111,7 @@ export function startLocalQueueWorker(){
     if(row.state!=='queued')continue;
     const binding=localBinding(row.mission);if(!binding)continue;
     try {
-     try{const native=await pollLocal(row.mission);if(!native.done)continue;}catch(error){if(!/no local run/i.test(String(error)))throw error;}
+     try{const native=await pollLocal(row.mission);if(!native.done){await reconcileLocalRun(row.mission);continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
      await reconcileLocalRun(row.mission);if(!valid())return;
      const mission=await getMission(row.mission);
      if(!mission.tags?.includes('placement:client')||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
@@ -139,6 +139,6 @@ export function startLocalQueueWorker(){
   }catch{/* Durable entries stay available for the next attempt. */}
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}
  };
- const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();const timer=setInterval(onWake,1000);
- return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);};
+ const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();const timer=setInterval(()=>{if(entries().some(row=>row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
+ return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
 }

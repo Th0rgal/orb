@@ -1,3 +1,4 @@
+import {eventPage} from "./eventPageFixture";
 import { test,expect,type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 const objective="Check remote startup without losing this draft";
@@ -42,8 +43,8 @@ async function setup(page:Page, options:{reject?:boolean;legacy?:boolean;remoteS
    listReads++;if(posts.length)await new Promise(r=>setTimeout(r,3000));return route.fulfill({json:options.failed?[m]:[]});
   }
   if(path==="/api/control/queue")return route.fulfill({json:[]});
-  if(path.endsWith("/events")) {if(!options.failed)await historyGate;return route.fulfill({json:options.failed?[]:[{id:1,event_id:"initial",sequence:1,event_type:"user_message",content:prompt,timestamp:""}]});}
-  if(path==="/api/control/stream"){await historyGate;if(options.failed)return route.fulfill({contentType:"text/event-stream",body:""});return route.fulfill({contentType:"text/event-stream",body:`event: user_message\ndata: ${JSON.stringify({id:"initial",content:prompt})}\n\n`});}
+  if(path.endsWith("/events")) {if(!options.failed)await historyGate;return route.fulfill(eventPage(route,options.failed?[]:[{id:1,event_id:"initial",sequence:1,event_type:"user_message",content:prompt,timestamp:""}]));}
+  if(path==="/api/control/stream"){if(!options.failed)await historyGate;if(options.failed)return route.fulfill({contentType:"text/event-stream",body:""});return route.fulfill({contentType:"text/event-stream",body:`event: user_message\ndata: ${JSON.stringify({id:"initial",content:prompt})}\n\n`});}
   if(path==="/api/control/missions/accepted")return route.fulfill({json:m});
   if(path==="/api/remote-nodes"){
    fleetReads++;

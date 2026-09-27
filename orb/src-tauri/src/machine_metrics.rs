@@ -17,6 +17,7 @@ pub struct Snapshot {
     disk_used: u64,
     disk_total: u64,
     consumers: Vec<Consumer>,
+    timings_ms: serde_json::Value,
 }
 
 fn category(pid: Pid, system: &System, voice: Option<u32>, agents: &[u32]) -> Option<usize> {
@@ -49,6 +50,13 @@ pub struct CachedSnapshot {
     #[serde(flatten)]
     snapshot: Snapshot,
     history: Vec<Sample>,
+}
+static DETAILS_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 static CACHE: OnceLock<Mutex<Option<CachedSnapshot>>> = OnceLock::new();
 
@@ -88,7 +96,10 @@ pub fn start(voice: crate::voice::VoiceState) {
     });
 }
 #[tauri::command]
-pub fn local_machine_metrics() -> Result<CachedSnapshot, String> {
+pub fn local_machine_metrics(details: Option<bool>) -> Result<CachedSnapshot, String> {
+    if details == Some(true) {
+        DETAILS_UNTIL.store(seconds() + 6, std::sync::atomic::Ordering::Relaxed);
+    }
     CACHE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -108,12 +119,28 @@ fn collect(
         .lock()
         .map_err(|e| e.to_string())?;
     let (system, initialized) = &mut *state;
+    let started = std::time::Instant::now();
     system.refresh_cpu_usage();
     system.refresh_memory();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    let aggregates_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let process_start = std::time::Instant::now();
+    let details = seconds() < DETAILS_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    if details {
+        system.refresh_processes(ProcessesToUpdate::All, true);
+    }
+    let processes_ms = process_start.elapsed().as_secs_f64() * 1000.0;
+    let disks_start = std::time::Instant::now();
     let cpu_percent = initialized.then(|| system.global_cpu_usage());
     *initialized = true;
-    let disks = Disks::new_with_refreshed_list();
+    static DISKS: OnceLock<Mutex<(Disks, u64)>> = OnceLock::new();
+    let mut disk_cache = DISKS
+        .get_or_init(|| Mutex::new((Disks::new_with_refreshed_list(), seconds())))
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if seconds().saturating_sub(disk_cache.1) >= 60 {
+        *disk_cache = (Disks::new_with_refreshed_list(), seconds());
+    }
+    let disks = &disk_cache.0;
     // macOS root and Data share an APFS container; count only the Data mount.
     let disk = disks
         .iter()
@@ -123,6 +150,8 @@ fn collect(
                 .iter()
                 .find(|d| d.mount_point() == std::path::Path::new("/"))
         });
+    let disks_ms = disks_start.elapsed().as_secs_f64() * 1000.0;
+    let classify_start = std::time::Instant::now();
     let mut consumers = vec![
         Consumer {
             label: "Orb · native process tree",
@@ -144,15 +173,19 @@ fn collect(
             processes: 0,
         },
     ];
-    for (pid, process) in system.processes() {
+    for (pid, process) in system.processes().iter().filter(|_| details) {
         if let Some(index) = category(*pid, system, voice_pid, &agents) {
             consumers[index].memory += process.memory();
             consumers[index].processes += 1;
         }
     }
+    let classification_ms = classify_start.elapsed().as_secs_f64() * 1000.0;
+    let gpu_start = std::time::Instant::now();
+    let gpu_percent = if details { apple_gpu_usage() } else { None };
+    let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
     Ok(Snapshot {
         cpu_percent,
-        gpu_percent: apple_gpu_usage(),
+        gpu_percent,
         memory_used: system.used_memory(),
         memory_total: system.total_memory(),
         disk_used: disk
@@ -160,6 +193,7 @@ fn collect(
             .unwrap_or(0),
         disk_total: disk.map(|d| d.total_space()).unwrap_or(0),
         consumers,
+        timings_ms: serde_json::json!({"aggregates":aggregates_ms,"processes":processes_ms,"disks":disks_ms,"classification":classification_ms,"gpu":gpu_ms,"total":started.elapsed().as_secs_f64()*1000.0,"details":details}),
     })
 }
 

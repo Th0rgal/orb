@@ -1,3 +1,4 @@
+import {transcriptSearch,type SearchHit} from "./VirtualTurns";
 import {createSignal, createEffect, onMount, onCleanup, Show} from 'solid-js';
 import {CloseIcon, SearchIcon} from './icons';
 import {indexText,matchOffsets,matchRange,type TextIndex} from './searchIndex';
@@ -6,8 +7,9 @@ import {indexText,matchOffsets,matchRange,type TextIndex} from './searchIndex';
 export function FindBar() {
   const [open,setOpen]=createSignal(false), [query,setQuery]=createSignal('');
   const [sensitive,setSensitive]=createSignal(false), [whole,setWhole]=createSignal(false);
-  const [matches,setMatches]=createSignal<{start:number;end:number}[]>([]), [index,setIndex]=createSignal(0);
+  const [matches,setMatches]=createSignal<Array<{start:number;end:number;hit?:SearchHit}>>([]), [index,setIndex]=createSignal(0);
   const [label,setLabel]=createSignal('conversation');
+  const [loading,setLoading]=createSignal(false),[failure,setFailure]=createSignal('');let searchAbort:AbortController|undefined;let revealVersion=0;
   let input!:HTMLInputElement, bar!:HTMLDivElement, scope:HTMLElement|undefined, last:HTMLElement|undefined;
   const registry=()=> (CSS as any).highlights;
   const paint=(name:string,ranges:Range[])=>{const H=(window as any).Highlight;if(H&&registry())registry().set(name,new H(...ranges));};
@@ -16,17 +18,31 @@ export function FindBar() {
   let previousFocus:HTMLElement|undefined;
   const [position,setPosition]=createSignal({top:'54px',right:'24px'});
   const positionBar=()=>{if(!scope)return;const r=scope.getBoundingClientRect();setPosition({top:`${Math.max(8,r.top+8)}px`,right:`${Math.max(8,innerWidth-r.right+12)}px`});};
-  const close=()=>{setOpen(false);clear();observer?.disconnect();clearTimeout(timer);previousFocus?.focus({preventScroll:true});};
+  const close=()=>{searchAbort?.abort();revealVersion++;setOpen(false);clear();observer?.disconnect();clearTimeout(timer);previousFocus?.focus({preventScroll:true});};
   const track=(e:Event)=>{if(!bar?.contains(e.target as Node))last=e.target as HTMLElement;};
+  const changed=(event:Event)=>{if(open()&&scope?.contains(event.target as Node)){clearTimeout(timer);timer=setTimeout(search,120);}};
   function search() {
     if(!scope||!open())return;
+    const virtual=transcriptSearch(scope);
+    if(virtual){const hits=virtual.search(query(),sensitive(),whole());setIndex(i=>Math.min(i,Math.max(0,hits.length-1)));setMatches(hits.map(hit=>({start:0,end:0,hit})));return;}
     cached ??= indexText(scope);
     const result=matchOffsets(cached.text,query(),sensitive(),whole());
     setIndex(i=>Math.min(i,Math.max(0,result.length-1)));setMatches(result);
   }
   createEffect(()=>{query();sensitive();whole();if(!open())return;clearTimeout(timer);timer=setTimeout(search,60);});
-  createEffect(()=>{if(!open()||!cached)return;
-    const all=matches(),at=index();
+  createEffect(()=>{if(!open())return;
+    const all=matches(),at=index(),hit=all[at]?.hit;
+    if(hit&&scope){
+      const virtual=transcriptSearch(scope),version=++revealVersion,q=query(),s=sensitive(),w=whole();
+      void virtual?.reveal(hit).then(node=>{
+        if(!node||version!==revealVersion||!open())return;
+        for(const toggle of node.querySelectorAll<HTMLButtonElement>('.st-work-head,.st-tool-head,.st-think-head'))if(toggle.getAttribute('aria-expanded')!=='true')toggle.click();
+        for(const details of node.querySelectorAll('details'))details.open=true;
+        const text=indexText(node),found=matchOffsets(text.text,q,s,w),match=found[Math.min(hit.occurrence,found.length-1)];
+        const range=match&&matchRange(text,match);paint('orb-find',[]);paint('orb-find-current',range?[range]:[]);
+      });return;
+    }
+    if(!cached){clear();return;}
     // Keep the full count, but only materialize a bounded neighborhood of highlights.
     const nearby=all.slice(Math.max(0,at-40),at+81).map(m=>matchRange(cached!,m)).filter((r):r is Range=>!!r);
     paint('orb-find',nearby);
@@ -41,16 +57,18 @@ export function FindBar() {
       const target=last??document.activeElement as HTMLElement;
       scope=target?.closest<HTMLElement>('.file-preview,.btw-thread,.scroll,[data-find-conversation]')??target?.closest('.file-panel')?.querySelector<HTMLElement>('.file-preview')??document.querySelector<HTMLElement>('.scroll')??undefined;
       if(!scope)return;
-      e.preventDefault();e.stopImmediatePropagation();previousFocus=document.activeElement as HTMLElement;cached=undefined;observer?.disconnect();observer=new MutationObserver(()=>{cached=undefined;clearTimeout(timer);timer=setTimeout(search,120);});observer.observe(scope,{subtree:true,childList:true,characterData:true});positionBar();setLabel(scope.matches('.file-preview')?'file':'conversation');setOpen(true);search();requestAnimationFrame(()=>{input.focus();input.select();});
+      e.preventDefault();e.stopImmediatePropagation();previousFocus=document.activeElement as HTMLElement;cached=undefined;observer?.disconnect();observer=new MutationObserver(()=>{cached=undefined;clearTimeout(timer);timer=setTimeout(search,120);});if(!transcriptSearch(scope))observer.observe(scope,{subtree:true,childList:true,characterData:true});positionBar();setLabel(scope.matches('.file-preview')?'file':'conversation');setOpen(true);search();searchAbort?.abort();searchAbort=new AbortController();const signal=searchAbort.signal;
+      const virtual=transcriptSearch(scope);if(virtual){setFailure('');setLoading(true);void virtual.prepare(signal).then(()=>{if(!signal.aborted)search();}).catch(error=>{if(!signal.aborted)setFailure('History unavailable — reopen search to retry');}).finally(()=>{if(!signal.aborted)setLoading(false);});}
+      requestAnimationFrame(()=>{input.focus();input.select();});
     }else if(open()&&e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();close();}
   }
-  onMount(()=>{window.addEventListener('resize',positionBar);window.addEventListener('keydown',keys,true);window.addEventListener('pointerdown',track,true);window.addEventListener('focusin',track,true);});
-  onCleanup(()=>{clear();observer?.disconnect();clearTimeout(timer);window.removeEventListener('resize',positionBar);window.removeEventListener('keydown',keys,true);window.removeEventListener('pointerdown',track,true);window.removeEventListener('focusin',track,true);});
+  onMount(()=>{window.addEventListener('orb:transcript-change',changed);window.addEventListener('resize',positionBar);window.addEventListener('keydown',keys,true);window.addEventListener('pointerdown',track,true);window.addEventListener('focusin',track,true);});
+  onCleanup(()=>{window.removeEventListener('orb:transcript-change',changed);searchAbort?.abort();clear();observer?.disconnect();clearTimeout(timer);window.removeEventListener('resize',positionBar);window.removeEventListener('keydown',keys,true);window.removeEventListener('pointerdown',track,true);window.removeEventListener('focusin',track,true);});
   return <Show when={open()}><div ref={bar} class="find-bar" style={position()} role="search" aria-label={`Find in ${label()}`}>
     <SearchIcon size={15}/><input ref={input} aria-label={`Find in ${label()}`} placeholder="Find…" title={`Find in ${label()}`} value={query()} onInput={e=>setQuery(e.currentTarget.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();step(e.shiftKey?-1:1);}}}/>
     <button title="Match case" aria-pressed={sensitive()} onClick={()=>setSensitive(v=>!v)}>Aa</button>
     <button class="find-whole" title="Whole word" aria-pressed={whole()} onClick={()=>setWhole(v=>!v)}>ab</button>
-    <span class="find-count" aria-live="polite">{query()?matches().length?`${index()+1} / ${matches().length}`:'No results':''}</span>
+    <span class="find-count" aria-live="polite">{failure()|| (loading()?'Searching history…':query()?matches().length?`${index()+1} / ${matches().length}`:'No results':'')}</span>
     <button title="Previous match (Shift+Enter)" disabled={!matches().length} onClick={()=>step(-1)}>↑</button><button title="Next match (Enter)" disabled={!matches().length} onClick={()=>step(1)}>↓</button>
     <button title="Close search (Esc)" onClick={close}><CloseIcon size={15}/></button>
   </div></Show>;

@@ -1,0 +1,37 @@
+[
+  {
+    "process": "Orb native",
+    "samples": 31,
+    "elapsed_seconds": 32.00285506248474,
+    "cpu_percent_one_core": 6.780645026085171,
+    "average_rss_mib": 394.97379032258067
+  },
+  {
+    "process": "Orb WebContent",
+    "samples": 31,
+    "elapsed_seconds": 32.00285506248474,
+    "cpu_percent_one_core": 5.7182398146259565,
+    "average_rss_mib": 211.71622983870967
+  },
+  {
+    "process": "Orb Networking",
+    "samples": 31,
+    "elapsed_seconds": 32.00285506248474,
+    "cpu_percent_one_core": 0.8124275146462642,
+    "average_rss_mib": 38.00756048387097
+  },
+  {
+    "process": "Vite",
+    "samples": 31,
+    "elapsed_seconds": 32.00285506248474,
+    "cpu_percent_one_core": 0.03124721210179647,
+    "average_rss_mib": 44.21774193548387
+  },
+  {
+    "process": "Orb GPU",
+    "samples": 31,
+    "elapsed_seconds": 32.00285506248474,
+    "cpu_percent_one_core": 0.2812249089160239,
+    "average_rss_mib": 15.672379032258064
+  }
+]

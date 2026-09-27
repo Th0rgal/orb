@@ -1,4 +1,4 @@
-import {describe,it,expect,vi} from 'vitest';
+import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {render,screen,fireEvent,waitFor,cleanup} from '@solidjs/testing-library';
 import {createSignal} from 'solid-js';
 import {MissionGlyph} from '../src/MissionGlyph';
@@ -7,6 +7,15 @@ import {api} from '../src/api';
 vi.mock('../src/api',async importOriginal=>({...await importOriginal<typeof import('../src/api')>(),api:vi.fn()}));
 import {composerModes,modePrompt} from '../src/goal';
 
+let emitted:any;
+const previousTauri=(window as any).__TAURI__;
+beforeEach(()=>{(window as any).__TAURI__={core:{Channel:class {onmessage=(value:any)=>{};constructor(){emitted=this;}}}};});
+afterEach(()=>{(window as any).__TAURI__=previousTauri;});
+function transport(read:(command:string,args?:any)=>Promise<any>){return async(command:string,args:any)=>{
+ if(command==='local_interaction_subscribe'){args.onEvent.onmessage(await read('local_interaction',{}));return 1;}
+ if(command==='local_interaction_unsubscribe')return;
+ return read(command,args);
+};}
 describe('native plan interactions',()=>{
  it('only exposes Plan when the destination confirms support',()=>{
   for(const harness of ['codex','claudecode','opencode','grok','gemini','chatgpt']) {
@@ -24,7 +33,7 @@ describe('native plan interactions',()=>{
    expect(args).toEqual({id:'mission',requestId:'native-1',answer:{answers:{greeting:{answers:['Hello']}}}});
    pending=null;return null;
   });
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><><MissionGlyph missionId="mission" status="awaiting_user"/><NativeInteraction mission="mission" active/></>);
    await screen.findByText('Which greeting?');
@@ -38,7 +47,7 @@ describe('native plan interactions',()=>{
  });
  it('switching from a custom answer to an option clears the custom field',async()=>{
   const invoke=vi.fn(async()=>({id:'custom',method:'questions',params:{questions:[{id:'q',question:'Where?',options:[{label:'Locally'}]}]}}));
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><NativeInteraction mission="mission" active/>);
    const input=await screen.findByRole('textbox',{name:'Other answer: Where?'});
@@ -50,7 +59,7 @@ describe('native plan interactions',()=>{
  });
  it('does not accept a plan until explicitly clicked',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'plan-1',method:'plan',params:{plan:'Create hello.txt'}}:null);
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><NativeInteraction mission="mission" active/>);
    await screen.findByText('Create hello.txt');
@@ -71,7 +80,7 @@ describe('native plan interactions',()=>{
  });
  it('sends requested changes without accepting execution',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'revise',method:'plan',params:{}}:null);
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try {
    render(()=><NativeInteraction mission="mission" active/>);
    await screen.findByRole('button',{name:'Request changes'});
@@ -97,3 +106,57 @@ describe('native plan interactions',()=>{
   expect(container.querySelector('.native-question')).toBeNull();
   cleanup();
  });
+
+
+describe('question focus during refresh',()=>{
+ const question={id:'focus-request',method:'questions',params:{questions:[{id:'q',question:'Phone number?',options:[{label:'Later'}]}]}};
+ it('preserves the focused custom answer and selection across native events',async()=>{
+  vi.useFakeTimers();
+  const host=window as any,previous=host.__TAURI_INTERNALS__;
+  const invoke=vi.fn(async()=>JSON.parse(JSON.stringify(question)));
+  host.__TAURI_INTERNALS__={invoke:transport(invoke)};
+  try {
+   render(()=><NativeInteraction mission="focus-local" active/>);
+   await vi.advanceTimersByTimeAsync(0);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'+33 612345678'}});input.setSelectionRange(4,7);
+   for(let i=0;i<20;i++)emitted.onmessage(structuredClone(question));
+   await vi.advanceTimersByTimeAsync(6000);
+   expect(invoke).toHaveBeenCalledTimes(1);
+   expect(screen.getByRole('textbox',{name:'Other answer: Phone number?'})).toBe(input);
+   expect(document.activeElement).toBe(input);
+   expect(input.value).toBe('+33 612345678');
+   expect([input.selectionStart,input.selectionEnd]).toEqual([4,7]);
+  } finally {cleanup();host.__TAURI_INTERNALS__=previous;vi.useRealTimers();}
+ });
+ it('preserves focus across remote snapshots but updates changed requests',()=>{
+  const item={kind:'tool' as const,key:'focus-tool',callId:question.id,name:'ui_native_request',args:question,done:false};
+  const [items,setItems]=createSignal([item]);
+  try {
+   render(()=><NativeInteraction mission="focus-remote" active remote items={items()}/>);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'My answer'}});input.setSelectionRange(2,5);
+   for(let i=0;i<5;i++)setItems(JSON.parse(JSON.stringify([item])));
+   expect(document.activeElement).toBe(input);
+   expect([input.selectionStart,input.selectionEnd]).toEqual([2,5]);
+   expect(input.value).toBe('My answer');
+   setItems([{...item,args:{...question,params:{questions:[{id:'q',question:'Updated question?',options:[]}]}}}]);
+   expect(screen.getByRole('textbox',{name:'Other answer: Updated question?'})).toBeTruthy();
+   setItems([{...item,callId:'next-request'}]);
+   expect((screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement).value).toBe('');
+  } finally {cleanup();}
+ });
+});
+
+it('shows a subscription failure even without a pending request and allows retry',async()=>{
+ const host=window as any,previous=host.__TAURI_INTERNALS__,previousTauri=host.__TAURI__;
+ const invoke=vi.fn().mockRejectedValueOnce('permission denied').mockResolvedValue(1);
+ host.__TAURI_INTERNALS__={invoke};host.__TAURI__={core:{Channel:class {onmessage=()=>{};}}};
+ try {
+  render(()=><NativeInteraction mission="retry" active/>);
+  expect((await screen.findByRole('alert')).textContent).toContain('permission denied');
+  fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+  await waitFor(()=>expect(invoke).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole('alert')).toBeNull();
+ } finally {cleanup();host.__TAURI_INTERNALS__=previous;host.__TAURI__=previousTauri;}
+});

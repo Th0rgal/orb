@@ -2,9 +2,12 @@
  * refreshes in the background and joins in-flight work so open + prefetch
  * share one request. */
 const MAX = 32;
+const MAX_BYTES=64*1024*1024;
+let totalBytes=0, generation=0;
+const bytes=(value:unknown)=>{try{return JSON.stringify(value).length*2;}catch{return MAX_BYTES+1;}};
 const recentsKey = "orb.recentPages";
 
-type Entry<T> = { value: T; at: number };
+type Entry<T> = { value: T; at: number; bytes:number };
 const store = new Map<string, Entry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 let recents: string[] = loadRecents();
@@ -35,17 +38,22 @@ export function cachePeek<T>(key: string): T | undefined {
   return hit.value;
 }
 
+export function cacheDelete(key:string){totalBytes-=store.get(key)?.bytes??0;store.delete(key);}
+
 export function cacheAge(key: string): number | undefined {
   const hit = store.get(key);
   return hit ? Date.now() - hit.at : undefined;
 }
 
 export function cachePut<T>(key: string, value: T): T {
-  if (store.has(key)) store.delete(key);
-  store.set(key, { value, at: Date.now() });
-  while (store.size > MAX) {
+  totalBytes-=store.get(key)?.bytes??0;
+  store.delete(key);
+  const size=bytes(value);totalBytes+=size;
+  store.set(key, { value, at: Date.now(), bytes:size });
+  while (store.size > MAX || totalBytes>MAX_BYTES) {
     const oldest = store.keys().next().value;
     if (oldest === undefined) break;
+    totalBytes-=store.get(oldest)!.bytes;
     store.delete(oldest);
   }
   return value;
@@ -55,14 +63,10 @@ export function cachePut<T>(key: string, value: T): T {
 export function cacheLoad<T>(key: string, load: () => Promise<T>): Promise<T> {
   const pending = inflight.get(key) as Promise<T> | undefined;
   if (pending) return pending;
+  const epoch=generation;
   const p = load()
-    .then((value) => cachePut(key, value))
-    .catch((err) => {
-      const hit = cachePeek<T>(key);
-      if (hit !== undefined) return hit;
-      throw err;
-    })
-    .finally(() => inflight.delete(key));
+    .then((value) => epoch===generation ? cachePut(key, value) : value)
+    .finally(() => {if(inflight.get(key)===p)inflight.delete(key);});
   inflight.set(key, p);
   return p;
 }
@@ -132,6 +136,7 @@ export function cachePrefetch(key: string, run: () => Promise<unknown>) {
 
 /** Test hook. */
 export function cacheReset() {
+  generation++;totalBytes=0;
   store.clear();
   inflight.clear();
   queue.length = 0;

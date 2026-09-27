@@ -1,0 +1,12 @@
+{
+  "secondsPerPhase": 10,
+  "counts": {
+    "before:/local_interaction": 29,
+    "after:/local_interaction_subscribe": 1,
+    "after:/local_interaction_unsubscribe": 1
+  },
+  "snapshots": 1,
+  "errors": [],
+  "native": true,
+  "visibility": "hidden"
+}

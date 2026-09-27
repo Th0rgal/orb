@@ -270,63 +270,84 @@ pub(crate) fn start_with_env(
         }
     };
     let child = Arc::new(Mutex::new(child));
-    watch_exit(
-        software_execution,
-        interaction,
-        Arc::clone(&child),
-        Arc::clone(&done),
-        Arc::clone(&exit_code),
-        Arc::clone(&text),
-    );
-    map.insert(
-        request.id,
-        Run {
-            generation: uuid::Uuid::new_v4().to_string(),
-            cwd,
-            child,
-            text,
-            done,
-            exit_code,
-            session_id,
-            error,
-            resumed,
-        },
-    );
+    let run = Run {
+        generation: uuid::Uuid::new_v4().to_string(),
+        cwd,
+        child,
+        text,
+        done,
+        exit_code,
+        session_id,
+        error,
+        resumed,
+    };
+    watch_exit(software_execution, interaction, run.clone());
+    map.insert(request.id, run);
     Ok(())
 }
 
 fn watch_exit(
     software_execution: crate::agent_software::Execution,
     mission_id: crate::interactions::Session,
-    child: Arc<Mutex<Child>>,
-    done: Arc<AtomicBool>,
-    exit_code: Arc<Mutex<Option<i32>>>,
-    output: Arc<Output>,
+    run: Run,
 ) {
+    let Run {
+        child,
+        done,
+        exit_code,
+        text: output,
+        session_id,
+        error,
+        resumed,
+        ..
+    } = run;
     thread::spawn(move || {
         let _software_execution = software_execution;
-        loop {
-            let status = child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.try_wait().ok())
-                .flatten();
-            if let Some(status) = status {
-                crate::interactions::finish(&mission_id);
-                if let Ok(mut slot) = exit_code.lock() {
-                    *slot = status.code();
+        // waitid leaves the child unreaped. Stop and the waiter serialize reaping
+        // through Child's mutex, so a recycled PID is never signalled.
+        #[cfg(unix)]
+        {
+            let pid = child.lock().unwrap().id();
+            loop {
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                let result = unsafe {
+                    libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT)
+                };
+                if result == 0
+                    || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    break;
                 }
-                while !output.drained() {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                done.store(true, Ordering::SeqCst);
-                break;
             }
-            if done.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(80));
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+            }
+            let handle = child.lock().unwrap().as_raw_handle();
+            unsafe {
+                WaitForSingleObject(handle, u32::MAX);
+            }
+        }
+        let status = child.lock().ok().and_then(|mut child| child.wait().ok());
+        crate::interactions::finish(&mission_id);
+        if let Ok(mut slot) = exit_code.lock() {
+            *slot = status.and_then(|status| status.code());
+        }
+        output.wait_drained(None);
+        done.store(true, Ordering::SeqCst);
+        output.finish(PollState {
+            text: output.snapshot(),
+            activities: output.activities(),
+            done: true,
+            exit_code: *exit_code.lock().unwrap(),
+            session_id: session_id.lock().unwrap().clone(),
+            error: error.lock().unwrap().clone(),
+            resumed,
+        });
     });
 }
 
@@ -351,35 +372,21 @@ pub fn local_agents_poll(id: String) -> Result<PollState, String> {
 pub fn local_agents_subscribe(
     id: String,
     on_event: tauri::ipc::Channel<OutputEvent>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let run = runs()
         .lock()
         .map_err(|e| e.to_string())?
         .get(&id)
         .cloned()
         .ok_or("no local run")?;
-    let token = run.text.subscribe(on_event.clone())?;
-    thread::spawn(move || {
-        while !run.done.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_millis(40));
-        }
-        let state = PollState {
-            text: run.text.snapshot(),
-            activities: run.text.activities(),
-            done: true,
-            exit_code: *run.exit_code.lock().unwrap(),
-            session_id: run.session_id.lock().unwrap().clone(),
-            error: run.error.lock().unwrap().clone(),
-            resumed: run.resumed,
-        };
-        let _ = on_event.send(OutputEvent {
-            text: String::new(),
-            reset: false,
-            state: Some(state),
-            activities: None,
-        });
+    run.text.subscribe(on_event)
+}
+
+#[tauri::command]
+pub fn local_agents_unsubscribe(id: String, token: u64) -> Result<(), String> {
+    if let Some(run) = runs().lock().map_err(|e| e.to_string())?.get(&id) {
         run.text.unsubscribe(token);
-    });
+    }
     Ok(())
 }
 
@@ -388,8 +395,8 @@ pub fn local_agents_stop(id: String) -> Result<(), String> {
     stop_generation(&id, None)
 }
 pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
-    let map = runs().lock().map_err(|e| e.to_string())?;
-    if let Some(run) = map.get(id) {
+    let run = runs().lock().map_err(|e| e.to_string())?.get(id).cloned();
+    if let Some(run) = run {
         if expected.is_some_and(|token| token != run.generation) {
             return Ok(());
         }
@@ -398,7 +405,7 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         // Completed runs stay cached for their transcript. Their old process
         // group ID may have been reused, so never signal it after completion.
         #[cfg(unix)]
-        if !run.done.load(Ordering::SeqCst) {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
@@ -406,12 +413,10 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
             child.kill().map_err(|e| e.to_string())?;
         }
-        child.wait().map_err(|e| e.to_string())?;
+        let status = child.wait().map_err(|e| e.to_string())?;
+        *run.exit_code.lock().map_err(|e| e.to_string())? = status.code();
         drop(child);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !run.text.drained() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
+        run.text.wait_drained(Some(Duration::from_secs(2)));
         if !run.text.drained() {
             return Err("Local output is still draining; retry Stop before moving".into());
         }
@@ -2293,4 +2298,12 @@ pub fn native_generation(id: &str) -> Option<String> {
         .ok()?
         .get(id)
         .map(|run| run.generation.clone())
+}
+
+pub fn clear_subscriptions() {
+    if let Ok(runs) = runs().lock() {
+        for run in runs.values() {
+            run.text.clear_subscriptions();
+        }
+    }
 }

@@ -143,6 +143,45 @@ pub async fn project_context_prepare(request: Request) -> Result<serde_json::Val
     command.spawn().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"root":replica.store.root,"state":state}))
 }
+fn context_listener(
+    request: Request,
+    wake_tx: tokio::sync::mpsc::Sender<()>,
+) -> tokio::task::JoinHandle<()> {
+    let endpoint = request.endpoint.clone();
+    let token = request.token.clone();
+    let project = request.project.clone();
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        loop {
+            if let Ok(mut response) = client
+                .get(format!(
+                    "{}/api/projects/{}/context/stream",
+                    endpoint.trim_end_matches('/'),
+                    project
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await
+            {
+                if response.status().is_success() {
+                    let _ = wake_tx.try_send(());
+                    let mut pending = String::new();
+                    while let Ok(Some(chunk)) = response.chunk().await {
+                        pending.push_str(&String::from_utf8_lossy(&chunk));
+                        while let Some(end) = pending.find("\n\n") {
+                            let event = pending.drain(..end + 2).collect::<String>();
+                            if event.contains("data:") {
+                                let _ = wake_tx.try_send(());
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    })
+}
+
 pub fn worker_entry() -> bool {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).and_then(|s| s.to_str()) != Some("--orb-context-worker") {
@@ -170,33 +209,68 @@ pub fn worker_entry() -> bool {
             .build()
             .map_err(|e| e.to_string())?;
         runtime.block_on(async {
+            let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(1);
+            let local_tx = wake_tx.clone();
+            let _watch = crate::file_notifications::watch(&initial.store.root, move || {
+                let _ = local_tx.try_send(());
+                true
+            })?;
+            let mut credentials = request.clone();
+            let mut remote = context_listener(credentials.clone(), wake_tx.clone());
             loop {
-                // Removing this connection file revokes the worker. Refresh credentials on each pass.
                 let Ok(bytes) = std::fs::read(&config) else {
                     break;
                 };
-                if let Ok(request) = serde_json::from_slice::<Request>(&bytes) {
-                    if let Ok(replica) = replica(&request) {
-                        if let Ok(state) = replica.tick().await {
-                            if state.error.as_ref().is_some_and(|error| {
-                                error.contains("HTTP 401") || error.contains("HTTP 403")
-                            }) {
-                                if std::fs::read(&config)
-                                    .ok()
-                                    .and_then(|bytes| {
-                                        serde_json::from_slice::<Request>(&bytes).ok()
-                                    })
-                                    .is_some_and(|saved| saved.token == request.token)
-                                {
-                                    let _ = std::fs::remove_file(&config);
-                                }
+                let current: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                if current.token != credentials.token || current.endpoint != credentials.endpoint {
+                    remote.abort();
+                    credentials = current.clone();
+                    remote = context_listener(credentials.clone(), wake_tx.clone());
+                }
+                let replica = replica(&current)?;
+                let state = match replica.tick().await {
+                    Ok(state) => state,
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        continue;
+                    }
+                };
+                if state
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("HTTP 401") || error.contains("HTTP 403"))
+                {
+                    if std::fs::read(&config).ok().as_deref() == Some(bytes.as_slice()) {
+                        let _ = std::fs::remove_file(&config);
+                        break;
+                    }
+                    continue;
+                }
+                // Sleep until an actual local/remote change. Check revocation without
+                // scanning or synchronizing the context on the quiet path.
+                loop {
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), wake_rx.recv())
+                        .await
+                    {
+                        Ok(Some(())) => break,
+                        Ok(None) => {
+                            remote.abort();
+                            return Ok::<(), String>(());
+                        }
+                        Err(_) => {
+                            if std::fs::read(&config).ok().as_deref() != Some(bytes.as_slice()) {
+                                break;
+                            }
+                            if state.error.is_some() || !state.pending.is_empty() {
+                                break;
                             }
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-        });
+            remote.abort();
+            Ok::<(), String>(())
+        })?;
         Ok(())
     };
     let _ = run();
@@ -311,4 +385,45 @@ pub async fn project_context_file(
         return Err("Context changed; refresh first".into());
     }
     Ok(serde_json::json!({"revision":receipt.revision}))
+}
+
+fn subscriptions() -> &'static std::sync::Mutex<
+    std::collections::HashMap<u64, crate::file_notifications::Subscription>,
+> {
+    static SUBS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, crate::file_notifications::Subscription>>,
+    > = std::sync::OnceLock::new();
+    SUBS.get_or_init(Default::default)
+}
+#[tauri::command]
+pub fn project_context_subscribe(
+    request: Request,
+    on_event: tauri::ipc::Channel<()>,
+) -> Result<u64, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let replica = replica(&request)?;
+    let root = replica.store.root.parent().ok_or("Invalid context root")?;
+    let channel = on_event.clone();
+    let subscription = crate::file_notifications::watch(root, move || channel.send(()).is_ok())?;
+    let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    on_event.send(()).map_err(|e| e.to_string())?;
+    subscriptions()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(token, subscription);
+    Ok(token)
+}
+#[tauri::command]
+pub fn project_context_unsubscribe(token: u64) -> Result<(), String> {
+    subscriptions()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&token);
+    Ok(())
+}
+
+pub fn clear_subscriptions() {
+    if let Ok(mut subscriptions) = subscriptions().lock() {
+        subscriptions.clear();
+    }
 }

@@ -196,6 +196,12 @@ export function parseMarkdown(src: string): Block[] {
 }
 
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
+/** Search the same block content without mounting historical Markdown. */
+export function markdownText(source:string):string{
+ const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
+ return parseMarkdown(source).map(block=>block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):block.t==='ul'?block.items.map(plain).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text)).join('\n');
+}
+
 export function incrementalMarkdown() {
   let previous = "", boundary = 0, stable: Block[] = [];
   return (text: string): Block[] => {

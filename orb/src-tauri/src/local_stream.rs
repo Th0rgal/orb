@@ -16,7 +16,7 @@ pub struct Event {
 #[derive(Default)]
 struct State {
     text: String,
-    next: u64,
+    terminal: Option<crate::local_agents::PollState>,
     listeners: Vec<(u64, Channel<Event>)>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -112,12 +112,20 @@ fn upsert_task<'a>(
     Some(activity)
 }
 #[derive(Default)]
-pub struct Output(Mutex<State>, AtomicUsize, Mutex<Vec<Activity>>);
+pub struct Output(
+    Mutex<State>,
+    AtomicUsize,
+    Mutex<Vec<Activity>>,
+    Mutex<()>,
+    std::sync::Condvar,
+);
 
 pub struct ReaderGuard(Arc<Output>);
 impl Drop for ReaderGuard {
     fn drop(&mut self) {
+        let _guard = self.0 .3.lock().unwrap();
         self.0 .1.fetch_sub(1, Ordering::SeqCst);
+        self.0 .4.notify_all();
     }
 }
 impl Output {
@@ -356,6 +364,18 @@ impl Output {
         self.1.fetch_add(1, Ordering::SeqCst);
         ReaderGuard(self.clone())
     }
+    pub fn wait_drained(&self, timeout: Option<std::time::Duration>) -> bool {
+        let guard = self.3.lock().unwrap();
+        if let Some(timeout) = timeout {
+            let _ = self
+                .4
+                .wait_timeout_while(guard, timeout, |_| !self.drained())
+                .unwrap();
+        } else {
+            drop(self.4.wait_while(guard, |_| !self.drained()).unwrap());
+        }
+        self.drained()
+    }
     pub fn drained(&self) -> bool {
         self.1.load(Ordering::SeqCst) == 0
     }
@@ -394,20 +414,41 @@ impl Output {
             .listeners
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
     }
+    pub fn finish(&self, terminal: crate::local_agents::PollState) {
+        let mut state = self.0.lock().unwrap();
+        if state.terminal.is_some() {
+            return;
+        }
+        state.terminal = Some(terminal.clone());
+        let event = Event {
+            text: String::new(),
+            reset: false,
+            state: Some(terminal),
+            activities: None,
+        };
+        for (_, channel) in state.listeners.drain(..) {
+            let _ = channel.send(event.clone());
+        }
+    }
     pub fn subscribe(&self, channel: Channel<Event>) -> Result<u64, String> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut state = self.0.lock().unwrap();
         channel
             .send(Event {
                 text: state.text.clone(),
                 reset: true,
-                state: None,
-                activities: None,
+                state: state.terminal.clone(),
+                activities: Some(self.activities()),
             })
             .map_err(|e| e.to_string())?;
-        state.next += 1;
-        let id = state.next;
-        state.listeners.push((id, channel));
-        Ok(id)
+        let token = NEXT.fetch_add(1, Ordering::Relaxed);
+        if state.terminal.is_none() {
+            state.listeners.push((token, channel));
+        }
+        Ok(token)
+    }
+    pub fn clear_subscriptions(&self) {
+        self.0.lock().unwrap().listeners.clear();
     }
     pub fn unsubscribe(&self, id: u64) {
         self.0
@@ -470,6 +511,54 @@ impl CodexText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn terminal() -> crate::local_agents::PollState {
+        crate::local_agents::PollState {
+            text: "done".into(),
+            activities: vec![],
+            done: true,
+            exit_code: Some(0),
+            session_id: None,
+            error: None,
+            resumed: false,
+        }
+    }
+    #[test]
+    fn terminal_publication_is_once_and_late_subscribers_do_not_leak() {
+        let output = Output::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        output
+            .subscribe(Channel::new(move |body| {
+                captured.lock().unwrap().push(body);
+                Ok(())
+            }))
+            .unwrap();
+        output.append("done");
+        output.finish(terminal());
+        output.finish(terminal());
+        assert_eq!(events.lock().unwrap().len(), 3);
+        assert!(output.0.lock().unwrap().listeners.is_empty());
+        let captured = events.clone();
+        output
+            .subscribe(Channel::new(move |body| {
+                captured.lock().unwrap().push(body);
+                Ok(())
+            }))
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 4);
+        assert!(output.0.lock().unwrap().terminal.as_ref().unwrap().done);
+        assert!(output.0.lock().unwrap().listeners.is_empty());
+    }
+    #[test]
+    fn stale_unsubscribe_cannot_remove_another_run_subscription() {
+        let old = Output::default();
+        let next = Output::default();
+        let token = old.subscribe(Channel::new(|_| Ok(()))).unwrap();
+        let next_token = next.subscribe(Channel::new(|_| Ok(()))).unwrap();
+        assert_ne!(token, next_token);
+        next.unsubscribe(token);
+        assert_eq!(next.0.lock().unwrap().listeners.len(), 1);
+    }
     #[test]
     fn native_tools_preserve_identity_and_terminal_errors() {
         let output = Output::default();

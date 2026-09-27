@@ -15847,6 +15847,44 @@ fn project_conversation_events(
 /// filter) and `X-Max-Sequence` (highest sequence stored for this
 /// mission) headers so the client can decide whether it's caught up
 /// without issuing a second request.
+fn event_page_cursor(
+    first: Option<i64>,
+    last: Option<i64>,
+    count: usize,
+    limit: Option<usize>,
+    backward: bool,
+) -> (Option<i64>, bool) {
+    (
+        if backward { first } else { last },
+        limit.is_some_and(|limit| limit > 0 && count == limit),
+    )
+}
+#[cfg(test)]
+mod event_page_cursor_tests {
+    use super::event_page_cursor;
+    #[test]
+    fn forward_progress_uses_raw_page_end() {
+        assert_eq!(
+            event_page_cursor(Some(1001), Some(2000), 1000, Some(1000), false),
+            (Some(2000), true)
+        );
+    }
+    #[test]
+    fn backward_progress_uses_raw_page_start() {
+        assert_eq!(
+            event_page_cursor(Some(1001), Some(2000), 1000, Some(1000), true),
+            (Some(1001), true)
+        );
+    }
+    #[test]
+    fn empty_page_terminates_without_advancing() {
+        assert_eq!(
+            event_page_cursor(None, None, 0, Some(1000), false),
+            (None, false)
+        );
+    }
+}
+
 pub async fn get_mission_events(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -15895,6 +15933,15 @@ pub async fn get_mission_events(
             .await
             .map_err(internal_error)?
     };
+    // Advance through raw rows, not the projected/condensed response.
+    let page_max = events.last().map(|event| event.sequence);
+    let (next_cursor, has_more) = event_page_cursor(
+        events.first().map(|event| event.sequence),
+        page_max,
+        events.len(),
+        query.limit,
+        query.before_seq.is_some() || query.since_seq.is_none(),
+    );
     let mut summary = if should_summarize_events(&mission) {
         summarize_inactive_stream_events(events)
     } else {
@@ -15958,6 +16005,26 @@ pub async fn get_mission_events(
 
     let mut response = Json(summary.events).into_response();
     let headers = response.headers_mut();
+    for (name, value) in [
+        ("X-Next-Cursor", next_cursor),
+        ("X-Page-Max-Sequence", page_max),
+    ] {
+        if let Some(value) = value {
+            headers.insert(
+                name,
+                header::HeaderValue::from_str(&value.to_string()).map_err(internal_error)?,
+            );
+        }
+    }
+    headers.insert(
+        "X-Orb-Events-Protocol",
+        header::HeaderValue::from_static("1"),
+    );
+    headers.insert(
+        "X-Has-More",
+        header::HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+
     if let Some(total) = total {
         if let Ok(v) = header::HeaderValue::from_str(&total.to_string()) {
             headers.insert("X-Total-Events", v);
@@ -15980,7 +16047,7 @@ pub async fn get_mission_events(
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         header::HeaderValue::from_static(
-            "X-Total-Events, X-Max-Sequence, X-Original-Event-Count, X-Summarized-Event-Count",
+            "X-Total-Events, X-Max-Sequence, X-Original-Event-Count, X-Summarized-Event-Count, X-Next-Cursor, X-Page-Max-Sequence, X-Has-More, X-Orb-Events-Protocol",
         ),
     );
 
