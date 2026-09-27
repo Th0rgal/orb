@@ -45,7 +45,9 @@ pub(crate) mod kimi_usage;
 pub mod library;
 pub mod mcp;
 pub mod metadata_llm;
+pub(crate) mod minimax_usage;
 pub mod mission_horizon;
+pub mod mission_payload;
 pub mod mission_runner;
 pub mod mission_store;
 pub mod mission_workspace_gc;
@@ -57,6 +59,8 @@ pub mod oauth_reconcile;
 pub mod opencode;
 pub(crate) mod operator_attention;
 pub mod paloma;
+pub mod project_controller;
+pub mod project_crons;
 pub mod project_files;
 pub mod project_health;
 pub mod projects_overview;
@@ -82,6 +86,7 @@ pub mod telegram;
 pub mod track_leases;
 pub mod tracker_import;
 pub mod types;
+pub(crate) mod uploads;
 pub mod usage_optimize;
 pub mod validation;
 pub mod webhook_markers;
@@ -91,3 +96,11 @@ pub(crate) mod xai_usage;
 
 pub use routes::serve;
 pub use types::*;
+
+pub mod file_resources;
+
+pub mod context_auth;
+
+pub mod context_execution;
+
+pub mod agent_software;
