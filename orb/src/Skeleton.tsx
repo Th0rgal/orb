@@ -58,3 +58,18 @@ export function ControllerSkeleton() {
     </div>
   );
 }
+
+/** Same centered column as the conversation, before its mission is resolved. */
+export function ConversationSkeleton() {
+  return <div class="scroll" role="status" aria-label="Loading conversation" aria-busy="true">
+    <div class="col">
+      <div class="sk-transcript" aria-hidden="true">
+        <div class="sk-lines">
+          <i style={{ width: "58%" }} />
+          <i style={{ width: "86%" }} />
+          <i style={{ width: "72%" }} />
+        </div>
+      </div>
+    </div>
+  </div>;
+}

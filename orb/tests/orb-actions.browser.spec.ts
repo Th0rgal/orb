@@ -122,7 +122,6 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
 test("finished agent rows offer the same copy, and it is never an execution id", async ({ page }) => {
   await setup(page);
   await expandProject(page);
-  await page.getByRole("button", { name: "1 finished" }).click();
 
   const done = page.getByRole("button", { name: /Earlier report/ });
   await done.click({ button: "right" });

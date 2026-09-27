@@ -22,8 +22,8 @@ it("reconnects a revoked sandboxed-owned Anthropic account using its existing id
   });
   vi.stubGlobal("fetch", fetch);
   render(() => <Providers />);
-  fireEvent.click(await screen.findByRole("button", { name: /Claude account/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Reconnect", exact: true }));
+  fireEvent.click(await screen.findByRole("button", { name: "Actions for Claude account", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Reconnect", exact: true }));
   const input = await screen.findByLabelText("Authorization code or redirect URL");
   expect(screen.getByText(/Sign in as account@example.test/)).toBeTruthy();
   fireEvent.input(input, { target: { value: "authorized-code" } });
@@ -32,16 +32,16 @@ it("reconnects a revoked sandboxed-owned Anthropic account using its existing id
   await screen.findByText("Connected");
   expect(fetch.mock.calls.some(([url]) => url.includes("cli-proxy-login"))).toBe(false);
 });
-it("does not expose empty API key rows as expandable buttons but keeps real error details", async () => {
+it("exposes API key editing and keeps real error details", async () => {
   setConnection("http://core.test", "test-token");
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers")
     ? ["muse", "custom", "minimax", "zai"].map(id => ({ id, name: id, provider_type: id, uses_oauth: false, status: { type: "connected" } }))
     : { entries: { muse: { provider_type: "muse" }, custom: { provider_type: "custom" }, minimax: { provider_type: "minimax", model_usage: [] }, zai: { provider_type: "zai", error: "Account unavailable" } } }))));
   const { container } = render(() => <Providers />);
   await screen.findAllByText("muse");
-  await waitFor(() => expect(screen.getByRole("button", { name: /zai/ })).toBeTruthy());
-  for (const name of ["muse", "custom", "minimax"]) expect(screen.queryByRole("button", { name: new RegExp(name) })).toBeNull();
-  expect(container.querySelectorAll(".p-acc-chev")).toHaveLength(1);
-  fireEvent.click(screen.getByRole("button", { name: /zai/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /^zai/ })).toBeTruthy());
+  for (const name of ["muse", "custom", "minimax"]) expect(screen.getByRole("button", { name: `Actions for ${name}`, exact: true })).toBeTruthy();
+  expect(container.querySelectorAll(".p-acc-chev")).toHaveLength(4);
+  fireEvent.click(screen.getByRole("button", { name: /^zai/ }));
   expect(screen.getByText("Account unavailable")).toBeTruthy();
 });

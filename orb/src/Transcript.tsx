@@ -1,5 +1,6 @@
+import {anchoredDisclosure} from "./anchoredDisclosure";
 import { messageImages } from "./messageImages";
-import { imagePrompt } from "./imageAttachments";
+import { imagePrompt, type DraftImage } from "./imageAttachments";
 import { Dialog } from "./Dialog";
 import { FileReferenceContext } from "./fileReferenceContext";
 import { copyText } from "./clipboard";
@@ -85,32 +86,42 @@ function MessageImage(p: {path:string; index:number}) {
   const resolver=useContext(FileReferenceContext);
   const [url,setUrl]=createSignal<string | null>(null);
   const [expanded,setExpanded]=createSignal(false);
+  const [attempt,setAttempt]=createSignal(0);
+  const [loading,setLoading]=createSignal(false);
   createEffect(() => {
     const path=p.path;
+    attempt();
+    if (/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(path)) { setUrl(path); setLoading(false); return; }
     let cancelled=false;
     let loaded:string | null=null;
-    setUrl(null);
-    void resolver?.loadImage?.(path).then(value => {
-      if(cancelled) { if(value)URL.revokeObjectURL(value); return; }
-      loaded=value;setUrl(value);
-    }).catch(() => {});
-    onCleanup(() => {cancelled=true;if(loaded)URL.revokeObjectURL(loaded);});
+    setUrl(null); setLoading(true);
+    void Promise.resolve(resolver?.loadImage?.(path)).then(value => {
+      if(cancelled) { if(value?.startsWith("blob:"))URL.revokeObjectURL(value); return; }
+      loaded=value ?? null;setUrl(value ?? null);
+    }).catch(() => {}).finally(() => {if(!cancelled)setLoading(false);});
+    onCleanup(() => {cancelled=true;if(loaded?.startsWith("blob:"))URL.revokeObjectURL(loaded);});
   });
   return <>
-    <button class="message-image" aria-label={`Image #${p.index}`} title={url()?`Open image #${p.index}`:`Image #${p.index} — preview unavailable`} disabled={!url()} onDblClick={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();setExpanded(true);}}>
+    <button class="message-image" aria-label={`Image #${p.index}`} title={url()?`Open image #${p.index}`:loading()?"Loading image…":"Preview unavailable — click to retry"} disabled={loading()} onDblClick={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();if(url())setExpanded(true);else setAttempt(n=>n+1);}}>
       <Show when={url()} fallback={<Ic.FileIcon size={22}/>}>{src=><img src={src()} alt={`Image #${p.index}`} onError={()=>setUrl(null)}/>}</Show>
-      <span>#{p.index}</span>
+      <span>{loading()?"Loading…":url()?`#${p.index}`:"Retry"}</span>
     </button>
     <Show when={expanded() && url()}><Dialog title={`Image #${p.index}`} size="wide" onClose={()=>setExpanded(false)}><img class="message-image-preview" src={url()!} alt={`Image #${p.index}`}/></Dialog></Show>
   </>;
 }
 
-export function UserTurn(p: { text: string; attached?: boolean; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
+const AUTOMATIC_SOURCES = new Set(["scheduler", "idle-worker-watchdog", "transport_auto_resume", "remote-build-terminal", "task-board"]);
+
+export function UserTurn(p: { text: string; images?: DraftImage[]; source?: string; attached?: boolean; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   const fork = createMemo(() => forkContext(p.text));
   const presentation = createMemo(() => messagePresentation(p.text));
   const images = createMemo(() => messageImages(presentation().text));
+  const thumbnails = createMemo(() => images().paths.length
+    ? images().paths.map((path,index)=>({path,reference:images().references[index]}))
+    : (p.images ?? []).map((image,index)=>({path:image.dataUrl,reference:image.reference ?? index+1})));
   const goal = createMemo(() => goalDraft(images().text));
   const plan = createMemo(() => planObjective(images().text));
+  let bubble!: HTMLDivElement;
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
   const [copyState, setCopyState] = createSignal("");
@@ -120,7 +131,7 @@ export function UserTurn(p: { text: string; attached?: boolean; pending?: boolea
     if (sending() || !draft().trim() || !p.onSend) return;
     setSending(true); setSendError("");
     try {
-      const accepted = await p.onSend(imagePrompt(draft(), images().paths));
+      const accepted = await p.onSend(imagePrompt(draft(), images().paths, images().references.map(reference=>({reference}))));
       if (accepted) setEditing(false);
       else setSendError("The message was not sent. Your draft is kept; try again.");
     } catch (e) { setSendError(e instanceof Error ? e.message : String(e)); }
@@ -128,13 +139,14 @@ export function UserTurn(p: { text: string; attached?: boolean; pending?: boolea
   };
   const resizeEditor = (el: HTMLTextAreaElement) => {
     el.style.height = "auto";
-    el.style.height = `${Math.min(320, el.scrollHeight)}px`;
+    el.style.height = `${el.scrollHeight}px`;
   };
-  const edit = () => { if (fork()) return; setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true); };
+  const edit = () => { if (fork()) return; bubble.style.setProperty("--editing-width", `${bubble.getBoundingClientRect().width}px`); setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true); };
   return (
-    <div onDblClick={() => { if (!editing()) edit(); }} class={`user ${editing() ? "editing" : ""} ${goal().kind === "goal" ? "goal" : ""} ${plan() !== null ? "plan" : ""} ${p.pending ? "pending" : ""}`}>
-      <Show when={images().paths.length}><div class="message-images"><For each={images().paths}>{(path,index)=><MessageImage path={path} index={index()+1}/>}</For></div></Show>
+    <div ref={bubble} onDblClick={() => { if (!editing()) edit(); }} class={`user ${editing() ? "editing" : ""} ${goal().kind === "goal" ? "goal" : ""} ${plan() !== null ? "plan" : ""} ${p.pending ? "pending" : ""}`}>
+      <Show when={thumbnails().length}><div class="message-images"><For each={thumbnails()}>{image=><MessageImage path={image.path} index={image.reference}/>}</For></div></Show>
       <Show when={editing()} fallback={<>
+      <Show when={p.source && AUTOMATIC_SOURCES.has(p.source)}><small class="user-origin" title="This message was generated by the agent coordinator">↻ Automatic follow-up</small></Show>
       <Show when={plan() !== null}><small class="user-plan"><Ic.PlanIcon size={12}/>Plan</small></Show>
       <Show when={fork()} fallback={<span>{goal().kind === "goal" ? (goal() as { objective: string }).objective : plan() ?? images().text}</span>}>
         {context => <details class="fork-context"><summary>Forked from {context().source_title || "conversation"} · {context().messages.length} messages</summary>
@@ -144,7 +156,7 @@ export function UserTurn(p: { text: string; attached?: boolean; pending?: boolea
       <Show when={p.attached || presentation().attached}><small class="user-context">Attached context</small></Show>
       <Show when={!fork()}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
       </>}>
-        <textarea class="prompt-editor" rows={1} aria-label="Edit prompt text" disabled={sending()} value={draft()} onInput={e => { setDraft(e.currentTarget.value); resizeEditor(e.currentTarget); }} onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); if (!sending()) setEditing(false); } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); void submit(); } }} ref={el => queueMicrotask(() => { el.focus(); resizeEditor(el); })} />
+        <textarea class="prompt-editor" rows={1} aria-label="Edit prompt text" disabled={sending()} value={draft()} onInput={e => { setDraft(e.currentTarget.value); resizeEditor(e.currentTarget); }} onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); if (!sending()) setEditing(false); } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); void submit(); } }} ref={el => queueMicrotask(() => { resizeEditor(el); el.focus({ preventScroll: true }); })} />
         <div class="prompt-editor-actions">
           <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={16} /></button>
           <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={15} /></button>
@@ -159,17 +171,24 @@ export function UserTurn(p: { text: string; attached?: boolean; pending?: boolea
 
 function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
   const [open, setOpen] = createSignal(false);
+  const anchored=anchoredDisclosure();
+  let toggle!:HTMLButtonElement;
   const target = () => toolTarget(p.item.name, p.item.args);
+  const failed=()=>{const r=toolArgs(p.item.result);return !!r&&(!!r.error||r.status==="failed"||r.is_error===true);};
   const detail = () => {
     const parts: string[] = [];
     if (p.item.args != null) parts.push(typeof p.item.args === "string" ? p.item.args : JSON.stringify(p.item.args, null, 2));
     const r = resultText(p.item.result);
     if (r) parts.push(r);
+    if(p.item.unresolved)parts.push("This turn ended without a recorded result for this action.");
     return parts.join("\n\n");
   };
   return (
     <div class={`st-tool ${open() ? "open" : ""}`}>
-      <button class="st-tool-head" onClick={() => setOpen(!open())}>
+      <Show when={open()}>
+        <pre class="st-tool-detail">{detail() || "(no details)"}</pre>
+      </Show>
+      <button class="st-tool-head" ref={toggle} aria-expanded={open()} onClick={() => anchored(toggle,()=>setOpen(!open()))}>
         <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
         <span class="st-tool-name">{p.item.name}</span>
         <Show when={target()}>
@@ -177,13 +196,11 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
         </Show>
         <span class="st-tool-state">
           <Show when={p.item.done} fallback={<Ic.Spinner size={12} />}>
-            <span class="st-tool-check">✓</span>
+            <span class="st-tool-check" classList={{"is-failed":failed()}} title={p.item.unresolved?"No result recorded":failed()?"Failed":undefined}>{p.item.unresolved?"—":failed()?"!":"✓"}</span>
           </Show>
         </span>
       </button>
-      <Show when={open()}>
-        <pre class="st-tool-detail">{detail() || "(no details)"}</pre>
-      </Show>
+
     </div>
   );
 }
@@ -237,6 +254,8 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
 function WorkFold(p: { items: WorkItem[] }) {
   const running = () => p.items.some((t) => (t.kind === "tool" ? !t.done : !t.done));
   const [open, setOpen] = createSignal(false);
+  const anchored=anchoredDisclosure();
+  let toggle!:HTMLButtonElement;
   const current = () => {
     const cur = [...p.items].reverse().find((t) => (t.kind === "tool" ? !t.done : !t.done));
     if (!cur) return "Working…";
@@ -246,12 +265,6 @@ function WorkFold(p: { items: WorkItem[] }) {
   const summary = () => workSummary(p.items);
   return (
     <div class={`st-work ${open() ? "open" : ""}`}>
-      <button class="st-work-head" onClick={() => setOpen(!open())}>
-        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
-        <Show when={running()} fallback={<span class="st-work-label">{summary()}</span>}>
-          <span class="st-work-label shimmer">{current()}</span>
-        </Show>
-      </button>
       <Show when={open()}>
         <div class="st-work-body">
           <For each={p.items}>
@@ -261,6 +274,13 @@ function WorkFold(p: { items: WorkItem[] }) {
           </For>
         </div>
       </Show>
+      <button class="st-work-head" ref={toggle} aria-expanded={open()} onClick={() => anchored(toggle,()=>setOpen(!open()))}>
+        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
+        <Show when={running()} fallback={<span class="st-work-label">{summary()}</span>}>
+          <span class="st-work-label shimmer">{current()}</span>
+        </Show>
+      </button>
+
     </div>
   );
 }
@@ -296,7 +316,7 @@ export function Transcript(p: { items: StreamItem[]; pending?: boolean; onSend?:
             case "user":
               // Only the turn still waiting for a reply animates: once anything
               // has been said or done after it, the work is visible on its own.
-              return <UserTurn text={item.text} attached={item.attached} onSend={p.onSend} pending={p.pending && item.key === lastUserKey()} />;
+              return <UserTurn text={item.text} images={item.images} source={item.source} attached={item.attached} onSend={p.onSend} pending={p.pending && item.key === lastUserKey()} />;
             case "think":
               return <ThinkBlock item={item} />;
             case "text":

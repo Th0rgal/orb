@@ -1,3 +1,6 @@
+import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
+import {connectionVersion} from "./api";
+import {nodeLabel} from "./missionLaunch";
 import { Select } from "./Select";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
@@ -8,12 +11,13 @@ import { appendClientTranscript, setClientMissionStatus } from "./api";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction } from "./machineTransfer";
 
 export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; onClose: () => void; onMoved: (mission: Mission) => void }) {
-  const [destinations, setDestinations] = createSignal<Destination[]>([]);
+  const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());
   const [selected, setSelected] = createSignal<Destination>();
   const [action, setAction] = createSignal<TransferAction>();
   const [backend, setBackend] = createSignal(p.mission.backend ?? "");
   const [model, setModel] = createSignal(p.mission.model_override ?? "");
   const [loading, setLoading] = createSignal(true);
+  const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [stage, setStage] = createSignal("");
   const [progress, setProgress] = createSignal(0);
@@ -30,25 +34,33 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   const compatible = () => !selected()?.harnesses || selected()!.harnesses!.includes(backend());
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
   const load = async () => {
-    setLoading(true); setError("");
+    setLoading(true); setReady(false); setError("");
+    const version=connectionVersion();
     try {
-      const view = await inspectTransfer(p.mission.id);
+      const local=async():Promise<Destination>=>{
+        if(!nativeInvoke())return {machine:{kind:"client",id:"unavailable"},label:"This computer",available:false,reason:"Open Orb desktop to use this computer"};
+        const [id,installed]=await Promise.all([machineIdentity(),refreshLocalAgents()]);
+        return {machine:{kind:"client",id},label:"This computer",available:true,harnesses:installed.filter(c=>c.installed).map(c=>c.id)};
+      };
+      const [view,computer]=await Promise.all([inspectTransfer(p.mission.id),local()]);
       if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
-      const rows = [...view.destinations];
-      if (nativeInvoke()) {
-        client = await machineIdentity();
-        const installed = await refreshLocalAgents();
-        rows.unshift({ machine: { kind: "client", id: client }, label: "This computer", available: true, harnesses: installed.filter(c => c.installed).map(c => c.id) });
-      } else rows.unshift({ machine: { kind: "client", id: "unavailable" }, label: "This computer", available: false, reason: "Open Orb desktop to use this computer" });
+      const rows = preferSparkAdministration([computer,...view.destinations],row=>row.machine.kind==='node'?row.machine.id:undefined)
+        .map(row=>row.machine.kind==='node'&&row.machine.id==='dgx-spark-admin'?{...row,label:nodeLabel(row.machine.id)}:row);
+      if(version!==connectionVersion())return;
+      cacheMachineDestinations(rows);
       if (!alive) return;
+      if(computer.machine.kind==='client')client=computer.machine.id;
       setDestinations(rows);
-      queueMicrotask(() => root?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus());
+      setReady(true);
+      const previous=selected();
+      if(previous)setSelected(rows.find(row=>sameMachine(row.machine,previous.machine)));
+      queueMicrotask(() => {if(!root?.contains(document.activeElement))root?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();});
       const pending = [...view.actions].reverse().find(activeTransfer);
       if (pending) {
         setAction(pending); setBackend(pending.backend); setModel(pending.model ?? "");
         setSelected(rows.find(r => sameMachine(r.machine, pending.destination)) ?? { machine: pending.destination, label: machineLabel(pending.destination), available: true });
       }
-    } catch (e) { if (alive) fail(e); }
+    } catch (e) { if (alive && version===connectionVersion()) fail(e); }
     finally { if (alive) setLoading(false); }
   };
   onMount(() => {
@@ -84,7 +96,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
     }
   };
   const prepare = async () => {
-    const target = selected(); if (!target || busy()) return;
+    const target = selected(); if (!target || busy() || !ready() || !target.available) return;
     cancelled = false; setBusy(true); setError(""); setStage("Preparing workspace…");
     try {
       if (current().kind === "client" && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer before moving it.");
@@ -124,7 +136,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   };
   return <div ref={root} class="menu machine-transfer-menu" role={selected() ? "dialog" : "menu"} aria-label="Change machine" onKeyDown={keys}>
     <div class="menu-group">{selected() ? `Continue on ${selected()!.label}` : "Change machine…"}</div>
-    <Show when={loading()}><div class="menu-group" role="status">Checking machines…</div></Show>
+    <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
     <Show when={!selected()}>
       <For each={destinations()}>{d => <button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? d.label} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
         <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span>
@@ -133,6 +145,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
     <Show when={selected()}>
       <div class="transfer-body">
         <p>Move this conversation and its workspace files. The agent will wait for your next message.</p>
+        <Show when={selected()?.reason}><p role="status">{selected()!.reason}</p></Show>
         <Show when={!action()}>
           <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
             <Show when={!compatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
@@ -145,12 +158,12 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
         <Show when={busy()}><div role="status">{stage()}</div><Show when={stage().startsWith("Copying")}><progress max="1" value={progress()} /></Show></Show>
         <div class="transfer-actions">
           <button class="pill" disabled={stage() === "Activating destination…" && busy()} onClick={() => busy() ? cancelled = true : void cancel()}>Cancel</button>
-          <Show when={action()?.manifest} fallback={<button class="pill on" disabled={busy() || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}>
+          <Show when={action()?.manifest} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}>
             <button class="pill on" disabled={busy()} onClick={() => void move()}>Move to {selected()!.label}</button>
           </Show>
         </div>
       </div>
     </Show>
-    <Show when={error()}><ErrorNotice error={error()} /><Show when={!selected()}><button class="menu-item" onClick={() => void load()}>Retry</button></Show></Show>
+    <Show when={error()}><ErrorNotice error={error()} /><Show when={!action() && !loading()}><button class="menu-item" onClick={() => void load()}>Retry</button></Show></Show>
   </div>;
 }

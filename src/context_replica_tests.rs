@@ -90,7 +90,11 @@ async fn round_trip_and_concurrent_edits() {
     assert!(history.len() >= 2);
     server.abort();
     std::fs::write(a.store.root.join("offline.md"), "queued").unwrap();
-    let status = a.tick().await.unwrap();
+    // Aborting the listener leaves pooled keep-alive connections alive.
+    // Use an unreachable endpoint to model an actual network outage.
+    let mut offline = a.clone();
+    offline.endpoint = "http://127.0.0.1:0".into();
+    let status = offline.tick().await.unwrap();
     assert!(status.error.is_some());
     assert_eq!(status.pending.len(), 1);
     let mut a = replica(dir.path(), "a", &endpoint);
@@ -153,5 +157,36 @@ async fn context_file_folder_transitions_and_conflict_resolution() {
         std::fs::read_to_string(core.root.join("item")).unwrap(),
         "variant"
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn idle_sync_fetches_manifest_once_per_tick() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = requests.clone();
+    let app = Router::new().route(
+        "/api/projects/test/context/manifest",
+        get(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(Manifest::default())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let replica = replica(dir.path(), "idle", &endpoint);
+    assert!(replica.tick().await.unwrap().ready);
+    assert!(replica.tick().await.unwrap().error.is_none());
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
     server.abort();
 }

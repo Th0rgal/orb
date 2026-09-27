@@ -297,3 +297,5 @@ export const PasteIcon = (p: P) => <I {...p}>
 export const ReopenIcon = (p: P) => <I {...p}>
   <path d="M3 6a5 5 0 1 1 0 4M3 2v4h4" />
 </I>;
+
+export const FlaskIcon = (p: P) => <I {...p}><path d="M6 2h4M6.8 2v4.2L3.3 12a1.3 1.3 0 0 0 1.1 2h7.2a1.3 1.3 0 0 0 1.1-2L9.2 6.2V2M5.1 9.2h5.8"/></I>;

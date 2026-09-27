@@ -1,8 +1,10 @@
 import {describe,it,expect,vi} from 'vitest';
 import {render,screen,fireEvent,waitFor,cleanup} from '@solidjs/testing-library';
+import {createSignal} from 'solid-js';
+import {MissionGlyph} from '../src/MissionGlyph';
 import {NativeInteraction} from '../src/NativeInteraction';
 import {api} from '../src/api';
-vi.mock('../src/api',()=>({api:vi.fn()}));
+vi.mock('../src/api',async importOriginal=>({...await importOriginal<typeof import('../src/api')>(),api:vi.fn()}));
 import {composerModes,modePrompt} from '../src/goal';
 
 describe('native plan interactions',()=>{
@@ -24,12 +26,14 @@ describe('native plan interactions',()=>{
   });
   const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
   try{
-   render(()=><NativeInteraction mission="mission" active/>);
+   render(()=><><MissionGlyph missionId="mission" status="awaiting_user"/><NativeInteraction mission="mission" active/></>);
    await screen.findByText('Which greeting?');
+   expect(document.querySelector('.mission-glyph')?.getAttribute('title')).toBe('Waiting for your reply');
    fireEvent.click(screen.getByRole('radio'));
    fireEvent.click(screen.getByRole('button',{name:'Continue'}));
    await waitFor(()=>expect(screen.queryByRole('button',{name:'Continue'})).toBeNull());
    expect(invoke.mock.calls.filter(([cmd])=>cmd==='local_interaction_answer')).toHaveLength(1);
+   expect(document.querySelector('.mission-glyph')?.getAttribute('title')).toBe('Ready for a follow-up');
   }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
  });
  it('switching from a custom answer to an option clears the custom field',async()=>{
@@ -77,4 +81,59 @@ describe('native plan interactions',()=>{
   } finally {cleanup();host.__TAURI_INTERNALS__=previous;}
  });
 
+});
+
+ it('shares request replacement and cancellation with the sidebar',()=>{
+  const question={kind:'tool' as const,key:'q',callId:'q',name:'ui_native_request',args:{method:'questions',params:{questions:[]}},done:false};
+  const [items,setItems]=createSignal([question]);
+  const [active,setActive]=createSignal(true);
+  const {container}=render(()=><><MissionGlyph missionId="shared" status="awaiting_user"/><NativeInteraction mission="shared" active={active()} remote items={items()}/></>);
+  const label=()=>container.querySelector('.mission-glyph')?.getAttribute('title');
+  expect(label()).toBe('Waiting for your reply');
+  setItems([{...question,callId:'plan',args:{method:'plan',params:{questions:[]}}}]);
+  expect(label()).toBe('Approval requested');
+  setActive(false);
+  expect(label()).toBe('Ready for a follow-up');
+  expect(container.querySelector('.native-question')).toBeNull();
+  cleanup();
+ });
+
+
+describe('question focus during refresh',()=>{
+ const question={id:'focus-request',method:'questions',params:{questions:[{id:'q',question:'Phone number?',options:[{label:'Later'}]}]}};
+ it('preserves the focused custom answer and selection across native polling',async()=>{
+  vi.useFakeTimers();
+  const host=window as any,previous=host.__TAURI_INTERNALS__;
+  const invoke=vi.fn(async()=>JSON.parse(JSON.stringify(question)));
+  host.__TAURI_INTERNALS__={invoke};
+  try {
+   render(()=><NativeInteraction mission="focus-local" active/>);
+   await vi.advanceTimersByTimeAsync(0);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'+33 612345678'}});input.setSelectionRange(4,7);
+   await vi.advanceTimersByTimeAsync(1400);
+   expect(invoke.mock.calls.length).toBeGreaterThanOrEqual(5);
+   expect(screen.getByRole('textbox',{name:'Other answer: Phone number?'})).toBe(input);
+   expect(document.activeElement).toBe(input);
+   expect(input.value).toBe('+33 612345678');
+   expect([input.selectionStart,input.selectionEnd]).toEqual([4,7]);
+  } finally {cleanup();host.__TAURI_INTERNALS__=previous;vi.useRealTimers();}
+ });
+ it('preserves focus across remote snapshots but updates changed requests',()=>{
+  const item={kind:'tool' as const,key:'focus-tool',callId:question.id,name:'ui_native_request',args:question,done:false};
+  const [items,setItems]=createSignal([item]);
+  try {
+   render(()=><NativeInteraction mission="focus-remote" active remote items={items()}/>);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'My answer'}});input.setSelectionRange(2,5);
+   for(let i=0;i<5;i++)setItems(JSON.parse(JSON.stringify([item])));
+   expect(document.activeElement).toBe(input);
+   expect([input.selectionStart,input.selectionEnd]).toEqual([2,5]);
+   expect(input.value).toBe('My answer');
+   setItems([{...item,args:{...question,params:{questions:[{id:'q',question:'Updated question?',options:[]}]}}}]);
+   expect(screen.getByRole('textbox',{name:'Other answer: Updated question?'})).toBeTruthy();
+   setItems([{...item,callId:'next-request'}]);
+   expect((screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement).value).toBe('');
+  } finally {cleanup();}
+ });
 });

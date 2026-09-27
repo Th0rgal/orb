@@ -1,3 +1,4 @@
+import { projectColor, projectColors, setProjectColor } from "./projectAppearance";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as Ic from "./icons";
@@ -19,20 +20,20 @@ import { ControllerSkeleton } from "./Skeleton";
 
 /** Shown for context, changed elsewhere. Saving the limit above leaves every
  * one of these exactly as it is. */
-const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string; desc: string }> = [
-  { key: "autonomy_level", label: "Autonomy level", desc: "How much this project's agents may do on their own." },
-  { key: "merge_authority", label: "Merge authority", desc: "Who may merge this project's work." },
-  { key: "budget_per_tick", label: "Budget per run", desc: "What a scheduled run may spend." },
-  { key: "material_bar", label: "Material bar", desc: "What counts as a material change here." },
-  { key: "pause_reason", label: "Pause reason", desc: "Why this project was paused." },
-  { key: "resume_condition", label: "Resume condition", desc: "What has to be true to resume it." },
+const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string }> = [
+  { key: "autonomy_level", label: "Autonomy level" },
+  { key: "merge_authority", label: "Merge authority" },
+  { key: "budget_per_tick", label: "Budget per run" },
+  { key: "material_bar", label: "Material bar" },
+  { key: "pause_reason", label: "Pause reason" },
+  { key: "resume_condition", label: "Resume condition" },
 ];
 
 /**
  * A project's own settings, opened in the main panel from the sidebar's
  * right-click menu — the same navigation a cron uses, not a modal.
  *
- * The one writable field is this project's limit on unfinished agents, which
+ * The server-backed writable field is this project's limit on unfinished agents, which
  * `create_mission` enforces by counting the project's own unfinished missions
  * (`campaign_slot_held_by` in `src/api/control/mod.rs`). It is a different
  * limit from the backend-wide one in Execution settings, which this page only
@@ -126,21 +127,30 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
           <h2>{title() || p.slug}</h2>
         </div>
         <p class="s-lead">
-          Settings for the project <code>{p.slug}</code> on the connected backend.
+          Project settings
         </p>
         <Show when={error()}>
           <ErrorNotice error={error()!} />
         </Show>
         <Show when={loaded()} fallback={<ControllerSkeleton />}>
           <section class="s-sec">
-            <h3>Concurrency</h3>
+            <h3>Appearance</h3>
+            <div class="s-card"><div class="s-row">
+              <div class="s-row-text"><div class="s-row-title">Project color</div><div class="s-row-desc">On this device</div></div>
+              <div class="ps-colors" role="group" aria-label="Project color"><For each={projectColors}>{color =>
+                <button class="ps-color" title={color.name} aria-label={color.name} aria-pressed={(projectColor(p.slug) ?? "") === color.value}
+                  style={{ "--swatch": color.value || "var(--fg-3)" }} onClick={() => { try { setProjectColor(p.slug, color.value); } catch { setSaveError("Couldn’t save project color."); } }} />
+              }</For></div>
+            </div></div>
+          </section>
+          <section class="s-sec">
+            <h3>Agents</h3>
             <div class="s-card">
               <div class="s-row">
                 <div class="s-row-text">
-                  <div class="s-row-title">Maximum unfinished agents for this project</div>
+                  <div class="s-row-title">Agent limit</div>
                   <div class="s-row-desc">
-                    Starting another agent here is refused once this many are still unfinished. Pending, paused and
-                    awaiting-user agents count too. Empty means no project limit.
+                    Includes queued, paused and waiting agents. Leave empty for no limit.
                   </div>
                 </div>
                 <div class="s-row-ctrl ps-cap-ctrl">
@@ -161,13 +171,13 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
               </div>
               <div class="s-row">
                 <div class="s-row-text">
-                  <div class="s-row-title">Unfinished now</div>
-                  <div class="s-row-desc">This project's agents that have not finished yet.</div>
+                  <div class="s-row-title">Agent slots used</div>
+
                 </div>
                 <div class="s-row-ctrl">
                   <span class="ps-usage" classList={{ full: limit() != null && unfinished().length >= limit()! }}>
                     {unfinished().length}
-                    <Show when={limit() != null} fallback={" running"}>{` / ${limit()}`}</Show>
+                    <Show when={limit() != null} fallback={" unfinished"}>{` / ${limit()}`}</Show>
                   </span>
                 </div>
               </div>
@@ -176,7 +186,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
               <ErrorNotice error={saveError()!} />
             </Show>
             <Show when={saved()}>
-              <p class="ps-saved" role="status">Saved. Only this project's limit changed.</p>
+              <p class="ps-saved" role="status">Saved.</p>
             </Show>
             <Show when={unfinished().length > 0}>
               <div class="s-card ps-occupants">
@@ -193,40 +203,20 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
           </section>
 
           <section class="s-sec">
-            <h3>Backend-wide limit</h3>
-            <div class="s-card">
-              <div class="s-row">
-                <div class="s-row-text">
-                  <div class="s-row-title">Maximum agents across all projects</div>
-                  <div class="s-row-desc">
-                    A separate limit that applies to the whole backend. Changing it does not affect this project's
-                    limit above.
-                  </div>
-                </div>
-                <div class="s-row-ctrl">
-                  <button class="s-btn" onClick={() => p.onOpenPage("execution")}>
-                    Execution settings
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="s-sec">
             <h3>Permissions</h3>
             <p class="s-lead">
-              Shown here, changed elsewhere. Saving the limit above leaves all of these untouched.
+              Managed by the project controller.
             </p>
             <div class="s-card">
-              <For each={READ_ONLY_FIELDS}>
+              <For each={READ_ONLY_FIELDS.filter(field => grant()?.[field.key])}>
                 {(field) => (
-                  <div class="s-row">
+                  <div class="s-row ps-permission">
                     <div class="s-row-text">
                       <div class="s-row-title">{field.label}</div>
-                      <div class="s-row-desc">{field.desc}</div>
+
                     </div>
                     <div class="s-row-ctrl">
-                      <span class="ps-readonly">{String(grant()?.[field.key] ?? "") || "—"}</span>
+                      <span class="ps-readonly">{field.key === "autonomy_level" ? ({observe: "Observe", propose: "Propose", act_reversible: "Reversible actions", act_full: "Full autonomy"}[String(grant()?.[field.key])] ?? String(grant()?.[field.key])) : String(grant()?.[field.key] ?? "")}</span>
                     </div>
                   </div>
                 )}

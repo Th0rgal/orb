@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchRefusal } from "../src/missionLaunch";
 import { ApiError, NO_PROJECT_LIMIT, holdsCapSlot, projectLimitOf, setProjectLimit, updateGlobalSettings, setConnection } from "../src/api";
 
-const CONTROL_RS = resolve(process.cwd(), "../src/api/control/mod.rs");
+const CONTROL_RS = resolve(__dirname, "../../src/api/control/mod.rs");
 const capError = (active: number, cap: number) =>
   new ApiError(429, JSON.stringify({ error: "parallel_missions_cap", cap, active }));
 
@@ -98,7 +98,7 @@ function mergeGrant(stored: Record<string, unknown>, posted: Record<string, unkn
 }
 
 describe("the backend merge these payloads are written for", () => {
-  const store = readFileSync(resolve(process.cwd(), "../src/api/projects_store.rs"), "utf8");
+  const store = readFileSync(resolve(__dirname, "../../src/api/projects_store.rs"), "utf8");
 
   it("really does COALESCE every grant column, so null preserves", () => {
     expect(store).toContain("parallel_missions = COALESCE(excluded.parallel_missions, project_grant.parallel_missions)");

@@ -1,6 +1,9 @@
+import katex from "katex";
+import "katex/dist/katex.min.css";
+import {requestHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
-import { For, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 
 /**
@@ -22,6 +25,7 @@ export function safeHref(raw: string): string | null {
 }
 
 function plainInline(text: string, links: boolean): JSX.Element[] {
+  text = text.replace(/\\([\\`*_[\]{}()#+.!|>-])/g, "$1");
   if (!links) return [<FileReferenceText text={text}/>];
   const result: JSX.Element[] = [];
   const pattern = /https?:\/\/[^\s<>"`]+/gi;
@@ -43,13 +47,41 @@ function plainInline(text: string, links: boolean): JSX.Element[] {
   return result;
 }
 
+function MathFormula(p: {text: string; display?: boolean}) {
+  const html = createMemo(() => katex.renderToString(p.text, {displayMode: !!p.display, throwOnError: false, trust: false, strict: "ignore", maxExpand: 1000}));
+  return <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={html()} />;
+}
 function inline(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g;
+  // Keep code spans opaque; currency such as "$15 and $20" is ordinary text.
+  const pattern = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
+    if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
+    else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
+    else out.push(<MathFormula text={match[3] ?? match[4]}/>);
+    last = match.index! + match[0].length;
+  }
+  if (last < text.length) out.push(...inlineText(text.slice(last), links));
+  return out;
+}
+function inlineText(text: string, links = true): JSX.Element[] {
+  const out: JSX.Element[] = [];
+  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(...plainInline(text.slice(last, m.index), links));
-    if (m[1] !== undefined) out.push(<strong>{inline(m[1], links)}</strong>);
+    if (m[5] !== undefined) {
+      const attributes = [...m[5].matchAll(/([a-z_]+)\s*=\s*("(?:\\.|[^"\\])*")/g)];
+      const quoted = attributes.find(attribute => attribute[1] === "path")?.[2];
+      let path: string | undefined;
+      try { path = quoted ? JSON.parse(quoted) : undefined; } catch { /* malformed citation remains readable */ }
+      if (path) out.push(<FileReference raw={path}>{path.split("/").pop() || path}</FileReference>);
+      else out.push(m[5]);
+    }
+    else if (m[6] !== undefined) out.push(<em>{inline(m[6], links)}</em>);
+    else if (m[1] !== undefined) out.push(<strong>{inline(m[1], links)}</strong>);
     else if (m[2] !== undefined) out.push(<FileReference raw={m[2]}><code>{m[2]}</code></FileReference>);
     else if (!safeHref(m[4])) out.push(<FileReference raw={m[4]}>{m[3]}</FileReference>);
     else
@@ -73,9 +105,11 @@ function inline(text: string, links = true): JSX.Element[] {
 
 type Align = "left" | "center" | "right";
 type Block =
+  | { t: "math"; text: string }
   | { t: "h"; n: number; text: string }
   | { t: "p"; text: string }
   | { t: "ul"; items: string[] }
+  | { t: "ol"; items: string[]; start: number }
   | { t: "pre"; lang: string; text: string }
   | { t: "quote"; text: string }
   | { t: "table"; heads: string[]; rows: string[][]; aligns: Align[] };
@@ -126,6 +160,21 @@ export function parseMarkdown(src: string): Block[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+    const singleLineMath = /^\s*(?:\$\$(.+?)\$\$|\\\[(.+?)\\\])\s*$/.exec(line);
+    if (singleLineMath) {
+      out.push({t: 'math', text: singleLineMath[1] ?? singleLineMath[2]});
+      i++;
+      continue;
+    }
+    if (line.trim() === '$$' || line.trim() === '\\[') {
+      const end = line.trim() === '$$' ? '$$' : '\\]';
+      const start = i++;
+      const content: string[] = [];
+      while (i < lines.length && lines[i].trim() !== end) content.push(lines[i++]);
+      if (i < lines.length) { i++; out.push({t: 'math', text: content.join('\n')}); }
+      else out.push({t: 'p', text: lines.slice(start).join('\n')});
+      continue;
+    }
     if (line.startsWith("```")) {
       const lang = line.slice(3).trim();
       const buf: string[] = [];
@@ -140,6 +189,12 @@ export function parseMarkdown(src: string): Block[] {
       out.push({ t: "h", n: hm[1].length, text: hm[2] });
       i++;
       continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const start = Number(line.match(/^\d+/)![0]);
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) items.push(lines[i++].replace(/^\d+\.\s+/, ''));
+      out.push({t: 'ol', items, start}); continue;
     }
     if (/^[-*]\s+/.test(line)) {
       const items: string[] = [];
@@ -175,6 +230,8 @@ export function parseMarkdown(src: string): Block[] {
       lines[i].trim() &&
       !/^#{1,6}\s/.test(lines[i]) &&
       !/^[-*]\s+/.test(lines[i]) &&
+      !/^\d+\.\s+/.test(lines[i]) &&
+      !/^\s*(?:\$\$|\\\[)/.test(lines[i]) &&
       !lines[i].startsWith("```") &&
       !/^ {0,3}>/.test(lines[i]) &&
       !readTable(lines, i)
@@ -193,11 +250,12 @@ export function incrementalMarkdown() {
     if (!text.startsWith(previous)) { boundary = 0; stable = []; }
     previous = text;
     const tail = text.slice(boundary);
-    let fenced = false, end = 0, offset = 0;
+    let fenced = false, math = false, end = 0, offset = 0;
     for (const line of tail.split("\n").slice(0, -1)) {
       offset += line.length + 1;
       if (line.startsWith("```")) fenced = !fenced;
-      if (!fenced && !line.trim()) end = offset;
+      if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
+      if (!fenced && !math && !line.trim()) end = offset;
     }
     if (end) {
       stable = [...stable, ...parseMarkdown(tail.slice(0, end))];
@@ -214,13 +272,13 @@ export function MdView(p: { text: string; compact?: boolean }) {
     <div class={`md ${p.compact ? "md-compact" : ""}`}>
       <For each={blocks()}>
         {(b) =>
-          b.t === "h" && b.n === 1 ? (
+          b.t === "math" ? <MathFormula text={b.text} display/> : b.t === "h" && b.n === 1 ? (
             <h1>{inline(b.text)}</h1>
           ) : b.t === "h" && b.n === 2 ? (
             <h2>{inline(b.text)}</h2>
           ) : b.t === "h" ? (
             <h3>{inline(b.text)}</h3>
-          ) : b.t === "ul" ? (
+          ) : b.t === "ol" ? <ol start={b.start}>{b.items.map(item => <li>{inline(item)}</li>)}</ol> : b.t === "ul" ? (
             <ul>
               {b.items.map((it) => (
                 <li>{inline(it)}</li>
@@ -369,6 +427,24 @@ export function MdSource(p: { text: string; onInput: (t: string) => void; readOn
 }
 
 /** The same syntax presentation as the editor, without a writable textarea. */
-export function ReadOnlySource(p: { text: string; line?: number }) {
-  return <div class="file-source-code"><For each={p.text.split("\n")}>{(line,i)=><div data-line={i()+1} class={p.line===i()+1?"highlight":""}><span class="file-line-number">{i()+1}</span><code>{hlLine(line)||" "}</code></div>}</For></div>;
+export function ReadOnlySource(p: { text: string; line?: number; language?: string }) {
+  const [highlighted,setHighlighted]=createSignal<string[]|null>(null);
+  createEffect(()=>{
+    const text=p.text,language=p.language;setHighlighted(null);
+    if(!language||typeof Worker==='undefined')return;
+    const cancel=requestHighlight(text,language,html=>setHighlighted(html?highlightedLines(html):null));
+    onCleanup(cancel);
+  });
+  return <div class="file-source-code"><For each={p.text.split("\n")}>{(line,i)=><div data-line={i()+1} class={p.line===i()+1?"highlight":""}><span class="file-line-number">{i()+1}</span><Show when={highlighted()?.[i()]} fallback={<code>{p.language?line||" ":hlLine(line)||" "}</code>}>{html=><code innerHTML={html()}/>}</Show></div>}</For></div>;
+}
+
+/** Reopen multiline token spans on each row without losing their lexical context. */
+export function highlightedLines(html:string):string[]{
+ const lines:string[]=[],stack:string[]=[];let current='';
+ for(const token of html.match(/<\/?span\b[^>]*>|\n|[^<\n]+|</g)??[]){
+  if(token==='\n'){lines.push(current+'</span>'.repeat(stack.length));current=stack.join('');continue;}
+  if(token.startsWith('<span'))stack.push(token);else if(token==='</span>')stack.pop();
+  current+=token;
+ }
+ lines.push(current+'</span>'.repeat(stack.length));return lines;
 }

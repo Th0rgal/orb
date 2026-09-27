@@ -7,6 +7,7 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
+pub(crate) mod btw_context;
 pub(crate) mod client_placement;
 pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
@@ -10349,6 +10350,15 @@ pub async fn create_mission(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
 ) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
+    create_mission_inner(State(state), Extension(user), body, false).await
+}
+
+pub(super) async fn create_mission_inner(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    body: Option<Json<CreateMissionRequest>>,
+    shared_side_workspace: bool,
+) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
     let mut req = body.map(|b| b.0).unwrap_or(CreateMissionRequest {
@@ -10683,7 +10693,7 @@ pub async fn create_mission(
     // worker (`6f1e92b0`) on the same workspace as the existing writer;
     // ChatGPT OAuth is single-use and the extra occupant also races the
     // files. Sequential certify-after-repair is fine: the writer is terminal.
-    if let Some(ws_id) = req.workspace_id {
+    if let Some(ws_id) = req.workspace_id.filter(|_| !shared_side_workspace) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = live_mission_on_workspace(&control_state.mission_store, ws_id).await
         {
@@ -13317,13 +13327,26 @@ async fn submit_leased_remote_job(
         }
     }
     let plan = &resolved_plan;
-    let workspace_prefix =
+    let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
             let root = t.destination_root.ok_or("Transferred workspace missing")?;
             format!("cd -- {} || exit 78; ", shell_single_quote(&root))
         } else {
             fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
         };
+    let context_prompt = match plan {
+        RemoteHarnessPlan::Codex { prompt, .. }
+        | RemoteHarnessPlan::Grok { prompt, .. }
+        | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
+        _ => "",
+    };
+    let context_prefix = btw_context::remote_prefix(mission, context_prompt);
+    if !context_prefix.is_empty() {
+        workspace_prefix = format!(
+            r#"btw_upload_root="$(dirname -- "$PWD")/uploads"; {workspace_prefix}{context_prefix}"#
+        );
+    }
     if let RemoteHarnessPlan::Grok {
         new_session_id: Some(session_id),
         resume_session_id: None,

@@ -1,4 +1,7 @@
+import * as TreeIcon from "./sidebarIcons";
 import {
+  lazy,
+  Suspense,
   createContext,
   useContext,
   createSignal,
@@ -33,6 +36,10 @@ import { ErrorNotice } from "./ErrorNotice";
 import { connectionVersion } from "./api";
 import * as Ic from "./icons";
 
+import ImagePreview, { imageMime } from "./ImagePreview";
+
+const PdfPreview = lazy(() => import("./PdfPreview"));
+
 type Tab = FileRef & { pinned: boolean; scroll?: number };
 type Saved = {
   tabs: Tab[];
@@ -54,6 +61,16 @@ const loadSaved = (key: string): Saved => {
     return { tabs: [], expanded: [], open: false };
   }
 };
+const SidePanelContext = createContext<{
+  target: () => HTMLDivElement | undefined;
+  available: () => boolean;
+  visible: () => boolean;
+  show: () => void;
+  hide: () => void;
+  register: (open: (() => void) | undefined) => void;
+}>();
+export const useSidePanel = () => useContext(SidePanelContext);
+
 const PanelContext = createContext<{
   toggle: () => void;
   open: () => boolean;
@@ -61,18 +78,20 @@ const PanelContext = createContext<{
 }>();
 export function FilePanelButton() {
   const ctx = useContext(PanelContext);
+  const side = useSidePanel();
   return (
-    <Show when={ctx?.available()}>
+    <><Show when={ctx?.available()}>
       <button
         class="files-toggle"
-        title="Files (⌘P to find a file)"
+        title="Toggle files (⌘J)"
+        aria-keyshortcuts="Meta+J"
         aria-label="Files"
         aria-expanded={ctx?.open()}
         onClick={() => ctx?.toggle()}
       >
         <Ic.FileIcon size={16} />
       </button>
-    </Show>
+    </Show><Show when={side?.available()}><button class="files-toggle" title="Side question" aria-label="Side question" aria-expanded={side?.visible()} onClick={() => side?.visible() ? side.hide() : side?.show()}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 9h8M7 13h5"/></svg></button></Show></>
   );
 }
 export function FilePanelProvider(p: {
@@ -86,11 +105,19 @@ export function FilePanelProvider(p: {
   const available = () => !!(p.scope.mission?.id || p.scope.project);
   let client = createFileClient(p.scope),
     generation = 0;
-  const [opened, setOpened] = createSignal(false),
+  const [sideVisible, setSideVisible] = createSignal(false);
+  const [sideTarget, setSideTarget] = createSignal<HTMLDivElement>();
+  const [openSide, setOpenSide] = createSignal<(() => void)>();
+  const [opened, setFilesOpened] = createSignal(false),
     [sources, setSources] = createSignal<FileSource[]>([]),
     [tabs, setTabs] = createSignal<Tab[]>([]),
     [active, setActive] = createSignal<string>(),
     [expanded, setExpanded] = createSignal<string[]>([]);
+  // All file entry points (including links and Cmd+P) select the Files pane.
+  const setOpened = (value: boolean | ((previous: boolean) => boolean)) => {
+    setSideVisible(false);
+    return setFilesOpened(value);
+  };
   const [directories, setDirectories] = createSignal<
       Record<string, FileEntry[]>
     >({}),
@@ -117,16 +144,19 @@ export function FilePanelProvider(p: {
     readGeneration = 0;
   let layoutMarker: HTMLSpanElement | undefined;
   const [layout, setLayout] = createSignal<HTMLElement>();
-  onMount(() =>
-    setLayout(layoutMarker?.closest<HTMLElement>(".app") ?? undefined),
-  );
+  onMount(() => {
+    const app=layoutMarker?.closest<HTMLElement>(".app");
+    setLayout(app ?? undefined);
+    const width=Number(localStorage.getItem("orb.files.width"));
+    if(app&&width>0)app.style.setProperty("--file-panel-width",`${width}px`);
+  });
   createEffect(() => {
     const app = layout();
-    if (app) app.dataset.filesOpen = String(opened() && available());
+    if (app) { app.dataset.filesOpen = String((opened() || sideVisible()) && available()); app.dataset.editorExpanded=String((opened() || sideVisible())&&available()&&maximized()); }
   });
   onCleanup(() => {
     const app = layout();
-    if (app) delete app.dataset.filesOpen;
+    if (app) { delete app.dataset.filesOpen; delete app.dataset.editorExpanded; }
   });
   const selected = createMemo(() =>
     tabs().find((t) => identity(t) === active()),
@@ -169,13 +199,14 @@ export function FilePanelProvider(p: {
     return rootPromise;
   }
   createEffect(
-    on(scopeKey, (key) => {
+    on([scopeKey, connectionVersion], ([key]) => {
       generation++;
       readGeneration++;
       client = createFileClient(untrack(() => p.scope));
       rootPromise = undefined;
       cache = new Map();
       if (batchTimer) clearTimeout(batchTimer);
+      batchTimer = undefined;
       for (const callbacks of queue.values()) callbacks.forEach((cb) => cb([]));
       queue = new Map();
       const saved = loadSaved(key);
@@ -270,6 +301,20 @@ export function FilePanelProvider(p: {
       if (opened()) void list(key.slice(0, split), key.slice(split + 1));
     }
   });
+  const [refreshingFiles,setRefreshingFiles]=createSignal(false);
+  async function refreshFiles(){
+    if(refreshingFiles())return;
+    setRefreshingFiles(true);
+    rememberScroll();
+    try {
+      cache.clear();rootPromise=undefined;setDirectories({});
+      const roots=await ensureRoots();
+      await Promise.all(roots.filter(root=>root.available).map(root=>list(root.id,"")));
+      await Promise.all(expanded().map(key=>{const split=key.indexOf(":");return list(key.slice(0,split),key.slice(split+1));}));
+      await readSelected();
+    } catch(error){setError(String(error));}
+    finally{setRefreshingFiles(false);}
+  }
   async function readSelected() {
     const ref = selected();
     if (!ref) return;
@@ -357,13 +402,24 @@ export function FilePanelProvider(p: {
   }
   const resolver: ReferenceResolver = {
     async loadImage(path) {
+      scopeKey(); // Retry the image when its mission/connection scope becomes ready.
       const g = generation;
       const c = client;
+      const preview = c.imagePreview(path);
+      if (preview) return preview;
       const extension = path.split(".").at(-1)?.toLowerCase();
       const mime = ({png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg",webp:"image/webp",gif:"image/gif"} as Record<string,string>)[extension ?? ""];
       if (!mime) return null;
+      // Failed lookups must be retriable after upload/provisioning completes.
+      cache.delete(path);
       const refs = await resolver.resolve(path);
-      if (g !== generation || !refs.length) return null;
+      if (g !== generation) return null;
+      if (!refs.length) {
+        rootPromise = undefined;
+        const url = await c.loadUploadedImage(path);
+        if (g !== generation) { if (url) URL.revokeObjectURL(url); return null; }
+        return url;
+      }
       const ref = refs[0];
       const chunks: Uint8Array[] = [];
       let offset=0;
@@ -437,8 +493,31 @@ export function FilePanelProvider(p: {
       clearTimeout(timer);
     });
   });
+  // Remember the most recently interacted pane, including clicks on read-only
+  // source text and toolbar buttons that Safari does not focus on click.
+  let filePaneFocused=false;
+  const trackPane=(event:Event)=>{filePaneFocused=!!panel?.contains(event.target as Node);};
+  onMount(()=>{window.addEventListener("pointerdown",trackPane,true);window.addEventListener("focusin",trackPane,true);});
+  onCleanup(()=>{window.removeEventListener("pointerdown",trackPane,true);window.removeEventListener("focusin",trackPane,true);});
   function keys(e: KeyboardEvent) {
     if (!available()) return;
+    if (opened() && filePaneFocused && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase()==="b" && !e.isComposing) {
+      e.preventDefault();e.stopImmediatePropagation();
+      if(!e.repeat)setTree(v=>!v);
+      return;
+    }
+    if ((opened() || sideVisible()) && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f" && !e.isComposing) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) setMaximized(v => !v);
+      return;
+    }
+    if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) setOpened(v => !v);
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -451,13 +530,22 @@ export function FilePanelProvider(p: {
       e.stopImmediatePropagation();
       setSourceMode((v) => !v);
     }
-    if (e.key === "Escape" && panel?.contains(document.activeElement)) {
+    if (e.key === "Escape" && document.querySelector(".find-bar")) return;
+    if (e.key === "Escape" && (maximized() || panel?.contains(document.activeElement))) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (search() !== null) setSearch(null);
+      else if (maximized()) setMaximized(false);
       else setOpened(false);
     }
   }
+  const closeSideOnEscape = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && !event.defaultPrevented && sideVisible()) {
+      event.preventDefault();setSideVisible(false);
+    }
+  };
+  onMount(() => window.addEventListener("keydown", closeSideOnEscape));
+  onCleanup(() => window.removeEventListener("keydown", closeSideOnEscape));
   onMount(() => window.addEventListener("keydown", keys, true));
   onCleanup(() => {
     window.removeEventListener("keydown", keys, true);
@@ -468,22 +556,38 @@ export function FilePanelProvider(p: {
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     const start = e.clientX;
+    const activePanel = target.closest<HTMLElement>(".file-panel") ?? panel;
     const initial = inside
-      ? (panel?.querySelector(".file-tree")?.getBoundingClientRect().width ??
+      ? (activePanel?.querySelector(".file-tree")?.getBoundingClientRect().width ??
         220)
-      : (panel?.getBoundingClientRect().width ?? 480);
-    const app = panel?.closest<HTMLElement>(".app");
+      : (activePanel?.getBoundingClientRect().width ?? 480);
+    const app = activePanel?.closest<HTMLElement>(".app");
+    const conversation = !inside ? app?.querySelector<HTMLElement>(".scroll") : undefined;
+    const viewportTop = conversation?.getBoundingClientRect().top ?? 0;
+    const anchor = conversation ? Array.from(conversation.querySelectorAll<HTMLElement>(".user, .agent-turn p, .agent-turn li, .agent-turn pre, .md-view p, .md-view pre"))
+      .find(el => el.getBoundingClientRect().bottom > viewportTop + 1) : undefined;
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const initialScroll = conversation?.scrollTop ?? 0;
+    const restoreAnchor = () => {
+      if (!conversation) return;
+      if (anchor?.isConnected && anchorTop !== undefined) conversation.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      else conversation.scrollTop = initialScroll;
+    };
+    if (conversation) conversation.dataset.panelResizing = "true";
+    const sidebarWidth = app ? parseFloat(getComputedStyle(app).gridTemplateColumns) || 0 : 0;
+    const maximum = Math.max(480, (app?.clientWidth ?? window.innerWidth) - sidebarWidth - 420);
     const move = (event: PointerEvent) => {
       const value = inside
         ? Math.max(150, Math.min(400, initial + event.clientX - start))
         : Math.max(
             480,
-            Math.min(window.innerWidth - 440, initial + start - event.clientX),
+            Math.min(maximum, initial + start - event.clientX),
           );
-      (inside ? panel : app)?.style.setProperty(
+      (inside ? activePanel : app)?.style.setProperty(
         inside ? "--file-tree-width" : "--file-panel-width",
         `${value}px`,
       );
+      restoreAnchor();
       try {
         localStorage.setItem(
           inside ? "orb.files.treeWidth" : "orb.files.width",
@@ -492,6 +596,11 @@ export function FilePanelProvider(p: {
       } catch {}
     };
     const end = () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        restoreAnchor();
+        if (conversation) delete conversation.dataset.panelResizing;
+      }));
+      target.removeEventListener("lostpointercapture", end);
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", end);
       target.removeEventListener("pointercancel", end);
@@ -499,6 +608,7 @@ export function FilePanelProvider(p: {
     target.addEventListener("pointermove", move);
     target.addEventListener("pointerup", end);
     target.addEventListener("pointercancel", end);
+    target.addEventListener("lostpointercapture", end);
   }
   function Rows(q: { source: string; path: string; depth: number }) {
     const key = () => `${q.source}:${q.path}`;
@@ -509,7 +619,7 @@ export function FilePanelProvider(p: {
           const dir = entry.kind === "dir",
             expandedKey = identity(ref);
           return (
-            <>
+            <div class="file-tree-node">
               <button
                 role="treeitem"
                 aria-level={q.depth + 1}
@@ -518,7 +628,7 @@ export function FilePanelProvider(p: {
                 }
                 aria-selected={active() === identity(ref)}
                 class={`file-tree-row ${active() === identity(ref) ? "selected" : ""}`}
-                style={{ "padding-left": `${10 + q.depth * 12}px` }}
+
                 onClick={() =>
                   dir
                     ? setExpanded((xs) =>
@@ -541,18 +651,43 @@ export function FilePanelProvider(p: {
                     <Ic.FileIcon size={14} />
                   )}
                 </span>
+                <Show when={dir}><span class="file-folder-icon">{expanded().includes(expandedKey)?<TreeIcon.FolderOpen size={14}/>:<TreeIcon.Folder size={14}/>}</span></Show>
                 <span class="file-entry-name">{entry.name}</span>
               </button>
               <Show when={dir && expanded().includes(expandedKey)}>
-                <Rows source={q.source} path={entry.path} depth={q.depth + 1} />
+                <div class="file-tree-children" role="group"><Rows source={q.source} path={entry.path} depth={q.depth + 1} /></div>
               </Show>
-            </>
+            </div>
           );
         }}
       </For>
     );
   }
+  const [showImage, setShowImage] = createSignal(true);
+  createEffect(on(() => [active(), scopeKey(), content()], () => setShowImage(true)));
+  const [showPdf, setShowPdf] = createSignal(false);
+  createEffect(on(() => [active(), scopeKey(), content()], () => setShowPdf(false)));
   const isLocalFile = () => sources().some(s => s.id === selected()?.source && s.local);
+  async function loadPreviewBytes(signal: AbortSignal): Promise<Uint8Array> {
+    const ref = selected();
+    if (!ref) throw new Error("No file selected");
+    const c = client;
+    const chunks: Uint8Array[] = [];
+    let offset = 0, total = 1;
+    while (offset < total) {
+      signal.throwIfAborted();
+      const part = await c.call(ref.source, {action:"download",path:ref.path,offset});
+      signal.throwIfAborted();
+      if (part.size === undefined || part.size > 50 * 1024 * 1024) throw new Error("File preview is limited to 50 MB. Open the full file externally.");
+      if (!part.bytes?.length || part.next !== offset + part.bytes.length) throw new Error("Incomplete file download");
+      chunks.push(new Uint8Array(part.bytes));
+      offset = part.next; total = part.size;
+    }
+    const bytes = new Uint8Array(offset);
+    let position = 0;
+    for (const chunk of chunks) { bytes.set(chunk, position); position += chunk.length; }
+    return bytes;
+  }
   async function revealFile() {
     const ref = selected();
     if (!ref) return;
@@ -599,12 +734,29 @@ export function FilePanelProvider(p: {
       setActive(tabs().at(-1) ? identity(tabs().at(-1)!) : undefined);
   };
   return (
+    <SidePanelContext.Provider value={{
+      target: sideTarget,
+      available: () => !!openSide(),
+      visible: sideVisible,
+      show: () => {
+        if (!openSide()) return;
+        setFilesOpened(false);
+        setSideVisible(true);
+        openSide()?.();
+      },
+      hide: () => setSideVisible(false),
+      register: fn => {
+        setOpenSide(() => fn);
+        if (!fn) setSideVisible(false);
+      },
+    }}>
     <PanelContext.Provider
       value={{ toggle: () => setOpened((v) => !v), open: opened, available }}
     >
       <FileReferenceContext.Provider value={resolver}>
         <span ref={layoutMarker} hidden />
         {p.children}
+        <aside class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
         <Show when={opened() && available()}>
           <aside
             ref={(el) => {
@@ -633,8 +785,14 @@ export function FilePanelProvider(p: {
               onPointerDown={(e) => resize(e)}
             />
             <div class="file-tabs file-header" data-tauri-drag-region>
+              <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>setMaximized(v=>!v)}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
+              </button>
               <button
                 aria-label="Toggle file explorer"
+                title="Toggle file explorer (⌘B)"
+                aria-keyshortcuts="Meta+B"
+                aria-expanded={tree()}
                 onClick={() => setTree((v) => !v)}
               >
                 <Ic.SidebarIcon size={16} />
@@ -687,73 +845,16 @@ export function FilePanelProvider(p: {
                   {sourceMode() ? "Preview" : "Markdown"}
                 </button>
               </Show>
-              <details class="file-actions">
-                <summary aria-label="File actions">
-                  <Ic.DotsIcon size={16} />
-                </summary>
-                <div>
-                  <button
-                    aria-label="Previous file"
-                    disabled={historyIndex() <= 0}
-                    onClick={() => {
-                      setHistoryIndex((i) => i - 1);
-                      openFile(history()[historyIndex()], false, false);
-                    }}
-                  >
-                    <Ic.ArrowLeft size={14} /> Previous file
-                  </button>
-                  <button
-                    aria-label="Next file"
-                    disabled={historyIndex() >= history().length - 1}
-                    onClick={() => {
-                      setHistoryIndex((i) => i + 1);
-                      openFile(history()[historyIndex()], false, false);
-                    }}
-                  >
-                    <Ic.ArrowRight size={14} /> Next file
-                  </button>
-
-                  <button onClick={() => setMaximized((v) => !v)}>
-                    {maximized() ? "Restore panel" : "Expand panel"}
-                  </button>
-                  <button
-                    disabled={!selected()}
-                    onClick={() =>
-                      void navigator.clipboard.writeText(selected()!.path)
-                    }
-                  >
-                    Copy path
-                  </button>
-                  <button
-                    onClick={() => {
-                      setDirectories({});
-                      cache.clear();
-                      rootPromise = undefined;
-                      void ensureRoots()
-                        .then((roots) => {
-                          for (const r of roots)
-                            if (r.available) void list(r.id, "");
-                        })
-                        .catch(() => {});
-                      void readSelected();
-                    }}
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    disabled={!selected()}
-                    onClick={() => void (isLocalFile() ? revealFile() : download())}
-                  >
-                    {isLocalFile() ? "Reveal in Finder" : "Download"}
-                  </button>
-                </div>
-              </details>{" "}
+              <button aria-label="Reload files" title="Reload files" disabled={refreshingFiles()} onClick={()=>void refreshFiles()}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9"/></svg>
+              </button>
               <button aria-label="Close files" onClick={() => setOpened(false)}>
                 <Ic.CloseIcon size={14} />
               </button>
             </div>
             <Show when={search() !== null || choices().length}>
-              <div class="file-search">
+              <div class="file-search" role="search" aria-label="Search files">
+                <button class="file-search-close" aria-label="Close file search" onClick={()=>{setSearch(null);setChoices([]);}}><Ic.CloseIcon size={14}/></button>
                 <Show when={search() !== null}>
                   <input
                     ref={searchInput}
@@ -779,7 +880,7 @@ export function FilePanelProvider(p: {
                     )}
                   </For>
                   <Show when={search() !== null && !results().length}>
-                    <p>No matching files</p>
+                    <p>{search()?.trim()?"No results found":"Type a file name or path"}</p>
                   </Show>
                 </div>
               </div>
@@ -789,7 +890,7 @@ export function FilePanelProvider(p: {
                 <nav class="file-tree" aria-label="File explorer">
                   <For each={sources()}>
                     {(root) => (
-                      <section>
+                      <section class="file-root">
                         <button
                           class="file-source"
                           title={[root.label, root.machine, root.path]
@@ -809,13 +910,9 @@ export function FilePanelProvider(p: {
                           ) : (
                             <Ic.ChevronRight size={12} />
                           )}
-                          <span class="file-source-label">
-                            {root.label.split(" · ")[0]}
+                          <span class="file-root-icon">{root.id==='controller'?<TreeIcon.Clock size={16}/>:root.id==='context'?<TreeIcon.FolderOpen size={16}/>:root.local?<Ic.LaptopIcon size={16}/>:<TreeIcon.Server size={16}/>}</span>
+                          <span class="file-root-text"><span class="file-source-label">{root.label.split(" · ")[0]}</span>
                           </span>
-                          <small>
-                            {root.machine ??
-                              root.label.split(" · ").slice(1).join(" · ")}
-                          </small>
                         </button>
                         <Show when={!root.available}>
                           <p class="file-muted">Source unavailable</p>
@@ -825,7 +922,7 @@ export function FilePanelProvider(p: {
                             root.available && expanded().includes(root.id + ":")
                           }
                         >
-                          <div role="tree">
+                          <div role="tree" class="file-root-children" aria-label={root.label.split(" · ")[0]}>
                             <Rows source={root.id} path="" depth={0} />
                           </div>
                         </Show>
@@ -845,6 +942,7 @@ export function FilePanelProvider(p: {
               </Show>
               <div
                 class="file-preview"
+                classList={{ "file-preview-binary": !loading() && !!content()?.binary }}
                 ref={viewer}
                 onScroll={() => {
                   const t = selected();
@@ -883,7 +981,7 @@ export function FilePanelProvider(p: {
                 <Show when={!loading() && content()}>
                   {(data) => (
                     <>
-                      <div class="file-provenance">
+                      <Show when={!data().binary}><div class="file-provenance">
                         {
                           sources().find((s) => s.id === selected()?.source)
                             ?.label
@@ -892,18 +990,32 @@ export function FilePanelProvider(p: {
                         {data().modified
                           ? ` · Modified ${new Date(data().modified! * 1000).toLocaleString()}`
                           : ""}
-                      </div>
-                      <Show when={data().truncated}>
+                      </div></Show>
+                      <Show when={data().truncated && !data().binary}>
                         <p class="file-muted">
                           Preview limited to 1 MiB. {isLocalFile() ? "Reveal in Finder to access the full file." : "Download for the full file."}
                         </p>
                       </Show>
                       <Show
-                        when={!data().binary}
+                        when={!data().binary && !imageMime(selected()?.name ?? "")}
                         fallback={
-                          <p class="file-muted">
-                            {isLocalFile() ? <>Open this file from Finder. <button class="s-btn" onClick={() => void revealFile()}>Reveal in Finder</button></> : "Binary file. Use Download to open it."}
-                          </p>
+                          <Show when={showImage() && imageMime(selected()?.name ?? "")} fallback={
+                          <Show when={showPdf()} fallback={<div class="file-binary-state">
+                            <div class="file-document-mark" aria-hidden="true"><Ic.FileIcon size={40} /><span>{selected()?.name.split(".").pop()?.slice(0, 8).toUpperCase() || "FILE"}</span></div>
+                            <h3>{selected()?.name}</h3>
+                            <div class="file-binary-details">{data().size < 1024 ? `${data().size} B` : data().size < 1048576 ? `${Math.round(data().size / 1024)} KB` : `${(data().size / 1048576).toFixed(1)} MB`}<span>·</span>{sources().find(s => s.id === selected()?.source)?.label}</div>
+                            <Show when={imageMime(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowImage(true)}>View image</button></Show>
+                            <p>{/\.pdf$/i.test(selected()?.name ?? "") || imageMime(selected()?.name ?? "") ? "View this document directly in Orb." : "Preview isn’t available for this file."}</p>
+                            <Show when={/\.pdf$/i.test(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowPdf(true)}><Ic.FileIcon size={16} />View PDF</button></Show>
+                            <button class="s-btn file-binary-action" onClick={() => void (isLocalFile() ? revealFile() : download())}>
+                              <Ic.FolderOpenIcon size={16} />{isLocalFile() ? "Reveal in Finder" : "Download file"}
+                            </button>
+                            <Show when={data().modified}><small>Modified {new Date(data().modified! * 1000).toLocaleDateString(undefined, {day:"numeric", month:"short", year:"numeric"})}</small></Show>
+                          </div>}>
+                            <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} /></Suspense>
+                          </Show>}>
+                            <ImagePreview name={selected()?.name ?? "Image"} load={loadPreviewBytes} close={() => setShowImage(false)} />
+                          </Show>
                         }
                       >
                         <FileReferenceContext.Provider
@@ -941,6 +1053,7 @@ export function FilePanelProvider(p: {
                             fallback={
                               <ReadOnlySource
                                 text={data().content ?? ""}
+                                language={selected()?.name.endsWith(".lean")?"lean":undefined}
                                 line={selected()?.line}
                               />
                             }
@@ -961,5 +1074,6 @@ export function FilePanelProvider(p: {
         </Show>
       </FileReferenceContext.Provider>
     </PanelContext.Provider>
+    </SidePanelContext.Provider>
   );
 }

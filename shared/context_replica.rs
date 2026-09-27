@@ -109,11 +109,14 @@ impl Replica {
         Ok(state)
     }
     async fn synchronize(&self, state: &mut ReplicaState) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| e.to_string())?;
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("valid context HTTP client configuration")
+        });
         let local = self.store.manifest()?;
         // Persist outgoing intent before any network operations, including while offline.
         if state.initialized {
@@ -163,8 +166,8 @@ impl Replica {
             });
             self.save(state)?;
         }
-        let _: Manifest = self
-            .request(&client, reqwest::Method::GET, "manifest", None, false)
+        let initial_remote: Manifest = self
+            .request(client, reqwest::Method::GET, "manifest", None, false)
             .await?
             .json()
             .await
@@ -176,10 +179,11 @@ impl Replica {
             state.initialized = true;
             self.save(state)?;
         }
+        let had_pending = !state.pending.is_empty();
         while let Some(op) = state.pending.first().cloned() {
             if let Some(hash) = &op.hash {
                 self.request(
-                    &client,
+                    client,
                     reqwest::Method::POST,
                     "blobs",
                     Some(self.store.blob(hash)?),
@@ -189,7 +193,7 @@ impl Replica {
             }
             let receipt: Receipt = self
                 .request(
-                    &client,
+                    client,
                     reqwest::Method::POST,
                     "operations",
                     Some(serde_json::to_vec(&op).map_err(|e| e.to_string())?),
@@ -220,16 +224,19 @@ impl Replica {
             state.pending.remove(0);
             self.save(state)?;
         }
-        let remote: Manifest = self
-            .request(&client, reqwest::Method::GET, "manifest", None, false)
-            .await?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let remote: Manifest = if had_pending {
+            self.request(client, reqwest::Method::GET, "manifest", None, false)
+                .await?
+                .json()
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            initial_remote
+        };
         let current = self.store.manifest()?;
         if !state.conflicts.is_empty() {
             let open: BTreeMap<String, Operation> = self
-                .request(&client, reqwest::Method::GET, "conflicts", None, false)
+                .request(client, reqwest::Method::GET, "conflicts", None, false)
                 .await?
                 .json()
                 .await
@@ -308,7 +315,7 @@ impl Replica {
                 if let Some(hash) = desired.and_then(|e| e.hash.as_ref()) {
                     let mut response = self
                         .request(
-                            &client,
+                            client,
                             reqwest::Method::GET,
                             &format!("blobs/{hash}"),
                             None,

@@ -12,7 +12,7 @@ import {
 } from "../src/effort";
 
 // vitest runs with `orb/` as the cwd; the core lives one level up.
-const CONTROL_RS = resolve(process.cwd(), "../src/api/control/mod.rs");
+const CONTROL_RS = resolve(__dirname, "../../src/api/control/mod.rs");
 
 /**
  * Re-derive the accepted ladder from the core's own gate,
