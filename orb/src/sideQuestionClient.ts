@@ -28,11 +28,11 @@ export function boundedHistory(history:SideExchange[],attachmentBudget=24*1024*1
   }
   return result;
 }
-// No thinking, unsent queued messages, or in-progress assistant reply is sent.
-export function sideContext(items: StreamItem[]): string {
+// Exclude thinking and queued drafts. Side agents can request a labelled live snapshot.
+export function sideContext(items: StreamItem[], includeLive = false): string {
   return byteTail(items.flatMap(item => {
     if(item.kind==='user') return item.queued ? [] : [`User: ${item.text}`];
-    if(item.kind==='text') return item.live ? [] : [`Agent: ${item.text}`];
+    if(item.kind==='text') return item.live ? (includeLive ? [`Agent (in progress at send time): ${item.text}`] : []) : [`Agent: ${item.text}`];
     if(item.kind==='tool' && item.done) return [`Tool ${item.name}: ${JSON.stringify({args:item.args,result:item.result}).slice(0,12000)}`];
     if(item.kind==='error') return [`Recorded error: ${item.text}`];
     return [];

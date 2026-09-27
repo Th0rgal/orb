@@ -32,13 +32,13 @@ export function CronGlyph(p: { job: ControllerJob | null | undefined; running?: 
   const [now, setNow] = createSignal(Date.now());
   const t = window.setInterval(() => setNow(Date.now()), 30000);
   onCleanup(() => clearInterval(t));
-  const size = () => p.size ?? 14;
-  const r = 5;
+  const size = () => p.size ?? 16;
+  const r = 6;
   const c = 2 * Math.PI * r;
   const state = () => cronState(p.job, p.running);
   return (
     <svg class={`cron-glyph ${state()}`} width={size()} height={size()} viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r={r} stroke="currentColor" stroke-width="1.5" opacity="0.28" />
+      <circle cx="8" cy="8" r={r} stroke="currentColor" stroke-width="1.5" opacity="1" />
       <Show when={state() !== "paused"}>
         <circle
           cx="8"

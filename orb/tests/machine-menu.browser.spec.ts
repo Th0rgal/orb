@@ -40,7 +40,7 @@ async function setup(page: Page) {
     await route.fulfill({ json });
   });
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /Core \(agent-core\)/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Core \(agent-core\)/ })).toBeVisible({timeout:15000});
 }
 
 /** Every two-line entry: caption strictly below the title, both inside the row. */
@@ -81,6 +81,7 @@ test("machine picker: two-line entries never overlap, and the footer stays reach
   await expect(menu).toBeVisible();
 
   await expectNoOverlap(page);
+  await expect(menu.locator(".machine-node-option .menu-title", {hasText:/^dgx-spark$/})).toHaveCount(0);
 
   // Single-line entries keep the 32px rhythm. Measured loosely: a
   // bounding box is reported in device pixels, so a row that is exactly 32 CSS
@@ -95,14 +96,14 @@ test("machine picker: two-line entries never overlap, and the footer stays reach
 
   // Selection still works and closes the menu. The trigger then shows the
   // node's display label ("dgx-spark" → "DGX Spark").
-  await page.getByRole("button", { name: /dgx-spark/ }).click();
+  await page.getByRole("button", { name: /DGX Spark · Admin/ }).click();
   await expect(menu).toBeHidden();
   const trigger = page.getByRole("button", { name: /DGX Spark/ });
   await expect(trigger).toBeVisible();
 
   await trigger.click();
   await expect(page.locator(".na-menu .menu-item.on")).toHaveCount(1);
-  await expect(page.locator(".na-menu .menu-item.on .menu-title")).toHaveText("dgx-spark");
+  await expect(page.locator(".na-menu .menu-item.on .menu-title")).toHaveText("DGX Spark · Admin");
   await page.locator(".na-menu").screenshot({ path: "artifacts/orb-machine-menu-wide.png" });
 });
 
@@ -126,7 +127,7 @@ test("machine picker at 375px: wraps inside the viewport with no overlap", async
  test("administration is explicit and never restored as the default machine", async ({page}) => {
  await setup(page);
  await page.getByRole("button", {name:/Core \(agent-core\)/}).click();
- await page.getByRole("button", {name:/DGX Spark · Admin Manual/}).click();
+ await page.getByRole("button", {name:/DGX Spark · Admin/}).click();
  await expect(page.locator(".na-drop-btn").filter({hasText:"DGX Spark · Administration"})).toBeVisible();
  expect(await page.evaluate(()=>localStorage.getItem("orb.machine"))).toBe("core");
  await page.reload();

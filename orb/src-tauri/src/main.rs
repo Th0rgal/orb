@@ -166,6 +166,7 @@ fn main() {
             context_service::project_context_status,
             context_service::project_context_subscribe,
             context_service::project_context_unsubscribe,
+            context_service::project_context_sync,
             context_service::project_context_disconnect,
             software::software_inventory,
             software::software_update,

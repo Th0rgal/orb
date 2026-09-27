@@ -1,7 +1,8 @@
+import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { Select } from "./Select";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
 import { clearConnection, getApiUrl, isConnected, login, setApiUrl } from "./api";
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride } from "./localAgents";
@@ -49,6 +50,28 @@ function Card(p: { title?: string; children: JSX.Element }) {
       <div class="s-card">{p.children}</div>
     </section>
   );
+}
+
+function CloudAccountsCard() {
+  const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+  const refresh = async () => {
+    setBusy(true);
+    try { setAccounts(await cloudAccounts()); setError(""); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  onMount(() => { void refresh(); });
+  return <Card title="Cloud accounts">
+    <Row title="Connected services" desc="Cloud agents use accounts connected to Core. Connecting an account does not start work.">
+      <button class="s-btn" disabled={busy()} onClick={() => void refresh()}>{busy() ? "Checking…" : "Refresh accounts"}</button>
+    </Row>
+    <Show when={error()}><p role="alert">{error()}</p></Show>
+    <For each={accounts()}>{a => <Row title={`${cloudNames[a.provider]} · ${a.label}`} desc={a.reason}>
+      <span>{a.available ? "Available" : "Unavailable"}{a.experimental ? " · Experimental" : ""}</span>
+    </Row>}</For>
+  </Card>;
 }
 
 function LocalAgentsCard() {
@@ -181,6 +204,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <h2>Client</h2>
         <BackendTab />
         <LocalAgentsCard />
+        <CloudAccountsCard />
         <Show when={isConnected()}>
           <section class="s-sec">
             <h3>Execution</h3>

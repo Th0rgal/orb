@@ -18,3 +18,24 @@ test('context conflict comparison fits the panel and keeps resolution conditiona
  await page.getByRole('button',{name:'Use variant',exact:true}).click();expect(operations).toEqual([expect.objectContaining({base:2,hash:'variant',path:'notes.md'})]);
  await page.keyboard.press('Escape');await expect(panel).toHaveCount(0);
 });
+
+test('context sync status is compact, explains offline state, and retries',async({page})=>{
+ await page.addInitScript(()=>{
+  localStorage.setItem('orb.apiUrl','http://context.test');localStorage.setItem('orb.jwt','fixture');
+  let offline=true;
+  (window as any).__TAURI_INTERNALS__={invoke:async(command:string)=>{
+   if(command==='project_context_sync')offline=false;
+   return {state:{initialized:true,pending:[],error:offline?'Context server unavailable':null}};
+  }};
+ });
+ await page.route('http://context.test/**',route=>route.fulfill({json:{}}));
+ await page.goto('/tests/context.html');
+ const badge=page.getByRole('button',{name:'Context offline'});
+ await expect(badge).toBeVisible();
+ expect((await badge.boundingBox())!.height).toBeLessThan(32);
+ await badge.click();
+ await expect(page.getByText('No queued changes.',{exact:false})).toBeVisible();
+ await page.screenshot({path:'/tmp/orb-context-sync.png'});
+ await page.getByRole('button',{name:'Retry sync'}).click();
+ await expect(badge).toHaveCount(0);
+});

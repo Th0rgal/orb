@@ -9,7 +9,7 @@ export interface ContextChange {revision:number;path:string;entry:ContextEntry|n
 const route=(slug:string)=>`/api/projects/${encodeURIComponent(slug)}/context`;
 export const contextManifest=(slug:string)=>api<ContextManifest>(`${route(slug)}/manifest`);
 export const contextHistory=(slug:string)=>api<ContextChange[]>(`${route(slug)}/history`);
-export const contextConflicts=(slug:string)=>api<Record<string,ContextOperation>>(`${route(slug)}/conflicts`);
+export const contextConflicts=(slug:string,init?:RequestInit)=>api<Record<string,ContextOperation>>(`${route(slug)}/conflicts`,init);
 export async function restoreContext(slug:string,path:string,entry:ContextEntry|null,base:number|null,conflict?:string){
  const operation:ContextOperation={id:crypto.randomUUID(),path,base,hash:entry?.hash??null,directory:entry?.directory??false,delete:!entry,source:'Orb'};
  const result=await api<{revision:number;conflict:boolean}>(`${route(slug)}/${conflict?`conflicts/${encodeURIComponent(conflict)}`:'operations'}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(operation)});

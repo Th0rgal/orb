@@ -73,6 +73,9 @@ and hooks. Ignore caches/build outputs by default with a visible inventory.
 Reject path traversal, unsafe symlinks, special files, changed-during-read files,
 manifest mismatches, disk exhaustion and oversized snapshots before activation.
 Chunk retries must be idempotent and support resuming interrupted uploads.
+Orb bounds each remote checkpoint request to two minutes and retries transport
+failures up to twice using the same operation and offset. Permanent refusals
+surface immediately; prepare and activate are outside this automatic retry loop.
 
 Existing `file-resources` and node `/jobs/:id/files` provide confined reads.
 Existing `SourceArchive` is a pinned Git source archive for build jobs, not a
@@ -120,9 +123,14 @@ committed destination, including before the first job runs there.
 
 The shared Rust checkpoint adapter uses 1 MiB blocks, SHA-256 manifests,
 resumable staged offsets and sealed verification receipts. Limits are 10 GiB,
-50,000 files and an 8 MiB manifest. Portable event context is limited to
-128 KiB / 50,000 events; exceeding a limit produces an explicit refusal,
-never truncation. The source is rechecked before activation.
+50,000 files and an 8 MiB manifest. Portable event context up to 128 KiB is passed inline. Larger conversations
+travel intact in `.paloma/transfers/<transfer-id>/conversation.txt`, included in
+the destination SHA-256 manifest and verified before activation. The fresh
+session receives a short instruction to read that archive. Core serves the
+archive blocks even for a client-owned source; Orb still transfers local
+workspace files through its native adapter. The archive storage bound is
+64 MiB / 50,000 events; exceeding either produces an explicit refusal, never
+truncation. The source is rechecked before activation.
 
 Git repositories, including nested repositories, travel as bundles; the
 working tree is overlaid without checkout, preserving uncommitted contents.

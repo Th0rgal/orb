@@ -1,3 +1,4 @@
+import { projectColor } from "./projectAppearance";
 import { For, Show, createMemo, createSignal, createEffect, onMount, onCleanup } from "solid-js";
 import * as Ic from "./icons";
 import { trapFocus } from "./focusScope";
@@ -10,7 +11,7 @@ export function ProjectPicker(p: {
   canCreate: boolean;
   onSelect: (id: string) => void;
   onCreate: () => void;
-  onMachine: () => void;
+  onMachine?: () => void;
   onClose: () => void;
 }) {
   const [query,setQuery]=createSignal("");
@@ -41,13 +42,13 @@ export function ProjectPicker(p: {
     <div class="project-picker-label">Recents</div>
     <div class="project-options" id="project-options" role="listbox" aria-label="Projects">
       <For each={rows()}>{(row,index)=><button id={`project-option-${index()}`} role="option" aria-selected={row.id===p.selected} class={`project-option ${armed()&&index()===active()?"highlighted":""}`} onPointerEnter={()=>{setArmed(true);setActive(index());}} onClick={()=>p.onSelect(row.id)}>
-        <Ic.FolderIcon size={15}/><span>{row.name}</span><Show when={row.id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
+        <span class="row-project-color" style={{ color: projectColor(row.id) }}><Ic.FolderIcon size={15}/></span><span>{row.name}</span><Show when={row.id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
       </button>}</For>
       <Show when={!rows().length}><p class="project-empty">{p.projects.length?"No matching projects":"No projects yet"}</p></Show>
     </div>
     <div class="project-picker-actions">
       <Show when={p.canCreate}><button onClick={p.onCreate}><Ic.PlusIcon size={15}/>New project…</button></Show>
-      <button onClick={p.onMachine}><Ic.MachinesIcon size={15}/>Choose machine…</button>
+      <Show when={p.onMachine}><button onClick={() => p.onMachine?.()}><Ic.MachinesIcon size={15}/>Choose machine…</button></Show>
     </div>
   </div>;
 }

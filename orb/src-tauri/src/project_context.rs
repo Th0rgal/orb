@@ -57,7 +57,17 @@ fn replica(request: &Request) -> Result<Replica, String> {
 #[tauri::command]
 pub fn project_context_status(request: Request) -> Result<serde_json::Value, String> {
     let replica = replica(&request)?;
-    Ok(serde_json::json!({"root":replica.store.root,"state":replica.status()?}))
+    let state = replica.status()?;
+    // A cached error is not a running sync. Recover workers after app/machine restarts.
+    if state.initialized
+        && !state
+            .error
+            .as_ref()
+            .is_some_and(|e| e.contains("HTTP 401") || e.contains("HTTP 403"))
+    {
+        ensure_worker(&request, &replica)?;
+    }
+    Ok(serde_json::json!({"root":replica.store.root,"state":state}))
 }
 #[tauri::command]
 pub fn project_context_disconnect(request: Request) -> Result<(), String> {
@@ -87,6 +97,9 @@ pub fn project_context_disconnect(request: Request) -> Result<(), String> {
 pub async fn project_context_prepare(request: Request) -> Result<serde_json::Value, String> {
     let replica = replica(&request)?;
     let state = replica.tick().await?;
+    if state.initialized {
+        ensure_worker(&request, &replica)?;
+    }
     if !state.ready {
         return Err(state
             .error
@@ -109,25 +122,48 @@ pub async fn project_context_prepare(request: Request) -> Result<serde_json::Val
             }
         }
     }
+    Ok(serde_json::json!({"root":replica.store.root,"state":state}))
+}
+fn ensure_worker(request: &Request, replica: &Replica) -> Result<(), String> {
     let config = replica.store.metadata.join("connection.json");
-    let bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&config)
-            .map_err(|e| e.to_string())?;
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(unix))]
-    {
+    let bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+    if std::fs::read(&config).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::create_dir_all(&replica.store.metadata).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let temp = config.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+            let result = (|| {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&temp)
+                    .map_err(|e| e.to_string())?;
+                file.write_all(&bytes)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| e.to_string())?;
+                std::fs::rename(&temp, &config).map_err(|e| e.to_string())
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(temp);
+            }
+            result?;
+        }
+        #[cfg(not(unix))]
         return Err("Persistent context credentials are not supported on this platform yet".into());
     }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(replica.store.metadata.join("worker.lock"))
+        .map_err(|e| e.to_string())?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(());
+    }
+    drop(lock);
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     command
         .arg("--orb-context-worker")
@@ -140,7 +176,19 @@ pub async fn project_context_prepare(request: Request) -> Result<serde_json::Val
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.spawn().map_err(|e| e.to_string())?;
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+#[tauri::command]
+pub async fn project_context_sync(request: Request) -> Result<serde_json::Value, String> {
+    let replica = replica(&request)?;
+    let state = replica.tick().await?;
+    if state.initialized {
+        ensure_worker(&request, &replica)?;
+    }
     Ok(serde_json::json!({"root":replica.store.root,"state":state}))
 }
 fn context_listener(
@@ -291,7 +339,7 @@ pub async fn project_context_file(
     if !replica.status()?.ready || !replica.store.metadata.join("connection.json").exists() {
         project_context_prepare(request).await?;
     }
-    let store = replica.store;
+    let store = replica.store.clone();
     let manifest = store.manifest()?;
     if operation == "list" {
         let prefix = if path.is_empty() {
@@ -346,6 +394,9 @@ pub async fn project_context_file(
                 return Err("Context changed while deleting; refresh first".into());
             }
         }
+        tokio::spawn(async move {
+            let _ = replica.tick().await;
+        });
         return Ok(serde_json::json!({}));
     }
     let hash = if operation == "write" {
@@ -384,6 +435,9 @@ pub async fn project_context_file(
         }
         return Err("Context changed; refresh first".into());
     }
+    tokio::spawn(async move {
+        let _ = replica.tick().await;
+    });
     Ok(serde_json::json!({"revision":receipt.revision}))
 }
 
@@ -425,5 +479,50 @@ pub fn project_context_unsubscribe(token: u64) -> Result<(), String> {
 pub fn clear_subscriptions() {
     if let Ok(mut subscriptions) = subscriptions().lock() {
         subscriptions.clear();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[test]
+    fn supervisor_refreshes_credentials_atomically_without_spawning_a_second_worker() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let replica = Replica {
+            store: Store::new(dir.path().join("files"), dir.path().join("state")),
+            endpoint: "https://example.test".into(),
+            token: "old".into(),
+            project: "test".into(),
+            source: "test".into(),
+        };
+        std::fs::create_dir_all(&replica.store.metadata).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(replica.store.metadata.join("worker.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let mut request = Request {
+            endpoint: replica.endpoint.clone(),
+            token: "old".into(),
+            project: "test".into(),
+            paths: vec![],
+        };
+        ensure_worker(&request, &replica).unwrap();
+        request.token = "refreshed".into();
+        ensure_worker(&request, &replica).unwrap();
+        let config = replica.store.metadata.join("connection.json");
+        let saved: Request = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(saved.token, "refreshed");
+        assert_eq!(
+            std::fs::metadata(config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_dir(&replica.store.metadata).unwrap().count(),
+            2
+        );
     }
 }

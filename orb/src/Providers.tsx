@@ -694,7 +694,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
   const stLabel = () => ({ connected: "Connected", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
-  const expandable = () => (canReconnect() && needsAuth()) || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const expandable = () => !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [open, setOpen] = createSignal(false);
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());

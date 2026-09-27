@@ -34,3 +34,18 @@ test('editing returns a queued message to the input without losing an existing d
  });
  expect(JSON.stringify(stored)).not.toContain('et en voici un autre');
 });
+
+ test('queue arrow opens usable actions and Escape dismisses without sending', async ({page}) => {
+  await page.goto('/tests/queued-messages.html');
+  const arrow=page.getByRole('button',{name:'Queue options'});
+  await arrow.click();
+  await expect(arrow).toHaveAttribute('aria-expanded','true');
+  await expect(page.getByRole('menuitem',{name:'Edit next message'})).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(arrow).toHaveAttribute('aria-expanded','false');
+  await expect(arrow).toBeFocused();
+  await arrow.click();
+  await page.getByRole('menuitem',{name:'Edit next message'}).click();
+  await expect(page.getByPlaceholder('Send follow-up')).toHaveValue('ceci est un message dans la queue');
+  await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('1 Queued');
+ });

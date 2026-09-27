@@ -1,3 +1,6 @@
+import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
+import {preferSparkAdministration} from "./machineDestinations";
+import { CloudAgentPage, CloudConversation } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {QueuedMessages} from "./QueuedMessages";
 import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages} from "./localMessageQueue";
@@ -8,7 +11,7 @@ import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
 import { startLocalOrigin } from "./localAgents";
 import { ChangeMachine } from "./ChangeMachine";
-import { adoptTransferredWorkspace, machineLabel } from "./machineTransfer";
+import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
 import { encoded, hasNativePicker, pickNativeFiles, transferFile, prepareUploads, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
@@ -41,12 +44,11 @@ import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Trans
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { DEFAULT_EFFORT_LABEL, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
-import { DelayedTranscriptSkeleton } from "./Skeleton";
+import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
 import { LiveProjectsSection, ProjectFileView } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
-const ExecutionSettings=lazy(()=>import("./ExecutionSettings").then(module=>({default:module.ExecutionSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
 import { insertAtCaret } from "./voice";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "./missionContext";
@@ -102,7 +104,7 @@ import {
   openExternalUrl,
 } from "./api";
 
-const PAGES = new Set(["settings", "btw-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "routing", "machines", "providers", "execution"]);
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -271,7 +273,10 @@ export function Composer(p: {
   placeholder: string;
   busy: boolean;
   onSend: (t: string, images: DraftImage[], files?: UploadedFile[]) => void | boolean | Promise<void | boolean>;
-  onStop: () => void;
+  onStop?: () => void;
+  textOnly?: boolean;
+  controls?: JSX.Element;
+  disabled?: boolean;
   autofocus?: boolean;
   tall?: boolean;
   files?: { id: string; name: string }[];
@@ -302,15 +307,17 @@ export function Composer(p: {
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
+  const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : `context:${p.projectSlug ?? ""}`;
   const attachSources = async (sources: UploadSource[]) => {
+    if (p.textOnly) return;
     const scope = p.scope;
-    const destination = uploadTarget();
+    const destination = attachmentTarget();
     setUploading(true); setUploadError(null); setCtx(false);
     try {
       for (const source of sources) {
-        if (disposed || scope !== p.scope) return;
+        if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
         const file = await transferFile(source, destination);
-        if (disposed || scope !== p.scope) return;
+        if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
         uploaded.push(file);
         const current = ta.selectionStart ?? text().length;
         const token = uploadToken(file.path) + " ";
@@ -322,10 +329,11 @@ export function Composer(p: {
   };
   let composerElement:HTMLDivElement|undefined;
   nativeComposerDrop(()=>composerElement, async sources=>{
-    if(sending()||uploading()||readingImages())return;
-    await attachMixed(sources);
+    if(sending()||uploading()||readingImages()) { setUploadError("Please wait for the current attachment or message to finish, then drop your files again."); return; }
+    await attachSources(sources);
   });
   const attachMixed = async (sources: UploadSource[]) => {
+    if (p.textOnly) return;
     try {
     const scope=p.scope;
     sources=await Promise.all(sources.map(async source=>{
@@ -382,6 +390,7 @@ export function Composer(p: {
   const [imageError, setImageError] = createSignal<string | null>(null);
   const [readingImages, setReadingImages] = createSignal(false);
   const pasteImages = async (event: ClipboardEvent) => {
+    if (p.textOnly) return;
     const clipboard = event.clipboardData;
     if (!clipboard) return;
     const files = Array.from(clipboard.files).filter(file => file.type.startsWith("image/"));
@@ -433,7 +442,7 @@ export function Composer(p: {
   createEffect(() => {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
   });
-  const modes = createMemo(() => p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices().find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices().find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
@@ -442,7 +451,7 @@ export function Composer(p: {
     return items.length ? { query: q.query, items } : null;
   });
   const at = createMemo(() => {
-    if (voiceActive() || atOff() || slash()) return null;
+    if (p.textOnly || voiceActive() || atOff() || slash()) return null;
     const q = atQuery(text(), caret());
     if (!q.open) return null;
     const demo = (p.files ?? []).map((f) => ({
@@ -452,9 +461,9 @@ export function Composer(p: {
       path: f.name,
       label: f.name,
     }));
-    const source = isConnected() ? atItems() : demo;
+    const source: AttachItem[] = [...(p.sideQuestion || mode() === "btw" ? [{ id: "btw:conversation", kind: "context" as const, section: "Context" as const, path: "conversation", label: "conversation · Latest agent conversation" }] : []), ...(isConnected() ? atItems() : demo)];
     const items = filterAttach(source, q.query);
-    return { query: q.query, items };
+    return items.length ? { query: q.query, items } : null;
   });
   createEffect(() => {
     slash();
@@ -533,12 +542,12 @@ export function Composer(p: {
   const send = async () => {
     const original = text();
     let payload = draftOf(original);
-    if ((!payload && !images().length) || sending() || uploading() || readingImages()) return;
-    if ((mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
+    if (p.disabled || (!payload && !images().length) || sending() || uploading() || readingImages()) return;
+    if (!p.textOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
       return;
     }
-    const sideMode = mode() === "btw" || /^\/btw(?:\s|$)/.test(payload);
+    const sideMode = !p.textOnly && (mode() === "btw" || /^\/btw(?:\s|$)/.test(payload));
     if (sideMode && !p.onBtw) { setUploadError("Side questions require an existing conversation."); return; }
     if (sideMode && !payload.replace(/^\/btw\s*/, "").trim() && !images().length && !uploaded.length) { p.onOpenBtw?.(); return; }
     const sentImages = images();
@@ -546,7 +555,7 @@ export function Composer(p: {
     const originalUploads = uploaded;
     const draftScope = p.scope;
     const project = p.projectSlug;
-    const destination = uploadTarget();
+    const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
     p.onPending?.({text:original,images:sentImages});
     setSending(true);
@@ -554,9 +563,9 @@ export function Composer(p: {
     let accepted = false;
     try {
       await attachmentLoad;
-      if (project !== p.projectSlug || draftScope !== p.scope || destination !== uploadTarget()) return;
-      const resolved = await prepareUploads(original, originalUploads, destination);
-      if (project !== p.projectSlug || draftScope !== p.scope || destination !== uploadTarget()) return;
+      if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
+      const resolved = p.textOnly ? {text: original, files: []} : await prepareUploads(original, originalUploads, destination);
+      if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
       uploaded = resolved.files;
       payload = draftOf(resolved.text);
       p.onAttachments?.(mentionedChips(resolved.text,atItems()));
@@ -829,11 +838,11 @@ export function Composer(p: {
   const sendBtn = (
     <div class="send-slot">
       <Show when={(text().trim() || images().length) && !slash() && !voiceActive()}>
-        <button class="send" disabled={uploading() || sending() || readingImages()} onClick={send} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : "Send"}>
+        <button class="send" disabled={p.disabled || uploading() || sending() || readingImages()} onClick={send} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : "Send"}>
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
-      <Show when={p.busy}>
+      <Show when={p.busy && p.onStop}>
         <button class="send stop" onClick={p.onStop} title="Stop">
           <Ic.StopIcon size={14} />
         </button>
@@ -915,7 +924,7 @@ export function Composer(p: {
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
       onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sending()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
       onClick={() => !voiceActive() && ta.focus()}>
-      {plus}
+      <Show when={!p.textOnly}>{plus}</Show>
       {slashMenu}
       {atMenu}
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
@@ -996,7 +1005,7 @@ export function Composer(p: {
           }}
         />
       </div>
-      {modelBtn}
+      {p.controls ?? modelBtn}
       {voice}
       {sendBtn}
     </div>
@@ -1004,7 +1013,7 @@ export function Composer(p: {
 }
 
 // Keep the last message reachable while the transparent dock floats over the transcript.
-function floatingDock(el: HTMLDivElement) {
+export function floatingDock(el: HTMLDivElement) {
   let parent: HTMLElement | null = null;
   const update = () => {
     const bounds = el.getBoundingClientRect();
@@ -1170,7 +1179,7 @@ export default function App() {
     if (sep < 0) return null;
     return { slug: rest.slice(0, sep), path: rest.slice(sep + 1) };
   });
-  const sortedNodes = () => [...fleetNodes()].sort((a, b) => Number(b.status === "online") - Number(a.status === "online"));
+  const sortedNodes = () => preferSparkAdministration([...fleetNodes()],node=>node.id).sort((a, b) => Number(b.status === "online") - Number(a.status === "online"));
   const machineLabel = () => {
     if (isConnected()) {
       if (newMachine() === "core") return "Core (agent-core)";
@@ -1227,6 +1236,7 @@ export default function App() {
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
     const mission = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(mission.title) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;
@@ -1244,7 +1254,7 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "routing" || selected() === "btw-settings";
+  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "btw-settings";
   const openSettings = () => {
     open("settings");
   };
@@ -1263,8 +1273,11 @@ export default function App() {
   const toBottom = (smooth = false) =>
     requestAnimationFrame(() => scroller?.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" }));
 
+  let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
+    if (id === "execution") id = "settings";
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
+    navigationVersion++;
     if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false);
     batch(() => {
       setSelected(id);
@@ -1352,7 +1365,7 @@ export default function App() {
     }
     void refreshMissions();
   };
-  const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[]) => {
+  const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     const rows = await refreshLocalAgents();
     const row = rows.find((item) => item.id === pick.backend && item.installed && item.path);
@@ -1371,7 +1384,7 @@ export default function App() {
     setAttachChips([]);
     rememberLaunch(m.id, {prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
-    open(`m:${m.id}`);
+    if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
     void refreshMissions();
   };
 
@@ -1384,6 +1397,7 @@ export default function App() {
       // `/goal <objective>` enters goal mode; the title is the objective.
       const prompt = goal.kind === "goal" ? goalPrompt(goal.objective) : text;
       const title = missionTitle(text);
+      const launchNavigation = navigationVersion;
       const machine = newMachine();
       const receipt = {prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
@@ -1399,7 +1413,7 @@ export default function App() {
           bumpProjects();
         }
         if (machine === "local") {
-          await launchLocal(text, prompt, title, projectSlug, pick, images);
+          await launchLocal(text, prompt, title, projectSlug, pick, images, launchNavigation);
           return true;
         }
         if (machine !== "core") {
@@ -1426,7 +1440,7 @@ export default function App() {
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
         setMissions(prev => [m, ...prev.filter(old => old.id !== m.id)]);
-        open(`m:${m.id}`);
+        if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
         void refreshMissions();
         return true;
       } catch (e) {
@@ -1460,6 +1474,19 @@ export default function App() {
       return;
     }
     if (hasFocusScope()) return;
+    const destination = navigationShortcut(e);
+    if (destination) {
+      e.preventDefault();
+      if (destination.id === 'projects') {
+        if (onSettings()) leaveSettings();
+        setSidebar(true);
+        requestAnimationFrame(() => {
+          const region = document.querySelector<HTMLElement>('[data-project-navigation]');
+          (region?.querySelector<HTMLElement>('button.row-main, button.row.agent') ?? region)?.focus();
+        });
+      } else open(destination.id === 'new-agent' ? null : destination.id);
+      return;
+    }
     if (e.key === "Escape" && sidebar() && window.matchMedia("(max-width: 720px)").matches) {
       e.preventDefault(); setSidebar(false); return;
     }
@@ -1541,13 +1568,16 @@ export default function App() {
                   <span class="row-label">New Agent</span>
                   <kbd>⌘N</kbd>
                 </button>
+                <button class={`row ${selected() === "cloud-agent" ? "active" : ""}`} onClick={() => open("cloud-agent")}>
+                  <span class="row-ico"><Ic.CloudIcon /></span><span class="row-label">Cloud agent</span><kbd aria-hidden="true">{shortcutLabel("cloud-agent")}</kbd>
+                </button>
                 <button class={`row ${selected() === "machines" ? "active" : ""}`} onClick={() => open("machines")}>
                   <span class="row-ico"><Ic.MachinesIcon /></span>
-                  <span class="row-label">Machines</span>
+                  <span class="row-label">Machines</span><kbd aria-hidden="true">{shortcutLabel("machines")}</kbd>
                 </button>
                 <button class={`row ${selected() === "providers" ? "active" : ""}`} onClick={() => open("providers")}>
                   <span class="row-ico"><Ic.ProvidersIcon /></span>
-                  <span class="row-label">Providers</span>
+                  <span class="row-label">Providers</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
                 </button>
 
                 <Show
@@ -1564,6 +1594,15 @@ export default function App() {
                     </>
                   }
                 >
+                  <div data-project-navigation tabindex="-1" aria-label="Projects" title={`Projects (${shortcutLabel('projects')})`} onKeyDown={event => {
+                    if (event.defaultPrevented || !['ArrowDown','ArrowUp','Home','End'].includes(event.key) || (event.target as HTMLElement).matches('input,textarea,[contenteditable]')) return;
+                    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent')).filter(row => row.getClientRects().length > 0);
+                    if (!rows.length) return;
+                    event.preventDefault();
+                    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+                    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+                    rows[next].focus();
+                  }}>
                   <LiveProjectsSection
                     harnessChoices={harnessChoices()}
                     onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
@@ -1578,6 +1617,7 @@ export default function App() {
                       });
                     }}
                     open={open}
+                    onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
                     onNewAgent={(slug, path) => {
                       setNewFolder(path ? { project: slug, path } : null);
                       setNewProject(slug);
@@ -1588,6 +1628,7 @@ export default function App() {
                       setNewProjectDraft(true);
                     }}
                   />
+                  </div>
                 </Show>
 
               </>
@@ -1633,10 +1674,10 @@ export default function App() {
         </div>
         <div class="tb-title" data-tauri-drag-region>
           <Switch>
-            <Match when={selected() === "settings"}>
+            <Match when={selected() === "settings" || selected() === "execution"}>
               <span>Settings · Client</span>
             </Match>
-            <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
+          <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
             <Match when={selected() === "routing"}><span>Settings · Routing</span></Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
@@ -1644,9 +1685,7 @@ export default function App() {
             <Match when={selected() === "providers"}>
               <span>Providers</span>
             </Match>
-            <Match when={selected() === "execution"}>
-              <span>Execution</span>
-            </Match>
+            <Match when={selected() === "cloud-agent"}><span>Cloud agent</span></Match>
             <Match when={currentProjectSettings()}>
               {(slug) => <span>{liveProjects().find((x) => x.slug === slug())?.title ?? slug()} · Settings</span>}
             </Match>
@@ -1694,8 +1733,14 @@ export default function App() {
 
       <main class="main">
         <Switch>
+            <Match when={selected() === "cloud-agent"}>
+            <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
+              projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
+              onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
+              onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+          </Match>
           <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
-          <Match when={selected() === "settings"}>
+          <Match when={selected() === "settings" || selected() === "execution"}>
             <Settings onOpenPage={open} />
           </Match>
           <Match when={selected() === "routing"}>
@@ -1713,9 +1758,6 @@ export default function App() {
                 {(mid) => <MissionView id={mid} initial={missions().find(m => m.id === mid)} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id, pct) => setPreviewContext({id, pct})} onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />}
               </Show>
             )}
-          </Match>
-          <Match when={selected() === "execution"}>
-            <ExecutionSettings />
           </Match>
           <Match when={currentController()}>
             {(slug) => (
@@ -2229,7 +2271,14 @@ function MissionDock(p: {
   );
 }
 
-function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
+function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
+  const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
+  const [error, setError] = createSignal("");
+  onMount(() => { if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e))); });
+  return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} /></Show>}</Show>;
+}
+
+function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
   const receipt = recalledLaunch(p.id);
   let disposed=false;
   onCleanup(()=>{disposed=true;});
@@ -2448,8 +2497,9 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
    * has to act on, which keeps its own banner.
    */
   const pending = () => {
+    if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     const phase = missionPhase(mission(), activity());
-    return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.waiting || row.state==='dispatching' || row.state==='accepted') || localRunActive(p.id) || phase.moving) && !activity();
+    return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
   const phaseLabel = () => "Working";
 
@@ -2601,7 +2651,7 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={localRunActive(p.id)} error={localFailure(p.id)} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />
@@ -2644,7 +2694,6 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
           <Show when={latestChecklist(items())?.tasks.length}>
             <button class="tasks-jump" onClick={() => { const tasks = scroller?.querySelector<HTMLElement>(".mission-tasks"); tasks?.scrollIntoView({ behavior: "smooth", block: "center" }); tasks?.focus({ preventScroll: true }); }}>Tasks</button>
           </Show>
-          <Show when={mission()?.machine_transfer}>{t => <div class="transfer-marker">Moved from {machineLabel(t().source)} to {machineLabel(t().destination)}</div>}</Show>
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={setMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>

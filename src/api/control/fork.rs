@@ -9,6 +9,8 @@ pub struct ForkRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub side_question: Option<String>,
+    #[serde(default)]
+    pub side_context_mode: Option<String>,
 }
 
 pub async fn fork_mission(
@@ -24,16 +26,30 @@ pub async fn fork_mission(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Source mission not found".into()))?;
-    let events = control
-        .mission_store
-        .get_events(
-            id,
-            Some(&["user_message", "assistant_message"]),
-            Some(50001),
-            None,
-        )
-        .await
-        .map_err(internal_error)?;
+    let incremental = match req.side_context_mode.as_deref() {
+        None => false,
+        Some("incremental") if req.side_question.is_some() => true,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Unsupported side context mode".into(),
+            ))
+        }
+    };
+    let events = if incremental {
+        Vec::new()
+    } else {
+        control
+            .mission_store
+            .get_events(
+                id,
+                Some(&["user_message", "assistant_message"]),
+                Some(50001),
+                None,
+            )
+            .await
+            .map_err(internal_error)?
+    };
     if events.len() > 50000 {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -50,7 +66,7 @@ pub async fn fork_mission(
         })
         .collect();
     let prompt = if let Some(question) = &req.side_question {
-        format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent automatically.\n\n<main_conversation>\n{}\n</main_conversation>\n\nCurrent request:\n{}", serde_json::to_string(&history).map_err(internal_error)?, question)
+        side_agent_prompt(&history, question, incremental)?
     } else {
         fork_prompt(id, source.title.as_deref(), &history)?
     };
@@ -160,6 +176,32 @@ pub async fn btw_agent(
     fork_mission(state, user, id, Json(req)).await
 }
 
+fn side_agent_prompt(
+    history: &[serde_json::Value],
+    question: &str,
+    incremental: bool,
+) -> Result<String, (StatusCode, String)> {
+    if incremental {
+        return Ok(question.to_owned());
+    }
+    Ok(format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent automatically.\n\n<main_conversation>\n{}\n</main_conversation>\n\nCurrent request:\n{}", serde_json::to_string(&history).map_err(internal_error)?, question))
+}
+
+#[cfg(test)]
+mod side_context_tests {
+    use super::*;
+    #[test]
+    fn incremental_context_does_not_reinject_parent_history() {
+        let history = vec![serde_json::json!({"role":"user", "content":"x".repeat(200_000)})];
+        let question = "@conversation: /uploads/conversation.json\nWhat changed?";
+        assert_eq!(
+            side_agent_prompt(&history, question, true).unwrap(),
+            question
+        );
+        assert!(side_agent_prompt(&history, question, false).unwrap().len() > 200_000);
+    }
+}
+
 fn fork_prompt(
     id: Uuid,
     title: Option<&str>,
@@ -204,6 +246,14 @@ pub(super) async fn workspace_prefix(
         .ok_or("Fork source is not on a remote node")?;
     if placement.node_id != node_id {
         return Err("Fork source is on a different node".into());
+    }
+    if let Some(transfer) =
+        super::machine_transfer::committed(&control.mission_store, source_id).await?
+    {
+        let root = transfer
+            .destination_root
+            .ok_or("Transferred workspace missing")?;
+        return Ok(format!("cd -- {} || exit 78; ", shell_single_quote(&root)));
     }
     Ok(workspace_command(source_id))
 }

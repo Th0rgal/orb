@@ -396,6 +396,7 @@ pub fn local_agents_stop(id: String) -> Result<(), String> {
 }
 pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
     let run = runs().lock().map_err(|e| e.to_string())?.get(id).cloned();
+    // Waiting for this run must not block polling or stopping other missions.
     if let Some(run) = run {
         if expected.is_some_and(|token| token != run.generation) {
             return Ok(());
@@ -418,7 +419,9 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         drop(child);
         run.text.wait_drained(Some(Duration::from_secs(2)));
         if !run.text.drained() {
-            return Err("Local output is still draining; retry Stop before moving".into());
+            return Err(
+                "The local agent has not finished closing its output. Try Stop again.".into(),
+            );
         }
         run.done.store(true, Ordering::SeqCst);
     }
@@ -498,6 +501,18 @@ fn opencode_args(request: &StartRequest) -> Vec<String> {
     args
 }
 
+/// Launchers (notably Codex's Node shim) spawn another process. Stop must
+/// address a dedicated group, never the desktop's inherited process group.
+fn harness_command(bin: &str) -> Command {
+    let mut command = Command::new(bin);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
 fn spawn_claude(
     request: &StartRequest,
     text: &Arc<Output>,
@@ -510,7 +525,7 @@ fn spawn_claude(
         .strip_prefix("/plan")
         .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace))
         .map(str::trim);
-    let mut cmd = Command::new(&request.bin);
+    let mut cmd = harness_command(&request.bin);
     if plan.is_some() {
         cmd.args([
             "--allow-dangerously-skip-permissions",
@@ -698,12 +713,7 @@ fn spawn_piped(
     session_id: &Arc<Mutex<Option<String>>>,
     env: &[(String, String)],
 ) -> Result<Child, String> {
-    let mut command = Command::new(&request.bin);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    let mut command = harness_command(&request.bin);
     // Share the user's provider credentials/config, but not a database whose
     // schema may belong to a different OpenCode build (e.g. the desktop app).
     if request.harness == "opencode" && std::env::var_os("OPENCODE_DB").is_none() {
@@ -915,7 +925,7 @@ fn spawn_codex(
     error: &Arc<Mutex<Option<String>>>,
     done: &Arc<AtomicBool>,
 ) -> Result<Child, String> {
-    let mut child = Command::new(&request.bin)
+    let mut child = harness_command(&request.bin)
         .current_dir(&request.cwd)
         .arg("app-server")
         .args(["--enable", "goals"])
@@ -2188,6 +2198,57 @@ printf '%s\n' '{"type":"result"}'
         stop_generation(&id, Some(&generation)).unwrap();
         assert!(local_agents_poll(id.clone()).unwrap().done);
         runs().lock().unwrap().remove(&id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_closes_output_held_by_codex_and_claude_launcher_children() {
+        use std::os::unix::fs::PermissionsExt;
+        for harness in ["codex", "claudecode"] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("launcher");
+            std::fs::write(&bin, "#!/bin/sh\nsleep 30 &\necho $! > child.pid\nwait\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let id = format!("stop-launcher-{}", uuid_like());
+            local_agents_start(StartRequest {
+                id: id.clone(),
+                harness: harness.into(),
+                bin: bin.to_string_lossy().into_owned(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "test".into(),
+                model: None,
+                session_id: None,
+                image_paths: vec![],
+            })
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !dir.path().join("child.pid").exists() {
+                assert!(Instant::now() < deadline, "launcher did not start");
+                thread::sleep(Duration::from_millis(10));
+            }
+            let run = runs().lock().unwrap().get(&id).unwrap().clone();
+            let pid = run.child.lock().unwrap().id() as i32;
+            let group = unsafe { libc::getpgid(pid) };
+            // Clean up even when checking the pre-fix implementation.
+            if group != pid {
+                if let Ok(child) = std::fs::read_to_string(dir.path().join("child.pid")) {
+                    if let Ok(child) = child.trim().parse::<i32>() {
+                        unsafe {
+                            libc::kill(child, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+            let stopped = local_agents_stop(id.clone());
+            assert_eq!(group, pid, "{harness} inherited Orb's process group");
+            stopped.unwrap();
+            assert!(
+                run.text.drained(),
+                "{harness} left a reader waiting for EOF"
+            );
+            assert!(local_agents_poll(id.clone()).unwrap().done);
+            runs().lock().unwrap().remove(&id);
+        }
     }
 
     #[test]

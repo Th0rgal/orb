@@ -97,7 +97,7 @@ async function mockAgent(page:import('@playwright/test').Page,answer:string){
   if(path==='/api/uploads'){const b=route.request().postDataJSON();return route.fulfill({json:{path:'/uploads/'+b.name,name:b.name,size:11}});}
   if(path.endsWith('/btw/agent')){requests.push(route.request().postDataJSON().side_question);events.push({id:events.length+1,sequence:events.length+1,event_type:'assistant_message',content:answer,timestamp:''});return route.fulfill({json:mission('side-child')});}
   if(path==='/api/control/message'){const b=route.request().postDataJSON();expect(b.mission_id).toBe('side-child');requests.push(b.content);events.push({id:events.length+1,sequence:events.length+1,event_type:'assistant_message',content:answer,timestamp:''});return route.fulfill({json:{id:'msg',queued:false}});}
-  if(path.endsWith('/events'))return route.fulfill(eventPage(route,events));
+  if(path.endsWith('/events'))return route.fulfill({json:events});
   if(path.includes('/missions/'))return route.fulfill({json:mission(path.split('/').at(-1)!)});
   return route.fulfill({json:[]});
  });

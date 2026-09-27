@@ -1,11 +1,13 @@
 import {subscribeProjectContext} from "./projectContext";
+import { projectColor } from "./projectAppearance";
+import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
 import { cutMission, readCutMission, moveMission } from "./missionMove";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createSignal, onCleanup, onMount, createEffect, on } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore } from "solid-js/store";
 import * as Ic from "./icons";
@@ -62,7 +64,8 @@ import { FileSkeleton } from "./Skeleton";
 /** Sidebar section listing the core backend's projects with their missions
  * and hosted files. Replaces the demo projects when connected. */
 /** Known placement only: remote node, then workspace. Never invented. */
-export function missionMachine(m: { remote_job?: { node_id?: string } | null; remote_node_id?: string | null; workspace_name?: string | null }): string | undefined {
+export function missionMachine(m: { backend?: string; remote_job?: { node_id?: string } | null; remote_node_id?: string | null; workspace_name?: string | null }): string | undefined {
+  if (m.backend?.startsWith("cloud_")) return ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud"} as Record<string,string>)[m.backend];
   const id = m.remote_job?.node_id ?? m.remote_node_id ?? m.workspace_name;
   return id ? nodeLabel(id) : undefined;
 }
@@ -216,6 +219,7 @@ export function LiveProjectsSection(p: {
   open: (id: string | null) => void;
   /** "+" on a project row: start a new agent in that project. */
   onNewAgent: (slug: string, path?: string) => void;
+  onNewCloudAgent?: (slug: string, path?: string) => void;
   onDeleted?: (ids: string[]) => void;
   /** "+" on the section header: create a project (opens the picker flow). */
   onNewProject: (anchor: HTMLButtonElement) => void;
@@ -265,21 +269,27 @@ export function LiveProjectsSection(p: {
   const [batchBusy, setBatchBusy] = createSignal(false);
   const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
   let selectionAnchor: string | null = null;
-  const clickAgent = (e: MouseEvent, id: string) => {
+  const clickAgent = (e: MouseEvent, id: string) => batch(() => {
     setSelectionActive(true);
-    const visible = visibleTree([...tree(), ...(archivesOpen() ? archiveNodes() : [])])
-      .flatMap(row => row.data.mission ? [row.data.mission.id] : []);
-    if (e.shiftKey && selectionAnchor && visible.includes(selectionAnchor)) {
+    // Only range selection needs the full tree. A normal click should navigate
+    // immediately, without rebuilding every expanded project and directory.
+    if (e.shiftKey && selectionAnchor) {
+      const visible = visibleTree([...tree(), ...(archivesOpen() ? archiveNodes() : [])])
+        .flatMap(row => row.data.mission ? [row.data.mission.id] : []);
       const a = visible.indexOf(selectionAnchor), b = visible.indexOf(id);
-      const range = visible.slice(Math.min(a, b), Math.max(a, b) + 1);
-      setSelectedAgents(e.metaKey || e.ctrlKey ? [...new Set([...selectedAgents(), ...range])] : range);
-    } else if (e.metaKey || e.ctrlKey) {
+      if (a >= 0 && b >= 0) {
+        const range = visible.slice(Math.min(a, b), Math.max(a, b) + 1);
+        setSelectedAgents(e.metaKey || e.ctrlKey ? [...new Set([...selectedAgents(), ...range])] : range);
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey) {
       setSelectedAgents(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
       selectionAnchor = id;
     } else {
       setSelectedAgents([id]); selectionAnchor = id; p.open(`m:${id}`);
     }
-  };
+  });
   const removeRow = (id: string) => {
     missionRevision++;
     for (const slug of Object.keys(missions)) setMissions(slug, rows => rows.filter(m => m.id !== id));
@@ -656,6 +666,7 @@ export function LiveProjectsSection(p: {
   const menuItems = (slug: string, path: string): MenuEntry[] => {
     const items: MenuEntry[] = [
       { kind: "item", label: "New agent", icon: Ic.NewAgentIcon, onClick: () => p.onNewAgent(slug, path) },
+      ...(p.onNewCloudAgent ? [{ kind: "item" as const, label: "Cloud agent", icon: Ic.CloudIcon, onClick: () => p.onNewCloudAgent?.(slug, path) }] : []),
       { kind: "item", label: cronChecking() ? "Checking crons…" : "New cron", icon: Ic.BellIcon, onClick: () => { if (!cronChecking()) void beginCron(slug, path); } },
       { kind: "sep" },
       ...(path ? [{ kind: "item" as const, label: "New file", icon: Ic.FileIcon, onClick: () => beginFile(slug, path) }] : []),
@@ -732,7 +743,7 @@ export function LiveProjectsSection(p: {
     {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
-    { kind: "item", label: "Fork conversation", icon: Ic.BranchIcon, openOnHover: true, onClick: anchor => { const rect = anchor?.parentElement?.getBoundingClientRect(); setForkTarget({ mission, x: rect ? rect.right + 3 : x, y: anchor?.getBoundingClientRect().top ?? y }); } },
+    ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Fork conversation", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { const rect = anchor?.parentElement?.getBoundingClientRect(); setForkTarget({ mission, x: rect ? rect.right + 3 : x, y: anchor?.getBoundingClientRect().top ?? y }); } }] : []),
     ...(["completed", "failed", "interrupted", "acknowledged", "cancelled"].includes(mission.status)
       ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
     { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
@@ -940,13 +951,13 @@ export function LiveProjectsSection(p: {
       setActionMenu({ x: e.clientX, y: e.clientY, slug: d.slug, path: d.path ?? "" });
     };
     if (d.kind === "archive-project") return <button class="row archive-project-row" aria-expanded={row.expanded} onClick={() => setArchiveExpanded(d.slug, !archiveExpanded[d.slug])}>
-      <span class="row-ico"><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
+      <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
     if (d.kind === "project") return <div class="row project" onContextMenu={contextMenu}>
       <button class="row-main" aria-expanded={row.expanded} onClick={() => toggleProject(d.slug)}>
-        <span class="row-ico"><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
+        <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
         <span class="row-label">{d.label}</span>
       </button>
       <Show when={row.expanded}><ContextBadge slug={d.slug}/></Show>
@@ -962,7 +973,7 @@ export function LiveProjectsSection(p: {
     </div>;
     if (d.kind === "folder") return <div class="row folder" onContextMenu={contextMenu}>
       <button class="row-main" aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onClick={() => toggleDir(d.slug, d.path!)}>
-        <span class="row-ico"><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span><span class="row-label">{d.label}</span>
+        <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span><span class="row-label">{d.label}</span>
       </button>
       <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
         onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
@@ -986,7 +997,7 @@ export function LiveProjectsSection(p: {
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined]));
     return <button aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
       onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<Show when={m().backend?.startsWith("cloud_")} fallback={<MissionGlyph missionId={m().id} status={m().status} />}><ProviderLogo type={m().backend!} /></Show>}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} />
     </button>;
   };

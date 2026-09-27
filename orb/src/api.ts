@@ -166,6 +166,8 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  execution_kind?: "hosted";
+  cloud?: import("./cloudAgentApi").CloudExecution;
   local_sync_pending?: boolean;
   local_sync_error?: string | null;
   machine_transfer?: import("./machineTransfer").TransferAction;
@@ -198,6 +200,7 @@ export interface Mission {
 }
 
 export interface CreateMissionBody {
+  cloud?: import("./cloudAgentApi").CloudSelection;
   supersedes_mission_id?: string;
   track?: string;
   github_pr?: string;

@@ -68,7 +68,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[])=>{
   text=text.trim();if(!text||busy())return false;
   const selected=key();await ready;if(selected!==key()||busy())return false;
-  const current=key(),context=sideContext(p.items),controller=new AbortController();abort=controller;
+  const current=key(),context=sideContext(p.items,true),controller=new AbortController();abort=controller;
   let attachments:SideAttachment[];
   setBusy(true);
   try { attachments=retryAttachments??await sideAttachments(images,files); }

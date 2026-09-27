@@ -1,3 +1,4 @@
+vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
@@ -52,4 +53,41 @@ it('never replays the previous answer underneath a new user question',()=>{
  const answer=event(8,'assistant_message','Proof.lean is the entry point');
  expect(btwTurnEvents([answer,next,previous],{baseline:0})).toEqual([answer]);
  expect(btwTurnEvents([previous],{baseline:0,afterSequence:6})).toEqual([]);
+});
+it('advances the parent cursor only after an accepted send and resets it for a new model',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='cursor-parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'cursor-child'});
+ await askBtwAgent('cursor-parent','Initial','first',[],new AbortController().signal,()=>{});
+ expect(btwSession('cursor-parent')?.conversationCursor?.sequence).toBe(10);
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'delta',cursor:{sequence:20,visibleHash:'next'}});
+ vi.mocked(sendMissionMessage).mockRejectedValueOnce(new Error('offline'));
+ await expect(askBtwAgent('cursor-parent','Next','second',[],new AbortController().signal,()=>{})).rejects.toThrow('offline');
+ expect(btwSession('cursor-parent')?.conversationCursor?.sequence).toBe(10);
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toEqual({sequence:10,visibleHash:'hash'});
+ localStorage.setItem(sideQuestionKey('settings:btw'),JSON.stringify({harness:'opencode',model:'different'}));
+ vi.mocked(api).mockResolvedValue({id:'new-child'});
+ await askBtwAgent('cursor-parent','New model','third',[],new AbortController().signal,()=>{});
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+});
+
+it('stages context on the committed transfer destination rather than a stale remote job',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='moved-parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:'',remote_job:{node_id:'old-node'},machine_transfer:{destination:{kind:'node',id:'new-node'}}} as any));
+ vi.mocked(api).mockResolvedValue({id:'moved-child'});
+ await askBtwAgent('moved-parent','Q','latest',[],new AbortController().signal,()=>{});
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[2]).toBe('new-node');
+});
+
+it('rejects generated empty-output status instead of claiming an answer',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:"Remote opencode job 00000000-0000-0000-0000-000000000000 on node 'old-agent' finished without assistant text (stop reason: unknown).",sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='empty-status-parent'?'active':'completed',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'empty-status-child'});
+ await expect(askBtwAgent('empty-status-parent','Q','latest',[],new AbortController().signal,()=>{})).rejects.toThrow('No response was captured');
 });

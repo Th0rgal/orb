@@ -923,6 +923,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::fork::btw_agent),
         )
         .route(
+            "/api/control/missions/:id/btw/context",
+            post(control::btw_context::stage),
+        )
+        .route(
             "/api/control/missions/:id/fork",
             post(control::fork::fork_mission),
         )

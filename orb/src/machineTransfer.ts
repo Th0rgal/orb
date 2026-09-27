@@ -20,17 +20,42 @@ export async function inspectTransfer(id: string): Promise<TransferView> {
   try { return await api<TransferView>(`/api/control/missions/${id}/machine-transfer`); }
   catch (e) { if (e instanceof ApiError && [404, 405].includes(e.status)) throw new Error("Update the connected backend to enable machine transfer. The conversation has not moved."); throw e; }
 }
-export const transferRequest = <T = TransferAction>(id: string, body: Record<string, unknown>) => api<T>(`/api/control/missions/${id}/machine-transfer`, {
-  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+export const transferRequest = <T = TransferAction>(id: string, body: Record<string, unknown>, signal?: AbortSignal) => api<T>(`/api/control/missions/${id}/machine-transfer`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal,
 });
+async function remoteTransferFiles<T>(action: TransferAction, side: "source" | "destination", operation: Record<string, unknown>): Promise<T> {
+  // Checkpoint operations are idempotent. Bound a stalled fetch and retry its
+  // same block; prepare/activate are deliberately outside this retry loop.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120_000);
+      try {
+        return await transferRequest<T>(action.mission_id, { op: "files", transfer_id: action.id, side, operation }, controller.signal);
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (error) {
+      const transient = error instanceof TypeError
+        || (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name))
+        || (error instanceof ApiError && (error.status >= 500 || [408, 429].includes(error.status)));
+      if (!transient || attempt >= 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+}
 export async function transferFiles<T>(action: TransferAction, side: "source" | "destination", operation: Record<string, unknown>): Promise<T> {
+  // Core owns the archived conversation, even when Orb owns workspace files.
+  if (side === "source" && operation.op === "read" && operation.path === `.paloma/transfers/${action.id}/conversation.txt`) {
+    return remoteTransferFiles<T>(action, side, operation);
+  }
   if (action[side].kind === "client") {
     if ((action[side] as { id: string }).id !== await machineIdentity()) throw new Error("Open Orb on the computer participating in this transfer.");
     const invoke = nativeInvoke();
     if (!invoke) throw new Error("The native transfer adapter is unavailable. Update Orb desktop.");
     return await invoke("local_machine_transfer", { id: action.mission_id, transferId: action.id, side, operation }) as T;
   }
-  return transferRequest<T>(action.mission_id, { op: "files", transfer_id: action.id, side, operation });
+  return remoteTransferFiles<T>(action, side, operation);
 }
 export async function snapshotTransfer(action: TransferAction): Promise<TransferAction> {
   if (action.manifest) return action;

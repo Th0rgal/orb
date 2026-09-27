@@ -20,6 +20,18 @@ COMPAT_VERSION = "chatgpt-ui-v2"
 CHATGPT_URL = "https://chatgpt.com/"
 MAX_DOWNLOAD_FILES = 8
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+# Both observed ChatGPT layouts. Exclude nested current-layout nodes inside
+# legacy wrappers so one message is counted once during gradual UI rollouts.
+USER_MESSAGE_SELECTOR = (
+    '[data-message-author-role="user"], '
+    'main [class~="group/user-message"]:not([data-message-author-role="user"] *)'
+)
+ASSISTANT_MESSAGE_SELECTOR = (
+    '[data-message-author-role="assistant"], '
+    'main [data-conversation-role="assistant"] + [data-chatgpt-selection-message-id]'
+    ':not([data-message-author-role="assistant"] *)'
+)
+
 # Account/bootstrap hydration can lag substantially behind the composer on the
 # current ChatGPT shell.  Keep this bounded, but do not classify a healthy
 # account as UI-incompatible merely because the intelligence pill missed the
@@ -142,6 +154,50 @@ def model_selection(requested: str) -> tuple[str, str]:
     if normalized in PRO_MODEL_ALIASES:
         return "Pro", "gpt-5.6-pro"
     return requested.strip(), requested.strip()
+
+
+async def assistant_markdown(locator):
+    """Read semantic content, preserving tables, source links and original TeX."""
+    return (await locator.evaluate(r'''root => {
+      const escape = text => text.replace(/([\\`*_[\]])/g, '\\$1');
+      const children = node => Array.from(node.childNodes).map(walk).join('');
+      function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) return escape(node.textContent || '');
+        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+        const tag = node.tagName.toLowerCase();
+        if (['script','style','button','svg'].includes(tag)) return '';
+        const math = node.matches('.katex-display, .katex') && node.querySelector('annotation[encoding="application/x-tex"]');
+        if (math) return node.matches('.katex-display') ? '\n\n$$\n'+math.textContent+'\n$$\n\n' : '\\('+math.textContent+'\\)';
+        if (tag === 'pre') {
+          const code = node.querySelector('code') || node;
+          const language = (code.className || '').match(/language-([\w+-]+)/)?.[1] || '';
+          const content = code.textContent || '';
+          const fence = '`'.repeat(Math.max(3, ...Array.from(content.matchAll(/`+/g), m => m[0].length + 1)));
+          return '\n\n'+fence+language+'\n'+content+'\n'+fence+'\n\n';
+        }
+        if (tag === 'code') return '`'+(node.textContent || '').replace(/`/g,'\\`')+'`';
+        if (tag === 'table') {
+          const rows = Array.from(node.querySelectorAll('tr')).map(row => Array.from(row.children).filter(c => /^(TH|TD)$/.test(c.tagName)).map(c => children(c).trim().replace(/\|/g,'\\|').replace(/\s*\n\s*/g,' ')));
+          if (!rows.length) return '';
+          return '\n\n'+[rows[0], rows[0].map(()=>'---'), ...rows.slice(1)].map(row => '| '+row.join(' | ')+' |').join('\n')+'\n\n';
+        }
+        if (tag === 'a') {
+          const text = children(node).trim(), href = node.getAttribute('href') || '';
+          return /^https?:\/\//i.test(href) ? '['+(text || escape(href))+']('+href.replace(/\(/g,'%28').replace(/\)/g,'%29')+')' : text;
+        }
+        if (tag === 'img') return node.getAttribute('alt') ? '[Image: '+escape(node.getAttribute('alt'))+']' : '';
+        const text = children(node);
+        if (/^h[1-6]$/.test(tag)) return '\n\n'+'#'.repeat(Number(tag[1]))+' '+text.trim()+'\n\n';
+        if (tag === 'strong' || tag === 'b') return '**'+text+'**';
+        if (tag === 'em' || tag === 'i') return '*'+text+'*';
+        if (tag === 'br') return '\n';
+        if (tag === 'li') return '\n'+(node.parentElement?.tagName === 'OL' ? (Array.from(node.parentElement.children).indexOf(node)+1)+'. ' : '- ')+text.trim()+'\n';
+        if (tag === 'blockquote') return '\n\n'+text.trim().split('\n').map(line => '> '+line).join('\n')+'\n\n';
+        if (['p','div','section','ul','ol'].includes(tag)) return '\n\n'+text.trim()+'\n\n';
+        return text;
+      }
+      return children(root).replace(/\n{3,}/g,'\n\n').trim();
+    }''')).strip()
 
 
 async def locate_composer_control(page, testid_selectors, accessible_name):
@@ -333,9 +389,13 @@ async def choose_intelligence_model(page, label: str) -> bool:
                 emit("diagnostic", message="stage=model_already_selected")
                 return True
             await button.click()
+            # New rollouts keep the semantic menu/slider but drop the test id.
+            # Require a unique visible picker after clicking the composer pill;
+            # never fall back to arbitrary page text or sidebar controls.
             overlay = page.locator(
-                '[data-testid="composer-intelligence-picker-content"]:visible'
-            ).last
+                '[data-testid="composer-intelligence-picker-content"]:visible, '
+                '[role="menu"]:visible:has([role="slider"])'
+            )
             await overlay.wait_for(state="visible", timeout=3_000)
             slider = overlay.locator('[role="slider"]')
             if await slider.count() and await slider.first.is_visible():
@@ -445,6 +505,8 @@ def download_control_key(
     """Identify a narrowly scoped ChatGPT artifact control."""
     if tag_name.lower() == "a" and downloadable_href(href):
         return f"href:{href}"
+    if tag_name.lower() == "button" and aria_label == "Download file":
+        return "direct-download"
     if tag_name.lower() != "button" or "behavior-btn" not in (class_name or "").split():
         return None
     label = (aria_label or text or "").strip()
@@ -458,7 +520,7 @@ def download_control_key(
 
 async def collect_downloads(page, response, download_dir: Path) -> None:
     """Download bounded assistant-generated artifacts and emit typed receipts."""
-    controls = response.locator('a[href], button.behavior-btn[aria-label]')
+    controls = response.locator('a[href], button.behavior-btn[aria-label], button[aria-label="Download file"]')
     seen_controls: set[str] = set()
     used_names: set[str] = set()
     total_bytes = 0
@@ -475,12 +537,14 @@ async def collect_downloads(page, response, download_dir: Path) -> None:
         control_key = download_control_key(
             tag_name, href, aria_label, class_name, text
         )
+        if control_key == "direct-download":
+            control_key = f"direct-download:{index}"
         if control_key is None or control_key in seen_controls:
             continue
         seen_controls.add(control_key)
         preview_open = False
         try:
-            if tag_name.lower() == "button":
+            if tag_name.lower() == "button" and aria_label != "Download file":
                 # Current ChatGPT opens an artifact preview first. The preview
                 # owns the actual browser download action.
                 await control.click()
@@ -493,7 +557,14 @@ async def collect_downloads(page, response, download_dir: Path) -> None:
                     await download_button.click(no_wait_after=True)
             else:
                 async with page.expect_download(timeout=15_000) as pending:
-                    await control.click(no_wait_after=True)
+                    if aria_label == "Download file" and tag_name.lower() == "button":
+                        # Current file cards cover this accessible button with
+                        # the preview overlay. Keyboard activation reaches its
+                        # own handler without opening that overlay instead.
+                        await control.focus()
+                        await control.press("Enter")
+                    else:
+                        await control.click(no_wait_after=True)
             download = await pending.value
             name = safe_download_name(download.suggested_filename, emitted + 1)
             stem = Path(name).stem
@@ -536,7 +607,7 @@ async def assert_blank_chat(page) -> None:
     parsed = urlparse(page.url)
     if parsed.netloc != "chatgpt.com" or parsed.path not in ("", "/"):
         raise RuntimeError("new-chat navigation did not reach a blank route")
-    if await page.locator('[data-message-author-role="assistant"]').count():
+    if await page.locator(ASSISTANT_MESSAGE_SELECTOR).count():
         raise RuntimeError("fresh-chat baseline contains prior content")
 
 
@@ -736,11 +807,9 @@ async def verify_authentication(page) -> None:
 async def establish_resumed_chat(page, conversation_path: str, message: str) -> int:
     """Reattach to a recorded conversation and prove it holds this prompt.
 
-    All verification happens in memory; nothing from the page is emitted. The
-    conversation is expected to hold exactly one user message (mission turns
-    always start from a blank chat), and that message must equal the prompt
-    this run was asked to submit — otherwise reattaching would return someone
-    else's response.
+    Verify the latest user message in the recorded conversation, including
+    resumed follow-up turns. Wait for history hydration before deciding that
+    the durable route or prompt is missing. Never submit from this path.
     """
     await page.goto(
         f"https://chatgpt.com{conversation_path}",
@@ -752,22 +821,31 @@ async def establish_resumed_chat(page, conversation_path: str, message: str) -> 
     await complete_saved_account_picker(page)
     await raise_if_rate_limited(page)
     await verify_authentication(page)
-    # Unknown or deleted conversations redirect away from the recorded route.
-    await page.wait_for_timeout(2_000)
-    parsed = urlparse(page.url)
-    if parsed.netloc.lower() not in CHATGPT_HOSTS or parsed.path != conversation_path:
-        raise ResumeNotFound()
-    user_messages = page.locator('[data-message-author-role="user"]')
-    count = await user_messages.count()
-    if count == 0:
-        raise ResumeNotFound()
-    if count != 1:
+    user_messages = page.locator(USER_MESSAGE_SELECTOR)
+    for _ in range(40):
+        parsed = urlparse(page.url)
+        if (parsed.netloc.lower() in CHATGPT_HOSTS
+                and parsed.path == conversation_path
+                and await user_messages.count() > 0
+                and normalized_prompt(await user_messages.last.inner_text())
+                    == normalized_prompt(message)):
+            break
+        await page.wait_for_timeout(500)
+    else:
+        parsed = urlparse(page.url)
+        if (parsed.netloc.lower() not in CHATGPT_HOSTS
+                or parsed.path != conversation_path
+                or await user_messages.count() == 0):
+            raise ResumeNotFound()
         raise ResumeMismatch()
-    text = await user_messages.first.inner_text()
-    if normalized_prompt(text) != normalized_prompt(message):
-        raise ResumeMismatch()
+    # Count responses before this user turn, not all currently rendered
+    # responses: the requested response may already have finished offline.
+    baseline = await user_messages.last.evaluate("""(node, selector) =>
+        [...document.querySelectorAll(selector)]
+        .filter(a => a.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+        .length""", ASSISTANT_MESSAGE_SELECTOR)
     emit("diagnostic", message="stage=resume_verified")
-    return 0
+    return baseline
 
 
 async def establish_continued_chat(page, conversation_path: str) -> int:
@@ -785,8 +863,8 @@ async def establish_continued_chat(page, conversation_path: str) -> int:
     parsed = urlparse(page.url)
     if parsed.netloc.lower() not in CHATGPT_HOSTS or parsed.path != conversation_path:
         raise ResumeNotFound()
-    user_messages = page.locator('[data-message-author-role="user"]')
-    responses = page.locator('[data-message-author-role="assistant"]')
+    user_messages = page.locator(USER_MESSAGE_SELECTOR)
+    responses = page.locator(ASSISTANT_MESSAGE_SELECTOR)
     # The route and account shell settle before the historical messages are
     # hydrated. A fixed two-second delay was flaky under concurrent profiles:
     # the same conversation became visible on an immediate retry. Wait for
@@ -932,6 +1010,7 @@ async def run(args, request) -> None:
                 await assert_blank_chat(page)
                 emit("probe_ready")
                 return
+            submission_user_count = 0
             if resume_path is not None:
                 stage = "resume"
                 baseline = await establish_resumed_chat(page, resume_path, message)
@@ -943,6 +1022,7 @@ async def run(args, request) -> None:
             elif continuation_path is not None:
                 stage = "continuation"
                 baseline = await establish_continued_chat(page, continuation_path)
+                submission_user_count = await page.locator(USER_MESSAGE_SELECTOR).count()
                 stage = "composer"
                 composer = await composer_locator(page)
                 await composer.fill(message)
@@ -978,13 +1058,17 @@ async def run(args, request) -> None:
                     # prompt is accepted. That route is the only durable
                     # pointer this driver ever reports.
                     submitted_route = conversation_path_from_url(page.url)
-                    if submitted_route is not None:
+                    submitted_users = page.locator(USER_MESSAGE_SELECTOR)
+                    if (submitted_route is not None
+                            and await submitted_users.count() > submission_user_count
+                            and normalized_prompt(await submitted_users.last.inner_text())
+                                == normalized_prompt(message)):
                         submitted_emitted = True
                         emit("submitted", conversation_path=submitted_route)
-                responses = page.locator('[data-message-author-role="assistant"]')
+                responses = page.locator(ASSISTANT_MESSAGE_SELECTOR)
                 count = await responses.count()
                 if count > baseline:
-                    text = (await responses.nth(count - 1).inner_text()).strip()
+                    text = await assistant_markdown(responses.nth(count - 1))
                     if text and text != last:
                         last, stable = text, 0
                         emit("text_delta", content=text)

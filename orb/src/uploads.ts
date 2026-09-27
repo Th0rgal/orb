@@ -46,6 +46,26 @@ export async function transferFile(source: UploadSource, destination: string): P
     return { source, path: source.localPath!, destination, connection, endpoint: getApiUrl() };
   }
   const data = await encoded(source);
+  if (destination.startsWith("context:")) {
+    const project = destination.slice("context:".length);
+    if (!project) throw new Error("Select a project before uploading files to shared context.");
+    const route = `/api/projects/${encodeURIComponent(project)}/context`;
+    const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+    if (connection !== connectionVersion()) throw new Error("The backend changed. Choose the file again.");
+    const blob = await api<{hash:string}>(`${route}/blobs`, {method:"POST", headers:{"Content-Type":"application/octet-stream"}, body:bytes});
+    if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
+    // Unique directories preserve names without overwriting another attachment.
+    const name = source.name.replace(/[\\/\x00-\x1f]/g, "_");
+    if (!name || name === "." || name === "..") throw new Error("Invalid attachment name.");
+    const path = `attachments/${crypto.randomUUID()}/${name}`;
+    const receipt = await api<{conflict:boolean}>(`${route}/operations`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:crypto.randomUUID(),path,base:null,hash:blob.hash,directory:false,delete:false,source:"Orb"}),
+    });
+    if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
+    if (receipt.conflict) throw new Error("Shared context changed. Drop the file again.");
+    return {source,path:`context/${path}`,destination,connection,endpoint:getApiUrl()};
+  }
   if (connection !== connectionVersion()) throw new Error("The backend changed. Choose the file again.");
   const receipt = await api<UploadReceipt>("/api/uploads", {
     method: "POST", headers: { "Content-Type": "application/json" },

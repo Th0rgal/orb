@@ -1,0 +1,21 @@
+import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { expect, it, vi } from 'vitest';
+import { Composer } from '../src/App';
+import { loadAttachItems } from '../src/attach';
+vi.mock('../src/attach', async importOriginal => ({ ...await importOriginal<typeof import('../src/attach')>(), loadAttachItems: vi.fn() }));
+vi.mock('../src/api', async importOriginal => ({ ...await importOriginal<typeof import('../src/api')>(), isConnected: () => true }));
+it('only opens context completion when matching results exist, including after a delayed load', async () => {
+  let resolve!: (items: any[]) => void;
+  vi.mocked(loadAttachItems).mockReturnValue(new Promise(r => { resolve = r; }));
+  render(() => <Composer placeholder="Write" projectSlug="test" busy={false} onSend={() => {}} onStop={() => {}} />);
+  const input = screen.getByPlaceholderText('Write');
+  const type = (value: string) => fireEvent.input(input, { target: { value, selectionStart: value.length } });
+  type('@');
+  expect(screen.queryByRole('listbox', { name: 'Context' })).toBeNull();
+  resolve([{id:'context:file',kind:'context',section:'Context',path:'context/file.txt',label:'file.txt'}]);
+  await waitFor(() => expect(screen.getByRole('option').textContent).toContain('file.txt'));
+  type('@missing');
+  expect(screen.queryByRole('listbox', { name: 'Context' })).toBeNull();
+  type('@file');
+  expect(screen.getByRole('listbox', { name: 'Context' })).toBeTruthy();
+});

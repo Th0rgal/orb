@@ -13,6 +13,7 @@ commands.allow = [
   "project_context_status",
   "project_context_subscribe",
   "project_context_unsubscribe",
+  "project_context_sync",
   "project_context_disconnect",
   "local_run_launch",
   "local_run_reconcile",

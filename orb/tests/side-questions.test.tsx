@@ -86,3 +86,13 @@ it('edits a side question and resends only to the side lane',async()=>{
  expect(JSON.parse(init.body as string).question).toBe('Revised question');
  expect(transfer).not.toHaveBeenCalled();
 });
+it('offers @conversation in a side composer without a project',async()=>{
+ render(()=><Composer sideQuestion picker={false} placeholder="Side draft" busy={false} onSend={()=>true} onStop={()=>{}}/>);
+ const input=screen.getByPlaceholderText('Side draft') as HTMLTextAreaElement;
+ fireEvent.input(input,{target:{value:'@',selectionStart:1}});
+ fireEvent.click(await screen.findByRole('option',{name:'conversation · Latest agent conversation'}));
+ expect(input.value).toBe('@conversation ');
+});
+it('labels the live snapshot while excluding thinking and queued drafts',()=>{
+ expect(sideContext([{kind:'think',key:'a',text:'private',done:true},{kind:'user',key:'b',text:'unsent',queued:true},{kind:'text',key:'c',text:'Current progress',live:true}],true)).toBe('Agent (in progress at send time): Current progress');
+});

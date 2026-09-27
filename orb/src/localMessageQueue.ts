@@ -5,7 +5,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
 const [entries,setEntries]=createSignal<QueuedLocalMessage[]>([]);
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
@@ -40,7 +40,21 @@ export async function takeQueuedMessage(id:string){
  });
  wake();return text;
 }
-export async function retryQueuedMessage(id:string){const key=storageKey();const row=(await read(key)).find(row=>row.id===id);if(row?.state==='dispatching'&&row.error)await recoverLocalLaunch(row.mission);await update(key,id,row=>{if(row.state==='error'||(row.state==='dispatching'&&row.error)){row.state='queued';delete row.error;}});wake();}
+export async function retryQueuedMessage(id:string){
+ const key=storageKey(),row=(await read(key)).find(row=>row.id===id);
+ if(!row)return;
+ if(row.interrupted||(row.state==='dispatching'&&row.error))await recoverLocalLaunch(row.mission);
+ // Keep the previous attempt, including unsynced output, before a deliberate retry.
+ if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+ if(key!==storageKey())return;
+ await update(key,id,stored=>{
+  if(stored.state==='error'||(stored.state==='dispatching'&&stored.error)||(stored.state==='accepted'&&stored.interrupted)){
+   stored.state='queued';delete stored.error;delete stored.interrupted;
+   delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+  }
+ });
+ wake();
+}
 const settling=new Map<string,Promise<void>>();
 const stopping=new Set<string>();
 export async function sendQueuedNow(mission:string){
@@ -52,7 +66,7 @@ export async function sendQueuedNow(mission:string){
   await stopLocal(mission);
   // The follower saves the partial answer before closing its run receipt.
   const follower=settling.get(runKey);
-  if(follower)await follower;else await setClientMissionStatus(mission,'interrupted');
+  if(follower)await follower;else await recoverLocalLaunch(mission);
  }finally{stopping.delete(runKey);wake();}
 }
 export function startLocalQueueWorker(){
@@ -76,6 +90,16 @@ export function startLocalQueueWorker(){
    window.dispatchEvent(new Event('orb:refresh'));
   }
  }
+ async function syncFailed(row:QueuedLocalMessage,error:unknown){
+  if(!valid())return;
+  // A closed receipt cannot become writable again. Keep its output and draft,
+  // but require an explicit retry instead of looping or silently replaying work.
+  const closed=/409.*Local execution (already ended or moved|receipt is stale)/i.test(String(error));
+  await update(key,row.id,stored=>{
+   if(closed){stored.state='error';stored.interrupted=true;stored.error='The previous run ended before syncing finished. Your message and any response are saved on this computer. Retry to continue the conversation.';}
+   else stored.error=`Saved locally; could not finish syncing: ${String(error)}`;
+  });
+ }
  function follow(row:QueuedLocalMessage){
   const runKey=`${key}:${row.mission}`;if(settling.has(runKey))return;
   let finished=false;
@@ -92,7 +116,19 @@ export function startLocalQueueWorker(){
     row={...row,result,resultId:crypto.randomUUID(),resultStatus:stopping.has(runKey)?'interrupted':undefined};
     await update(key,row.id,stored=>{stored.result=result;stored.resultId=row.resultId;stored.resultStatus=row.resultStatus;});
     await persistResult(row);finished=true;
-   }catch(error){if(valid())await update(key,row.id,stored=>{stored.error=`Saved locally; could not finish syncing: ${String(error)}`;});}
+   }catch(error){
+    if(!valid())return;
+    if(/no local run/i.test(String(error))){
+     let recovered=false;
+     let detail='Orb lost the local run. Your message is saved. Retry to resume it.';
+     try{await recoverLocalLaunch(row.mission);recovered=true;}
+     catch(recovery){detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;}
+     if(!valid())return;
+     recordLocalFailure(row.mission,recovered?null:'The local runner is no longer attached. Check the saved message below.');
+     await update(key,row.id,stored=>{stored.interrupted=true;stored.error=detail;if(recovered)stored.state='error';});
+     window.dispatchEvent(new Event('orb:refresh'));
+    }else await syncFailed(row,error);
+   }
   }).then(()=>{}).finally(()=>{settling.delete(runKey);if(finished)wake();});settling.set(runKey,promise);
  }
  const tick=async()=>{
@@ -104,8 +140,9 @@ export function startLocalQueueWorker(){
     if(!valid())return;if(seen.has(row.mission))continue;seen.add(row.mission);
     const runKey=`${key}:${row.mission}`;
     if(settling.has(runKey)||stopping.has(runKey))continue;
+    if(row.interrupted)continue;
     if(row.state==='accepted'){
-     if(row.result)await persistResult(row).catch(()=>{});else follow(row);
+     if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
      continue;
     }
     if(row.state!=='queued')continue;

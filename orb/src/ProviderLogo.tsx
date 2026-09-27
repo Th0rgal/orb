@@ -9,7 +9,9 @@ export function ProviderLogo(p: { type: string; name?: string }) {
     if (/anthropic|claude/.test(key)) return "anthropic";
     if (/openai|codex|chatgpt/.test(key)) return "openai";
     if (/kimi|moonshot/.test(key)) return "kimi";
-    if (/xai|grok/.test(key)) return "xai";
+    if (/grok/.test(key)) return "grok";
+    if (/cursor/.test(key)) return "cursor";
+    if (/xai/.test(key)) return "xai";
     if (/meta|llama/.test(key)) return "meta";
     if (/minimax/.test(key)) return "minimax";
     if (/z[._-]?ai|zhipu|glm/.test(key)) return "zai";
