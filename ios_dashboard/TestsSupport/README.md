@@ -8,6 +8,8 @@ Run from the repository root. Xcode 26 and an iOS 26 Simulator are required.
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py
 # In another terminal, for the sign-in layout test:
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18769 --require-auth
+# In another terminal, for expired-session recovery (restart before each run):
+python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18770 --expire-session
 ```
 
 In a separate terminal, choose an installed Simulator UUID and run:
@@ -102,3 +104,12 @@ Screenshots prefixed `compact-` record the reviewed layouts. Secure-input
 screenshots omit protected password/keyboard pixels; XCTest checks keyboard
 presence and Sign In reachability separately. These checks use fixtures and
 do not change the live-provider limitations listed above.
+
+## Session recovery
+
+`testExpiredSessionAndServerPassword` exercises a real HTTP 401 through OrbCore,
+checks that project creation/search disappear, submits a wrong then correct
+password, and replaces credentials from Server settings. It also verifies that
+a failed settings login preserves the working session. The fixture issues a
+new token at startup; restart port 18770 before repeating this scenario.
+Connect stays in the server sheet's toolbar so the keyboard cannot cover it.

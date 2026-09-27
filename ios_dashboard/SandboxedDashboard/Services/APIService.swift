@@ -139,6 +139,7 @@ final class APIService {
     var authRequired: Bool = false
     var authMode: AuthMode = .singleTenant
     var authSessionExpired: Bool = false
+    var connectionGeneration = 0
     var onSuccessfulAuthenticatedRequest: (() -> Void)?
 
     enum AuthMode: String {
@@ -969,7 +970,12 @@ final class APIService {
         }
 
         if httpResponse.statusCode == 401 {
-            markSessionExpired()
+            // A rejected login or an old in-flight request must not clear a newer session.
+            if let authorization = request.value(forHTTPHeaderField: "Authorization"),
+               authorization == "Bearer \(authToken ?? "")",
+               request.url?.absoluteString.hasPrefix(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") == true {
+                markSessionExpired()
+            }
             throw APIError.unauthorized
         }
 
@@ -1543,7 +1549,12 @@ final class APIService {
         }
 
         if httpResponse.statusCode == 401 {
-            markSessionExpired()
+            // A rejected login or an old in-flight request must not clear a newer session.
+            if let authorization = request.value(forHTTPHeaderField: "Authorization"),
+               authorization == "Bearer \(authToken ?? "")",
+               request.url?.absoluteString.hasPrefix(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") == true {
+                markSessionExpired()
+            }
             throw APIError.unauthorized
         }
 

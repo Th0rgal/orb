@@ -20,7 +20,9 @@ struct ContentView: View {
             if isCheckingAuth {
                 LoadingView(message: "Connecting...")
                     .background(Theme.backgroundPrimary.ignoresSafeArea())
-            } else if authRequired && (!isAuthenticated || api.authSessionExpired) {
+            } else if api.authSessionExpired {
+                ReconnectView()
+            } else if authRequired && !isAuthenticated {
                 LoginView(
                     sessionExpired: api.authSessionExpired,
                     onLogin: {
@@ -45,6 +47,9 @@ struct ContentView: View {
             if isConfigured {
                 Task { await checkAuth() }
             }
+        }
+        .onChange(of: api.connectionGeneration) { _, _ in
+            Task { await checkAuth() }
         }
         .onChange(of: api.authSessionExpired) { _, expired in
             if expired {
@@ -78,14 +83,33 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Setup Sheet (First Launch)
+struct ReconnectView: View {
+    @State private var reconnecting = false
+    var body: some View {
+        ContentUnavailableView {
+            Label("Reconnect to Orb", systemImage: "lock.circle")
+        } description: {
+            Text("Your session has expired. Enter your password to continue.")
+        } actions: {
+            Button("Enter password") { reconnecting = true }
+                .buttonStyle(.borderedProminent).accessibilityIdentifier("reconnect")
+        }
+        .background(OrbStyle.background.ignoresSafeArea())
+        .sheet(isPresented: $reconnecting) {
+            SetupSheet(onComplete: { reconnecting = false }, allowsDismissal: true)
+        }
+    }
+}
+
+// MARK: - Server and credentials
 
 struct SetupSheet: View {
     let onComplete: () -> Void
 
     @State private var serverURL = ""
     @State private var isTestingConnection = false
-    @State private var connectionSuccess = false
+    @State private var password = ""
+    @State private var username = UserDefaults.standard.string(forKey: "last_username") ?? ""
     @State private var errorMessage: String?
 
     private let api = APIService.shared
@@ -101,17 +125,32 @@ struct SetupSheet: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                         .accessibilityIdentifier("server-url")
                 }
-                if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
-                Section {
-                    Button { Task { await connectToServer() } } label: {
-                        HStack { Text(isTestingConnection ? "Connecting…" : "Connect"); Spacer(); if isTestingConnection { ProgressView() } }
-                    }.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
+                Section("Sign in") {
+                    if api.authMode == .multiUser {
+                        TextField("Username", text: $username).textContentType(.username)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
+                    SecureField("Password", text: $password).textContentType(.password)
+                        .accessibilityIdentifier("server-password")
+                    Text("Enter your password to reconnect or use different credentials.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
+                if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
             }.scrollContentBackground(.hidden).background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
                 .navigationTitle(allowsDismissal ? "Server" : "Connect to Orb")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar { if allowsDismissal { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() }.disabled(isTestingConnection) } } }
+                .toolbar {
+                    if allowsDismissal {
+                        ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() }.disabled(isTestingConnection) }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { Task { await connectToServer() } } label: {
+                            if isTestingConnection { ProgressView() } else { Text("Connect").fontWeight(.semibold) }
+                        }.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
+                        .accessibilityLabel("Connect")
+                    }
+                }
                 .interactiveDismissDisabled(!allowsDismissal || isTestingConnection)
         }
         .onAppear { if serverURL.isEmpty { serverURL = api.baseURL } }
@@ -125,7 +164,6 @@ struct SetupSheet: View {
 
         isTestingConnection = true
         errorMessage = nil
-        connectionSuccess = false
 
         // Save original URL to restore on failure
         let originalURL = api.baseURL
@@ -133,7 +171,18 @@ struct SetupSheet: View {
 
         do {
             _ = try await api.checkHealth()
-            connectionSuccess = true
+            if api.authRequired {
+                if !password.isEmpty {
+                    _ = try await api.login(password: password, username: api.authMode == .multiUser ? username : nil)
+                } else if !api.isAuthenticated || api.authSessionExpired {
+                    api.baseURL = originalURL
+                    errorMessage = "Enter your password to connect."
+                    isTestingConnection = false
+                    return
+                }
+            } else { api.authSessionExpired = false }
+            password = ""
+            api.connectionGeneration += 1
             HapticService.success()
             // No artificial delay before dismissing — the haptic + checkmark
             // already convey success, and adding 500 ms here just felt slow.
@@ -142,7 +191,11 @@ struct SetupSheet: View {
         } catch {
             // Restore original URL on failure
             api.baseURL = originalURL
-            errorMessage = "Could not connect. Please check the URL."
+            if case APIError.unauthorized = error {
+                errorMessage = "Incorrect password. Please try again."
+            } else {
+                errorMessage = "Could not connect. Check the server address and your connection."
+            }
             HapticService.error()
         }
 

@@ -4,6 +4,8 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 REQUIRE_AUTH = False
+EXPIRE_SESSION = False
+VALID_TOKEN = "orb-fixture-" + str(uuid.uuid4())
 LOCK = threading.Lock()
 MISSIONS = {}
 RECEIPTS = {}
@@ -23,8 +25,12 @@ class Handler(BaseHTTPRequestHandler):
     def send(self, value, status=200):
         data=json.dumps(value).encode(); self.send_response(status); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
+        global REQUIRE_AUTH
         u=urlparse(self.path); p=unquote(u.path)
         if p=='/api/health': return self.send({'status':'ok','auth_required':REQUIRE_AUTH})
+        if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
+            REQUIRE_AUTH = True
+            return self.send({'error':'invalid or expired token'},401)
         if p=='/api/projects': return self.send({'projects':PROJECTS})
         if p=='/api/control/missions': return self.send(list(MISSIONS.values()))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
@@ -54,6 +60,9 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK: self.mutate()
     def mutate(self):
         p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0)); body=json.loads(self.rfile.read(size)) if size else {}
+        if p=='/api/auth/login':
+            if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
+            return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
         if p=='/api/projects': PROJECTS.append(body); return self.send(body)
         if p.endswith('/file/mkdir'): return self.send({})
@@ -77,5 +86,5 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(m)
         return self.send({'error':'Unknown route'},404)
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); args=parser.parse_args(); REQUIRE_AUTH=args.require_auth
+    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); parser.add_argument('--expire-session',action='store_true'); args=parser.parse_args(); REQUIRE_AUTH=args.require_auth; EXPIRE_SESSION=args.expire_session
     ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

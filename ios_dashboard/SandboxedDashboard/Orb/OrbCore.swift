@@ -99,6 +99,14 @@ final class OrbCore {
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 401 {
+            let api = APIService.shared
+            if url.absoluteString.hasPrefix(endpoint + "/"),
+               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(api.authToken ?? "")" {
+                api.markSessionExpired()
+            }
+            throw APIError.unauthorized
+        }
         guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Request failed") }
         return data.isEmpty ? .null : try JSONDecoder().decode(OrbJSON.self, from: data)
     }
