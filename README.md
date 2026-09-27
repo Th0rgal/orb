@@ -1,299 +1,102 @@
 <p align="center">
-  <img src="dashboard/public/favicon.svg" width="120" alt="sandboxed.sh" />
+  <img src="dashboard/public/favicon.svg" width="80" alt="sandboxed.sh" />
 </p>
 
-<h1 align="center">sandboxed.sh</h1>
+<h1 align="center">sandboxed.sh + Orb</h1>
 
 <p align="center">
-  <strong>Self-hosted mission-execution backend for autonomous AI agents</strong><br/>
-  Isolated Linux workspaces with Claude Code, OpenCode, Codex, Gemini, and Grok runtimes<br/>
-  <em>Driven over MCP by a coordinator like <a href="https://github.com/Th0rgal/hermes-agent">Hermes</a> — sandboxed.sh runs the missions</em>
-</p>
-
-<p align="center">
-  <em>Formerly known as Open Agent</em>
+  <strong>Your agents, machines and subscriptions. One place to work.</strong><br/>
+  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.
 </p>
 
 <p align="center">
+  <a href="#get-started">Get started</a> ·
+  <a href="orb/README.md">Desktop</a> ·
+  <a href="ios_dashboard/README.md">iOS</a> ·
   <a href="https://sandboxed.sh">Website</a> ·
-  <a href="https://relens.ai/community">Discord</a> ·
-  <a href="#vision">Vision</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#ecosystem">Ecosystem</a> ·
-  <a href="#screenshots">Screenshots</a> ·
-  <a href="#getting-started">Getting Started</a>
+  <a href="https://relens.ai/community">Discord</a>
 </p>
 
-<br/>
+![Orb on macOS, following a Verity coding mission](screenshots/orb-desktop.webp)
+
+## Choose where your agent works
+
+| Mode | Where it runs | How you use it |
+| --- | --- | --- |
+| **Your computer** | A local coding agent on your desktop | Choose **New Agent → This computer**, then a harness and model. Work with your local files and tools. |
+| **Your private cloud** | Your own servers and remote machines | Add machines to sandboxed.sh, then select one in Orb. Run agents in the configured host or isolated container workspace. |
+| **Cloud agents** | A provider-managed assistant | Choose **Cloud agent**, then ChatGPT, Grok Bot or Cursor Cloud. Continue the provider conversation from Orb. |
+
+Use Claude Code, Codex and other supported harnesses for local and remote work.
+Cloud agents have their own connections: **ChatGPT** uses a signed-in browser
+profile and your available subscription modes; **Grok Bot** uses its connected
+account; **Cursor Cloud** uses its official API, with a repository, Git reference
+and available model. ChatGPT and Grok Bot connectors are experimental; available
+models and actions depend on the connected account and provider.
+
+![Creating an agent in Orb on macOS](screenshots/orb-setup.webp)
+
+## Pick up the conversation anywhere
+
+Projects contain folders, conversations and shared context. Open a mission to
+follow its progress, send a follow-up, change supported model settings, or review
+its output. Markdown, code, tables, LaTeX, images and downloadable artifacts stay
+readable inside the conversation.
+
+Orb for **iOS** connects to the same sandboxed.sh server: browse projects, follow
+agents, start remote or cloud work, and view or edit shared Markdown files.
+Agents run on the selected computer or service, not on your phone. Local desktop
+execution still depends on the computer that owns the run.
 
 <p align="center">
-  <img src="screenshots/hero.webp" alt="sandboxed.sh Dashboard" width="100%" />
+  <img src="screenshots/orb-ios.webp" width="280" alt="Orb on iOS showing code and downloadable files in a test conversation" /><br/>
+  <sub>iOS Simulator · ChatGPT rendering test with fixture data.</sub>
 </p>
 
-<p align="center">
-  <strong>Ready to deploy?</strong> Jump to the <a href="#choose-your-installation-method">installation comparison</a>, or go straight to the <a href="docs/install-docker.md">Docker guide</a> / <a href="docs/install-native.md">native guide</a>.
-</p>
+## Bring your subscriptions
+
+Connect supported subscription accounts through **CLIProxyAPI Plus**, then
+configure that endpoint as an inference provider in sandboxed.sh. The proxy
+handles account routing and rotation among configured, eligible accounts;
+Orb lets you choose the harness and model. Provider quotas still apply.
+
+- [CLIProxyAPI Plus — maintained CCS fork](https://github.com/kaitranntt/CLIProxyAPIPlus)
+- [CLIProxyAPI — upstream](https://github.com/router-for-me/CLIProxyAPI)
+- [Credential ownership and proxy configuration](docs/CREDENTIAL_OWNERSHIP.md)
+
+This routes **model inference** for coding agents. Managed cloud agents use
+separate service adapters; connecting a proxy account does not sign in to the
+ChatGPT browser or create a Cursor Cloud API account.
+
+## Get started
+
+1. **Run sandboxed.sh.** Follow the [Docker guide](docs/install-docker.md) or
+   [native Linux guide](docs/install-native.md). It keeps the project record,
+   mission history and remote execution services.
+2. **Open Orb.** Build the [desktop client](orb/README.md) or the
+   [iOS app](ios_dashboard/README.md), then enter your server URL and sign in.
+3. **Connect your execution environment.** Set up local harnesses, register
+   [remote machines](docs/REMOTE_NODES.md), or connect a cloud-agent account.
+   Configure inference providers for the models you want to use.
+4. **Create a project and launch an agent.** Choose its execution mode, write
+   your task, and keep its conversation and results together.
+
+## Under the hood
+
+**Orb is the client; sandboxed.sh is the execution and persistence layer.**
+Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
+projects, missions, event history and remote-node coordination. Cloud adapters
+observe provider work independently of the client window.
+
+The same control plane is available over MCP for coordinators such as
+[Hermes](https://github.com/Th0rgal/hermes-agent). Automation uses the same project
+and mission records as Orb.
+
+[Execution architecture](agents.md) ·
+[Workspaces](docs/WORKSPACES.md) ·
+[MCP and Hermes](docs/HERMES_ORCHESTRATION.md) ·
+[Development and troubleshooting](DEBUGGING.md)
 
 ---
 
-## Vision
-
-What if you could:
-
-**Hand off entire dev cycles.** Point an agent at a GitHub issue, let it write
-code, test by launching desktop applications, and open a PR when tests pass. You
-review the diff, not the process.
-
-**Run multi-day operations unattended.** Give an agent SSH access to your home
-GPU through a VPN. It reads Nvidia docs, sets up training, fine-tunes models
-while you sleep.
-
-**Keep sensitive data local.** Analyze your sequenced DNA against scientific
-literature. Local inference, isolated containers, nothing leaves your machines.
-
----
-
-## Architecture
-
-sandboxed.sh is the **mission-execution backend** of a two-part system — the
-half an autonomous agent drives over MCP to actually *build* things in
-isolation. The other half is a **coordinator** that decides *what* to do and
-*when*: we run our own Hermes fork —
-[hermes-agent](https://github.com/Th0rgal/hermes-agent) (the Python gateway +
-CLI) and its bundled **hermes-desktop** Electron app (`apps/desktop/`) — but any
-MCP-capable assistant works. The agent never runs untrusted code itself; it
-hands each unit of work to sandboxed.sh, which runs it in a throwaway
-workspace/container and streams back structured results. The canonical target
-model is the
-[agent-native control-plane architecture](docs/AGENT_CONTROL_PLANE.md):
-portfolio → project → track → attempt → action → receipt → evidence. Four
-runtime concepts explain the current integration:
-
-| Concept | What it is | Where it lives |
-|---|---|---|
-| **Project** | The durable unit of work (an audit, a paper, a benchmark). First-class object with a mode (`active` / `blocked` / `paused`), an autonomy **grant** (merge authority, budget, parallelism), **tracks**, and open **decisions**. | `projects.db` on the sandboxed.sh host, served at `/api/projects/*` |
-| **Controller** | A coordinator cron that wakes on a schedule, reads its control conversation + GitHub + the project state, and dispatches work. Each controller owns its project(s) and reports structured status trailers; it can also launch missions on *another* project when it depends on that project's output (see [Coordination between controllers](docs/CONTROLLERS.md#coordination-between-controllers)). | Coordinator (e.g. a Hermes cron with the project MCP tools) |
-| **Conversation** *(control session)* | The durable Hermes chat thread; the one bound to a project is its **control conversation** — where you (or the controller) talk. Continuations roll over, so it's addressed by route, not a frozen ID. | Coordinator, binding stored in `projects.db` |
-| **Mission** | One unit of autonomous execution: an agent in an isolated workspace/container running a harness (Claude Code, Codex, …) that writes code, runs builds, opens PRs. Tagged with `project`/`track`. | sandboxed.sh workspaces |
-
-```
-             decide / coordinate                      build / execute
-  ┌────────────────────────────────┐      ┌────────────────────────────────────┐
-  │  Coordinator (Hermes)          │ MCP  │  sandboxed.sh                      │
-  │                                ├─────▶│                                    │
-  │  controller crons              │      │  missions in isolated workspaces   │
-  │  control conversations         │      │  (systemd-nspawn / Docker)         │
-  │  project tools + start_mission │◀─────┤  projects.db · event stream        │
-  └────────────────────────────────┘ SSE/ └────────────────────────────────────┘
-                                  webhooks
-```
-
-Controllers write structured project state through MCP tools (`list_projects`,
-`update_project_status`, `set_project_grant`, `link_mission_to_project`, …)
-instead of free text; a state ingestor also folds controller status trailers
-from deliveries into the project record, so the roster stays current even for
-text-only updates.
-
-**Rule of thumb:** *a controller drives a project through its control
-conversation by dispatching missions.* Decide/coordinate → the assistant;
-build/execute in isolation → a sandboxed mission. In-conversation subagents are for quick
-reasoning and decomposition; anything needing a real filesystem, git, builds,
-or a PR gets dispatched as a mission.
-
-The same project roster is rendered by three surfaces: the web dashboard's
-board (`/`), the desktop Projects board, and the iOS app's Projects tab.
-
----
-
-## Features
-
-- **Multi-Runtime Support**: Run Claude Code, OpenCode, Codex, Gemini, and Grok
-  agents in the same infrastructure
-- **Projects & Controllers**: First-class projects (mode, autonomy grant,
-  tracks, decisions) driven by scheduled controllers over MCP — structured
-  state, not status prose
-- **Mission Control**: Start, stop, and monitor agents remotely with real-time
-  streaming
-- **Isolated Workspaces**: Containerized Linux environments (systemd-nspawn)
-  with per-mission directories
-- **Git-backed Library**: Skills, tools, rules, agents, and MCPs versioned in a
-  single repo
-- **Assistant Gateway**: Manage Telegram gateway compatibility from the
-  top-level Assistant UI while Hermes takes over assistant runtime over MCP
-- **Automations**: Schedule recurring agent runs with cron-like triggers
-- **Model Routing**: Provider fallback chains with health checks and
-  rate-limit handling
-- **MCP Registry (optional)**: Extra tool servers (desktop/playwright/etc.) when
-  needed
-- **OpenAI-compatible Proxy Queue Mode**: Optional deferred execution for
-  `/v1/chat/completions` when all routed providers are temporarily rate-limited
-- **Native Inference Protocols**: Capability-gated Chat Completions, Responses,
-  and Anthropic Messages with provider-specific reasoning continuity; see
-  [`docs/INFERENCE_PROTOCOLS.md`](docs/INFERENCE_PROTOCOLS.md)
-- **Multi-platform**: Web dashboard (Next.js) and iOS app (SwiftUI) with
-  Picture-in-Picture
-
----
-
-## Ecosystem
-
-**The coordinator** — the agent that decides what to run and drives sandboxed.sh
-over MCP:
-
-- **[Hermes (our fork)](https://github.com/Th0rgal/hermes-agent)**: the
-  coordinator we run in production — a Python gateway + CLI plus the bundled
-  **hermes-desktop** Electron app (`apps/desktop/`). It owns the control
-  conversations, controller crons, and the project MCP tools (`start_mission`,
-  `link_mission_to_project`, …). Any MCP-capable assistant can take this role;
-  Hermes is the reference implementation. See its
-  [`FORK.md`](https://github.com/Th0rgal/hermes-agent/blob/main/FORK.md) for how
-  our changes are layered on upstream to stay easy to update.
-
-**The runtimes** — the coding agents sandboxed.sh executes inside isolated
-workspaces:
-
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)**: Anthropic's
-  official coding agent with native skills support (`.claude/skills/`)
-- **[OpenCode](https://github.com/anomalyco/opencode)**: Open-source coding agent
-- **Codex, Gemini, and Grok**: Native CLI backends for OpenAI, Google, and xAI
-  coding agents
-
-Each runtime executes inside isolated workspaces, so bash commands and file
-operations are scoped correctly. sandboxed.sh handles orchestration, workspace
-isolation, and Library-based configuration management.
-
----
-
-## Screenshots
-
-<p align="center">
-  <img src="screenshots/dashboard-overview.webp" alt="Dashboard Overview" width="100%" />
-</p>
-<p align="center"><em>Real-time monitoring with CPU, memory, network graphs and mission timeline</em></p>
-
-<br/>
-
-<p align="center">
-  <img src="screenshots/library-skills.webp" alt="Library Skills Editor" width="100%" />
-</p>
-<p align="center"><em>Git-backed Library with skills, commands, rules, and inline editing</em></p>
-
-<br/>
-
-<p align="center">
-  <img src="screenshots/mcp-servers.webp" alt="MCP Servers" width="100%" />
-</p>
-<p align="center"><em>MCP server management with runtime status and Library integration</em></p>
-
----
-
-## Getting Started
-
-### Choose your installation method
-
-|                          | Docker (recommended)                           | Native (bare metal)                                 |
-| ------------------------ | ---------------------------------------------- | --------------------------------------------------- |
-| **Best for**             | Getting started, macOS users, quick deployment | Production servers, maximum performance             |
-| **Platform**             | Any OS with Docker                             | Ubuntu 24.04 LTS                                    |
-| **Setup time**           | ~5 minutes                                     | ~30 minutes                                         |
-| **Container workspaces** | Yes (with `privileged: true`)                  | Yes (native systemd-nspawn)                         |
-| **Desktop automation**   | Yes (headless Xvfb inside Docker)              | Yes (native X11 or Xvfb)                            |
-| **Performance**          | Good (slight overhead on macOS)                | Best (native Linux)                                 |
-| **Updates**              | `docker compose pull` / rebuild                | Git pull + cargo build, or one-click from dashboard |
-
-### Docker (recommended for most users)
-
-```bash
-git clone https://github.com/Th0rgal/sandboxed.sh.git
-cd sandboxed.sh
-cp .env.example .env
-# Edit .env with your settings
-docker compose up -d
-```
-
-Open `http://localhost:3000` — that's it.
-
-For container workspace isolation (recommended), uncomment `privileged: true` in
-`docker-compose.yml`.
-
-→ **[Full Docker setup guide](docs/install-docker.md)**
-
-### Native (bare metal)
-
-For production servers running Ubuntu 24.04 with maximum performance and native
-systemd-nspawn isolation.
-
-→ **[Full native installation guide](docs/install-native.md)**
-
-### First-time setup
-
-After installation, follow the **[Getting Started Guide](docs/getting-started.md)** for:
-- Configuring your backend connection
-- Setting up your library repository
-- Exploring skills and tools
-- Creating your first mission
-
-### AI-assisted setup
-
-Point your coding agent at the installation guide and let it handle the
-deployment:
-
-> "Deploy Sandboxed.sh on my server at `1.2.3.4` with domain `agent.example.com`"
-
----
-
-## Documentation
-
-### User Guides
-- **[Getting Started](docs/getting-started.md)** - First-time setup and usage
-- **[Docker Installation](docs/install-docker.md)** - Recommended installation method
-- **[Native Installation](docs/install-native.md)** - Bare metal Ubuntu setup
-
-### Architecture & APIs
-- **[Agent-native control plane](docs/AGENT_CONTROL_PLANE.md)** - Canonical system model, epistemic contract, abstraction tower, and design laws
-- **[Agent-native roadmap](docs/AGENT_NATIVE_ROADMAP.md)** - Phased migration to bounded situation reads, receipts, atomic actions, leases, and accretive knowledge
-- **[Hermes orchestration](docs/HERMES_ORCHESTRATION.md)** - How Hermes and sandboxed.sh run autonomous projects: sessions, missions, controllers, routes
-- **[Harness System](docs/HARNESS_SYSTEM.md)** - Backend integration architecture
-- **[ChatGPT UI harness](docs/CHATGPT_UI_HARNESS.md)** - Experimental subscription-backed browser harness
-- **[Workspaces](docs/WORKSPACES.md)** - Isolated execution environments
-- **[Mission API](docs/MISSION_API.md)** - Mission lifecycle and control
-- **[Workspace API](docs/WORKSPACE_API.md)** - Workspace management endpoints
-- **[Backend API](docs/BACKEND_API.md)** - Backend configuration
-
-### Setup Guides
-- **[Assistant Gateway](docs/TELEGRAM_ASSISTANT.md)** - Connect Telegram bots and manage the Assistant cutover
-- **[Hermes Assistant Migration](docs/HERMES_ASSISTANT_MIGRATION.md)** - MCP bridge and runtime handoff notes
-- **[Desktop Setup](docs/DESKTOP_SETUP.md)** - X11/Xvfb configuration for GUI automation
-
-### Reference
-- **[agents.md](agents.md)** - Agent configuration and harness details
-- **[Persistent Sessions Design](PERSISTENT_SESSIONS_DESIGN.md)** - Claude CLI session management
-- **[Debugging Guide](DEBUGGING.md)** - Troubleshooting and debug workflows
-- **[Docker Analysis](docs/DOCKER_ANALYSIS.md)** - Docker setup deep dive
-
----
-
-## Development
-
-### Setup git hooks
-
-Enable pre-push formatting checks to catch CI failures locally:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-This runs `cargo fmt --check` before each push. If formatting issues are found,
-run `cargo fmt --all` to fix them.
-
----
-
-## Status
-
-**Work in Progress** — This project is under active development. Contributions
-and feedback welcome.
-
-## License
-
-MIT
+Formerly Open Agent.
