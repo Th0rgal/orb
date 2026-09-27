@@ -1,3 +1,4 @@
+import {FindBar} from "../src/FindBar";
 import {render} from 'solid-js/web';
 import {createSignal} from 'solid-js';
 import {NativeInteraction} from '../src/NativeInteraction';
@@ -7,7 +8,7 @@ import '../src/styles.css';
 const [items,setItems]=createSignal<any[]>([]),[view,setView]=createSignal('idle');
 const pending={kind:'tool',key:'q',callId:'q',name:'ui_native_request',done:false,args:{method:'questions',params:{questions:[{id:'q',question:'Performance fixture: keep typing',options:[{label:'Later'}]}]}}};
 const [requests,setRequests]=createSignal([pending]);
-render(()=><main style={{padding:'32px','max-width':'900px',margin:'auto'}}><h2>Orb Performance Lab</h2><p>Synthetic content · native Tauri channels · no model calls</p><NativeInteraction mission="performance-fixture" active={view()==='question'} remote items={requests()}/><Transcript items={items()}/></main>,document.getElementById('root')!);
+render(()=><><FindBar/><main class="scroll" style={{height:"calc(100vh - 64px)",overflow:"auto",padding:'32px','max-width':'900px',margin:'auto'}}><h2>Orb Performance Lab</h2><p>Synthetic content · native Tauri channels · no model calls</p><NativeInteraction mission="performance-fixture" active={view()==='question'} remote items={requests()}/><Transcript items={items()}/></main></>,document.getElementById('root')!);
 let received=0;const errors:string[]=[];
 const stop=followInteraction('performance-empty',()=>received++,e=>errors.push(String(e)));
 const quantile=(xs:number[],q:number)=>[...xs].sort((a,b)=>a-b)[Math.min(xs.length-1,Math.floor(xs.length*q))];

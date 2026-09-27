@@ -1,4 +1,4 @@
-import {describe,it,expect,vi} from 'vitest';
+import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {render,screen,fireEvent,waitFor,cleanup} from '@solidjs/testing-library';
 import {createSignal} from 'solid-js';
 import {MissionGlyph} from '../src/MissionGlyph';
@@ -7,6 +7,15 @@ import {api} from '../src/api';
 vi.mock('../src/api',async importOriginal=>({...await importOriginal<typeof import('../src/api')>(),api:vi.fn()}));
 import {composerModes,modePrompt} from '../src/goal';
 
+let emitted:any;
+const previousTauri=(window as any).__TAURI__;
+beforeEach(()=>{(window as any).__TAURI__={core:{Channel:class {onmessage=(value:any)=>{};constructor(){emitted=this;}}}};});
+afterEach(()=>{(window as any).__TAURI__=previousTauri;});
+function transport(read:(command:string,args?:any)=>Promise<any>){return async(command:string,args:any)=>{
+ if(command==='local_interaction_subscribe'){args.onEvent.onmessage(await read('local_interaction',{}));return 1;}
+ if(command==='local_interaction_unsubscribe')return;
+ return read(command,args);
+};}
 describe('native plan interactions',()=>{
  it('only exposes Plan when the destination confirms support',()=>{
   for(const harness of ['codex','claudecode','opencode','grok','gemini','chatgpt']) {
@@ -24,7 +33,7 @@ describe('native plan interactions',()=>{
    expect(args).toEqual({id:'mission',requestId:'native-1',answer:{answers:{greeting:{answers:['Hello']}}}});
    pending=null;return null;
   });
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><><MissionGlyph missionId="mission" status="awaiting_user"/><NativeInteraction mission="mission" active/></>);
    await screen.findByText('Which greeting?');
@@ -38,7 +47,7 @@ describe('native plan interactions',()=>{
  });
  it('switching from a custom answer to an option clears the custom field',async()=>{
   const invoke=vi.fn(async()=>({id:'custom',method:'questions',params:{questions:[{id:'q',question:'Where?',options:[{label:'Locally'}]}]}}));
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><NativeInteraction mission="mission" active/>);
    const input=await screen.findByRole('textbox',{name:'Other answer: Where?'});
@@ -50,7 +59,7 @@ describe('native plan interactions',()=>{
  });
  it('does not accept a plan until explicitly clicked',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'plan-1',method:'plan',params:{plan:'Create hello.txt'}}:null);
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try{
    render(()=><NativeInteraction mission="mission" active/>);
    await screen.findByText('Create hello.txt');
@@ -71,7 +80,7 @@ describe('native plan interactions',()=>{
  });
  it('sends requested changes without accepting execution',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'revise',method:'plan',params:{}}:null);
-  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke};
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try {
    render(()=><NativeInteraction mission="mission" active/>);
    await screen.findByRole('button',{name:'Request changes'});
@@ -101,18 +110,19 @@ describe('native plan interactions',()=>{
 
 describe('question focus during refresh',()=>{
  const question={id:'focus-request',method:'questions',params:{questions:[{id:'q',question:'Phone number?',options:[{label:'Later'}]}]}};
- it('preserves the focused custom answer and selection across native polling',async()=>{
+ it('preserves the focused custom answer and selection across native events',async()=>{
   vi.useFakeTimers();
   const host=window as any,previous=host.__TAURI_INTERNALS__;
   const invoke=vi.fn(async()=>JSON.parse(JSON.stringify(question)));
-  host.__TAURI_INTERNALS__={invoke};
+  host.__TAURI_INTERNALS__={invoke:transport(invoke)};
   try {
    render(()=><NativeInteraction mission="focus-local" active/>);
    await vi.advanceTimersByTimeAsync(0);
    const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
    input.focus();fireEvent.input(input,{target:{value:'+33 612345678'}});input.setSelectionRange(4,7);
+   for(let i=0;i<20;i++)emitted.onmessage(structuredClone(question));
    await vi.advanceTimersByTimeAsync(6000);
-   expect(invoke.mock.calls.length).toBeGreaterThanOrEqual(5);
+   expect(invoke).toHaveBeenCalledTimes(1);
    expect(screen.getByRole('textbox',{name:'Other answer: Phone number?'})).toBe(input);
    expect(document.activeElement).toBe(input);
    expect(input.value).toBe('+33 612345678');

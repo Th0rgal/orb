@@ -1,3 +1,4 @@
+import {eventPage} from "./eventPageFixture";
 import { test, expect, type Page } from "@playwright/test";
 import type { StoredEvent } from "../src/stream";
 
@@ -36,7 +37,7 @@ async function setup(page: Page, mixed = false) {
     }
     if(path==="/api/control/queue") return route.fulfill({json:pending});
     if(path==="/api/control/stream") return route.fulfill({contentType:"text/event-stream",body:`event: text_delta\ndata: ${JSON.stringify({content:"Review in progress",sequence:6})}\n\n${extraFrames}`});
-    if(path.endsWith("/events")) return route.fulfill({json:events});
+    if(path.endsWith("/events")) return route.fulfill(eventPage(route,events));
     if(path==="/api/control/missions/active") return route.fulfill({json:mission});
     if(path==="/api/projects/test/files") {
       const dir=url.searchParams.get("path")??"";

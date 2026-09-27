@@ -41,6 +41,8 @@ pub mod backend_config;
 pub mod config;
 pub mod container_tmp;
 pub mod cost;
+#[path = "../shared/file_notifications.rs"]
+pub mod file_notifications;
 pub mod github_connection;
 pub mod hermes_tools;
 pub mod library;

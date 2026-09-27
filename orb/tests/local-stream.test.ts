@@ -50,7 +50,8 @@ it("follows native channel output without repeatedly requesting snapshots", asyn
   let channel: { onmessage: (event: unknown) => void } | undefined;
   const invoke = vi.fn(
     async (_command: string, args: Record<string, unknown>) => {
-      channel = args.onEvent as typeof channel;
+      if(_command.endsWith("_subscribe"))channel = args.onEvent as typeof channel;
+      return 1;
     },
   );
   vi.stubGlobal("__TAURI__", {
@@ -72,18 +73,13 @@ it("follows native channel output without repeatedly requesting snapshots", asyn
     channel!.onmessage({ text: "", reset: false, state });
     expect(await following).toEqual(state);
     expect(localLiveText("stream-test")).toBe("Start now.");
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke.mock.calls[0][0]).toBe("local_agents_subscribe");
   } finally {
     vi.unstubAllGlobals();
   }
 });
 
-it("recognizes the actual Tauri permission error for compatibility fallback",async()=>{
- const {missingStreamCommand}=await import('../src/localAgents');
- expect(missingStreamCommand('local_agents_subscribe not allowed. Command not found')).toBe(true);
- expect(missingStreamCommand('no local run')).toBe(false);
-});
 
 it("keeps streaming blockquotes equivalent to complete Markdown parsing", () => {
  const parse=incrementalMarkdown(); const text="> Bonjour\n>\n> Deuxième paragraphe\n> > Citation imbriquée\n\nFin.";

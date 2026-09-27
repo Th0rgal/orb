@@ -1,3 +1,4 @@
+import {followNative} from "./nativeInteractionStream";
 import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 /**
  * Local harnesses: the CLIs installed on this computer, not a sandboxed.sh
@@ -19,11 +20,6 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export function missingStreamCommand(error:unknown) {
-  const message=String(error);
-  return /unknown command/i.test(message) || (/local_agents_subscribe/i.test(message) && /command not found|not allowed|not found/i.test(message));
-}
-
 export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode"] as const;
 export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
 
@@ -91,26 +87,17 @@ export function setPathOverride(id: string, path: string) {
   localStorage.setItem(PATH_KEY, JSON.stringify(next));
 }
 
-export function localBinding(id: string): LocalBinding | undefined {
-  try {
-    const all = JSON.parse(localStorage.getItem(BIND_KEY) || "{}") as Record<string, LocalBinding>;
-    return all[id];
-  } catch {
-    return undefined;
-  }
-}
-
-export function rememberBinding(id: string, binding: LocalBinding) {
-  const all = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(BIND_KEY) || "{}") as Record<string, LocalBinding>;
-    } catch {
-      return {};
-    }
-  })();
-  all[id] = binding;
-  localStorage.setItem(BIND_KEY, JSON.stringify(all));
-  void tauriInvoke()?.("local_bindings", {id, binding}).catch(console.error);
+const [bindings, setBindings] = createSignal<Record<string, LocalBinding>>({});
+let bindingsReady: Promise<void> | undefined;
+let bindingRevision=-1;
+type BindingSnapshot={revision:number;bindings:Record<string,LocalBinding>};
+const applyBindings=(snapshot:BindingSnapshot)=>{if(snapshot.revision>=bindingRevision){bindingRevision=snapshot.revision;setBindings(snapshot.bindings);}};
+export function localBinding(id: string): LocalBinding | undefined { return bindings()[id]; }
+export async function rememberBinding(id: string, binding: LocalBinding) {
+ await restoreLocalBindings();
+ if(JSON.stringify(bindings()[id])===JSON.stringify(binding))return;
+ const invoke=tauriInvoke();if(!invoke)throw Error('Native storage unavailable.');
+ applyBindings(await invoke('local_binding_set',{id,binding}) as BindingSnapshot);
 }
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -123,18 +110,27 @@ function tauriInvoke(): Invoke | null {
   return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
 }
 
-export async function restoreLocalBindings() {
-  const invoke = tauriInvoke();
-  if (!invoke) return;
-  const stored = await invoke("local_bindings") as Record<string, LocalBinding>;
-  let cached: Record<string, LocalBinding> = {};
-  try { cached = JSON.parse(localStorage.getItem(BIND_KEY) || "{}"); } catch { /* Native storage remains authoritative. */ }
-  if (!cached || typeof cached !== "object" || Array.isArray(cached)) cached = {};
-  // Restore before migrating unrelated legacy entries that could fail.
-  localStorage.setItem(BIND_KEY, JSON.stringify({...cached, ...stored}));
-  for (const [id, binding] of Object.entries(cached)) {
-    if (!stored[id]) await invoke("local_bindings", {id, binding});
-  }
+export function restoreLocalBindings(): Promise<void> {
+ if(bindingsReady)return bindingsReady;
+ if(!tauriInvoke())return Promise.resolve();
+ bindingsReady=new Promise<void>((resolve,reject)=>{
+  let initialized=false;
+  const stop=followNative<{revision:number;bindings:Record<string,LocalBinding>}>('local_bindings',{},snapshot=>{
+   applyBindings(snapshot);
+   window.dispatchEvent(new Event('orb:queue-wake'));
+   if(initialized)return;initialized=true;
+   void (async()=>{
+    let legacy:Record<string,LocalBinding>={};
+    try{legacy=JSON.parse(localStorage.getItem(BIND_KEY)||'{}');}catch{/* Invalid legacy data is not imported. */}
+    if(legacy&&typeof legacy==='object'&&!Array.isArray(legacy))for(const [id,binding] of Object.entries(legacy)){
+     if(!snapshot.bindings[id]&&binding&&['harness','bin','cwd'].every(key=>typeof (binding as unknown as Record<string,unknown>)[key]==='string'))await tauriInvoke()!('local_binding_set',{id,binding,ifAbsent:true});
+    }
+    localStorage.removeItem(BIND_KEY);resolve();
+   })().catch(error=>{bindingsReady=undefined;stop();reject(error);});
+  },error=>{bindingsReady=undefined;stop();reject(error);});
+  window.addEventListener('pagehide',stop,{once:true});
+ });
+ return bindingsReady;
 }
 
 const [scanning, setScanning] = createSignal(false);
@@ -392,18 +388,24 @@ export async function pollLocal(id: string): Promise<PollLocal> {
 }
 
 /** The native runner survives webview reloads; frontend flags do not. */
-export async function reconcileLocalRun(id: string): Promise<void> {
+const reconciling=new Map<string,Promise<void>>();
+export function reconcileLocalRun(id:string):Promise<void>{
+ const pending=reconciling.get(id);if(pending)return pending;
+ const work=reconcileRun(id).finally(()=>reconciling.delete(id));reconciling.set(id,work);return work;
+}
+async function reconcileRun(id: string): Promise<void> {
   if (launching.has(id)) return;
   const version=runVersions.get(id);
   try {
     const state = await pollLocal(id);
     if (runVersions.get(id)!==version) return;
     setRunning(prev => ({ ...prev, [id]: !state.done }));
+    if(!state.done&&!followers.has(id))void followLocal(id,()=>{}).catch(console.error);
     setLiveText(prev => ({ ...prev, [id]: state.text }));
     setActivities(prev => ({ ...prev, [id]: state.activities ?? [] }));
     if (state.session_id) {
       const binding = localBinding(id);
-      if (binding) rememberBinding(id, { ...binding, sessionId: state.session_id });
+      if (binding) await rememberBinding(id, { ...binding, sessionId: state.session_id });
     }
   } catch (error) {
     // A transport error does not mean the process stopped.
@@ -427,47 +429,25 @@ export async function stopLocal(id: string): Promise<void> {
   setRunning((prev) => ({ ...prev, [id]: false }));
 }
 
-/** New native builds push ordered deltas; old binaries retain compatibility. */
-export async function followLocal(id: string, onText: (text: string) => void): Promise<PollLocal> {
-  const publish = (text:string) => {
-    setLiveText(prev=>({...prev,[id]:text}));
-    onText(text);
-  };
-  const core=(window as unknown as {__TAURI__?:{core?:{Channel?:new()=>{onmessage:(event:OutputEvent<PollLocal>)=>void}}}}).__TAURI__?.core;
-  const pollUntilDone = async ():Promise<PollLocal> => {
-    let last="";
-    for(;;){
-      const state=await pollLocal(id);
-      if(state.text!==last){last=state.text;publish(last)}
-      setActivities(prev => ({ ...prev, [id]: state.activities ?? [] }));
-      if(state.done)return state;
-      await new Promise(resolve=>setTimeout(resolve,400));
-    }
-  };
-  let state:PollLocal;
-  try {
-    if(core?.Channel){
-      try {
-        state=await new Promise<PollLocal>((resolve,reject)=>{
-          const buffer=bufferedOutput<PollLocal>(publish,resolve);
-          const channel=new core.Channel!();
-          channel.onmessage=event=>{
-            const activity=(event as typeof event & {activities?:LocalActivity[]}).activities;
-            if(activity)setActivities(prev=>({...prev,[id]:activity}));
-            buffer.receive(event);
-          };
-          void tauriInvoke()!("local_agents_subscribe",{id,onEvent:channel}).catch(error=>{buffer.dispose();reject(error)});
-        });
-      } catch(error) {
-        if(!missingStreamCommand(error))throw error;
-        state=await pollUntilDone();
-      }
-    } else {state=await pollUntilDone();}
-    setActivities(prev => ({ ...prev, [id]: state.activities ?? [] }));
-    if(state.session_id){const binding=localBinding(id);if(binding)rememberBinding(id,{...binding,sessionId:state.session_id});}
-    setRunning(prev=>({...prev,[id]:false}));
-    return state;
-  } catch(error) {await reconcileLocalRun(id);recordLocalFailure(id,error);throw error;}
+/** One process subscription per run; all views share its output and completion. */
+const followers=new Map<string,{promise:Promise<PollLocal>;listeners:Set<(text:string)=>void>}>();
+export function followLocal(id:string,onText:(text:string)=>void):Promise<PollLocal>{
+ const existing=followers.get(id);if(existing){existing.listeners.add(onText);onText(localLiveText(id));return existing.promise;}
+ const listeners=new Set([onText]);
+ const promise=new Promise<PollLocal>((resolve,reject)=>{
+  const buffer=bufferedOutput<PollLocal>(text=>{setLiveText(prev=>({...prev,[id]:text}));listeners.forEach(listener=>listener(text));},resolve);
+  let stop=()=>{};
+  stop=followNative<OutputEvent<PollLocal>&{activities?:LocalActivity[]}>('local_agents',{id},event=>{
+   if(event.activities)setActivities(prev=>({...prev,[id]:event.activities!}));
+   buffer.receive(event);if(event.state)queueMicrotask(()=>{stop();window.removeEventListener('pagehide',stop);});
+  },error=>{buffer.dispose();reject(error);});
+  window.addEventListener('pagehide',stop,{once:true});
+ }).then(async state=>{
+  setActivities(prev=>({...prev,[id]:state.activities??[]}));
+  if(state.session_id){const binding=localBinding(id);if(binding)await rememberBinding(id,{...binding,sessionId:state.session_id});}
+  setRunning(prev=>({...prev,[id]:false}));return state;
+ }).catch(error=>{recordLocalFailure(id,error);throw error;}).finally(()=>{followers.delete(id);window.dispatchEvent(new Event('orb:queue-wake'));});
+ followers.set(id,{promise,listeners});return promise;
 }
 
 export async function localSessionGit(cwd: string): Promise<{ repository: string; branch?: string | null } | null> {
@@ -481,7 +461,7 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
- rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model});
+ await rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model});
  await reconcileLocalRun(mission.id);
  return mission;
 }

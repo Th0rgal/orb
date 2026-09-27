@@ -74,7 +74,7 @@ export async function adoptTransferredWorkspace(action: TransferAction) {
   const rows = await refreshLocalAgents();
   const cli = rows.find(r => r.id === action.backend && r.installed && r.path);
   if (!cli?.path) throw new Error("Install the selected harness on this computer before continuing.");
-  rememberBinding(action.mission_id, { harness: action.backend, bin: cli.path, cwd: action.destination_root, model: action.model ?? undefined });
+  await rememberBinding(action.mission_id, { harness: action.backend, bin: cli.path, cwd: action.destination_root, model: action.model ?? undefined });
 }
 export async function activateTransfer(action: TransferAction): Promise<Mission> {
   let clientSourceVerified: string | undefined;

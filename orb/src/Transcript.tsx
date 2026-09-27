@@ -1,3 +1,4 @@
+import {VirtualTurns} from "./VirtualTurns";
 import {anchoredDisclosure} from "./anchoredDisclosure";
 import { messageImages } from "./messageImages";
 import { imagePrompt, type DraftImage } from "./imageAttachments";
@@ -7,9 +8,9 @@ import { copyText } from "./clipboard";
 import { remoteLog } from "./remoteLog";
 import { ErrorNotice } from "./ErrorNotice";
 import { forkContext } from "./forkContext";
-import { For, Show, createSignal, createEffect, createMemo, useContext, onCleanup } from "solid-js";
+import { For, Show, createSignal, createEffect, createMemo, createContext, useContext, onCleanup } from "solid-js";
 import * as Ic from "./icons";
-import { MdView } from "./Markdown";
+import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
 
@@ -18,6 +19,13 @@ import { latestChecklist, toolArgs, toolName, workSummary } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 export { buildTranscript, applyStreamEvent } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
+
+const DisclosureState=createContext<Map<string,boolean>>();
+function disclosure(key:string,initial=false){
+ const state=useContext(DisclosureState);
+ const [open,setOpen]=createSignal(state?.get(key)??initial);
+ return [open,(value:boolean)=>{state?.set(key,value);setOpen(value);}] as const;
+}
 
 /** Short, human-readable target for a tool call row (Cursor-style). */
 function toolTarget(name: string, args: unknown): string {
@@ -170,7 +178,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
 }
 
 function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
-  const [open, setOpen] = createSignal(false);
+  const [open, setOpen] = disclosure(`tool:${p.item.key}`,false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
   const target = () => toolTarget(p.item.name, p.item.args);
@@ -206,10 +214,10 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
 }
 
 function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
-  const [open, setOpen] = createSignal(true);
+  const [open, setOpen] = disclosure(`think:${p.item.key}`,true);
   return (
     <div class={`st-think ${open() ? "open" : ""}`}>
-      <button class="st-think-head" onClick={() => setOpen(!open())}>
+      <button class="st-think-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <Show when={p.item.done} fallback={<span class="shimmer">Thinking</span>}>
           <span>Thinking</span>
         </Show>
@@ -253,7 +261,7 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
 
 function WorkFold(p: { items: WorkItem[] }) {
   const running = () => p.items.some((t) => (t.kind === "tool" ? !t.done : !t.done));
-  const [open, setOpen] = createSignal(false);
+  const [open, setOpen] = disclosure(`work:${p.items[0]?.key}`,false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
   const current = () => {
@@ -285,10 +293,10 @@ function WorkFold(p: { items: WorkItem[] }) {
   );
 }
 
-export function Transcript(p: { items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
+export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
-  const [grouped, setGrouped] = createStore<Grouped[]>([]);
+  const disclosures=new Map<string,boolean>();
   const checklist = createMemo(() => latestChecklist(p.items));
   const groups = createMemo<Grouped[]>((previous) => groupWork(p.items.filter(item => item.kind !== "user" || !item.queued), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
@@ -298,10 +306,18 @@ export function Transcript(p: { items: StreamItem[]; pending?: boolean; onSend?:
     const last = p.items[p.items.length - 1];
     return last?.kind === "user" ? last.key : null;
   });
-  createEffect(() => setGrouped(reconcile(groups(), { key: "key" })));
+  const turns=createMemo<Array<{key:string;items:Grouped[]}>>((previous)=>{
+    const cached=new Map(previous?.map(row=>[row.key,row]));
+    const rows:Array<{key:string;items:Grouped[]}>=[];
+    for(const item of groups()){if(item.kind==='user'||!rows.length)rows.push({key:item.key,items:[]});rows[rows.length-1].items.push(item);}
+    return rows.map(row=>{const old=cached.get(row.key);return old&&old.items.length===row.items.length&&old.items.every((item,index)=>item===row.items[index])?old:row;});
+  },[]);
+  const [turnStore,setTurns]=createStore<Array<{key:string;items:Grouped[]}>>([]);
+  createEffect(()=>setTurns(reconcile(turns(),{key:'key'})));
+  const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
   return (
     <>
-      <For each={grouped}>
+      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} text={searchText} prepare={p.prepareSearch}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":
@@ -331,7 +347,7 @@ export function Transcript(p: { items: StreamItem[]; pending?: boolean; onSend?:
               return <ErrorNotice error={item.text} title={item.cancelled ? "Mission cancelled" : "Mission failed"} />;
           }
         }}
-      </For>
+      </For>}</VirtualTurns></DisclosureState.Provider>
       <Show when={checklist()?.tasks.length}>
         <section class="mission-tasks" id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
           <div class="tasks-heading"><strong>Tasks</strong><span>{checklist()!.tasks.filter(task => task.status === "completed").length}/{checklist()!.tasks.length} completed</span></div>

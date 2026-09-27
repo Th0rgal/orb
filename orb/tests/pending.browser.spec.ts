@@ -1,3 +1,4 @@
+import {eventPage} from "./eventPageFixture";
 import { test, expect, type Page } from "@playwright/test";
 
 const MISSION = "9f2a91c4-8b7d-4e21-9a0c-5d6e7f801234";
@@ -26,7 +27,7 @@ async function setup(page: Page, o: Options = {}) {
     if(path === "/api/model-routing/chains") return route.fulfill({json:[{id:"builtin/smart",name:"Smart (Default)"}]});
     if (path.endsWith("/events")) {
       while (!released) await new Promise((r) => setTimeout(r, 50));
-      return route.fulfill({ json: o.events ?? [] });
+      return route.fulfill(eventPage(route,o.events??[]));
     }
     if (path === "/api/control/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
     if (path.endsWith("/queue")) return route.fulfill({ json: [] });
@@ -134,7 +135,7 @@ test("a remote track follow-up opens its admitted replacement instead of showing
     }
     if(path===`/api/control/missions/${MISSION}`)return route.fulfill({json:source});
     if(path===`/api/control/missions/${next}`)return route.fulfill({json:replacement});
-    if(path===`/api/control/missions/${next}/events`)return route.fulfill({json:[{...evUser,content:body?.prompt}]});
+    if(path===`/api/control/missions/${next}/events`)return route.fulfill(eventPage(route,[{...evUser,content:body?.prompt}]));
     if(path==='/api/control/missions')return route.fulfill({json:body?[source,replacement]:[source]});
     return route.fallback();
   });

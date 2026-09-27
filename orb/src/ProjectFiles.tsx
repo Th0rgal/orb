@@ -1,3 +1,4 @@
+import {subscribeProjectContext} from "./projectContext";
 import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
@@ -1144,14 +1145,16 @@ export function ProjectFileView(p: { slug: string; path: string }) {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   cacheRemember(fileKey());
 
+  let invalidated=false;
   let editVersion=0;
   const reload = () => {const version=editVersion;return readProjectFileVersion(p.slug,p.path).then(row=>{if(version!==editVersion || pending!==null || saving)return;revision=row.revision;setText(row.content);cachePut(fileKey(),row.content);setState("saved");setError(null);halted=false;}).catch(e=>{setError(String(e));setState("error");});};
   onMount(() => {
     void reload();
-    const timer=setInterval(()=>{if(pending===null&&!saving&&!halted&&!editing())void reload();},5000);
-    onCleanup(()=>clearInterval(timer));
+    const stop=subscribeProjectContext(p.slug,()=>{invalidated=true;if(pending===null&&!saving&&!halted&&!editing()){invalidated=false;void reload();}},failure=>setError(String(failure)));
+    onCleanup(stop);
   });
   let pending: string | null = null;
+  createEffect(()=>{if(!editing()&&invalidated&&pending===null&&!saving&&!halted){invalidated=false;void reload();}});
   const flush = () => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = undefined;
@@ -1166,7 +1169,7 @@ export function ProjectFileView(p: { slug: string; path: string }) {
         if (pending === null) pending = t;
         setError(e instanceof Error ? e.message : String(e));
         setState("error");
-      }).finally(() => { saving=false; if (pending !== null && !halted) flush(); });
+      }).finally(() => { saving=false; if (pending !== null && !halted) flush(); else if(invalidated&&!halted&&!editing()){invalidated=false;void reload();} });
   };
   // Don't lose a debounced edit when the user switches files mid-save.
   onCleanup(flush);
