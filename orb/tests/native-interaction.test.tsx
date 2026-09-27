@@ -97,3 +97,56 @@ describe('native plan interactions',()=>{
   expect(container.querySelector('.native-question')).toBeNull();
   cleanup();
  });
+
+
+describe('question focus during refresh',()=>{
+ const question={id:'focus-request',method:'questions',params:{questions:[{id:'q',question:'Phone number?',options:[{label:'Later'}]}]}};
+ it('preserves the focused custom answer and selection across native polling',async()=>{
+  vi.useFakeTimers();
+  const host=window as any,previous=host.__TAURI_INTERNALS__;
+  const invoke=vi.fn(async()=>JSON.parse(JSON.stringify(question)));
+  host.__TAURI_INTERNALS__={invoke};
+  try {
+   render(()=><NativeInteraction mission="focus-local" active/>);
+   await vi.advanceTimersByTimeAsync(0);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'+33 612345678'}});input.setSelectionRange(4,7);
+   await vi.advanceTimersByTimeAsync(6000);
+   expect(invoke.mock.calls.length).toBeGreaterThanOrEqual(5);
+   expect(screen.getByRole('textbox',{name:'Other answer: Phone number?'})).toBe(input);
+   expect(document.activeElement).toBe(input);
+   expect(input.value).toBe('+33 612345678');
+   expect([input.selectionStart,input.selectionEnd]).toEqual([4,7]);
+  } finally {cleanup();host.__TAURI_INTERNALS__=previous;vi.useRealTimers();}
+ });
+ it('preserves focus across remote snapshots but updates changed requests',()=>{
+  const item={kind:'tool' as const,key:'focus-tool',callId:question.id,name:'ui_native_request',args:question,done:false};
+  const [items,setItems]=createSignal([item]);
+  try {
+   render(()=><NativeInteraction mission="focus-remote" active remote items={items()}/>);
+   const input=screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement;
+   input.focus();fireEvent.input(input,{target:{value:'My answer'}});input.setSelectionRange(2,5);
+   for(let i=0;i<5;i++)setItems(JSON.parse(JSON.stringify([item])));
+   expect(document.activeElement).toBe(input);
+   expect([input.selectionStart,input.selectionEnd]).toEqual([2,5]);
+   expect(input.value).toBe('My answer');
+   setItems([{...item,args:{...question,params:{questions:[{id:'q',question:'Updated question?',options:[]}]}}}]);
+   expect(screen.getByRole('textbox',{name:'Other answer: Updated question?'})).toBeTruthy();
+   setItems([{...item,callId:'next-request'}]);
+   expect((screen.getByRole('textbox',{name:'Other answer: Phone number?'}) as HTMLInputElement).value).toBe('');
+  } finally {cleanup();}
+ });
+});
+
+it('shows a subscription failure even without a pending request and allows retry',async()=>{
+ const host=window as any,previous=host.__TAURI_INTERNALS__,previousTauri=host.__TAURI__;
+ const invoke=vi.fn().mockRejectedValueOnce('permission denied').mockResolvedValue(1);
+ host.__TAURI_INTERNALS__={invoke};host.__TAURI__={core:{Channel:class {onmessage=()=>{};}}};
+ try {
+  render(()=><NativeInteraction mission="retry" active/>);
+  expect((await screen.findByRole('alert')).textContent).toContain('permission denied');
+  fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+  await waitFor(()=>expect(invoke).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole('alert')).toBeNull();
+ } finally {cleanup();host.__TAURI_INTERNALS__=previous;host.__TAURI__=previousTauri;}
+});

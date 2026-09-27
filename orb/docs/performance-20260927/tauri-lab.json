@@ -1,0 +1,67 @@
+{
+  "native": {
+    "received": 1,
+    "errors": [],
+    "native": true,
+    "visibility": "visible"
+  },
+  "question": {
+    "same": true,
+    "focused": true,
+    "value": "A draft",
+    "selection": [
+      2,
+      5
+    ]
+  },
+  "transcripts": [
+    {
+      "turns": 30,
+      "updates": 100,
+      "replayMs": 0,
+      "mountMs": 25,
+      "updateP50": 0,
+      "updateP95": 1,
+      "updateMax": 3,
+      "updatesOver16ms": 0,
+      "added": 1,
+      "removed": 0,
+      "nodes": 1223,
+      "visibility": "visible"
+    },
+    {
+      "turns": 300,
+      "updates": 100,
+      "replayMs": 5,
+      "mountMs": 82,
+      "updateP50": 3,
+      "updateP95": 5,
+      "updateMax": 10,
+      "updatesOver16ms": 0,
+      "added": 1,
+      "removed": 0,
+      "nodes": 12023,
+      "visibility": "visible"
+    },
+    {
+      "turns": 1000,
+      "updates": 100,
+      "replayMs": 11,
+      "mountMs": 161,
+      "updateP50": 7,
+      "updateP95": 8,
+      "updateMax": 13,
+      "updatesOver16ms": 0,
+      "added": 1,
+      "removed": 0,
+      "nodes": 40023,
+      "visibility": "visible"
+    }
+  ],
+  "nativeAfter": {
+    "received": 1,
+    "errors": [],
+    "native": true,
+    "visibility": "visible"
+  }
+}

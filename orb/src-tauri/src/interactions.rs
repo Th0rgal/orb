@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{mpsc, Mutex, OnceLock};
+use tauri::ipc::Channel;
 
 #[derive(Clone, Serialize)]
 pub struct Request {
@@ -20,6 +21,7 @@ pub struct Session {
 struct Store {
     sessions: HashMap<String, u64>,
     pending: HashMap<String, Pending>,
+    subscribers: HashMap<String, HashMap<u64, Channel<Option<Request>>>>,
 }
 struct Pending {
     request: Request,
@@ -28,6 +30,48 @@ struct Pending {
 fn pending() -> &'static Mutex<Store> {
     static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
     STORE.get_or_init(Default::default)
+}
+// Snapshot registration and publication share the store lock: a subscriber
+// cannot miss a transition between its initial read and event registration.
+impl Store {
+    fn publish(&mut self, id: &str) {
+        let request = self.pending.get(id).map(|p| p.request.clone());
+        if let Some(subscribers) = self.subscribers.get_mut(id) {
+            subscribers.retain(|_, channel| channel.send(request.clone()).is_ok());
+            if subscribers.is_empty() {
+                self.subscribers.remove(id);
+            }
+        }
+    }
+}
+#[tauri::command]
+pub fn local_interaction_subscribe(
+    id: String,
+    on_event: Channel<Option<Request>>,
+) -> Result<u64, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut store = pending().lock().map_err(|e| e.to_string())?;
+    on_event
+        .send(store.pending.get(&id).map(|p| p.request.clone()))
+        .map_err(|e| e.to_string())?;
+    store
+        .subscribers
+        .entry(id)
+        .or_default()
+        .insert(token, on_event);
+    Ok(token)
+}
+#[tauri::command]
+pub fn local_interaction_unsubscribe(id: String, token: u64) -> Result<(), String> {
+    let mut store = pending().lock().map_err(|e| e.to_string())?;
+    if let Some(subscribers) = store.subscribers.get_mut(&id) {
+        subscribers.remove(&token);
+        if subscribers.is_empty() {
+            store.subscribers.remove(&id);
+        }
+    }
+    Ok(())
 }
 #[tauri::command]
 pub fn local_interaction(id: String) -> Result<Option<Request>, String> {
@@ -67,12 +111,15 @@ pub fn local_interaction_answer(
         .send(answer)
         .map_err(|_| "The session is no longer waiting.".to_string())?;
     map.pending.remove(&id);
+    map.publish(&id);
     Ok(())
 }
 pub fn cancel(id: &str) {
     if let Ok(mut p) = pending().lock() {
         p.sessions.remove(id);
-        p.pending.remove(id);
+        if p.pending.remove(id).is_some() {
+            p.publish(id);
+        }
     }
 }
 pub fn begin(id: &str) -> Session {
@@ -82,7 +129,9 @@ pub fn begin(id: &str) -> Session {
         generation: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     };
     let mut store = pending().lock().unwrap();
-    store.pending.remove(id);
+    if store.pending.remove(id).is_some() {
+        store.publish(id);
+    }
     store.sessions.insert(id.into(), session.generation);
     session
 }
@@ -101,7 +150,9 @@ pub fn finish(session: &Session) {
     let mut store = pending().lock().unwrap();
     if store.sessions.get(&session.mission) == Some(&session.generation) {
         store.sessions.remove(&session.mission);
-        store.pending.remove(&session.mission);
+        if store.pending.remove(&session.mission).is_some() {
+            store.publish(&session.mission);
+        }
     }
 }
 pub fn ask(session: &Session, method: &str, params: Value) -> Result<Value, String> {
@@ -124,12 +175,75 @@ pub fn ask(session: &Session, method: &str, params: Value) -> Result<Value, Stri
         store
             .pending
             .insert(session.mission.clone(), Pending { request, reply: tx });
+        store.publish(&session.mission);
     }
     rx.recv().map_err(|_| "The request was cancelled.".into())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn subscriber(id: &str) -> (u64, mpsc::Receiver<Value>) {
+        let (tx, rx) = mpsc::channel();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body {
+                tx.send(serde_json::from_str(&json).unwrap()).unwrap();
+            }
+            Ok(())
+        });
+        (local_interaction_subscribe(id.into(), channel).unwrap(), rx)
+    }
+    #[test]
+    fn subscription_recovers_snapshot_publishes_transitions_and_unsubscribes() {
+        let id = "subscription-test";
+        let session = begin(id);
+        let (token, events) = subscriber(id);
+        assert_eq!(events.recv().unwrap(), Value::Null);
+        let worker = std::thread::spawn(move || ask(&session, "questions", Value::Null));
+        let request = events
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(request["method"], "questions");
+        let (second, recovered) = subscriber(id);
+        assert_eq!(recovered.recv().unwrap(), request);
+        local_interaction_unsubscribe(id.into(), second).unwrap();
+        local_interaction_answer(
+            id.into(),
+            request["id"].as_str().unwrap().into(),
+            Value::Bool(true),
+        )
+        .unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(), Value::Bool(true));
+        assert_eq!(events.recv().unwrap(), Value::Null);
+        assert!(recovered.try_recv().is_err());
+        local_interaction_unsubscribe(id.into(), token).unwrap();
+        assert!(!pending().lock().unwrap().subscribers.contains_key(id));
+        cancel(id);
+    }
+    #[test]
+    fn subscription_observes_cancellation_and_replacement() {
+        let id = "subscription-cancel-test";
+        let session = begin(id);
+        let (token, events) = subscriber(id);
+        events.recv().unwrap();
+        let old = session.clone();
+        let worker = std::thread::spawn(move || ask(&session, "plan", Value::Null));
+        events
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let next = begin(id);
+        assert_eq!(events.recv().unwrap(), Value::Null);
+        assert!(worker.join().unwrap().is_err());
+        finish(&old);
+        assert!(events.try_recv().is_err());
+        let worker = std::thread::spawn(move || ask(&next, "plan", Value::Null));
+        events
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        cancel(id);
+        assert_eq!(events.recv().unwrap(), Value::Null);
+        assert!(worker.join().unwrap().is_err());
+        local_interaction_unsubscribe(id.into(), token).unwrap();
+    }
     #[test]
     fn answer_is_bound_and_consumed_once() {
         let (tx, rx) = mpsc::channel();

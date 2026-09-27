@@ -1,0 +1,80 @@
+{
+  "before": {
+    "visibility": "visible",
+    "nodes": 2569,
+    "hasQuestion": false,
+    "conversation": false,
+    "scrollHeight": 37090
+  },
+  "duration": 30000,
+  "visibility": "visible",
+  "nodes": 2569,
+  "mutations": 64,
+  "added": 0,
+  "removed": 0,
+  "frameCount": 1750,
+  "frameP50": 17,
+  "frameP95": 18,
+  "framesOver50ms": 3,
+  "records": {
+    "ipc": {},
+    "network": {
+      "/local_origin_list": {
+        "count": 15,
+        "ms": 145,
+        "max": 16
+      },
+      "/local_bindings": {
+        "count": 61,
+        "ms": 213,
+        "max": 6
+      },
+      "/api/control/missions": {
+        "count": 6,
+        "ms": 1019,
+        "max": 222
+      },
+      "/api/remote-nodes": {
+        "count": 2,
+        "ms": 439,
+        "max": 230
+      },
+      "/api/control/queue": {
+        "count": 6,
+        "ms": 874,
+        "max": 231
+      },
+      "/api/control/missions/:id": {
+        "count": 3,
+        "ms": 694,
+        "max": 250
+      },
+      "/api/control/missions/:id/events": {
+        "count": 6,
+        "ms": 861,
+        "max": 179
+      },
+      "/local_agents_poll": {
+        "count": 16,
+        "ms": 23,
+        "max": 3
+      },
+      "/api/projects/default/context/manifest": {
+        "count": 3,
+        "ms": 454,
+        "max": 155
+      },
+      "/api/projects/default/controller": {
+        "count": 3,
+        "ms": 745,
+        "max": 261
+      },
+      "/project_context_file": {
+        "count": 3,
+        "ms": 6,
+        "max": 3
+      }
+    },
+    "ipcInstrumentation": "TypeError: Attempted to assign to readonly property."
+  }
+}
