@@ -19,6 +19,7 @@ struct OrbCircle: View {
 
 struct OrbHome: View {
     @State private var projects: [OrbRow] = []
+    @State private var loading = true
     @State private var error = ""
     @State private var search = ""
     @State private var settings = false
@@ -46,7 +47,8 @@ struct OrbHome: View {
                             Button("Archive") { Task { do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")])); await load() } catch { self.error = error.localizedDescription } } }
                         }
                     }
-                    if projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
+                    if loading && projects.isEmpty { ProgressView("Loading projects…").frame(maxWidth: .infinity).padding(.top, 32) }
+                    if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
                 }.padding(.horizontal, 20)
             }
             .background(OrbStyle.background).navigationTitle("Projects").navigationBarTitleDisplayMode(.inline).toolbar {
@@ -72,11 +74,14 @@ struct OrbHome: View {
         }.tint(.primary).preferredColorScheme(.dark)
     }
     private func load() async {
+        defer { loading = false }
         if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = cached["projects"].items.map { OrbRow($0, project: true) } }
         do {
             let value = try await api.call("/api/projects")
             projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             try OrbDisk.save(value, key: "projects"); error = ""
+            // Warm only the first project; never fan out across the entire account.
+            if let first = projects.first { Task { _ = try? await OrbReadCache.project(first.id) } }
         } catch { self.error = error.localizedDescription }
     }
     private func create() async {
@@ -90,6 +95,7 @@ struct OrbHome: View {
 struct OrbProjectPage: View {
     let project: OrbRow
     @State private var missions: [OrbRow] = []
+    @State private var loading = true
     @State private var folders: [String] = []
     @State private var collapsed: Set<String> = []
     @State private var search = ""
@@ -124,9 +130,10 @@ struct OrbProjectPage: View {
                     HStack { Text(filter).font(.subheadline); Spacer(); Button("Clear filter") { filter = "All" }.font(.subheadline) }.frame(minHeight: 44)
                 }
                 if !error.isEmpty { OrbNotice(message: error) }
+                if loading && missions.isEmpty { ProgressView("Loading conversations…").frame(maxWidth: .infinity).padding(.top, 32).accessibilityIdentifier("conversations-loading") }
                 ForEach(visible.filter { $0.folder.isEmpty }) { row in missionLink(row) }
                 folderRows
-                if visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
+                if !loading && visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
             }.padding(.horizontal, 20)
         }.background(OrbStyle.background).navigationTitle(project.name).navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, prompt: "Search conversations")
@@ -144,7 +151,7 @@ struct OrbProjectPage: View {
             }
         }
         .alert("New folder", isPresented: $newFolder) { TextField("Folder name", text: $folderName); Button("Create") { Task { await mkdir() } }; Button("Cancel", role: .cancel) {} }
-        .task { await load() }.refreshable { await load() }
+        .task { await load() }.refreshable { await load(force: true) }
     }
     private var folderRows: some View {
                 ForEach(paths.filter(shown), id: \.self) { folder in
@@ -168,17 +175,23 @@ struct OrbProjectPage: View {
             }.padding(.vertical, 12).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 22) }
         }.accessibilityIdentifier("mission.\(row.id)")
     }
-    private func load() async {
+    private func apply(_ value: OrbJSON) {
+        missions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
+        if case .object(let entries) = value["manifest"]["entries"] { folders = entries.filter { $0.value["directory"].flag }.map(\.key) }
+    }
+    private func load(force: Bool = false) async {
+        if let cached = OrbReadCache.read("project:\(project.id)") { apply(cached); loading = false }
+        defer { loading = false }
         do {
-            missions = try await api.missions(project.id)
-            let manifest = try await api.call("/api/projects/\(OrbCore.escape(project.id))/context/manifest")
-            if case .object(let entries) = manifest["entries"] { folders = entries.filter { $0.value["directory"].flag }.map(\.key) }
-            error = ""
-        } catch { self.error = error.localizedDescription }
+            let value = try await OrbReadCache.project(project.id, force: force)
+            guard !Task.isCancelled else { return }
+            apply(value); loading = false; error = ""
+            await OrbReadCache.prefetch(missions)
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
     private func mkdir() async {
         guard !folderName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file/mkdir", method: "POST", body: .object(["path": .string(folderName)])); folderName = ""; await load() }
+        do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file/mkdir", method: "POST", body: .object(["path": .string(folderName)])); folderName = ""; await load(force: true) }
         catch { self.error = error.localizedDescription }
     }
 }

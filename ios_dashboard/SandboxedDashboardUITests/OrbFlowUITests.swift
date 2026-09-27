@@ -11,6 +11,56 @@ final class OrbFlowUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    @MainActor func testLoadingCacheLatestMessagesAndModeMenu() async throws {
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18771/__reset")!)
+        reset.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: reset)
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18771", "-orb_test_reset", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        XCTAssertTrue(app.otherElements["conversations-loading"].exists || app.staticTexts["Loading conversations…"].exists)
+        XCTAssertFalse(app.staticTexts["No conversations yet"].exists)
+        XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 15))
+        app.buttons["mission.long-chat"].tap()
+        let latest = app.staticTexts["Message 080 — conversation history"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 15))
+        XCTAssertTrue(latest.isHittable)
+        XCTAssertFalse(app.staticTexts["Message 001 — conversation history"].exists)
+        capture(app, "latest-messages")
+        for _ in 0..<12 {
+            if app.buttons["load-earlier"].isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(app.buttons["load-earlier"].isHittable)
+        app.buttons["load-earlier"].tap()
+        // Prepending keeps the previously visible boundary, then allows reading earlier text.
+        for _ in 0..<4 {
+            if app.staticTexts["Message 060 — conversation history"].isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(app.staticTexts["Message 060 — conversation history"].isHittable)
+        try await Task.sleep(for: .seconds(4))
+        XCTAssertTrue(app.staticTexts["Message 060 — conversation history"].isHittable)
+        app.buttons["composer-add"].tap()
+        XCTAssertTrue(app.buttons["Photos"].waitForExistence(timeout: 5))
+        app.buttons["Mode"].tap()
+        XCTAssertTrue(app.buttons["mode-option-plan"].waitForExistence(timeout: 5))
+        capture(app, "composer-mode-picker")
+        app.buttons["mode-option-plan"].tap()
+        XCTAssertTrue(app.buttons["Clear Plan mode"].exists)
+        let input = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]
+        input.tap(); input.typeText("Outline a small test")
+        app.buttons["Send message"].tap()
+        XCTAssertTrue(app.staticTexts["/plan Outline a small test"].waitForExistence(timeout: 15))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["project.orb-test"].tap()
+        XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Loading conversations…"].exists)
+    }
     @MainActor func testCompactComposerKeyboardAndSettings() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
@@ -139,6 +189,10 @@ final class OrbFlowUITests: XCTestCase {
         for _ in 0..<12 { if row.isHittable { break }; app.swipeUp() }
         row.tap()
         XCTAssertTrue(title.waitForExistence(timeout: 15))
+        for _ in 0..<8 {
+            if title.isHittable { break }
+            app.swipeDown()
+        }
         let artifact = app.webViews.buttons["Graphique généré"]
         for _ in 0..<12 {
             if artifact.exists && artifact.frame.midY > 120 && artifact.frame.midY < app.frame.height * 0.70 { break }

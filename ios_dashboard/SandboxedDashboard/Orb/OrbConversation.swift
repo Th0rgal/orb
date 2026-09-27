@@ -5,6 +5,10 @@ struct OrbConversation: View {
     let project: String
     let folder: String
     @State private var id: String?
+    @State private var loading = true
+    @State private var visibleCount = 20
+    @State private var followsLatest = true
+    @State private var openedAtLatest = false
     @State private var mission: OrbJSON = .null
     @State private var execution: OrbJSON = .null
     @State private var text = ""
@@ -20,12 +24,12 @@ struct OrbConversation: View {
     @State private var destinationFolder = ""
     @State private var title = ""
     @State private var attachments: [OrbAttachment] = []
-    @State private var addingFiles = false
     @State private var preview: OrbPreviewFile?
     @State private var events: [StoredEvent] = []
     @State private var queued: [OrbJSON] = []
     @State private var mode = "Message"
     @State private var refreshing = false
+    @State private var lastRefresh = Date.distantPast
     @State private var stream: Task<Void, Never>?
     @State private var liveText = ""
     @State private var answered: Set<String> = []
@@ -44,15 +48,28 @@ struct OrbConversation: View {
         return mission["history"].items.enumerated().map { (String($0.offset), $0.element["role"].text, $0.element["content"].text) }
     }
     var body: some View {
+        ScrollViewReader { scroll in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
                 if unavailable { ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS.")) }
                 else {
-                    if id == nil { VStack(alignment: .leading, spacing: 8) { Text("What would you like to work on?").font(.title2); Text(folder.isEmpty ? project : "\(project) / \(folder)").font(.subheadline).foregroundStyle(.secondary) }.padding(.top, 20) }
-                    ForEach(history, id: \.0) { item in
+                    if loading && missionID != nil && mission == .null { ProgressView("Loading conversation…").frame(maxWidth: .infinity) }
+                    if missionID == nil && id == nil { VStack(alignment: .leading, spacing: 8) { Text("What would you like to work on?").font(.title2); Text(folder.isEmpty ? project : "\(project) / \(folder)").font(.subheadline).foregroundStyle(.secondary) }.padding(.top, 20) }
+                    if history.count > visibleCount {
+                        Button("Load earlier messages") {
+                            let anchor = history.suffix(visibleCount).first?.0
+                            followsLatest = false
+                            visibleCount += 20
+                            Task { @MainActor in
+                                await Task.yield()
+                                if let anchor { scroll.scrollTo(anchor, anchor: .top) }
+                            }
+                        }.font(.subheadline).frame(maxWidth: .infinity).accessibilityIdentifier("load-earlier")
+                    }
+                    ForEach(Array(history.suffix(visibleCount)), id: \.0) { item in
                         if item.1 == "user" {
-                            HStack { Spacer(minLength: 42); Text(item.2).textSelection(.enabled).padding(18).background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 26)) }
-                        } else { OrbRichText(source: item.2, onArtifact: { path in Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) } }).frame(maxWidth: .infinity, alignment: .leading) }
+                            HStack { Spacer(minLength: 42); Text(item.2).textSelection(.enabled).padding(18).background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 26)) }.id(item.0)
+                        } else { OrbRichText(source: item.2, onArtifact: { path in Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) } }).frame(maxWidth: .infinity, alignment: .leading).id(item.0) }
                     }
                     ForEach(turns.indices, id: \.self) { index in
                         let turn = turns[index]
@@ -93,11 +110,22 @@ struct OrbConversation: View {
                     if working { HStack { ProgressView(); Text(status.isEmpty ? "Working" : status).foregroundStyle(.secondary) }.accessibilityIdentifier("agent-working") }
                 }
                 if !error.isEmpty { OrbNotice(message: error) }
+                Color.clear.frame(height: 1).id("conversation-bottom").accessibilityIdentifier("conversation-bottom")
             }.padding(.horizontal, 20).padding(.vertical, 12)
+        }
+        .defaultScrollAnchor(.bottom)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 100
+        } action: { _, atBottom in followsLatest = atBottom }
+        .onChange(of: history.last?.0) { _, _ in
+            if !openedAtLatest || followsLatest {
+                scroll.scrollTo("conversation-bottom", anchor: .bottom)
+                openedAtLatest = true
+            }
         }
         .background(OrbStyle.background)
         .scrollDismissesKeyboard(.interactively)
-        .navigationTitle(mission["title"].text.isEmpty ? "New agent" : mission["title"].text)
+        .navigationTitle(mission["title"].text.isEmpty ? (missionID == nil ? "New agent" : "Conversation") : mission["title"].text)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { Menu {
@@ -135,54 +163,97 @@ struct OrbConversation: View {
             text = OrbDisk.read(draftKey, as: String.self) ?? ""
             attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
             if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
-            if let id { mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null; execution = OrbDisk.read("cloud:\(id)", as: OrbJSON.self) ?? .null; if execution != .null { selection.restore(execution["selection"]) } }
+            if let id { mission = OrbReadCache.read("mission:\(id)") ?? .null; execution = OrbReadCache.read("cloud:\(id)") ?? .null; if execution != .null { selection.restore(execution["selection"]) } }
             await refresh()
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
-                if phase == .active { await refresh() }
+                if phase == .active { await refresh(force: working) }
             }
         }
         .onChange(of: text) { _, value in do { try OrbDisk.save(value, key: draftKey) } catch { self.error = "Could not save draft: \(error.localizedDescription)" } }
         .onChange(of: attachments) { _, value in do { try OrbDisk.save(value, key: draftKey + ":files") } catch { self.error = "Could not save attachments: \(error.localizedDescription)" } }
         .onDisappear { stream?.cancel(); stream = nil }
         .onChange(of: phase) { _, value in
-            if value == .active { Task { await refresh() } }
+            if value == .active { Task { await refresh(force: true) } }
             else { stream?.cancel(); stream = nil }
         }
     }
+    }
+    private var modeQuery: String? {
+        guard !isCloud, selection.backend == "codex",
+              let token = text.split(whereSeparator: { $0.isWhitespace }).last,
+              token.hasPrefix("@") else { return nil }
+        let query = String(token.dropFirst()).lowercased()
+        return ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) ? query : nil
+    }
+    private func chooseMode(_ value: String) {
+        if let range = text.range(of: "@", options: .backwards) { text.removeSubrange(range.lowerBound...) }
+        mode = value
+        composerFocused = true
+    }
+    private var modePicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Choose a mode").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.vertical, 8)
+            ForEach(["Message", "Plan", "Goal"].filter { modeQuery?.isEmpty != false || $0.lowercased().hasPrefix(modeQuery ?? "") }, id: \.self) { value in
+                Button { chooseMode(value) } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: value == "Goal" ? "target" : value == "Plan" ? "list.bullet.clipboard" : "bubble.left").frame(width: 24)
+                        Text(value)
+                        Spacer()
+                        if mode == value { Image(systemName: "checkmark").foregroundStyle(.secondary) }
+                    }.padding(12).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityIdentifier("mode-option-" + value.lowercased())
+            }
+        }.padding(6).background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 22))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(OrbStyle.border)).padding(.bottom, 8)
+            .accessibilityElement(children: .contain).accessibilityIdentifier("mode-picker")
+    }
     private var composer: some View {
+        VStack(spacing: 0) {
+            if modeQuery != nil { modePicker }
+            composerInput
+        }.padding(.horizontal, 12).padding(.bottom, 6)
+    }
+    private var composerInput: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if (addingFiles && !isCloud) || !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: !isCloud) }
+            if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
+            if mode != "Message" && !isCloud && selection.backend == "codex" {
+                Button { mode = "Message" } label: { Label(mode, systemImage: "xmark.circle.fill").font(.caption).padding(.horizontal, 8).padding(.vertical, 4).background(.white.opacity(0.08), in: Capsule()) }.accessibilityLabel("Clear " + mode + " mode")
+            }
             TextField(id == nil ? "Plan, ask, build…" : "Follow up…", text: $text, axis: .vertical).lineLimit(1...6).font(.body).padding(.horizontal, 4).padding(.top, 6).focused($composerFocused).disabled(busy).accessibilityIdentifier("composer")
             HStack {
-                if !project.isEmpty && !isCloud { Button { composerFocused = false; addingFiles.toggle() } label: { Image(systemName: "plus").frame(width: 44, height: 44) }.accessibilityLabel("Attach files") }
-                Button { composerFocused = false; showSelection = true } label: { HStack(spacing: 6) { Image(systemName: selection.cloud ? "cloud" : "terminal"); Text(selection.model.isEmpty ? selection.label : selection.model); Image(systemName: "chevron.down").font(.caption2) }.font(.subheadline).foregroundStyle(.secondary).lineLimit(1).frame(minHeight: 44) }.accessibilityLabel("Agent and model: \(selection.label)").accessibilityIdentifier("agent-selection")
-                if !isCloud && selection.backend == "codex" {
-                    Menu(mode) { ForEach(["Message", "Plan", "Goal"], id: \.self) { value in Button(value) { mode = value } } }.font(.caption).frame(minWidth: 44, minHeight: 44)
+                if !project.isEmpty && !isCloud {
+                    OrbAttachments(files: $attachments, error: $error, showMode: selection.backend == "codex" ? {
+                        if modeQuery == nil { text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@" }
+                        composerFocused = true
+                    } : nil, showFiles: false)
                 }
+                Button { composerFocused = false; showSelection = true } label: { HStack(spacing: 6) { Image(systemName: selection.cloud ? "cloud" : "terminal"); Text(selection.model.isEmpty ? selection.label : selection.model); Image(systemName: "chevron.down").font(.caption2) }.font(.subheadline).foregroundStyle(.secondary).lineLimit(1).frame(minHeight: 44) }.accessibilityLabel("Agent and model: \(selection.label)").accessibilityIdentifier("agent-selection")
                 Spacer()
-                Button { Task { await send() } } label: { Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44).background(.white.opacity(0.15), in: Circle()) }.disabled(busy || cloudBlocked || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message")
+                Button { Task { await send() } } label: { Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44).background(.white.opacity(0.15), in: Circle()) }.disabled(busy || cloudBlocked || modeQuery != nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message")
             }
-        }.padding(.horizontal, 12).padding(.vertical, 8).background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 24)).overlay(RoundedRectangle(cornerRadius: 24).stroke(OrbStyle.border)).accessibilityElement(children: .contain).accessibilityIdentifier("conversation-composer").padding(.horizontal, 12).padding(.bottom, 6)
+        }.padding(.horizontal, 12).padding(.vertical, 8).background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 24)).overlay(RoundedRectangle(cornerRadius: 24).stroke(OrbStyle.border)).accessibilityElement(children: .contain).accessibilityIdentifier("conversation-composer")
     }
-    private func refresh() async {
-        guard let id, !refreshing else { return }; refreshing = true; defer { refreshing = false }
+    private func refresh(force: Bool = false) async {
+        guard let id, !refreshing else { return }
+        if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
+        refreshing = true; defer { refreshing = false; loading = false }
         do {
-            let value = try await api.call("/api/control/missions/\(OrbCore.escape(id))")
+            let value = try await OrbReadCache.conversation(id, force: force)
             mission = value
             unavailable = !OrbRow(value).mobile
             guard !unavailable else { return }
             if OrbRow(value).cloud && execution == .null {
                 do {
-                    execution = try await api.call("/api/control/missions/\(OrbCore.escape(id))/cloud")
+                    execution = try await OrbReadCache.cloud(id, force: force)
                     selection.restore(execution["selection"])
                 } catch let e as OrbHTTPError where e.status == 404 { selection.backend = value["backend"].text; selection.model = value["model_override"].text }
-            } else if OrbRow(value).cloud { execution = try await api.call("/api/control/missions/\(OrbCore.escape(id))/cloud") }
+            } else if OrbRow(value).cloud { execution = try await OrbReadCache.cloud(id, force: force) }
             if !OrbRow(value).cloud {
                 if stream == nil && phase == .active {
                     stream = APIService.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
                         if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String { liveText += delta }
-                        if ["assistant_message", "mission_status_changed"].contains(type) { Task { await refresh() } }
+                        if ["assistant_message", "mission_status_changed"].contains(type) { Task { await refresh(force: true) } }
                     }
                 }
                 if !working { liveText = "" }
@@ -200,6 +271,7 @@ struct OrbConversation: View {
             }
             if execution != .null { try OrbDisk.save(execution, key: "cloud:\(id)") }
             try OrbDisk.save(value, key: "mission:\(id)")
+            lastRefresh = Date()
         } catch {
             if mission == .null { mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null }
             self.error = "Connection unavailable. Last observed state is preserved. \(error.localizedDescription)"
@@ -215,7 +287,7 @@ struct OrbConversation: View {
             else {
                 var uploaded: [OrbJSON] = []
                 var prompt = text
-                if mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
+                if !isCloud && selection.backend == "codex" && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
                 for file in attachments {
                     let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(selection.node.isEmpty ? "core" : selection.node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                     guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
@@ -250,7 +322,8 @@ struct OrbConversation: View {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
             }
             if id == nil { guard !result["id"].text.isEmpty else { throw URLError(.cannotParseResponse) }; id = result["id"].text }
-            OrbDisk.remove(pendingKey); attachments = []; OrbDisk.remove(draftKey + ":files"); text = ""; error = ""; await refresh()
+            OrbReadCache.invalidate("project:\(project)")
+            OrbDisk.remove(pendingKey); attachments = []; OrbDisk.remove(draftKey + ":files"); text = ""; error = ""; followsLatest = true; openedAtLatest = false; await refresh(force: true)
         } catch {
             if let http = error as? OrbHTTPError, [400, 422].contains(http.status) { OrbDisk.remove(pendingKey) }
             self.error = "Message kept. \(error.localizedDescription)"
@@ -260,19 +333,19 @@ struct OrbConversation: View {
         guard let id, !destinationProject.isEmpty else { return }
         var tags = mission["tags"].items.filter { !$0.text.hasPrefix("orb-folder:") }
         if !destinationFolder.isEmpty { tags.append(.string("orb-folder:" + destinationFolder)) }
-        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)])); moving = false; await refresh() }
+        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)])); moving = false; OrbReadCache.invalidate("project:\(project)"); OrbReadCache.invalidate("project:\(destinationProject)"); await refresh(force: true) }
         catch { self.error = error.localizedDescription }
     }
     private func mutate(_ fields: [String: OrbJSON]) async {
         guard let id else { return }
-        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(fields["title"] != nil ? "title" : "status")", method: "POST", body: .object(fields)); await refresh() } catch { self.error = error.localizedDescription }
+        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(fields["title"] != nil ? "title" : "status")", method: "POST", body: .object(fields)); OrbReadCache.invalidate("project:\(project)"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func cancel() async {
         guard let id else { return }
-        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(isCloud ? "cloud/cancel" : "cancel")", method: "POST"); await refresh() } catch { self.error = error.localizedDescription }
+        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(isCloud ? "cloud/cancel" : "cancel")", method: "POST"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func removeQueued(_ message: String) async {
-        do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh() } catch { self.error = error.localizedDescription }
+        do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func safeURL(_ value: String) -> URL? { guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil else { return nil }; return url }
     private func download(_ path: String) async {

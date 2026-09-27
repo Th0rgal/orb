@@ -5,6 +5,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 REQUIRE_AUTH = False
 EXPIRE_SESSION = False
+LIST_DELAY = 0
+COUNTS = {}
 VALID_TOKEN = "orb-fixture-" + str(uuid.uuid4())
 LOCK = threading.Lock()
 MISSIONS = {}
@@ -16,6 +18,7 @@ def reset():
     MISSIONS.clear(); RECEIPTS.clear()
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
+    MISSIONS['long-chat']=dict(id='long-chat',title='Long conversation',status='awaiting_user',project='orb-test',backend='codex',tags=[],model_override='test-model',history=[dict(role='user',content=f'Message {i:03d} — conversation history') for i in range(1,81)])
     rich=Path(__file__).with_name('fixtures').joinpath('chatgpt-rich.md').read_text()
     MISSIONS['rich-chatgpt']=dict(id='rich-chatgpt',title='ChatGPT rich response',status='awaiting_user',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
     MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect ChatGPT',status='blocked',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your ChatGPT account in Orb on your Mac.','result':'','artifacts':[]}]})
@@ -27,12 +30,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         global REQUIRE_AUTH
         u=urlparse(self.path); p=unquote(u.path)
+        COUNTS[p] = COUNTS.get(p, 0) + 1
+        if p=='/__counts': return self.send(COUNTS)
         if p=='/api/health': return self.send({'status':'ok','auth_required':REQUIRE_AUTH})
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
             return self.send({'error':'invalid or expired token'},401)
         if p=='/api/projects': return self.send({'projects':PROJECTS})
-        if p=='/api/control/missions': return self.send(list(MISSIONS.values()))
+        if p=='/api/control/missions':
+            time.sleep(LIST_DELAY)
+            return self.send(list(MISSIONS.values()))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
         if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'}])
         if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
@@ -86,5 +93,5 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(m)
         return self.send({'error':'Unknown route'},404)
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); parser.add_argument('--expire-session',action='store_true'); args=parser.parse_args(); REQUIRE_AUTH=args.require_auth; EXPIRE_SESSION=args.expire_session
+    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); parser.add_argument('--expire-session',action='store_true'); parser.add_argument('--list-delay',type=float,default=0); args=parser.parse_args(); LIST_DELAY=args.list_delay; REQUIRE_AUTH=args.require_auth; EXPIRE_SESSION=args.expire_session
     ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

@@ -90,16 +90,25 @@ struct OrbAttachments: View {
     @Binding var files: [OrbAttachment]
     @Binding var error: String
     var canAdd = true
+    var showMode: (() -> Void)? = nil
+    var showFiles = true
     @State private var importing = false
     @State private var photo: PhotosPickerItem?
     @State private var preview: OrbPreviewFile?
     var body: some View {
         VStack(alignment: .leading) {
-            if canAdd { HStack {
-                PhotosPicker(selection: $photo, matching: .images) { Label("Photos", systemImage: "photo") }
-                Button { importing = true } label: { Label("Files", systemImage: "paperclip") }
-            }.font(.subheadline) }
-            ScrollView(.horizontal) {
+            if canAdd {
+                Menu {
+                    PhotosPicker(selection: $photo, matching: .images) { Label("Photos", systemImage: "photo") }
+                    Button { importing = true } label: { Label("Files", systemImage: "paperclip") }
+                    if let showMode {
+                        Divider()
+                        Button(action: showMode) { Label("Mode", systemImage: "at") }
+                    }
+                } label: { Image(systemName: "plus").frame(width: 44, height: 44) }
+                .accessibilityLabel("Add attachments or mode").accessibilityIdentifier("composer-add")
+            }
+            if showFiles && !files.isEmpty { ScrollView(.horizontal) {
                 HStack {
                     ForEach(files) { file in
                         HStack {
@@ -111,7 +120,7 @@ struct OrbAttachments: View {
                         }.padding(8).background(.white.opacity(0.07), in: Capsule())
                     }
                 }
-            }
+            } }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
             do {

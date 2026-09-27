@@ -2,6 +2,27 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    @MainActor func testReadCacheCoalescesAndInvalidates() async throws {
+        let key = "test-cache:" + UUID().uuidString
+        defer { OrbDisk.remove(key) }
+        var requests = 0
+        let fetch: @MainActor () async throws -> OrbJSON = {
+            requests += 1
+            try await Task.sleep(for: .milliseconds(30))
+            return .string("loaded")
+        }
+        async let first = OrbReadCache.load(key, fetch: fetch)
+        async let second = OrbReadCache.load(key, fetch: fetch)
+        let results = try await [first, second]
+        XCTAssertEqual(results, [.string("loaded"), .string("loaded")])
+        XCTAssertEqual(requests, 1)
+        _ = try await OrbReadCache.load(key, fetch: fetch)
+        XCTAssertEqual(requests, 1)
+        OrbReadCache.invalidate(key)
+        XCTAssertEqual(OrbReadCache.read(key), .string("loaded"))
+        _ = try await OrbReadCache.load(key, fetch: fetch)
+        XCTAssertEqual(requests, 2)
+    }
     func testLocalAndSideMissionsAreExcluded() throws {
         let local = OrbRow(.object(["id": .string("local"), "tags": .array([.string("placement:client")])]))
         XCTAssertFalse(local.mobile)

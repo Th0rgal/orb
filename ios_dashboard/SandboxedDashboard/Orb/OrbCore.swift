@@ -145,3 +145,67 @@ enum OrbDisk {
     static func save<T: Encodable>(_ value: T, key: String) throws { try JSONEncoder().encode(value).write(to: url(key), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
     static func remove(_ key: String) { try? FileManager.default.removeItem(at: url(key)) }
 }
+
+/// Account-scoped, bounded read-through cache. In-flight loads are shared with navigation.
+@MainActor
+enum OrbReadCache {
+    private struct Entry { let value: OrbJSON; let date: Date }
+    private static var values: [String: Entry] = [:]
+    private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
+    private static var pending: [String: Pending] = [:]
+    private static func key(_ name: String) -> String { OrbDisk.url(name).absoluteString }
+    static func read(_ name: String) -> OrbJSON? {
+        values[key(name)]?.value ?? OrbDisk.read(name, as: OrbJSON.self)
+    }
+    static func load(_ name: String, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
+        let scope = key(name)
+        if !force, let entry = values[scope], Date().timeIntervalSince(entry.date) < 30 { return entry.value }
+        if let item = pending[scope] {
+            let value = try await item.task.value
+            guard scope == key(name), !item.task.isCancelled else { throw CancellationError() }
+            return value
+        }
+        let task = Task { try await fetch() }
+        let item = Pending(task: task)
+        pending[scope] = item
+        defer { if pending[scope]?.id == item.id { pending[scope] = nil } }
+        let value = try await task.value
+        guard scope == key(name), pending[scope]?.id == item.id else { throw CancellationError() }
+        if values.count >= 64, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        values[scope] = Entry(value: value, date: Date())
+        try? OrbDisk.save(value, key: name)
+        return value
+    }
+    static func invalidate(_ name: String) {
+        let scope = key(name)
+        pending[scope]?.task.cancel()
+        pending[scope] = nil
+        if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
+    }
+    static func project(_ id: String, force: Bool = false) async throws -> OrbJSON {
+        try await load("project:\(id)", force: force) {
+            async let missions = OrbCore.shared.missions(id)
+            async let manifest = OrbCore.shared.call("/api/projects/\(OrbCore.escape(id))/context/manifest")
+            return try await .object(["missions": .array(missions.map(\.raw)), "manifest": manifest])
+        }
+    }
+    static func conversation(_ id: String, force: Bool = false) async throws -> OrbJSON {
+        try await load("mission:\(id)", force: force) {
+            try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))")
+        }
+    }
+    static func cloud(_ id: String, force: Bool = false) async throws -> OrbJSON {
+        try await load("cloud:\(id)", force: force) {
+            try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cloud")
+        }
+    }
+    static func prefetch(_ rows: [OrbRow]) async {
+        for row in rows.prefix(2) {
+            guard !Task.isCancelled else { return }
+            do {
+                _ = try await conversation(row.id)
+                if row.cloud { _ = try await cloud(row.id) }
+            } catch { return }
+        }
+    }
+}

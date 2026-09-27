@@ -10,6 +10,8 @@ python3 ios_dashboard/TestsSupport/orb_fixture_server.py
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18769 --require-auth
 # In another terminal, for expired-session recovery (restart before each run):
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18770 --expire-session
+# For loading/cache/history and the composer mode menu:
+python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18771 --list-delay 4
 ```
 
 In a separate terminal, choose an installed Simulator UUID and run:
@@ -113,3 +115,28 @@ password, and replaces credentials from Server settings. It also verifies that
 a failed settings login preserves the working session. The fixture issues a
 new token at startup; restart port 18770 before repeating this scenario.
 Connect stays in the server sheet's toolbar so the keyboard cannot cover it.
+
+## Navigation and composer
+
+Project lists and conversations use an account-scoped disk/memory cache with a
+30-second freshness window. Concurrent loads share one request. The first project
+and two conversations are prefetched; mutations invalidate the affected project.
+Cold loads show progress rather than an empty-state message.
+
+Conversation rendering begins with the latest 20 messages, anchored at the bottom.
+“Load earlier messages” reveals another 20 and preserves the previous boundary.
+This is **rendering pagination**, not network history pagination: the existing
+Core mission/cloud endpoints still return the full history. Reducing that initial
+payload requires a compatible history API on Core.
+
+The + menu offers Photos, Files and (for Codex) Mode. Mode inserts `@`, opening
+Message/Plan/Goal suggestions. A selected non-default mode becomes a removable
+chip. Arbitrary @mentions remain ordinary text. Cloud attachment/mode controls
+are not exposed when the provider does not support them.
+
+Validation: 5 model/cache tests and 7 native WebKit tests passed. Simulator
+checks passed for delayed loading, cached return navigation, latest-first history,
+loading earlier messages without losing the reading position, the @ mode picker
+and /plan submission, compact keyboard/settings layout, and ChatGPT reopening
+with image/CSV previews. Screenshots `composer-mode-picker.png` and
+`conversation-latest-messages.png` show the final navigation/composer behavior.
