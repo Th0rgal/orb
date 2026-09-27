@@ -527,6 +527,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
     Router::new()
         .route("/", get(list_projects))
         .route("/:slug/context/manifest", get(context_manifest))
+        .route("/:slug/context/stream", get(context_stream))
         .route("/:slug/context/history", get(context_history))
         .route("/:slug/context/conflicts", get(context_conflicts))
         .route("/:slug/context/conflicts/:id", post(context_resolve))
@@ -623,31 +624,71 @@ mod tests {
 
 /// Observe direct harness writes even while no UI is polling.
 pub fn start_context_observer(working_dir: PathBuf) {
-    tokio::spawn(async move {
+    std::thread::spawn(move || {
+        let root = working_dir.join(".sandboxed-sh/project-files");
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _subscription = match crate::file_notifications::watch(&root, move || {
+            let _ = tx.try_send(());
+            true
+        }) {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                tracing::error!(%error,"Context watcher unavailable");
+                return;
+            }
+        };
         loop {
-            let working_dir = working_dir.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let root = working_dir.join(".sandboxed-sh/project-files");
-                if let Ok(projects) = std::fs::read_dir(root) {
-                    for project in projects.flatten() {
-                        let Some(slug) = project.file_name().to_str().map(str::to_owned) else {
-                            continue;
-                        };
-                        if !super::projects_overview::is_plain_key(&slug) {
-                            continue;
-                        }
-                        let metadata = working_dir
+            if let Ok(projects) = std::fs::read_dir(&root) {
+                for project in projects.flatten() {
+                    let Some(slug) = project.file_name().to_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    if !super::projects_overview::is_plain_key(&slug) {
+                        continue;
+                    }
+                    let store = crate::project_context::Store::new(
+                        project.path(),
+                        working_dir
                             .join(".sandboxed-sh/project-context-state")
-                            .join(&slug);
-                        let store = crate::project_context::Store::new(project.path(), metadata);
-                        if let Err(error) = store.manifest() {
-                            tracing::warn!(project=%slug,%error,"Context reconciliation deferred");
-                        }
+                            .join(&slug),
+                    );
+                    if let Err(error) = store.manifest() {
+                        tracing::warn!(project=%slug,%error,"Context reconciliation deferred");
                     }
                 }
-            })
-            .await;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            if rx.recv().is_err() {
+                break;
+            }
         }
     });
+}
+
+async fn context_stream(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let store = context_store(&state, &slug)?;
+    let (tx, rx) = tokio::sync::watch::channel(());
+    let callbacks = [store.root, store.metadata]
+        .into_iter()
+        .map(|root| {
+            let tx = tx.clone();
+            crate::file_notifications::watch(&root, move || tx.send(()).is_ok()).map_err(internal)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let stream = futures::stream::unfold(
+        (rx, callbacks, true),
+        |(mut rx, subscriptions, initial)| async move {
+            if !initial && rx.changed().await.is_err() {
+                return None;
+            }
+            Some((
+                Ok::<_, std::convert::Infallible>(Event::default().event("changed").data("{}")),
+                (rx, subscriptions, false),
+            ))
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

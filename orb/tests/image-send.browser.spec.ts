@@ -1,3 +1,4 @@
+import {eventPage} from "./eventPageFixture";
 import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
 test.setTimeout(90000);
@@ -25,7 +26,7 @@ test('one pasted image remains visible through delayed send, canonical history a
   }
   if(p==='/api/control/missions' && req.method()==='POST'){submitted=req.postDataJSON().prompt;await postGate;return route.fulfill({json:mission()});}
   if(p==='/api/control/missions/image-mission')return route.fulfill({json:mission()});
-  if(p.endsWith('/events'))return route.fulfill({json:submitted?[{id:1,event_id:'image-turn',sequence:1,event_type:'user_message',content:submitted,timestamp:''}]:[]});
+  if(p.endsWith('/events'))return route.fulfill(eventPage(route,submitted?[{id:1,event_id:'image-turn',sequence:1,event_type:'user_message',content:submitted,timestamp:''}]:[]));
   if(p==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   const json=p==='/api/projects'?{projects:[{slug:'default',title:'Default'},{slug:'test',title:'Test'}]}:
    p==='/api/backends'?[{id:'grok',name:'Grok'}]:

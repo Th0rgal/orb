@@ -22,17 +22,17 @@ import { atQuery, chipToAttachment, filterAttach, insertMention, loadAttachItems
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasFocusScope } from "./focusScope";
-import { For, Show, Switch, Match, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
+import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { JSX } from "solid-js";
 import { projects as seed, LOREM_REPLY, type Agent, type Block, type Turn } from "./data";
 import * as Ic from "./icons";
 import { ForkMission } from "./ForkMission";
-import { Settings } from "./Settings";
+const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
-import { Providers } from "./Providers";
+const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 import { MenuList, PopupMenu, type MenuEntry } from "./Menu";
 import { MdSource, MdView, mdSource, safeHref, setMdSource, toggleMdSource } from "./Markdown";
 import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
@@ -40,13 +40,13 @@ import { latestChecklist } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { DEFAULT_EFFORT_LABEL, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
-import { refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
+import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
 import { DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
 import { LiveProjectsSection, ProjectFileView } from "./ProjectFiles";
-import { ProjectSettings } from "./ProjectSettings";
-import { ExecutionSettings } from "./ExecutionSettings";
+const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
+const ExecutionSettings=lazy(()=>import("./ExecutionSettings").then(module=>({default:module.ExecutionSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
 import { insertAtCaret } from "./voice";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "./missionContext";
@@ -1366,23 +1366,12 @@ export default function App() {
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify(body);
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    let m:Mission;
-    let legacy=false;
-    try{m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});}
-    catch(error){
-      // A running older native binary can still launch online during rollout.
-      // Only an explicitly missing command permits this fallback: an uncertain
-      // native start must never create a second mission on Core.
-      if(!String(error).includes("Update Orb desktop to enable local launches"))throw error;
-      try{m=await createMission({...body,idempotency_key:launchAttempt.key});}catch{throw error;}
-      rememberBinding(m.id,{harness:pick.backend,bin:row.path,cwd:root,model:pick.model});legacy=true;
-    }
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setAttachChips([]);
     rememberLaunch(m.id, {prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
     open(`m:${m.id}`);
-    if(legacy){const run=await startLocal({id:m.id,harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,imagePaths});void finishLocal(m.id,run);}
     void refreshMissions();
   };
 
@@ -2242,6 +2231,9 @@ function MissionDock(p: {
 
 function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
   const receipt = recalledLaunch(p.id);
+  let disposed=false;
+  onCleanup(()=>{disposed=true;});
+  onCleanup(retainTranscript(p.id));
   const cached = peekReadyTranscript(p.id);
   const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null);
   createEffect(() => p.onMission?.(mission()));
@@ -2276,6 +2268,8 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
   // Resize notifications run after streaming Markdown has changed layout.
   onMount(() => {
     if (!scroller) return;
+    const older=()=>{if(scroller!.scrollTop<800&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().catch(e=>setError(String(e)));};
+    scroller.addEventListener('scroll',older,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',older));
     const observer = new ResizeObserver(() => { if (nearBottom) scrollIfPinned(); });
     const content = scroller.querySelector(".col");
     if (content) observer.observe(content);
@@ -2284,7 +2278,9 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
 
   const refresh = async () => {
     try {
-      setMission(await getMission(p.id));
+      const next=await getMission(p.id);
+      if(disposed)return;
+      setMission(next);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2300,28 +2296,33 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
   let refreshAgain = false;
   const [refreshing, setRefreshing] = createSignal(false);
   let held: StreamEvent[] = [];
+  let liveEvents:StreamEvent[]=[];
   const applyLive = (ev: StreamEvent) => {
+    liveEvents.push(ev);
     setItems((cur) => {
       const next = applyStreamEvent(cur, ev);
       if (next !== cur) {
         putTranscriptItems(p.id, next);
-        queueMicrotask(scrollIfPinned);
+        queueMicrotask(()=>{if(!disposed){scrollIfPinned();scroller?.dispatchEvent(new Event("orb:transcript-change",{bubbles:true}));}});
       }
       return next;
     });
   };
   const resync = async (fresh = false) => {
+    if(disposed)return;
     if (replaying) { refreshAgain ||= fresh; return; }
     replaying = true;
     held = [];
     let history: StreamEvent[] = [];
     try {
       const snap = await (fresh ? refreshTranscript(p.id) : loadTranscript(p.id));
+      if(disposed)return;
       history = snap.stream;
+      liveEvents=heldAfterHistory(history,liveEvents);
       // Absence from a queue snapshot is not proof of delivery: the event
       // logger can lag dequeue. Keep known pending entries until their ID is
       // explicitly delivered, including while a reconnect replay is in flight.
-      let next = snap.items;
+      let next = liveEvents.reduce((state,event)=>applyStreamEvent(state,event),snap.items);
       for (const item of items()) if (item.kind === "user" && item.queued && item.messageId) {
         next = applyStreamEvent(next, { type: "user_message", data: { id: item.messageId, content: item.text, queued: true, receipt: item.receipt, attached: item.attached } });
       }
@@ -2331,12 +2332,14 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
       setError(null);
     } catch (e) {
       const local=(await import("./localOrigins").then(m=>m.localOrigins()).catch(()=>[])).find(m=>m.id===p.id);
+      if(disposed)return;
       if(local){
         const events:StreamEvent[]=local.history.filter(row=>row.content).map((row,index)=>({type:row.role==="user"?"user_message":"assistant_message",data:{id:`local:${p.id}:${index}`,content:row.content}}));
         setItems(events.reduce((list,event)=>applyStreamEvent(list,event),[] as StreamItem[]));setError(null);
       }else setError(e instanceof Error ? e.message : String(e));
     } finally {
       replaying = false;
+      if(disposed)return;
       setAwaiting(false);
       const queued = held;
       held = [];
@@ -2345,6 +2348,24 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
     }
   };
 
+  let olderPending:Promise<void>|undefined;
+  const loadOlder=()=>{
+    if(olderPending)return olderPending;
+    olderPending=(async()=>{
+      const snap=await loadOlderTranscript(p.id);
+      if(disposed)return;
+      const anchor=scroller?.querySelector<HTMLElement>('[data-turn-key]');
+      const key=anchor?.dataset.turnKey,top=anchor?.getBoundingClientRect().top;
+      let next=heldAfterHistory(snap.stream,liveEvents).reduce((state,event)=>applyStreamEvent(state,event),snap.items);
+      for(const item of items())if(item.kind==='user'&&item.queued&&item.messageId)next=applyStreamEvent(next,{type:'user_message',data:{id:item.messageId,content:item.text,queued:true}});
+      setItems(next);
+      if(key&&top!==undefined)requestAnimationFrame(()=>{const element=Array.from(scroller?.querySelectorAll<HTMLElement>('[data-turn-key]')??[]).find(el=>el.dataset.turnKey===key);if(element&&scroller)scroller.scrollTop+=element.getBoundingClientRect().top-top;});
+    })().finally(()=>olderPending=undefined);
+    return olderPending;
+  };
+  const prepareSearch=async(signal:AbortSignal)=>{
+    while(!disposed&&!signal.aborted&&peekReadyTranscript(p.id)?.hasOlder)await loadOlder();
+  };
   onMount(() => {
     const reload = async () => {
       if (refreshing()) return;
@@ -2354,7 +2375,7 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
-    void Promise.all([refresh(), resync()]).then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+    void refresh();
     const stopStream = streamMission(
       p.id,
       (ev) => {
@@ -2370,7 +2391,8 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
         if (replaying) held.push(ev);
         else applyLive(ev);
       },
-      () => void resync(),
+      () => void resync(true),
+      () => void resync(true).then(()=>{if(nearBottom)scrollIfPinned();}),
     );
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
@@ -2387,17 +2409,18 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
     });
   });
 
+  const localMissionId=createMemo(()=>mission()?.tags?.includes("placement:client")?p.id:null);
   createEffect(() => {
-    const id = p.id;
-    if (!mission()?.tags?.includes("placement:client")) return;
+    const id=localMissionId();
+    if(!id)return;
     const reconcile = async () => {
       await import("./localAgents").then(m => m.restoreLocalBindings());
       if (localBinding(id)) await reconcileLocalRun(id);
     };
     const refreshLocal = () => { void reconcile().catch(console.error); };
     refreshLocal();
-    const stop = pollWhileVisible(refreshLocal, 2000);
-    onCleanup(stop);
+    window.addEventListener('orb:queue-wake',refreshLocal);
+    onCleanup(()=>window.removeEventListener('orb:queue-wake',refreshLocal));
   });
 
   createEffect(() => {
@@ -2572,7 +2595,7 @@ function MissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData 
             }
           >
             <LaunchStatus submitting={localRunActive(p.id)} destination={missionDestination(mission(), receipt)} mission={mission()} goal={missionGoal(mission(), receipt)} activity={activity()} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
-            <Transcript items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={sendEditedPrompt} />
+            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={sendEditedPrompt} />
             <Show when={clientPlaced() && localActivities(p.id).length}>
               <AgentActivity items={localActivities(p.id)} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
             </Show>

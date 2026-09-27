@@ -39,33 +39,41 @@ describe("local mention rewrite", () => {
 });
 
 it("restores native session bindings across webview origins", async () => {
+  vi.resetModules();
   const { restoreLocalBindings, localBinding } = await import('../src/localAgents');
   const binding = {harness:'codex',bin:'/bin/codex',cwd:'/work',sessionId:'original-session'};
   const host = window as unknown as {__TAURI_INTERNALS__?: {invoke: () => Promise<unknown>}};
   const previous = host.__TAURI_INTERNALS__;
   localStorage.removeItem('orb.localBindings');
-  host.__TAURI_INTERNALS__ = {invoke: async () => ({mission:binding})};
+  const priorTauri=(window as any).__TAURI__;
+  (window as any).__TAURI__={core:{Channel:class {onmessage=(_value:any)=>{};}}};
+  host.__TAURI_INTERNALS__ = {invoke: async (...args:any[]) => {if(args[0]==='local_bindings_subscribe')args[1].onEvent.onmessage({revision:0,bindings:{mission:binding}});return 1;}};
   try {
     await restoreLocalBindings();
     expect(localBinding('mission')).toEqual(binding);
   } finally {
-    host.__TAURI_INTERNALS__ = previous;
+    window.dispatchEvent(new Event('pagehide'));
+    host.__TAURI_INTERNALS__ = previous;(window as any).__TAURI__=priorTauri;
     localStorage.removeItem('orb.localBindings');
   }
 });
 
 it("restores native bindings even when the webview cache is corrupt", async () => {
+  vi.resetModules();
   const { restoreLocalBindings, localBinding } = await import('../src/localAgents');
   const binding = {harness:'codex',bin:'/bin/codex',cwd:'/work',sessionId:'original-session'};
   const host = window as unknown as {__TAURI_INTERNALS__?: {invoke: () => Promise<unknown>}};
   const previous = host.__TAURI_INTERNALS__;
   localStorage.setItem('orb.localBindings', '{broken');
-  host.__TAURI_INTERNALS__ = {invoke: async () => ({mission:binding})};
+  const priorTauri=(window as any).__TAURI__;
+  (window as any).__TAURI__={core:{Channel:class {onmessage=(_value:any)=>{};}}};
+  host.__TAURI_INTERNALS__ = {invoke: async (...args:any[]) => {if(args[0]==='local_bindings_subscribe')args[1].onEvent.onmessage({revision:0,bindings:{mission:binding}});return 1;}};
   try {
     await restoreLocalBindings();
     expect(localBinding('mission')).toEqual(binding);
   } finally {
-    host.__TAURI_INTERNALS__ = previous;
+    window.dispatchEvent(new Event('pagehide'));
+    host.__TAURI_INTERNALS__ = previous;(window as any).__TAURI__=priorTauri;
     localStorage.removeItem('orb.localBindings');
   }
 });

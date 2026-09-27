@@ -1,3 +1,4 @@
+import {batch} from "solid-js";
 import { clearConnection, getApiUrl, getJwt } from "./api";
 
 export interface StoredEvent {
@@ -43,11 +44,20 @@ async function apiRaw(path: string): Promise<Response> {
   return res;
 }
 
-export async function getMissionEvents(id: string): Promise<StoredEvent[]> {
-  const res = await apiRaw(`/api/control/missions/${id}/events?limit=4000`);
-  const data = (await res.json()) as StoredEvent[] | { events?: StoredEvent[] };
-  return Array.isArray(data) ? data : (data.events ?? []);
+export interface EventPage { events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
+export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number}={}):Promise<EventPage>{
+ const query=new URLSearchParams({limit:'1000',include_counts:'false'});
+ if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
+ if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
+ const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
+ const events=await response.json() as StoredEvent[];
+ if(!Array.isArray(events)||response.headers.get('X-Orb-Events-Protocol')!=='1'||!response.headers.has('X-Has-More'))throw Error('Invalid event page protocol. Redeploy Orb and the backend together.');
+ const number=(name:string)=>{const value=response.headers.get(name);if(value===null)return undefined;const n=Number(value);if(!value.trim()||!Number.isSafeInteger(n)||n<0)throw Error(`Invalid event cursor: ${name}`);return n;};
+ const nextCursor=number('X-Next-Cursor'),pageMax=number('X-Page-Max-Sequence'),max=number('X-Max-Sequence'),more=response.headers.get('X-Has-More');
+ if(!['true','false'].includes(more!)||((more==='true'||events.length>0)&&(nextCursor===undefined||pageMax===undefined)))throw Error('Incomplete event page cursor.');
+ return {events,reset:cursor.since!==undefined&&max!==undefined&&cursor.since>max,nextCursor,pageMax,hasMore:more==='true'};
 }
+export async function getMissionEvents(id:string):Promise<StoredEvent[]>{return (await getMissionEventPage(id)).events;}
 
 /** Map a stored (replayed) event row onto the live-stream event shape. */
 export function storedToStream(ev: StoredEvent): StreamEvent | null {
@@ -111,8 +121,12 @@ export function streamMission(
   missionId: string,
   onEvent: (ev: StreamEvent) => void,
   onLagged: () => void,
+  onReady?:()=>void,
 ): () => void {
   let stopped = false;
+  let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
+  const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];batch(()=>{for(const event of pending)onEvent(event);});};
+  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();onEvent(event);}};
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
@@ -136,7 +150,8 @@ export function streamMission(
         return;
       }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
-      if (retry > 0) {
+      if(onReady)onReady();
+      else if (retry > 0) {
         // Events emitted while we were disconnected never reached us.
         onLagged();
       }
@@ -166,15 +181,17 @@ export function streamMission(
           }
           try {
             const parsed = JSON.parse(data);
-            onEvent({ type: eventType, data: parsed, eventId: parsed.event_id ?? parsed.id, sequence: parsed.sequence });
+            deliver({ type: eventType, data: parsed, eventId: parsed.event_id ?? parsed.id, sequence: parsed.sequence });
           } catch {
             /* malformed frame — skip */
           }
         }
       }
+      flush();
       throw new Error("stream ended");
     } catch (e) {
       if (stopped || (e instanceof DOMException && e.name === "AbortError")) return;
+      if(retry===0)onLagged();
       retry = Math.min(retry + 1, 5);
       timer = setTimeout(() => void connect(), Math.min(1000 * 2 ** retry, 15000));
     }
@@ -183,6 +200,7 @@ export function streamMission(
   void connect();
   return () => {
     stopped = true;
+    clearTimeout(paint);fragments=[];
     if (timer) clearTimeout(timer);
     controller?.abort();
   };

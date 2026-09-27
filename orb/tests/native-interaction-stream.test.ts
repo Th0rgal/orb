@@ -25,14 +25,10 @@ describe('native interaction subscription',()=>{
   setup(invoke);const stop=followInteraction('old',vi.fn(),vi.fn());stop();resolve(9);await Promise.resolve();
   expect(invoke).toHaveBeenLastCalledWith('local_interaction_unsubscribe',{id:'old',token:9});
  });
- it('falls back only for older native builds and never overlaps reads',async()=>{
-  vi.useFakeTimers();let resolve!:(value:null)=>void;
-  const invoke=vi.fn((command:string)=>command==='local_interaction_subscribe'?Promise.reject('Command local_interaction_subscribe not found'):new Promise(r=>resolve=r));
-  setup(invoke);const publish=vi.fn(),stop=followInteraction('old',publish,vi.fn());
-  await vi.advanceTimersByTimeAsync(0);await vi.advanceTimersByTimeAsync(10000);
-  expect(invoke).toHaveBeenCalledTimes(2);resolve(null);await vi.advanceTimersByTimeAsync(1500);
-  expect(invoke).toHaveBeenCalledTimes(3);stop();resolve(null);await vi.advanceTimersByTimeAsync(10000);
-  expect(invoke).toHaveBeenCalledTimes(3);expect(publish).toHaveBeenCalledTimes(1);
+ it('reports a protocol mismatch without starting periodic reads',async()=>{
+  vi.useFakeTimers();const invoke=vi.fn().mockRejectedValue('Command local_interaction_subscribe not found');setup(invoke);const fail=vi.fn();
+  const stop=followInteraction('mission',vi.fn(),fail);await vi.advanceTimersByTimeAsync(60000);
+  expect(invoke).toHaveBeenCalledTimes(1);expect(fail).toHaveBeenCalledOnce();stop();
  });
  it('surfaces subscription failures without silently starting a polling loop',async()=>{
   vi.useFakeTimers();const invoke=vi.fn().mockRejectedValue('permission denied');setup(invoke);const fail=vi.fn();

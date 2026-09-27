@@ -8,7 +8,7 @@ export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number)
     const r = run();
     if (r && typeof (r as Promise<unknown>).then === "function") {
       busy = true;
-      void (r as Promise<unknown>).finally(() => {
+      void (r as Promise<unknown>).catch(console.error).finally(() => {
         busy = false;
       });
     }

@@ -34,7 +34,9 @@ export class TranscriptReducer {
   private seq = new Map<string, number>();
   private next = 0;
   private lastFinal: number | undefined;
-  private key(kind: string) { return `${kind}-${++this.next}`; }
+  private identity:string|undefined;
+  private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
+  private nextForEvent=0;
   private put(index: number, item: StreamItem) { this.items[index] = item; }
   private close() {
     for (const index of this.bubbles.values()) {
@@ -49,6 +51,7 @@ export class TranscriptReducer {
     this.bubbles.clear();
   }
   apply(ev: StreamEvent) {
+    this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
     const d = ev.data;
     // A message has one identity and a monotonic queued -> delivered lifecycle.
     // Process it before event dedupe and channel sequence checks: receipt, queue

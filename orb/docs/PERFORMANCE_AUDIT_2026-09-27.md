@@ -1,5 +1,7 @@
 # Orb — audit de performances du 27 septembre 2026
 
+> État historique avant la refonte complète. Voir [l’architecture implémentée et les nouvelles mesures](EVENT_ARCHITECTURE.md) pour le résultat final.
+
 ## Résultat et périmètre
 
 Les interactions locales utilisent désormais un abonnement natif : un état initial, puis uniquement les changements. Le polling toutes les 350 ms disparaît sur le nouveau binaire. L’identité d’une question inchangée reste stable, y compris pour les snapshots distants, ce qui conserve le champ, le focus et la sélection.

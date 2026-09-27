@@ -8,7 +8,8 @@ fn home() -> Result<PathBuf, String> {
 }
 #[tauri::command]
 pub fn local_machine_identity() -> Result<String, String> {
-    let _lock = crate::BINDINGS_LOCK.lock().map_err(|e| e.to_string())?;
+    static IDENTITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = IDENTITY_LOCK.lock().map_err(|e| e.to_string())?;
     let home = home()?;
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     let path = home.join("machine-id");

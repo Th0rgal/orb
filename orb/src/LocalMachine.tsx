@@ -20,7 +20,7 @@ export function LocalMachine() {
   const [sample, setSample] = createSignal<Snapshot>();
   const [error, setError] = createSignal("");
   onMount(() => {
-    const invoke = (window as Window & { __TAURI__?: { core?: { invoke: (name: string) => Promise<Snapshot> } } }).__TAURI__?.core?.invoke;
+    const invoke = (window as Window & { __TAURI__?: { core?: { invoke: (name: string,args?:Record<string,unknown>) => Promise<Snapshot> } } }).__TAURI__?.core?.invoke;
     if (!invoke) { setError("Available in the Orb desktop app"); return; }
     let disposed = false;
     let pending = false;
@@ -28,7 +28,7 @@ export function LocalMachine() {
       if (pending) return;
       pending = true;
       try {
-        const result = await invoke("local_machine_metrics");
+        const result = await invoke("local_machine_metrics",{details:open()&&!document.hidden});
         if (!disposed) { setSample(result); setHistory(old => freshSamples(appendSamples(old, result.history ?? [{ time: Date.now(), cpu: result.cpu_percent, gpu: result.gpu_percent, memory: result.memory_total > 0 ? result.memory_used / result.memory_total * 100 : null }]))); saveHistory("local", history()); setError(""); }
       } catch (e) { if (!disposed) setError(`Couldn’t refresh local metrics: ${String(e)}`); }
       finally { pending = false; }

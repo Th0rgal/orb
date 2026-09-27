@@ -1,8 +1,10 @@
+import {eventPage} from "./eventPageFixture";
 import { test, expect } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 test("long transcript DOM benchmark retains expanded work",async({page})=>{
  await page.goto(`/tests/transcript.html${process.env.ORB_BENCHMARK_BASELINE ? "?baseline" : ""}`);
- await expect(page.locator(".st-work")).toHaveCount(300);
+ await expect(page.locator(".st-work").first()).toBeVisible();
+ if(!process.env.ORB_BENCHMARK_BASELINE)expect(await page.locator(".st-work").count()).toBeLessThan(40);
  const result=await page.evaluate(()=> (window as any).transcriptHarness.benchmark());
  console.log("TRANSCRIPT_BENCHMARK",JSON.stringify(result));
  writeFileSync(`test-results/transcript-${process.env.ORB_BENCHMARK_BASELINE ? "before" : "after"}.json`,JSON.stringify(result,null,2));
@@ -52,7 +54,7 @@ test("native Grok canary final assistant_message then text_delta renders once",a
       :path.endsWith("/controller")?{job:null,runs:[]}
       :[];
     if(path==="/api/control/stream")return route.fulfill({contentType:"text/event-stream",body:""});
-    return route.fulfill({json});
+    return route.fulfill(path.endsWith("/events")?eventPage(route,Array.isArray(json)?json:[]):{json});
   });
   await page.goto("/");
   await page.getByRole("button",{name:"test",exact:true}).click();

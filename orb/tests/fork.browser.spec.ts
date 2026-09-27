@@ -1,3 +1,4 @@
+import {eventPage} from "./eventPageFixture";
 import { test, expect } from "@playwright/test";
 
 test("fork dialog opens a new page without mutating the source", async ({ page }) => {
@@ -26,7 +27,7 @@ test("fork dialog opens a new page without mutating the source", async ({ page }
       : path.endsWith("/files") ? { entries: [] }
       : path === "/api/remote-nodes" ? { nodes: [{ id: "dgx-spark", status: "online" }] }
       : { job: null, runs: [] };
-    return route.fulfill({ json });
+    return route.fulfill(path.endsWith("/events")?eventPage(route,Array.isArray(json)?json:[]):{json});
   });
   await page.goto("/");
   await page.locator(".row.project .row-main", { hasText: "Test" }).click();

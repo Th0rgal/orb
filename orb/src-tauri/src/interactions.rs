@@ -290,3 +290,9 @@ mod tests {
         assert!(local_interaction("cancel-test".into()).unwrap().is_none());
     }
 }
+
+pub fn clear_subscriptions() {
+    if let Ok(mut store) = pending().lock() {
+        store.subscribers.clear();
+    }
+}
