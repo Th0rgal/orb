@@ -10,6 +10,8 @@ python3 ios_dashboard/TestsSupport/orb_fixture_server.py
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18769 --require-auth
 # In another terminal, for expired-session recovery (restart before each run):
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18770 --expire-session
+# For saved-login and expired-token renewal:
+python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18772 --require-auth
 # For loading/cache/history and the composer mode menu:
 python3 ios_dashboard/TestsSupport/orb_fixture_server.py --port 18771 --list-delay 4
 ```
@@ -158,3 +160,27 @@ then replaces it with 40 Markdown/math sections and a final marker. It verifies
 that the final marker and file button are both visible above the composer without
 a scroll gesture. This test and all seven native renderer tests passed; the
 existing loading/cache/earlier-history test also passed with the new scroll logic.
+
+## Saved login and cloud-only ChatGPT
+
+Tokens and login credentials use separate endpoint-scoped Keychain services.
+Login reports storage failures; explicit logout clears both. An expired token
+triggers one saved-credential login attempt, including for streaming 401s.
+A failed renewal leaves the reconnect screen available. Credentials are never
+written to the response cache or UserDefaults. Older versions stored no password,
+so one successful sign-in is needed to enable renewal.
+
+The saved-login UI scenario terminates/relaunches the app, rotates the fixture's
+token, then checks that renewal returns to projects without requesting a password.
+The regular-agent fixture deliberately advertises chatgpt_ui: the harness picker
+must exclude it while the separate ChatGPT cloud creation scenario remains valid.
+Existing mission records are unchanged.
+
+Verified on iPhone 17e / iOS 26.5: regular-agent and ChatGPT-cloud creation
+passed; expired-token recovery performed exactly one new login. Installing the
+built app over the existing Simulator app (without uninstalling or clearing its
+container/Keychain) reopened Projects without entering a password.
+
+The Settings recovery scenario also passed (wrong password, successful reconnect,
+failed replacement preserving the session, then successful replacement). The test
+dismisses iOS's delayed Save Password sheet before reopening Settings.

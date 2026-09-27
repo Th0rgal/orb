@@ -61,16 +61,26 @@ struct OrbHTTPError: LocalizedError {
 }
 
 enum OrbKeychain {
-    static func token(for endpoint: String) -> String? {
-        var query = base(endpoint)
+    struct Credentials: Codable { let password: String; let username: String? }
+    static func credentials(for endpoint: String) -> Credentials? {
+        guard let text = token(for: endpoint, service: "md.thomas.orb.credentials"), let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(Credentials.self, from: data)
+    }
+    @discardableResult static func saveCredentials(_ value: Credentials?, for endpoint: String) -> Bool {
+        guard let value else { return save(nil, for: endpoint, service: "md.thomas.orb.credentials") }
+        guard let data = try? JSONEncoder().encode(value), let text = String(data: data, encoding: .utf8) else { return false }
+        return save(text, for: endpoint, service: "md.thomas.orb.credentials")
+    }
+    static func token(for endpoint: String, service: String = "md.thomas.orb.core") -> String? {
+        var query = base(endpoint, service: service)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
-    @discardableResult static func save(_ value: String?, for endpoint: String) -> Bool {
-        let query = base(endpoint)
+    @discardableResult static func save(_ value: String?, for endpoint: String, service: String = "md.thomas.orb.core") -> Bool {
+        let query = base(endpoint, service: service)
         guard let value else { let code = SecItemDelete(query as CFDictionary); return code == errSecSuccess || code == errSecItemNotFound }
         let attributes: [CFString: Any] = [kSecValueData: Data(value.utf8)]
         let result = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -81,8 +91,8 @@ enum OrbKeychain {
         insert[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
     }
-    private static func base(_ endpoint: String) -> [CFString: Any] {
-        [kSecClass: kSecClassGenericPassword, kSecAttrService: "md.thomas.orb.core", kSecAttrAccount: endpoint]
+    private static func base(_ endpoint: String, service: String) -> [CFString: Any] {
+        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: endpoint]
     }
 }
 

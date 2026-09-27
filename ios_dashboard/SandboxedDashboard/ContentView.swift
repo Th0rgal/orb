@@ -17,7 +17,7 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if isCheckingAuth {
+            if isCheckingAuth || api.authRefreshing {
                 LoadingView(message: "Connecting...")
                     .background(Theme.backgroundPrimary.ignoresSafeArea())
             } else if api.authSessionExpired {
@@ -72,6 +72,7 @@ struct ContentView: View {
         do {
             let _ = try await api.checkHealth()
             authRequired = api.authRequired
+            if authRequired && !api.isAuthenticated && !api.authSessionExpired { await api.restoreSavedSession() }
             isAuthenticated = api.isAuthenticated || !authRequired
         } catch {
             // If health check fails, assume we need auth

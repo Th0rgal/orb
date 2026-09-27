@@ -469,7 +469,13 @@ struct OrbAgentPicker: View {
         do {
             if selection.cloud { accounts = try await api.call("/api/cloud/accounts").items }
             else {
-                let response = try await api.call("/api/backends"); backends = response.items.isEmpty ? response["backends"].items : response.items
+                let response = try await api.call("/api/backends")
+                // ChatGPT browser sessions belong to Cloud agent, not a local harness.
+                backends = (response.items.isEmpty ? response["backends"].items : response.items)
+                    .filter { $0["id"].text != "chatgpt_ui" }
+                if !existing && selection.backend == "chatgpt_ui" {
+                    selection.backend = ""; selection.model = ""; selection.params = .array([])
+                }
                 let fleet = try await api.call("/api/remote-nodes"); nodes = fleet["nodes"].items
             }
             await loadModels(); error = ""

@@ -42,7 +42,7 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(LIST_DELAY)
             return self.send(list(MISSIONS.values()))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
-        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'}])
+        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'chatgpt_ui','name':'ChatGPT UI'}])
         if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
         if p=='/api/remote-nodes': return self.send({'nodes':[{'id':'test-node','name':'Test node','status':'online'}]})
         if p=='/api/cloud/accounts': return self.send([{'id':p+'-test','provider':p,'label':p+' account','available':True,'capabilities':{'cancel':True,'follow_up':True,'models':p!='grok_bot','attachments':False}} for p in ['chatgpt','cursor_cloud','grok_bot']])
@@ -71,8 +71,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         with LOCK: self.mutate()
     def mutate(self):
+        global VALID_TOKEN
         p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0)); body=json.loads(self.rfile.read(size)) if size else {}
+        if p=='/__expire':
+            VALID_TOKEN = 'orb-fixture-' + str(uuid.uuid4())
+            return self.send({})
         if p=='/api/auth/login':
+            COUNTS[p] = COUNTS.get(p, 0) + 1
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})

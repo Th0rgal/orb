@@ -15,6 +15,7 @@ struct SandboxedDashboardApp: App {
            UserDefaults.standard.string(forKey: "api_base_url")?.hasPrefix("http://127.0.0.1:") == true {
             let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
             try? FileManager.default.removeItem(at: root)
+            if UserDefaults.standard.bool(forKey: "orb_test_reset_auth") { APIService.shared.logout() }
         }
         #endif
         // Drain legacy in-UserDefaults mission cache blobs into the on-disk

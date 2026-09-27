@@ -139,6 +139,9 @@ final class APIService {
     var authRequired: Bool = false
     var authMode: AuthMode = .singleTenant
     var authSessionExpired: Bool = false
+    var authRefreshing = false
+    private var sessionRecovery: Task<Void, Never>?
+    private var loginAttempt = UUID()
     var connectionGeneration = 0
     var onSuccessfulAuthenticatedRequest: (() -> Void)?
 
@@ -189,20 +192,48 @@ final class APIService {
             let exp: Int
         }
         
+        let endpoint = baseURL
+        let attempt = UUID()
+        loginAttempt = attempt
         let response: LoginResponse = try await post("/api/auth/login", body: LoginRequest(password: password, username: username), authenticated: false)
-        jwtToken = response.token
+        try Task.checkCancellation()
+        guard endpoint == baseURL, attempt == loginAttempt else { throw CancellationError() }
+        guard OrbKeychain.save(response.token, for: endpoint),
+              OrbKeychain.saveCredentials(.init(password: password, username: username), for: endpoint) else {
+            throw NSError(domain: "OrbKeychain", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not securely save your login. Please unlock your device and try again."])
+        }
+        UserDefaults.standard.removeObject(forKey: "jwt_token")
         authSessionExpired = false
         return true
     }
     
     func logout() {
+        loginAttempt = UUID()
+        sessionRecovery?.cancel(); sessionRecovery = nil; authRefreshing = false
+        OrbKeychain.saveCredentials(nil, for: baseURL)
         jwtToken = nil
         authSessionExpired = false
     }
 
     func markSessionExpired() {
+        guard !authRefreshing else { return }
         jwtToken = nil
         authSessionExpired = true
+        guard OrbKeychain.credentials(for: baseURL) != nil else { return }
+        authRefreshing = true
+        sessionRecovery = Task { @MainActor in
+            await restoreSavedSession()
+            authRefreshing = false
+            sessionRecovery = nil
+            connectionGeneration += 1
+        }
+    }
+
+    /// Credentials stay in the device Keychain across app updates; tokens can be renewed.
+    func restoreSavedSession() async {
+        guard let saved = OrbKeychain.credentials(for: baseURL) else { return }
+        do { _ = try await login(password: saved.password, username: saved.username) }
+        catch { /* Keep the saved login on transient failures; the reconnect UI remains available. */ }
     }
     
     func checkHealth() async throws -> Bool {
@@ -1173,8 +1204,9 @@ final class APIService {
             // dropped events and left the user staring at "Reconnecting…".
             if let http = response as? HTTPURLResponse {
                 guard (200..<300).contains(http.statusCode) else {
-                    if http.statusCode == 401 {
-                        logout()
+                    if http.statusCode == 401, token == authToken,
+                       url.absoluteString.hasPrefix(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") {
+                        markSessionExpired()
                     }
                     emitDiagnostic(transport: .sse, phase: .error, host: url.host, status: http.statusCode, bytes: nil, error: "Stream rejected", eventType: nil, generation: generation, onDiagnostic: onDiagnostic)
                     onEvent("error", [

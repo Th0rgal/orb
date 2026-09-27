@@ -113,13 +113,41 @@ final class OrbFlowUITests: XCTestCase {
         capture(app, "compact-agent-settings")
         app.buttons["Done"].tap()
     }
+    @MainActor func testLoginSurvivesRelaunchAndRenewsInvalidToken() async throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18772", "-orb_test_reset", "YES", "-orb_test_reset_auth", "YES"]
+        app.launch()
+        XCTAssertTrue(app.secureTextFields.firstMatch.waitForExistence(timeout: 20))
+        app.secureTextFields.firstMatch.tap(); app.secureTextFields.firstMatch.typeText("orb-test-password")
+        app.buttons["Sign In"].tap()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 15))
+        app.terminate()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18772"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.secureTextFields.firstMatch.exists)
+        app.terminate()
+        let (beforeData, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:18772/__counts")!)
+        let before = try XCTUnwrap(JSONSerialization.jsonObject(with: beforeData) as? [String: Int])
+        var expire = URLRequest(url: URL(string: "http://127.0.0.1:18772/__expire")!)
+        expire.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: expire)
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["reconnect"].exists)
+        XCTAssertFalse(app.secureTextFields.firstMatch.exists)
+        let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:18772/__counts")!)
+        let counts = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Int])
+        XCTAssertEqual(counts["/api/auth/login"], (before["/api/auth/login"] ?? 0) + 1)
+        capture(app, "saved-login-renewed")
+    }
     @MainActor func testExpiredSessionAndServerPassword() throws {
         addUIInterruptionMonitor(withDescription: "Password AutoFill prompt") { alert in
             if alert.buttons["Not Now"].exists { alert.buttons["Not Now"].tap(); return true }
             return false
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18770", "-orb_test_reset", "YES"]
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18770", "-orb_test_reset", "YES", "-orb_test_reset_auth", "YES"]
         app.launch()
         XCTAssertTrue(app.buttons["reconnect"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.buttons["New project"].exists)
@@ -135,6 +163,10 @@ final class OrbFlowUITests: XCTestCase {
         password.tap(); password.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5) + "orb-test-password")
         app.buttons["Connect"].tap()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 15))
+        if app.buttons["Not Now"].waitForExistence(timeout: 5) {
+            app.buttons["Not Now"].tap()
+            XCTAssertTrue(app.buttons["Not Now"].waitForNonExistence(timeout: 5))
+        }
         app.buttons["Settings"].tap()
         XCTAssertTrue(password.waitForExistence(timeout: 10))
         password.tap(); password.typeText("wrong")
@@ -142,12 +174,17 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Incorrect password. Please try again."].waitForExistence(timeout: 10))
         app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["project.orb-test"].exists)
+        if app.buttons["Not Now"].waitForExistence(timeout: 5) {
+            app.buttons["Not Now"].tap()
+            XCTAssertTrue(app.buttons["Not Now"].waitForNonExistence(timeout: 5))
+        }
         app.buttons["Settings"].tap()
         XCTAssertTrue(password.waitForExistence(timeout: 10))
-        if app.buttons["Not Now"].exists { app.buttons["Not Now"].tap() }
-        password.tap(); password.typeText("orb-test-password")
+        password.tap()
+        password.typeText("orb-test-password")
         capture(app, "auth-server-password")
         app.buttons["Connect"].tap()
+        XCTAssertTrue(password.waitForNonExistence(timeout: 15))
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 15))
     }
     @MainActor func testCloudReconnectNoticeRemainsVisible() throws {
@@ -264,6 +301,8 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["new-agent"].tap()
         app.buttons["agent-selection"].tap()
         app.buttons["picker.harness"].tap()
+        XCTAssertFalse(app.buttons["ChatGPT UI"].exists)
+        XCTAssertFalse(app.buttons["chatgpt_ui"].exists)
         app.buttons["Claude Code"].tap()
         app.buttons["Done"].tap()
         let input = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]
