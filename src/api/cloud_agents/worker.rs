@@ -177,10 +177,8 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
             turn.detail = None;
         }
         Err(error) => {
-            if error == "reconnect_required" {
-                if e.turns[i].phase != Phase::CancelRequested {
-                    e.turns[i].phase = Phase::ReconnectRequired;
-                }
+            if error == "reconnect_required" && e.turns[i].phase != Phase::CancelRequested {
+                e.turns[i].phase = Phase::ReconnectRequired;
             }
             e.turns[i].detail = Some(error);
         }
