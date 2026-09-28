@@ -8,7 +8,40 @@ import { cancelMission, getMission, type HarnessChoice, type Mission } from "./a
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal } from "./localAgents";
 import { appendClientTranscript, setClientMissionStatus } from "./api";
-import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction } from "./machineTransfer";
+import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView } from "./machineTransfer";
+
+type Loaded = { view: TransferView; rows: Destination[]; client?: string };
+const loads = new Map<string, Promise<Loaded>>();
+/** Shares an in-flight request, e.g. a preload, with the menu that opens meanwhile.
+ * A settled result is never reused: transfer actions must be read fresh. */
+export function loadMachineDestinations(missionId: string, force = false): Promise<Loaded> {
+  const key = `${connectionVersion()}:${missionId}`;
+  const pending = loads.get(key);
+  if (pending && !force) return pending;
+  const version = connectionVersion();
+  const promise = (async () => {
+    const local = async (): Promise<Destination> => {
+      if (!nativeInvoke()) return { machine: { kind: "client", id: "unavailable" }, label: "This computer", available: false, reason: "Open Orb desktop to use this computer" };
+      // A recent scan is enough to list harnesses; launching re-validates.
+      const [id, installed] = await Promise.all([machineIdentity(), refreshLocalAgents(false)]);
+      return { machine: { kind: "client", id }, label: "This computer", available: true, harnesses: installed.filter(c => c.installed).map(c => c.id) };
+    };
+    const [view, computer] = await Promise.all([inspectTransfer(missionId), local()]);
+    if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
+    const rows = preferSparkAdministration([computer, ...view.destinations], row => row.machine.kind === "node" ? row.machine.id : undefined)
+      .map(row => row.machine.kind === "node" && row.machine.id === "dgx-spark-admin" ? { ...row, label: nodeLabel(row.machine.id) } : row);
+    if (version === connectionVersion()) cacheMachineDestinations(rows);
+    return { view, rows, client: computer.machine.kind === "client" ? computer.machine.id : undefined };
+  })();
+  loads.set(key, promise);
+  const settle = () => { if (loads.get(key) === promise) loads.delete(key); };
+  promise.then(settle, settle);
+  return promise;
+}
+/** Forget reusable loads (connection reset, tests). */
+export function forgetMachineDestinationLoads() { loads.clear(); }
+/** Warm the machine list in the background; failures surface when the menu opens. */
+export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId).catch(() => {}); }
 
 export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; onClose: () => void; onMoved: (mission: Mission) => void }) {
   const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());
@@ -33,23 +66,13 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   const availableHarnesses = () => p.choices.filter(c => !selected()?.harnesses || selected()!.harnesses!.includes(c.backend.id));
   const compatible = () => !selected()?.harnesses || selected()!.harnesses!.includes(backend());
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
-  const load = async () => {
+  const load = async (force = false) => {
     setLoading(true); setReady(false); setError("");
     const version=connectionVersion();
     try {
-      const local=async():Promise<Destination>=>{
-        if(!nativeInvoke())return {machine:{kind:"client",id:"unavailable"},label:"This computer",available:false,reason:"Open Orb desktop to use this computer"};
-        const [id,installed]=await Promise.all([machineIdentity(),refreshLocalAgents()]);
-        return {machine:{kind:"client",id},label:"This computer",available:true,harnesses:installed.filter(c=>c.installed).map(c=>c.id)};
-      };
-      const [view,computer]=await Promise.all([inspectTransfer(p.mission.id),local()]);
-      if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
-      const rows = preferSparkAdministration([computer,...view.destinations],row=>row.machine.kind==='node'?row.machine.id:undefined)
-        .map(row=>row.machine.kind==='node'&&row.machine.id==='dgx-spark-admin'?{...row,label:nodeLabel(row.machine.id)}:row);
-      if(version!==connectionVersion())return;
-      cacheMachineDestinations(rows);
-      if (!alive) return;
-      if(computer.machine.kind==='client')client=computer.machine.id;
+      const {view,rows,client:id}=await loadMachineDestinations(p.mission.id,force);
+      if (!alive || version!==connectionVersion()) return;
+      client=id;
       setDestinations(rows);
       setReady(true);
       const previous=selected();
@@ -164,6 +187,6 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
         </div>
       </div>
     </Show>
-    <Show when={error()}><ErrorNotice error={error()} /><Show when={!action() && !loading()}><button class="menu-item" onClick={() => void load()}>Retry</button></Show></Show>
+    <Show when={error()}><ErrorNotice error={error()} /><Show when={!action() && !loading()}><button class="menu-item" onClick={() => void load(true)}>Retry</button></Show></Show>
   </div>;
 }
