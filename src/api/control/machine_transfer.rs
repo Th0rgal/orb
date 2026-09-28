@@ -240,6 +240,68 @@ async fn node_request(
         .await
         .map_err(|_| conflict("Invalid machine transfer response"))
 }
+// Version 1 nodes omitted Claude from transfer discovery. Their authenticated
+// software inventory lets a rolling upgrade repair that omission without
+// restarting nodes that still own jobs. Version 2 is authoritative.
+fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
+    if capabilities["version"].as_u64() != Some(1) {
+        return;
+    }
+    let installed = inventory["components"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["id"] == "claudecode"
+                && item["installed"] == true
+                && item["version"]
+                    .as_str()
+                    .is_some_and(|v| !v.trim().is_empty())
+                && item["path"].as_str().is_some_and(|p| !p.is_empty())
+        })
+    });
+    if installed {
+        if let Some(harnesses) = capabilities["harnesses"].as_array_mut() {
+            if !harnesses.iter().any(|h| h == "claudecode") {
+                harnesses.push(json!("claudecode"));
+            }
+        }
+    }
+}
+async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
+    let mut capabilities = node_request(state, id, "/machine-transfer/capabilities", None).await?;
+    if capabilities["version"].as_u64() == Some(1)
+        && !capabilities["harnesses"]
+            .as_array()
+            .is_some_and(|h| h.iter().any(|h| h == "claudecode"))
+    {
+        if let Ok(inventory) = node_request(state, id, "/software", None).await {
+            supplement_legacy_claude(&mut capabilities, &inventory);
+        }
+    }
+    Ok(capabilities)
+}
+#[cfg(test)]
+mod claude_capability_tests {
+    use super::*;
+    #[test]
+    fn legacy_inventory_is_evidence_not_a_blanket_allowlist() {
+        let installed = json!({"components":[{"id":"claudecode","installed":true,"path":"/usr/local/bin/claude","version":"2.1.283"}]});
+        let mut old = json!({"version":1,"harnesses":["codex"]});
+        supplement_legacy_claude(&mut old, &installed);
+        supplement_legacy_claude(&mut old, &installed);
+        assert_eq!(old["harnesses"], json!(["codex", "claudecode"]));
+        for inventory in [
+            json!({}),
+            json!({"components":[{"id":"claudecode","installed":false,"path":"/usr/local/bin/claude"}]}),
+            json!({"components":[{"id":"claudecode","installed":true}]}),
+        ] {
+            let mut old = json!({"version":1,"harnesses":[]});
+            supplement_legacy_claude(&mut old, &inventory);
+            assert_eq!(old["harnesses"], json!([]));
+        }
+        let mut current = json!({"version":2,"harnesses":[]});
+        supplement_legacy_claude(&mut current, &installed);
+        assert_eq!(current["harnesses"], json!([]));
+    }
+}
 async fn capabilities(state: &AppState) -> Vec<Value> {
     let harnesses: Vec<_> = state
         .backend_registry
@@ -253,7 +315,7 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
     for node in &state.config.remote_nodes.nodes {
-        let result = node_request(state, &node.id, "/machine-transfer/capabilities", None).await;
+        let result = node_transfer_capabilities(state, &node.id).await;
         rows.push(match result {Ok(v)=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":v["harnesses"]}),Err((_,e))=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":e})});
     }
     rows
@@ -353,7 +415,7 @@ async fn validate_destination(
             if !state.config.remote_nodes.enabled {
                 return Err(conflict("Remote nodes are disabled"));
             }
-            let c = node_request(state, id, "/machine-transfer/capabilities", None).await?;
+            let c = node_transfer_capabilities(state, id).await?;
             if !c["harnesses"]
                 .as_array()
                 .is_some_and(|h| h.iter().any(|h| h.as_str() == Some(backend)))

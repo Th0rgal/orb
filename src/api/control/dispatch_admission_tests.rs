@@ -7749,3 +7749,225 @@ fn http_restored_scheduler_batch_retry_preserves_pending_and_consumed_state() {
         });
     }
 }
+
+#[tokio::test]
+async fn remote_claude_allocates_and_resumes_native_session() {
+    let fixture = spawn_fixture_node(
+        "claude-transfer-fixture",
+        "CLAUDE_TRANSFER_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let response = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "title":"Claude continuity", "prompt":"first turn", "project":"lido",
+            "backend":"claudecode", "model_override":"claude-opus-5-5",
+            "remote_node_id":"claude-transfer-fixture", "idempotency_key":"claude-continuity-test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+    let session = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    assert!(Uuid::parse_str(&session).is_ok());
+    let command = fixture.submissions.lock().unwrap()[0]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        command.contains(&format!("--session-id '{}'", session)),
+        "{command}"
+    );
+    fixture.set_state("succeeded");
+    wait_until("Claude first turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("Claude first ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    fixture.set_state("running");
+    let response = h.request(false, id, json!({"content":"second turn"})).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 2);
+    let command = submissions[1]["payload"]["command"].as_str().unwrap();
+    assert!(
+        command.contains(&format!("--resume '{}'", session)),
+        "{command}"
+    );
+    assert!(!command.contains("--session-id"));
+    fixture.set_state("succeeded");
+}
+
+#[tokio::test]
+async fn transferred_claude_starts_with_context_then_resumes_same_session() {
+    let fixture = spawn_fixture_node(
+        "claude-moved-fixture",
+        "CLAUDE_MOVED_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    use crate::api::mission_store::transfer::{Machine, Transfer};
+    let store = h.control.mission_store.clone();
+    let mission = store
+        .create_mission(
+            Some("Transferred Claude"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = mission.id;
+    store
+        .update_mission_status(id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    let mission = store.get_mission(id).await.unwrap().unwrap();
+    let mut transfer = store
+        .save_machine_transfer(
+            Transfer {
+                id: Uuid::new_v4(),
+                mission_id: id,
+                key: "claude-transfer".into(),
+                revision: 0,
+                phase: "preparing".into(),
+                source: Machine::Client {
+                    id: "source-mac".into(),
+                },
+                destination: Machine::Node {
+                    id: "claude-moved-fixture".into(),
+                },
+                source_revision: mission.updated_at,
+                source_generation: 0,
+                generation: 1,
+                backend: "claudecode".into(),
+                model: Some("claude-opus-5-5".into()),
+                effort: None,
+                source_root: Some("/source".into()),
+                destination_root: None,
+                manifest: None,
+                receipt: None,
+                context: "portable-context-sentinel".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    transfer.phase = "verified".into();
+    transfer.destination_root = Some("/transferred-workspace".into());
+    transfer.receipt = Some(json!({"verified":true}));
+    let revision = transfer.revision;
+    transfer = store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    transfer.phase = "activated".into();
+    let revision = transfer.revision;
+    store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    let response = h
+        .request(false, id, json!({"content":"first turn after move"}))
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let session = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    assert!(Uuid::parse_str(&session).is_ok());
+    let command = fixture.submissions.lock().unwrap()[0]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        command.contains(&format!("--session-id '{}'", session)),
+        "{command}"
+    );
+    assert!(command.contains("portable-context-sentinel"), "{command}");
+    assert!(command.contains("/transferred-workspace"), "{command}");
+    fixture.set_state("succeeded");
+    wait_until("Claude first turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("Claude first ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    fixture.set_state("running");
+    let response = h.request(false, id, json!({"content":"second turn"})).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 2);
+    let command = submissions[1]["payload"]["command"].as_str().unwrap();
+    assert!(
+        command.contains(&format!("--resume '{}'", session)),
+        "{command}"
+    );
+    assert!(!command.contains("--session-id"));
+    assert!(
+        !command.contains("portable-context-sentinel"),
+        "history must not be injected on native resume: {command}"
+    );
+    assert!(command.contains("/transferred-workspace"), "{command}");
+    fixture.set_state("succeeded");
+}

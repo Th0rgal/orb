@@ -1253,7 +1253,7 @@ pub(crate) async fn continue_on_node(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex"
+        GROK_BACKEND | "opencode" | "codex" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1368,6 +1368,15 @@ pub(crate) async fn continue_on_node(
                     "Codex remote session has no recorded model".to_string(),
                 )
             })?,
+            prompt: prompt.clone(),
+            resume_session_id: session_id.clone(),
+        }
+    } else if mission.backend == "claudecode" {
+        RemoteHarnessPlan::ClaudeCode {
+            model: mission
+                .model_override
+                .clone()
+                .map(|m| m.strip_prefix("anthropic/").unwrap_or(&m).to_string()),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
         }

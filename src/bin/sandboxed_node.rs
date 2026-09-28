@@ -1132,16 +1132,47 @@ async fn transfer_capabilities(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
-    let mut harnesses = Vec::new();
-    for bin in ["grok", "codex", "opencode"] {
-        let found = std::env::var_os("PATH")
-            .is_some_and(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).is_file()));
-        if found && (bin != "grok" || state.managed_auth.advertised().iter().any(|p| p == "grok")) {
-            harnesses.push(bin);
-        }
-    }
-    Ok(Json(serde_json::json!({"version":1,"harnesses":harnesses})))
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    let harnesses = transfer_harnesses(
+        &paths,
+        state.managed_auth.advertised().iter().any(|p| p == "grok"),
+    );
+    Ok(Json(serde_json::json!({"version":2,"harnesses":harnesses})))
 }
+fn transfer_harnesses(paths: &std::ffi::OsStr, grok_auth: bool) -> Vec<&'static str> {
+    [
+        ("grok", "grok"),
+        ("codex", "codex"),
+        ("opencode", "opencode"),
+        ("claude", "claudecode"),
+    ]
+    .into_iter()
+    .filter(|(bin, _)| {
+        std::env::split_paths(paths).any(|p| p.join(bin).is_file()) && (*bin != "grok" || grok_auth)
+    })
+    .map(|(_, backend)| backend)
+    .collect()
+}
+#[cfg(test)]
+mod transfer_harness_tests {
+    #[test]
+    fn installed_claude_is_advertised_by_backend_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("claude"), "fixture").unwrap();
+        std::fs::write(dir.path().join("grok"), "fixture").unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false),
+            vec!["claudecode"]
+        );
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), true),
+            vec!["grok", "claudecode"]
+        );
+        std::fs::remove_file(dir.path().join("claude")).unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false).is_empty());
+    }
+}
+
 async fn transfer_files(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
