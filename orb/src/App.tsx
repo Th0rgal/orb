@@ -12,7 +12,7 @@ import { nativeComposerDrop } from "./composerDrop";
 import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
 import { startLocalOrigin } from "./localAgents";
-import { ChangeMachine } from "./ChangeMachine";
+import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
@@ -2137,10 +2137,16 @@ function MissionDock(p: {
   };
   onMount(() => window.addEventListener("pointerdown", close));
   onCleanup(() => window.removeEventListener("pointerdown", close));
+  // Warm the machine list once the conversation is idle so the menu opens filled.
+  createEffect(on(() => p.mission?.id, id => {
+    if (!id) return;
+    const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
+    onCleanup(() => clearTimeout(timer));
+  }));
   return (
     <div class="under">
       <div class="fork-anchor">
-        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
+        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
           <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
           {p.destination} <Ic.ChevronDown size={10} />
         </button>
@@ -2388,6 +2394,15 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const prepareSearch=async(signal:AbortSignal)=>{
     while(!disposed&&!signal.aborted&&peekReadyTranscript(p.id)?.hasOlder)await loadOlder();
   };
+  // Core rewrites a local run's reply in place and never streams it, so a
+  // transcript read mid-run stays partial. Re-read once the native worker
+  // (2s cadence) has posted the final snapshot.
+  createEffect(on(() => localRunActive(p.id), (active, was) => {
+    if (active || !was) return;
+    const timers = [3000, 8000].map(ms => setTimeout(() => void resync(true), ms));
+    onCleanup(() => timers.forEach(clearTimeout));
+  }));
+
   onMount(() => {
     const reload = async () => {
       if (refreshing()) return;

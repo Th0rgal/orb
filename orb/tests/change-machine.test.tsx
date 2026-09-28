@@ -1,12 +1,12 @@
 import { render, fireEvent, waitFor, cleanup } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import {cacheMachineDestinations} from "../src/machineDestinations";
-import { ChangeMachine } from "../src/ChangeMachine";
+import { ChangeMachine, forgetMachineDestinationLoads, preloadMachineDestinations } from "../src/ChangeMachine";
 import * as transfers from "../src/machineTransfer";
 import type { Mission, HarnessChoice } from "../src/api";
 const mission: Mission = { id: "source", title: "Original", status: "awaiting_user", history: [], created_at: "", updated_at: "", backend: "codex", model_override: "model" };
 const choices: HarnessChoice[] = [{ backend: { id: "codex", name: "Codex" }, models: [{ value: "model", label: "Model" }] }];
-afterEach(() => { cacheMachineDestinations([]); cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cacheMachineDestinations([]); forgetMachineDestinationLoads(); cleanup(); vi.restoreAllMocks(); });
 it("lists the current machine and explains unavailable targets", async () => {
   vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({ version: 1, actions: [], destinations: [{ machine: { kind: "core" }, label: "Core", available: true }, { machine: { kind: "node", id: "offline" }, label: "Offline", available: false, reason: "Machine unreachable" }] });
   const ui = render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
@@ -64,4 +64,15 @@ it.each(['ashur','babylon','nippur','old-agent','dgx-spark-admin','sepolia'])('k
   expect([...harness.options].some(o=>o.value==='claudecode'&&!o.disabled)).toBe(true);
   expect((ui.container.querySelector('select[aria-label="Transfer model"]') as HTMLSelectElement).value).toBe('claude-opus-5-5');
   expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("opens instantly from a preload with a single request", async () => {
+  const inspect = vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({ version: 1, actions: [], destinations: [{ machine: { kind: "node", id: "spark" }, label: "Spark", available: true }] });
+  preloadMachineDestinations(mission.id);
+  await waitFor(() => expect(inspect).toHaveBeenCalledTimes(1));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const ui = render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
+  expect(ui.queryByText("Checking machines…")).toBeNull();
+  await waitFor(() => expect((ui.getByRole("menuitem", { name: /Spark/ }) as HTMLButtonElement).disabled).toBe(false));
+  expect(inspect).toHaveBeenCalledTimes(1);
 });
