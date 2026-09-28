@@ -733,6 +733,12 @@ fn spawn_claude(
                         };
                         write_line(&mut stdin,&json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}).to_string())?;
                     } else if event["type"] == "result" {
+                        // A resumed session first settles what the previous process
+                        // left behind (a stopped background task) and reports it as
+                        // a result of zero turns. The request has not run yet.
+                        if event["num_turns"] == 0 && event["is_error"] != true {
+                            continue;
+                        }
                         if let Some(piece) = claude_text.consume(&event) {
                             output.append(&piece);
                         }
@@ -2404,6 +2410,48 @@ printf '%s\n' '{"type":"result"}'
             assert!(local_agents_poll(id.clone()).unwrap().done);
             runs().lock().unwrap().remove(&id);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resumed_claude_session_keeps_the_reply_after_its_empty_first_result() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(&events, concat!(
+            r#"{"type":"system","subtype":"task_notification","task_id":"stale","status":"stopped"}"#, "\n",
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"orb-init"}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}"#, "\n",
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Resumed reply."}]}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Resumed reply."}"#, "\n",
+        )).unwrap();
+        let bin = dir.path().join("claude");
+        // The real CLI keeps working only while its input stays open.
+        std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\nhead -3 '{0}'\nif read -r line && read -r line && sleep 0.3 && read -r -t 1 line; then :; fi\ntail -2 '{0}'\ncat >/dev/null\n", events.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let id = format!("resumed-{}", uuid_like());
+        local_agents_start(StartRequest {
+            id: id.clone(),
+            harness: "claudecode".into(),
+            bin: bin.to_string_lossy().into_owned(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "test".into(),
+            model: None,
+            session_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            image_paths: vec![],
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let state = loop {
+            let state = local_agents_poll(id.clone()).unwrap();
+            if state.done || Instant::now() > deadline {
+                break state;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        runs().lock().unwrap().remove(&id);
+        assert!(state.done, "the run did not finish");
+        assert_eq!(state.text, "Resumed reply.");
     }
 
     #[test]
