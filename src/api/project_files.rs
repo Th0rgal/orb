@@ -430,34 +430,13 @@ async fn delete_file(
     }
     let store = context_store(&state, &slug)?;
     tokio::task::spawn_blocking(move || {
-        crate::project_context::valid_path(&q.path).map_err(bad_request)?;
-        let manifest = store.manifest().map_err(internal)?;
-        let prefix = format!("{}/", q.path);
-        let mut entries: Vec<_> = manifest
-            .entries
-            .iter()
-            .filter(|(path, _)| *path == &q.path || path.starts_with(&prefix))
-            .collect();
-        entries.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
-        for (path, entry) in entries {
-            let receipt = store
-                .apply(crate::project_context::Operation {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    path: path.clone(),
-                    base: Some(entry.revision),
-                    hash: None,
-                    directory: false,
-                    delete: true,
-                    source: "orb".into(),
-                })
-                .map_err(bad_request)?;
-            if receipt.conflict {
-                return Err((
-                    StatusCode::CONFLICT,
-                    "A file changed during deletion; the remaining files were kept".into(),
-                ));
+        store.delete_tree(&q.path).map_err(|error| {
+            if error.contains("changed during deletion") {
+                (StatusCode::CONFLICT, error)
+            } else {
+                bad_request(error)
             }
-        }
+        })?;
         Ok(Json(serde_json::json!({"deleted":q.path})))
     })
     .await

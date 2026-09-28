@@ -26,6 +26,12 @@ export function fileDestination(path: string, value: string, rename: boolean): s
 /** Files and folders share one transfer; another project receives a copy before the source is removed. */
 export async function transferProjectFile(slug: string, path: string, destination: string, copy = false, project = slug): Promise<void> {
   const version = connectionVersion();
+  if (project !== slug) {
+    // This computer's copy would happily create a project Core no longer has.
+    const known = await api<{ projects?: Array<{ slug?: string; status?: string }> }>("/api/projects");
+    if (version !== connectionVersion()) throw new Error("Connection changed. Try again.");
+    if (!known.projects?.some(row => row.slug === project && row.status !== "archived" && row.status !== "deleted")) throw new Error("The destination project no longer exists. Refresh the project list.");
+  }
   const local = await localContextFile(slug, copy ? "copy" : "move", path, destination, undefined, project === slug ? undefined : project);
   if (local) return;
   if (version !== connectionVersion()) throw new Error("Connection changed. Try again.");
