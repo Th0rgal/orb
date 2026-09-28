@@ -57,7 +57,12 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
     let adapter = match cursor::Cursor::from_account(&e.selection.account) {
         Ok(a) => a,
         Err(_) => {
-            if e.turns[i].phase != Phase::CancelRequested {
+            // Keep cancellation and submission ambiguity: only a turn known not
+            // to be in flight may later be requeued from ReconnectRequired.
+            if !matches!(
+                e.turns[i].phase,
+                Phase::CancelRequested | Phase::Submitting | Phase::SubmissionUncertain
+            ) {
                 e.turns[i].phase = Phase::ReconnectRequired;
             }
             receipt(store, e, i).await?;
@@ -100,6 +105,21 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
         // Only initial creation has a provider-enforced unique identity. A follow-up
         // without a receipt MUST NOT guess latestRunId or submit a second prompt.
         if i != 0 {
+            // Authentication rejected this follow-up before any provider work
+            // started: resubmit once the account answers again.
+            if let (Phase::ReconnectRequired, Some(agent)) =
+                (e.turns[i].phase, e.external_id.clone())
+            {
+                match adapter.agent(&agent).await {
+                    Ok(_) => {
+                        e.turns[i].phase = Phase::Queued;
+                        e.turns[i].detail = None;
+                    }
+                    Err(error) => e.turns[i].detail = Some(error),
+                }
+                receipt(store, e, i).await?;
+                return Ok(());
+            }
             e.turns[i].phase = Phase::SubmissionUncertain;
             receipt(store, e, i).await?;
             return Ok(());
@@ -117,12 +137,13 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
                 }
             }
             Err(error) => {
-                e.turns[i].phase = if error == "reconnect_required" {
-                    Phase::ReconnectRequired
-                } else {
-                    Phase::SubmissionUncertain
+                e.turns[i].phase = match error.as_str() {
+                    "reconnect_required" => Phase::ReconnectRequired,
+                    // The deterministic agent id was never created: nothing ran.
+                    "not_found" => Phase::Queued,
+                    _ => Phase::SubmissionUncertain,
                 };
-                e.turns[i].detail = Some(error);
+                e.turns[i].detail = (error != "not_found").then_some(error);
             }
         }
         receipt(store, e, i).await?;
@@ -282,6 +303,50 @@ mod tests {
             assert_eq!(
                 store.cloud_executions().await.unwrap()[0].turns[0].phase,
                 Phase::CancelRequested
+            );
+        }
+    }
+    #[tokio::test]
+    async fn missing_credentials_never_hide_an_ambiguous_submission() {
+        // A turn that may already be in flight must not become ReconnectRequired:
+        // that phase is requeued after reconnecting and would submit twice.
+        for phase in [Phase::Submitting, Phase::SubmissionUncertain] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = Arc::new(
+                SqliteMissionStore::new(dir.path().into(), "ambiguous-auth")
+                    .await
+                    .unwrap(),
+            );
+            let mut first = Turn::new("first".into(), "hello".into());
+            first.phase = Phase::ResponseComplete;
+            first.external_id = Some("run".into());
+            let mut follow = Turn::new("follow".into(), "again".into());
+            follow.phase = phase;
+            let e = Execution {
+                mission_id: Uuid::new_v4(),
+                request_key: "launch".into(),
+                request_signature: "launch".into(),
+                revision: 0,
+                selection: Selection {
+                    provider: Provider::CursorCloud,
+                    account: "missing-account".into(),
+                    repository: None,
+                    git_ref: None,
+                    model: None,
+                    model_params: vec![],
+                },
+                external_id: Some("agent".into()),
+                external_url: None,
+                turns: vec![first, follow],
+            };
+            let e = store
+                .save_cloud_execution(e, None, None, None, vec![])
+                .await
+                .unwrap();
+            tick(&store, e).await.unwrap();
+            assert_eq!(
+                store.cloud_executions().await.unwrap()[0].turns[1].phase,
+                phase
             );
         }
     }
