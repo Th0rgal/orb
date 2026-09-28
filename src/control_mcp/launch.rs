@@ -20,6 +20,8 @@ pub fn require_runtime_owner(
     Ok(())
 }
 
+/// Arguments, environment and optional settings written for a harness launch.
+type HarnessLaunch = (Vec<String>, HashMap<String, String>, Option<Value>);
 pub fn overlays(
     harness: &str,
     binary: &str,
@@ -28,7 +30,7 @@ pub fn overlays(
     mission_id: &str,
     existing: &HashMap<String, String>,
     settings_file: &str,
-) -> Result<(Vec<String>, HashMap<String, String>, Option<Value>), String> {
+) -> Result<HarnessLaunch, String> {
     let args = vec![
         "--api-url",
         api_url,
@@ -192,18 +194,18 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let header = &args[..separator];
     let command = &args[separator + 1..];
     let program = command.first().ok_or("Missing harness executable")?;
-    if header.len() % 2 != 0 {
+    if !header.len().is_multiple_of(2) {
         return Err("Launcher options require values".into());
     }
     let mut options = HashMap::new();
-    for pair in header.chunks_exact(2) {
+    for [key, value] in header.as_chunks::<2>().0 {
         if !matches!(
-            pair[0].as_str(),
+            key.as_str(),
             "--harness" | "--api-url" | "--token-file" | "--mission-id"
         ) {
             return Err("Unknown launcher option".into());
         }
-        if options.insert(pair[0].as_str(), pair[1].as_str()).is_some() {
+        if options.insert(key.as_str(), value.as_str()).is_some() {
             return Err("Duplicate launcher option".into());
         }
     }

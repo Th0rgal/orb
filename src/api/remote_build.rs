@@ -2268,7 +2268,9 @@ printf '%s' "$REMOTE_BUILD_TEST_HTTP_STATUS"
         use crate::remote_node::protocol::NodeHeartbeat;
         let old: NodeHeartbeat = serde_json::from_value(serde_json::json!({
             "node_id":"a-old", "online":true, "capacity_total":1,
-            "capacity_available":1, "active_leases":0, "version":"old", "protocol_version":4,
+            "capacity_available":1, "active_leases":0, "version":"old",
+            // Current protocol: the fixture isolates source-bundle capacity.
+            "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
             "labels":["lean"], "disk_available_bytes": 1000 * GIB,
             "mem_available_bytes": 1000 * GIB,
         }))
