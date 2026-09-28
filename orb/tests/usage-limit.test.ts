@@ -14,3 +14,8 @@ it("does not read a throttled Orb API call as a provider limit", () => {
   expect(providerLimit("429 Codex usage limit reached")?.kind).toBe("quota");
   expect(providerLimit("Anthropic API error: 529 overloaded_error")?.kind).toBe("rate");
 });
+
+it("leaves a filesystem quota error alone", () => {
+  expect(providerLimit("Disk quota exceeded (os error 122)")).toBeUndefined();
+  expect(providerLimit("Gemini: quota exceeded for this project")?.kind).toBe("quota");
+});

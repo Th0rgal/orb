@@ -28,6 +28,8 @@ export function resetPhrase(when: string): string {
 }
 
 export function providerLimit(raw: string): ProviderLimit | undefined {
+  // A full disk says "quota exceeded" too. That is not a provider limit.
+  if (/\bos error \d+|disk quota/i.test(raw)) return undefined;
   // Orb's own API errors start with their HTTP status. A throttled login or
   // settings call is not an AI provider limit unless the body names one.
   if (/^\s*\d{3}\b/.test(raw) && !QUOTA.test(raw) && !provider(raw)) return undefined;
