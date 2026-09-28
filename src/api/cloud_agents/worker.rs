@@ -61,11 +61,16 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
             // to be in flight may later be requeued from ReconnectRequired.
             if !matches!(
                 e.turns[i].phase,
-                Phase::CancelRequested | Phase::Submitting | Phase::SubmissionUncertain
+                Phase::CancelRequested
+                    | Phase::Submitting
+                    | Phase::SubmissionUncertain
+                    | Phase::ReconnectRequired
             ) {
+                // Persist only the transition: the worker polls every 5s and an
+                // unchanged receipt would still bump the revision and updated_at.
                 e.turns[i].phase = Phase::ReconnectRequired;
+                receipt(store, e, i).await?;
             }
-            receipt(store, e, i).await?;
             return Ok(());
         }
     };
@@ -307,6 +312,47 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn a_disconnected_turn_is_not_rewritten_on_every_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().into(), "disconnected")
+                .await
+                .unwrap(),
+        );
+        let e = Execution {
+            parent_mission_id: None,
+            mission_id: Uuid::new_v4(),
+            request_key: "launch".into(),
+            request_signature: "launch".into(),
+            revision: 0,
+            selection: Selection {
+                provider: Provider::CursorCloud,
+                account: "missing-account".into(),
+                repository: None,
+                git_ref: None,
+                model: None,
+                model_params: vec![],
+            },
+            external_id: None,
+            external_url: None,
+            turns: vec![Turn::new("turn".into(), "hello".into())],
+        };
+        let e = store
+            .save_cloud_execution(e, None, None, None, vec![])
+            .await
+            .unwrap();
+        tick(&store, e).await.unwrap();
+        let first = store.cloud_executions().await.unwrap().remove(0);
+        assert_eq!(first.turns[0].phase, Phase::ReconnectRequired);
+        tick(&store, first.clone()).await.unwrap();
+        tick(&store, first.clone()).await.unwrap();
+        assert_eq!(
+            store.cloud_executions().await.unwrap()[0].revision,
+            first.revision
+        );
+    }
+
     #[tokio::test]
     async fn missing_credentials_never_hide_an_ambiguous_submission() {
         // A turn that may already be in flight must not become ReconnectRequired:

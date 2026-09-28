@@ -65,6 +65,37 @@ class NativeGoalTests(unittest.TestCase):
         self.assertNotIn('goal.status', output.getvalue())
         self.assertEqual(output.getvalue().count('turn.completed'), 1)
 
+    def test_goal_controls_act_on_the_native_goal_without_objective_check(self):
+        for word, expected_calls, status in (
+            ('pause', [('thread/goal/set', {'threadId':'same-thread','status':'paused'})], 'paused'),
+            ('clear', [('thread/goal/clear', {'threadId':'same-thread'})], 'cleared'),
+            ('status', [], 'active'),
+        ):
+            session = NativeSession.__new__(NativeSession)
+            session.config = {'model':'test-model', 'session':'same-thread', 'prompt':f'/goal {word}'}
+            session.inbound = queue.Queue()
+            session.deferred = []
+            session.goal_status = None
+            session.pending_hint = None
+            goal = {'status':'active', 'objective':'ship the release'}
+            calls = []
+            def rpc(method, params):
+                calls.append((method, params))
+                if method == 'thread/resume':
+                    return {'thread':{'id':'same-thread','cwd':os.getcwd(),'turns':[]}}
+                if method == 'thread/goal/get':
+                    return {'goal': None if word == 'clear' and len(calls) > 3 else dict(goal, status=status)}
+                return {}
+            session.rpc = rpc
+            session.send = lambda message: None
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                session.run()
+            mutations = [(m, p) for m, p in calls if m not in ('initialize', 'thread/resume', 'thread/goal/get')]
+            self.assertEqual(mutations, expected_calls, word)
+            self.assertIn(f'"status": "{status}"', output.getvalue(), word)
+            self.assertEqual(output.getvalue().count('turn.completed'), 1, word)
+            self.assertNotIn('turn/start', [m for m, _ in calls])
+
     def test_resume_preserves_native_goal_and_budget(self):
         goal = {'status': 'active', 'objective': 'all roadmap criteria', 'tokenBudget': None, 'tokensUsed': 11314410}
         self.assertEqual(goal_action(goal, '/goal resume'), {'status': 'active'})

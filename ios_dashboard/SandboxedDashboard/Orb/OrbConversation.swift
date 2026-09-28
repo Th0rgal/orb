@@ -47,7 +47,7 @@ struct OrbConversation: View {
     /// Same wording as the desktop: the step, then how long Orb has seen it working.
     private func progress(at now: Date) -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
-        let key = turn?["key"].text ?? id ?? ""
+        let key = turn?["key"].text ?? "local:\(id ?? "")"
         let started = OrbWorkClock.start(key)
         let seconds = max(0, Int(now.timeIntervalSince(started)))
         let provider = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot"][execution["selection"]["provider"].text] ?? "the service"
@@ -69,11 +69,15 @@ struct OrbConversation: View {
     }
     /// Sends quiz answers through the normal, idempotent send path; the typed draft is restored after.
     private func sendReply(_ reply: String) async -> Bool {
-        guard OrbDisk.read(pendingKey, as: OrbPending.self) == nil else { error = "Another message is still being confirmed. Send it before answering the quiz."; return false }
+        // Retrying the same answers reuses the saved request and its message id.
+        if let pending = OrbDisk.read(pendingKey, as: OrbPending.self), pending.body["content"].text != reply {
+            error = "Another message is still being confirmed. Send it before answering the quiz."
+            return false
+        }
         let draft = text; text = reply
-        await send()
-        // The quiz keeps its own answers; what was being typed must survive a refused send too.
-        let sent = text.isEmpty && error.isEmpty
+        // Acceptance, not the refresh that follows, decides whether the quiz was sent.
+        let sent = await send()
+        // The quiz keeps its own answers; what was being typed survives every outcome.
         text = draft
         return sent
     }
@@ -181,6 +185,8 @@ struct OrbConversation: View {
                 }
             }
         }
+        // A local conversation has no turn ids: restart its clock for each turn.
+        .onChange(of: working) { _, now in if !now { OrbWorkClock.stop("local:\(id ?? "")") } }
         .onChange(of: history.last?.0) { _, _ in
             if !openedAtLatest || followsLatest {
                 scroll.scrollTo("conversation-bottom", anchor: .bottom)
@@ -341,8 +347,9 @@ struct OrbConversation: View {
             self.error = "Connection unavailable. Last observed state is preserved. \(error.localizedDescription)"
         }
     }
-    private func send() async {
-        guard !busy, !cloudBlocked else { return }; busy = true; defer { busy = false }
+    /// True once Core accepted the request, even if the refresh that follows fails.
+    @discardableResult private func send() async -> Bool {
+        guard !busy, !cloudBlocked else { return false }; busy = true; defer { busy = false }
         do {
             guard !isCloud || attachments.isEmpty else { throw OrbHTTPError(status: 400, detail: "This cloud service does not support attachments. Remove the files before sending.") }
             try OrbDisk.save(attachments, key: draftKey + ":files")
@@ -388,9 +395,11 @@ struct OrbConversation: View {
             if id == nil { guard !result["id"].text.isEmpty else { throw URLError(.cannotParseResponse) }; id = result["id"].text }
             OrbReadCache.invalidate("project:\(project)")
             OrbDisk.remove(pendingKey); attachments = []; OrbDisk.remove(draftKey + ":files"); text = ""; error = ""; followsLatest = true; openedAtLatest = false; await refresh(force: true)
+            return true
         } catch {
             if let http = error as? OrbHTTPError, [400, 422].contains(http.status) { OrbDisk.remove(pendingKey) }
             self.error = "Message kept. \(error.localizedDescription)"
+            return false
         }
     }
     private func move() async {
@@ -546,4 +555,5 @@ struct OrbAgentPicker: View {
 @MainActor enum OrbWorkClock {
     private static var starts: [String: Date] = [:]
     static func start(_ key: String) -> Date { if let date = starts[key] { return date }; let now = Date(); starts[key] = now; return now }
+    static func stop(_ key: String) { starts[key] = nil }
 }
