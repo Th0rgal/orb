@@ -796,3 +796,14 @@ Native goal non-completion is authoritative for board settlement: live settlemen
 and restart recovery record a blocked outcome even when final prose looks complete
 or is absent. Dependent tasks remain gated; the board does not automatically retry
 these stops. Native completion still requires the usual delivery evidence.
+
+### Hosted cloud attempts
+
+Discover accounts and capabilities with `list_cloud_accounts` and supported models
+with `list_cloud_models` before setting `start_mission.cloud`. Use a stable
+`idempotency_key` for creation and `client_message_id` for follow-ups, including
+unchanged model parameters on retries. Read `get_cloud_execution` to reconcile
+provider identities and uncertain submissions; do not create replacement work
+after a transport timeout. Cloud attempts currently reject track leases, writer
+grants and scheduled admission, so autonomous controllers must not dispatch
+tracked work through this route. Cancellation needs provider confirmation.

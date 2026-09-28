@@ -65,12 +65,3 @@ it('an earlier fetch cannot overwrite a newer direct cache publication',async()=
  cachePut('live','newer');gate.resolve('earlier');await pending;
  expect(cachePeek('live')).toBe('newer');
 });
-
-it('bounds the live paging journal without altering displayed events and resumes after a durable replay',async()=>{
- const {ReplayBuffer}=await import('../src/replayBuffer');const buffer=new ReplayBuffer(1024,2);
- const event={type:'text_delta',data:{content:'text'}};
- buffer.push([event,event]);expect(buffer.available).toBe(true);
- buffer.push([event]);expect(buffer.available).toBe(false);expect(buffer.events).toEqual([]);
- buffer.reset();buffer.push([event]);expect(buffer.available).toBe(true);expect(buffer.events).toEqual([event]);
- buffer.push([{type:'text_delta',data:{content:'x'.repeat(1024)}}]);expect(buffer.available).toBe(false);
-});

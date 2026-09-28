@@ -827,8 +827,6 @@ restart shows zero drift (plan step 9 retires them).
   command after the wake collects the receipt (or attaches if still running).
   The default poll interval for the non-passive path is now 15 s
   (`REMOTE_BUILD_POLL_SECS`).
-<<<<<<< HEAD
-=======
 
 ### DGX Spark in the fleet (plan step 8)
 
@@ -851,7 +849,6 @@ memory shared with vLLM and a GitHub CI runner — is handled by an external
   `dgx-spark` (override `SPARK_BUILD_NODE_ID`) with the same exit contract
   (91 = fleet unavailable). Other commands still use the legacy
   `/api/spark/offload` path until it is retired (step 9).
->>>>>>> 7d8a390e (Step 8: DGX Spark as a fleet node — arbiter slot provider on the node, spark-build via remote-lean-build)
 
 ### Native Grok goals (CLI 1.0.34)
 

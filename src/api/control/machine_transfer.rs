@@ -89,6 +89,13 @@ pub(crate) async fn committed(
 }
 pub(crate) async fn guard(store: &Arc<dyn MissionStore>, id: Uuid) -> Result<(), String> {
     if store
+        .get_mission(id)
+        .await?
+        .is_some_and(|m| m.backend.starts_with("cloud_"))
+    {
+        return Err("Cloud conversations use their provider account; local harness and machine operations are unavailable".into());
+    }
+    if store
         .machine_transfers(id)
         .await?
         .iter()

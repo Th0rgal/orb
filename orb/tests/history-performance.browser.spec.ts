@@ -42,5 +42,4 @@ test('older history preserves scroll and remains accessible in WebKit',async({pa
  await page.getByText(/^Message 2\./).first().scrollIntoViewIfNeeded();
  await expect(page.getByText(/^Message 2\./).first()).toBeInViewport();
  await info.attach('history-metrics.json',{body:JSON.stringify({limits,anchorShift:after-before,deferred:await page.locator('.st-deferred').count()}),contentType:'application/json'});
- await page.screenshot({path:'screenshots/history-performance.png',fullPage:false});
 });

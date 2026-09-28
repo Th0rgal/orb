@@ -2587,12 +2587,17 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     const row=resend();if(!row||row.state==='sending')return;
     setResend({...row,state:"sending",error:undefined});
     const version=connectionVersion();
-    const project=mission()?.project;
-    const chips=project?mentionedChips(row.text,await loadAttachItems(project)):[];
-    const accepted=await sendMsg(row.text,[],chips,row.id);
-    if(version!==connectionVersion())return;
-    setResend({...row,state:accepted?"accepted":"error",error:accepted?undefined:sendError()||"Couldn’t send. Retry uses the same message identity."});
-    if(!accepted)setSendError(null);
+    try {
+      const project=mission()?.project;
+      const chips=project?mentionedChips(row.text,await loadAttachItems(project)):[];
+      if(version!==connectionVersion())return;
+      const accepted=await sendMsg(row.text,[],chips,row.id);
+      if(version!==connectionVersion())return;
+      setResend({...row,state:accepted?"accepted":"error",error:accepted?undefined:sendError()||"Couldn’t send. Retry uses the same message identity."});
+      if(!accepted)setSendError(null);
+    } catch(error) {
+      if(version===connectionVersion())setResend({...row,state:"error",error:String(error)});
+    }
   };
   const sendEditedPrompt = (text: string) => {
     // One pending resend owns its identity even across ambiguous network failures.

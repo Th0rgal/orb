@@ -1,0 +1,25 @@
+--- a/skills/productivity/project-manager/SKILL.md
++++ b/skills/productivity/project-manager/SKILL.md
+@@ -70,3 +70,22 @@
+ These tools reach every project on the box. When the conversation is about
+ one project, do not mutate another one's state without naming it and getting
+ the owner's confirmation first. Reads are always fine.
++
++
++### Hosted cloud attempts
++
++Discover accounts and effective capabilities with `list_cloud_accounts`. An
++available account can be selected through `start_mission.cloud` with provider
++`chatgpt`, `grok_bot`, or `cursor_cloud`, an account reference, optional supported
++model/repository/ref, and a stable `idempotency_key`. Never send credentials or
++local directory contents in that selection. Connecting an account starts no work.
++
++Read `get_cloud_execution` for durable provider identities, turns and results.
++A transport disconnect is not completion; `submission_uncertain` requires
++reconciliation before a new submission. Continue the same mission using
++`send_message_to_mission` and a stable `client_message_id` UUID. Response completion,
++archive and track acceptance are distinct. Cancellation must be provider-confirmed.
++
++The initial hosted route does not implement track leases, writer grants or
++scheduled admission: do not use it for autonomous track dispatch. Unsupported
++connectors remain unavailable until their bounded real-provider canaries pass.

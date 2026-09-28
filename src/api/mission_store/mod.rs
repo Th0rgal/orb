@@ -2079,6 +2079,33 @@ pub trait MissionStore: Send + Sync {
         Ok(counts)
     }
 
+    async fn append_cloud_event(
+        &self,
+        _id: Uuid,
+        _event: crate::api::cloud_agents::Event,
+    ) -> Result<(), String> {
+        Err("Cloud events require SQLite".into())
+    }
+    async fn cloud_events(
+        &self,
+        _id: Uuid,
+    ) -> Result<Vec<crate::api::cloud_agents::Event>, String> {
+        Ok(vec![])
+    }
+    async fn cloud_executions(&self) -> Result<Vec<crate::api::cloud_agents::Execution>, String> {
+        Ok(vec![])
+    }
+    async fn save_cloud_execution(
+        &self,
+        _execution: crate::api::cloud_agents::Execution,
+        _expected: Option<u64>,
+        _title: Option<String>,
+        _project: Option<String>,
+        _tags: Vec<String>,
+    ) -> Result<crate::api::cloud_agents::Execution, String> {
+        Err("Cloud agents require durable SQLite storage".into())
+    }
+
     async fn machine_transfers(&self, _id: Uuid) -> Result<Vec<transfer::Transfer>, String> {
         Ok(vec![])
     }

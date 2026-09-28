@@ -29,9 +29,7 @@ test('cloud quiz survives polling and submits choices to the same conversation',
  await expect(page.getByRole('radio',{name:'B 56'})).toBeChecked();
  await expect(page.getByRole('region',{name:'Quiz interactif'})).toHaveCSS('background-color','rgb(246, 246, 244)');
  const box=await page.getByRole('region',{name:'Quiz interactif'}).boundingBox();expect(box!.height).toBeLessThan(520);
- await page.screenshot({path:'screenshots/chatgpt-quiz-interactive.png',fullPage:true});
  await page.emulateMedia({colorScheme:'dark'});
- await page.screenshot({path:'screenshots/chatgpt-quiz-interactive-dark.png',fullPage:true});
  await page.getByRole('button',{name:'Suivant →'}).click();
  await page.getByRole('radio',{name:'C Apprendre'}).check();
  await page.getByRole('button',{name:'Envoyer mes réponses'}).click();

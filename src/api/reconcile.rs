@@ -570,6 +570,9 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
             .collect();
 
         for mission in active {
+            if mission.backend.starts_with("cloud_") {
+                continue;
+            }
             report.missions_scanned += 1;
             let has_durable_run = match store.get_active_mission_run(mission.id).await {
                 Ok(run) => run.is_some_and(|run| {
@@ -666,7 +669,7 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
         };
         for mission in recent
             .into_iter()
-            .filter(|m| m.status == MissionStatus::AwaitingUser)
+            .filter(|m| m.status == MissionStatus::AwaitingUser && !m.backend.starts_with("cloud_"))
         {
             report.missions_scanned += 1;
             let has_events = store
@@ -756,6 +759,9 @@ send a new message or re-create the mission.",
             }
         };
         for mission in interrupted {
+            if mission.backend.starts_with("cloud_") {
+                continue;
+            }
             if reresume_budget == 0 {
                 break;
             }

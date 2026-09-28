@@ -379,3 +379,14 @@ laisses pourrir/escalader est une erreur de supervision.
 - `start_mission` for a helper on the same project/track while you are parked on a
   build answers `409 BUILD_IN_PROGRESS {job_id}`. Do not spawn pollers; wait for the
   wake or read the job status with the `job_id`.
+
+### Hosted cloud attempts
+
+Discover accounts and capabilities with `list_cloud_accounts` and supported models
+with `list_cloud_models` before setting `start_mission.cloud`. Use a stable
+`idempotency_key` for creation and `client_message_id` for follow-ups, including
+unchanged model parameters on retries. Read `get_cloud_execution` to reconcile
+provider identities and uncertain submissions; do not create replacement work
+after a transport timeout. Cloud attempts currently reject track leases, writer
+grants and scheduled admission, so autonomous controllers must not dispatch
+tracked work through this route. Cancellation needs provider confirmation.

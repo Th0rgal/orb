@@ -197,6 +197,11 @@ pub(crate) fn heartbeat_supports_grok(
 /// What one fed chunk changed, for the observer to broadcast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamUpdate {
+    GoalStatus {
+        status: String,
+        objective: String,
+    },
+    GoalIteration(u64),
     Text,
     Thinking,
     TextSnapshot(String),
@@ -228,6 +233,7 @@ pub(crate) struct GrokStream {
     pub(crate) model: Option<String>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) ended: bool,
+    pub(crate) native_goal_status: Option<String>,
     pub(crate) auth_required: bool,
     pub(crate) error: Option<String>,
     pub(crate) json_events: u64,
@@ -311,6 +317,22 @@ impl GrokStream {
         // Codex exec emits native thread/turn/item events. Keep the thread id
         // for continuation on the same node and preserve tool/text ordering.
         let kind = value["type"].as_str().unwrap_or_default();
+        if kind == "goal.status" {
+            if let Some(status) = value["status"].as_str() {
+                self.native_goal_status = Some(status.to_string());
+                updates.push(StreamUpdate::GoalStatus {
+                    status: status.to_string(),
+                    objective: value["objective"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+            return;
+        }
+        if kind == "goal.iteration" {
+            if let Some(iteration) = value["iteration"].as_u64() {
+                updates.push(StreamUpdate::GoalIteration(iteration));
+            }
+            return;
+        }
         if matches!(
             kind,
             "thread.started"
@@ -732,6 +754,24 @@ impl NativeGrokObserver {
     async fn broadcast(&mut self, updates: Vec<StreamUpdate>) {
         for update in updates {
             match update {
+                StreamUpdate::GoalStatus { status, objective } => {
+                    self.owner
+                        .publish_native(AgentEvent::GoalStatus {
+                            status,
+                            objective,
+                            mission_id: Some(self.mission_id),
+                        })
+                        .await;
+                }
+                StreamUpdate::GoalIteration(iteration) => {
+                    self.owner
+                        .publish_native(AgentEvent::GoalIteration {
+                            iteration: iteration as u32,
+                            objective: goal_objective(&self.mission).unwrap_or_default(),
+                            mission_id: Some(self.mission_id),
+                        })
+                        .await;
+                }
                 StreamUpdate::Tool { update, completed } => {
                     self.close_thinking();
                     let id = update
@@ -899,19 +939,29 @@ impl NativeGrokObserver {
                 self.stream.stop_reason.as_deref(),
                 Some("end_turn" | "EndTurn")
             );
+        let codex_goal = self.mission.backend == "codex"
+            && (self.mission.goal_mode || self.stream.native_goal_status.is_some());
         let success = succeeded
             && !auth_required
             && self.stream.error.is_none()
-            && (!self.mission.goal_mode || native_end);
+            && (!self.mission.goal_mode || native_end)
+            && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
         let mut content = self.stream.text.trim().to_string();
-        let status_reason: &'static str = if auth_required {
+        let status_reason: &'static str = if codex_goal && !success {
+            "native_goal_stopped"
+        } else if auth_required {
             "remote_grok_auth_required"
         } else {
             "remote_node_job"
         };
         if !success {
             let mut report = String::new();
-            if auth_required {
+            if codex_goal && succeeded && self.stream.error.is_none() {
+                report.push_str(&format!(
+                    "Native Codex goal stopped with status '{}'; the objective and counters are preserved. Resume after resolving that stop.",
+                    self.stream.native_goal_status.as_deref().unwrap_or("unconfirmed")
+                ));
+            } else if auth_required {
                 report.push_str(
                     "The grok CLI on the node could not authenticate non-interactively: managed auth is not usable there. \
                      On the node, set SANDBOXED_NODE_GROK_HOME for the sandboxed-node service and run \
@@ -961,7 +1011,9 @@ impl NativeGrokObserver {
             );
         }
 
-        if let Some(objective) = goal_objective(&self.mission) {
+        if let Some(objective) =
+            goal_objective(&self.mission).filter(|_| self.mission.backend != "codex")
+        {
             let event = AgentEvent::GoalStatus {
                 status: if success { "complete" } else { "paused" }.to_string(),
                 objective,
@@ -1937,6 +1989,25 @@ mod tests {
         assert_eq!(updates.last(), Some(&StreamUpdate::End));
         stream.feed("{\"type\":\"turn.failed\",\"error\":{\"message\":\"rate limited\"}}\n");
         assert_eq!(stream.error.as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn codex_turn_end_never_fabricates_goal_completion() {
+        let mut stream = GrokStream::default();
+        stream.feed("{\"type\":\"turn.completed\"}\n");
+        assert_eq!(stream.native_goal_status, None);
+        stream.feed(
+            "{\"type\":\"goal.status\",\"status\":\"active\",\"objective\":\"full roadmap\"}\n",
+        );
+        stream.feed("{\"type\":\"turn.completed\"}\n");
+        assert_eq!(stream.native_goal_status.as_deref(), Some("active"));
+        let updates = stream.feed(
+            "{\"type\":\"goal.status\",\"status\":\"blocked\",\"objective\":\"full roadmap\"}\n",
+        );
+        assert_eq!(stream.native_goal_status.as_deref(), Some("blocked"));
+        assert!(
+            matches!(&updates[0], StreamUpdate::GoalStatus { status, .. } if status == "blocked")
+        );
     }
 
     #[test]

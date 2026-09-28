@@ -1,4 +1,6 @@
 //! SQLite-based mission store with full event logging.
+#[path = "sqlite_cloud.rs"]
+mod cloud;
 #[path = "sqlite_transfer.rs"]
 mod machine_transfer;
 #[path = "sqlite_local_origin.rs"]
@@ -1061,6 +1063,8 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
 
             // Run schema
+            conn.execute_batch(cloud::SCHEMA)
+                .map_err(|e| e.to_string())?;
             conn.execute_batch(machine_transfer::SCHEMA)
                 .map_err(|e| e.to_string())?;
             conn.execute_batch(SCHEMA)
@@ -3446,6 +3450,18 @@ impl MissionStore for SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
 
                 m.history = history;
+                if m.backend.starts_with("cloud_") {
+                    let data: Option<String> = conn.query_row("SELECT data FROM cloud_executions WHERE mission_id=?1", [&id_str], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+                    if let Some(data) = data {
+                        let execution: crate::api::cloud_agents::Execution = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+                        m.history.clear();
+                        for turn in execution.turns.iter().rev().take(100).collect::<Vec<_>>().into_iter().rev() {
+                            m.history.push(MissionHistoryEntry {role:"user".into(),content:turn.prompt.clone()});
+                            if let Some(result) = &turn.result { m.history.push(MissionHistoryEntry{role:"assistant".into(),content:result.clone()}); }
+                        }
+                    }
+                }
+
                 // Guard evidence lives in its own side table (see
                 // run_migrations); the single-mission read is the one path
                 // that carries it — list projections stay lean.
@@ -3463,6 +3479,30 @@ impl MissionStore for SqliteMissionStore {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    async fn append_cloud_event(
+        &self,
+        id: Uuid,
+        event: crate::api::cloud_agents::Event,
+    ) -> Result<(), String> {
+        cloud::event(self, id, event).await
+    }
+    async fn cloud_events(&self, id: Uuid) -> Result<Vec<crate::api::cloud_agents::Event>, String> {
+        cloud::events(self, id).await
+    }
+    async fn cloud_executions(&self) -> Result<Vec<crate::api::cloud_agents::Execution>, String> {
+        cloud::list(self).await
+    }
+    async fn save_cloud_execution(
+        &self,
+        execution: crate::api::cloud_agents::Execution,
+        expected: Option<u64>,
+        title: Option<String>,
+        project: Option<String>,
+        tags: Vec<String>,
+    ) -> Result<crate::api::cloud_agents::Execution, String> {
+        cloud::save(self, execution, expected, title, project, tags).await
     }
 
     async fn machine_transfers(&self, id: Uuid) -> Result<Vec<super::transfer::Transfer>, String> {

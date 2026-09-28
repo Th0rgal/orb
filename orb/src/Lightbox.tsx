@@ -8,7 +8,7 @@ export type LightboxItem = { src: string | null; label: string };
 export function Lightbox(p: { items: LightboxItem[]; index: number; onClose: () => void }) {
   const [index, setIndex] = createSignal(p.index);
   const go = (step: number) => setIndex(i => Math.max(0, Math.min(p.items.length - 1, i + step)));
-  const item = () => p.items[Math.min(index(), p.items.length - 1)];
+  const item = () => p.items[Math.min(index(), p.items.length - 1)] ?? {src:null,label:"Image unavailable"};
   onMount(() => {
     const key = (e: KeyboardEvent) => {
       if (e.altKey || e.metaKey || e.ctrlKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;

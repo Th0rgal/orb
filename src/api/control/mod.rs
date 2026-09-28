@@ -4546,6 +4546,10 @@ impl ControlHub {
             self.telegram_bridge.clone(),
             user.id.clone(),
         );
+        super::cloud_agents::worker::start(
+            state.mission_store.clone(),
+            self.config.working_dir.clone(),
+        );
         sessions.insert(user.id.clone(), state.clone());
 
         // Drop the write lock before performing async I/O so concurrent
@@ -5097,6 +5101,10 @@ pub async fn post_message(
     }
     crate::api::mission_payload::validate_user_content(&content)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let cloud_store = state.control.get_or_spawn(&user).await.mission_store;
+    if let Some(response) = super::cloud_agents::http::follow_up(cloud_store, &req).await? {
+        return Ok(response);
+    }
     let id = req.client_message_id.unwrap_or_else(Uuid::new_v4);
     let agent = req.agent;
     let target_mission_id = req.mission_id;
@@ -7469,6 +7477,26 @@ pub async fn get_mission(
         .map_err(internal_error)?
     {
         Some(mut mission) => {
+            if mission.backend.starts_with("cloud_") {
+                let execution = control
+                    .mission_store
+                    .cloud_executions()
+                    .await
+                    .map_err(internal_error)?
+                    .into_iter()
+                    .find(|e| e.mission_id == id)
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::CONFLICT,
+                            "Hosted receipt missing; do not launch a replacement".into(),
+                        )
+                    })?;
+                let mut value = serde_json::to_value(&mission).map_err(internal_error)?;
+                value["execution_kind"] = serde_json::json!("hosted");
+                value["cloud"] = serde_json::to_value(execution).map_err(internal_error)?;
+                return Ok(Json(value));
+            }
+
             // Populate workspace_name + spark_offload from the workspace (P#7).
             let workspace = state.workspaces.get(mission.workspace_id).await;
             if let Some(ws) = workspace.as_ref() {
@@ -10350,6 +10378,19 @@ pub async fn create_mission(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
 ) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
+    let mut body = body;
+    if let Some(req) = body.as_mut() {
+        if let Some(selection) = req.extra.remove("cloud") {
+            let selection = serde_json::from_value(selection).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid cloud selection: {e}"),
+                )
+            })?;
+            return super::cloud_agents::http::create(state, user, body.unwrap().0, selection)
+                .await;
+        }
+    }
     create_mission_inner(State(state), Extension(user), body, false).await
 }
 
@@ -12067,7 +12108,6 @@ pub(crate) fn plan_remote_harness(
         .filter(|m| !m.is_empty())
         .map(str::to_string);
     match backend {
-        "codex" if prompt.starts_with("/goal") => Err("REMOTE_GOAL_UNSUPPORTED: remote Codex supports native exec sessions, but not app-server goals yet; use Codex on core for /goal".to_string()),
         "codex" => Ok(RemoteHarnessPlan::Codex {
             effort: None,
             fast_mode: false,
@@ -12197,11 +12237,7 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
-            let mut command = String::from(
-                "command -v codex >/dev/null 2>&1 || { echo 'codex is not installed on this node' >&2; exit 127; }; exec codex",
-            );
-            // CLI overrides keep configuration and credentials out of project files.
-            for setting in [
+            let mut settings = vec![
                 "model_provider=\"sandboxed\"".to_string(),
                 "model_providers.sandboxed.name=\"Sandboxed\"".to_string(),
                 format!(
@@ -12211,34 +12247,24 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
                 format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
-            ] {
-                command.push_str(" -c ");
-                command.push_str(&shell_single_quote(&setting));
-            }
+            ];
             if let Some(effort) = effort {
-                command.push_str(" -c ");
-                command.push_str(&shell_single_quote(&format!(
+                settings.push(format!(
                     "model_reasoning_effort={}",
                     serde_json::to_string(effort).unwrap()
-                )));
+                ));
             }
             if *fast_mode {
-                command.push_str(" -c 'service_tier=\"fast\"'");
+                settings.push("service_tier=\"fast\"".into());
             }
-            command.push_str(" exec");
-            if resume_session_id.is_some() {
-                command.push_str(" resume");
-            }
-            command.push_str(
-                " --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --model ",
+            let configuration = serde_json::json!({"model": model, "prompt": prompt, "session": resume_session_id, "settings": settings});
+            // Embed the versioned driver in the job; no node install race, no
+            // secret in argv. Native app-server owns the goal continuation loop.
+            let command = format!(
+                "exec python3 -c {} {}",
+                shell_single_quote(include_str!("../../../scripts/remote_codex_app_server.py")),
+                shell_single_quote(&configuration.to_string())
             );
-            command.push_str(&shell_single_quote(model));
-            command.push_str(" -- ");
-            if let Some(session) = resume_session_id {
-                command.push_str(&shell_single_quote(session));
-                command.push(' ');
-            }
-            command.push_str(&shell_single_quote(prompt));
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -13189,7 +13215,9 @@ async fn finalize_remote_mission(
         let _ = owner.mission_store.log_event(mission_id, &event).await;
         owner.send(event);
     }
-    let status = if success {
+    let status = if status_reason == "native_goal_stopped" {
+        MissionStatus::Blocked
+    } else if success {
         MissionStatus::Completed
     } else {
         MissionStatus::Failed
@@ -15031,6 +15059,12 @@ pub async fn update_mission_settings(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+    if current.backend.starts_with("cloud_") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cloud service and account cannot be replaced by a local harness".into(),
+        ));
+    }
     let previous_status = current.status;
 
     let backend = req.backend.as_ref().and_then(|backend| {
@@ -16799,6 +16833,17 @@ pub async fn cancel_mission(
     let (tx, rx) = oneshot::channel();
 
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .cloud_executions()
+        .await
+        .map_err(internal_error)?
+        .iter()
+        .any(|e| e.mission_id == mission_id)
+    {
+        return super::cloud_agents::http::cancel(State(state), Extension(user), Path(mission_id))
+            .await;
+    }
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?
@@ -16882,6 +16927,18 @@ pub async fn pause_mission(
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let actor = resolve_actor(body.and_then(|b| b.0.actor), &user);
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .map_err(internal_error)?
+        .is_some_and(|m| m.backend.starts_with("cloud_"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cloud pause is unsupported; use capability-gated cancellation".into(),
+        ));
+    }
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?
@@ -17253,6 +17310,16 @@ pub async fn delete_mission(
     Path(mission_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .cloud_executions()
+        .await
+        .map_err(internal_error)?
+        .iter()
+        .any(|e| e.mission_id == mission_id && e.turns.iter().any(|t| !t.phase.terminal()))
+    {
+        return Err((StatusCode::CONFLICT, "Cloud work is still active or unconfirmed; archive the conversation or confirm cancellation before deleting its receipts".into()));
+    }
     let running = get_running_missions(&control).await?;
 
     let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_delete(
@@ -36900,6 +36967,7 @@ Investigate <service/> failures.
             )
             .unwrap(),
             RemoteHarnessPlan::ClaudeCode {
+                resume_session_id: None,
                 model: Some("claude-opus-5".into()),
                 prompt: "do it".into()
             }
@@ -36961,12 +37029,10 @@ Investigate <service/> failures.
         let execution =
             remote_execution_for_plan(&plan, "https://core.example/", "secret-test-key");
         assert!(!execution.command.contains("secret-test-key"));
-        assert!(execution.command.contains("exec codex"));
-        assert!(execution.command.contains("wire_api=\"responses\""));
+        assert!(execution.command.contains("exec python3 -c"));
+        assert!(execution.command.contains("wire_api"));
         assert!(execution.command.contains("https://core.example/v1"));
-        assert!(execution
-            .command
-            .contains(&shell_single_quote("say 'hi'; $(false)")));
+        assert!(execution.command.contains("$(false)"));
         assert_eq!(
             execution.env.unwrap()[REMOTE_PROXY_KEY_ENV],
             "secret-test-key"
@@ -36980,17 +37046,13 @@ Investigate <service/> failures.
         };
         let execution =
             remote_execution_for_plan(&resume, "https://core.example", "secret-test-key");
-        assert!(execution.command.contains("exec resume --json"));
-        assert!(execution
-            .command
-            .contains("model_reasoning_effort=\"high\""));
-        assert!(execution.command.contains("service_tier=\"fast\""));
+        assert!(execution.command.contains("thread/resume"));
+        assert!(execution.command.contains("model_reasoning_effort"));
+        assert!(execution.command.contains("service_tier"));
         assert!(
-            plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test"))
-                .unwrap_err()
-                .starts_with("REMOTE_GOAL_UNSUPPORTED")
+            plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test")).is_ok()
         );
-        assert!(execution.command.ends_with("-- 'thread-123' 'continue'"));
+        assert!(execution.command.contains("thread-123"));
         assert!(plan_remote_harness(None, "codex", None, Some("do it"))
             .unwrap_err()
             .starts_with(REMOTE_MODEL_REQUIRED));

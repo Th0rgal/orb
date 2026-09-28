@@ -316,6 +316,8 @@ struct DownloadSharedFileParams {
 
 #[derive(Debug, Deserialize)]
 struct StartMissionParams {
+    #[serde(default)]
+    cloud: Option<serde_json::Value>,
     title: String,
     prompt: String,
     #[serde(default)]
@@ -601,6 +603,12 @@ fn dispatch_identity_schema() -> Value {
 
 #[derive(Debug, Deserialize)]
 struct SendMessageParams {
+    #[serde(default)]
+    cloud_model: Option<String>,
+    #[serde(default)]
+    cloud_model_params: Option<Vec<sandboxed_sh::api::cloud_agents::ModelParam>>,
+    #[serde(default)]
+    client_message_id: Option<String>,
     #[serde(flatten)]
     identity: DispatchIdentityParams,
     mission_id: String,
@@ -1638,6 +1646,9 @@ impl AssistantMcp {
                     }
                 }),
             },
+            ToolDefinition {name:"list_cloud_models".into(),description:"Discover actual hosted model IDs, labels and supported parameter combinations before creating or following up a cloud mission. Grok Bot has no model selector.".into(),input_schema:json!({"type":"object","required":["provider"],"properties":{"provider":{"type":"string","enum":["chatgpt","cursor_cloud"]}}})},
+            ToolDefinition { name: "list_cloud_accounts".into(), description: "Discover hosted agent accounts and effective capabilities. Unavailable connectors cannot launch; connecting never starts work.".into(), input_schema: json!({"type":"object","properties":{}}) },
+            ToolDefinition { name: "get_cloud_execution".into(), description: "Read durable hosted execution, external identities, response state and results. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"}}}) },
             ToolDefinition {
                 name: "start_mission".to_string(),
                 description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. Use backend=chatgpt_ui with model_override=gpt-5.6-pro only for exceptionally difficult read-only synthesis, research, or design-conflict questions; keep writer=false, then retrieve any generated files with list_mission_shared_files and download_shared_file. For compatibility, a native agent name (codex/claudecode/gemini/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
@@ -1647,6 +1658,7 @@ impl AssistantMcp {
                     "properties": {
                         "title": {"type": "string"},
                         "prompt": {"type": "string", "description": "Codex native /goal objective: maximum 4000 Unicode characters, including automatic writer promotion. Put supporting detail in referenced artifacts; never rely on truncation."},
+                        "cloud": {"type":"object","description":"Hosted execution. Discover availability with list_cloud_accounts. Requires idempotency_key; never pass credentials, machine paths or attachments.","required":["provider","account"],"properties":{"provider":{"type":"string","enum":["chatgpt","grok_bot","cursor_cloud"]},"account":{"type":"string"},"repository":{"type":"string"},"git_ref":{"type":"string"},"model":{"type":"string"},"model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}}},"additionalProperties":false},
                         "workspace_id": {"type": "string"},
                         "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "gemini", "grok", "chatgpt_ui"]},
                         "model_override": {"type": "string", "description": "Exact account-supported model ID. For ChatGPT UI Pro use the canonical ID gpt-5.6-pro; the harness verifies the visible Pro picker option. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol."},
@@ -1690,6 +1702,9 @@ impl AssistantMcp {
                     "type": "object",
                     "required": ["mission_id", "content"],
                     "properties": {
+                        "cloud_model":{"type":"string","description":"Model for this cloud turn only. Discover supported models before selecting."},
+                        "cloud_model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}},
+                        "client_message_id": {"type":"string","format":"uuid","description":"Required stable UUID for cloud follow-ups. Reuse on retries."},
                         "continue_identity": dispatch_identity_schema(),
                         "github_pr": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
                         "track": {"type": "string", "description": "Explicit retask identity update; empty string clears. Omit to preserve."},
@@ -2507,7 +2522,14 @@ impl AssistantMcp {
                 }
             }
         }
-        let workspace_id = resolve_default_workspace_id(params.workspace_id);
+        let workspace_id = if params.cloud.is_some() {
+            if params.workspace_id.is_some() {
+                return Err("Cloud execution does not accept a workspace".into());
+            }
+            None
+        } else {
+            resolve_default_workspace_id(params.workspace_id)
+        };
         let backend = params
             .backend
             .or_else(|| native_backend_from_agent(params.agent.as_deref()));
@@ -2537,7 +2559,7 @@ impl AssistantMcp {
             }
             None => None,
         };
-        let body = json!({
+        let mut body = json!({
             "title": params.title,
             "workspace_id": workspace_id,
             "backend": backend,
@@ -2573,6 +2595,9 @@ impl AssistantMcp {
             "origin_session_id": origin_session_id,
             "attachments": params.attachments,
         });
+        if let Some(cloud) = params.cloud {
+            body["cloud"] = cloud;
+        }
         let response = self.api_post("/api/control/missions", body).await?;
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -2702,6 +2727,15 @@ impl AssistantMcp {
         let id = self.resolve_mission_id(&params.mission_id).await?;
         self.assert_mission_scope(id).await?;
         let mut body = json!({"mission_id": id.to_string(), "content": params.content});
+        if let Some(key) = params.client_message_id {
+            body["client_message_id"] = json!(key);
+        }
+        if let Some(model) = params.cloud_model {
+            body["cloud_model"] = json!(model);
+        }
+        if let Some(params) = params.cloud_model_params {
+            body["cloud_model_params"] = json!(params);
+        }
         params.identity.add_to(&mut body);
         let response = self.api_post("/api/control/message", body).await?;
         if !response.status().is_success() {
@@ -3809,6 +3843,40 @@ impl AssistantMcp {
 
     async fn handle_call(&self, name: &str, arguments: Value) -> Result<Value, String> {
         match name {
+            "list_cloud_accounts" => {
+                let response = self.api_get("/api/cloud/accounts").await?;
+                if !response.status().is_success() {
+                    return Err(format!("Cloud discovery failed: {}", response.status()));
+                }
+                response.json().await.map_err(|e| e.to_string())
+            }
+            "list_cloud_models" => {
+                let path = match arguments.get("provider").and_then(Value::as_str) {
+                    Some("chatgpt") => "/api/cloud/chatgpt/options",
+                    Some("cursor_cloud") => "/api/cloud/cursor/options",
+                    _ => return Err("This provider does not expose model selection".into()),
+                };
+                let response = self.api_get(path).await?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Cloud model discovery failed: {}",
+                        response.status()
+                    ));
+                }
+                response.json().await.map_err(|e| e.to_string())
+            }
+            "get_cloud_execution" => {
+                let params: MissionIdParams = parse_params(arguments)?;
+                let id = self.resolve_mission_id(&params.mission_id).await?;
+                self.assert_mission_scope(id).await?;
+                let response = self
+                    .api_get(&format!("/api/control/missions/{id}/cloud"))
+                    .await?;
+                if !response.status().is_success() {
+                    return Err(format!("Cloud receipt unavailable: {}", response.status()));
+                }
+                response.json().await.map_err(|e| e.to_string())
+            }
             "list_active_missions" => {
                 let params: ListMissionsParams = parse_params(arguments)?;
                 self.list_active_missions(params).await
