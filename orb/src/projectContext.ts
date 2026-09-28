@@ -26,9 +26,9 @@ export async function contextBlob(slug:string,hash:string):Promise<Blob>{
  return response.blob();
 }
 
-export async function localContextFile<T>(slug:string,operation:string,path:string,content?:string,revision?:number):Promise<T|undefined>{
+export async function localContextFile<T>(slug:string,operation:string,path:string,content?:string,revision?:number,destinationProject?:string):Promise<T|undefined>{
  const invoke=nativeInvoke();if(!invoke)return undefined;
- return await invoke('project_context_file',{request:{endpoint:getApiUrl(),token:getJwt()??'',project:slug},operation,path,content:content??null,revision:revision??null}) as T;
+ return await invoke('project_context_file',{request:{endpoint:getApiUrl(),token:getJwt()??'',project:slug},operation,path,content:content??null,revision:revision??null,destinationProject:destinationProject??null}) as T;
 }
 
 /** One context transport per project; views only invalidate their own projection. */

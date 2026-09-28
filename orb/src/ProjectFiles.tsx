@@ -2,7 +2,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import type {UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, copyFileReference, readFileReference, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, moveFolderWork, copyFileReference, readFileReference, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -372,15 +372,24 @@ export function LiveProjectsSection(p: {
   const [fileClipboard, setFileClipboard] = createSignal("");
   let consumedFileClipboard = "";
   const cutFile = createMemo(() => { const item = readFileReference(fileClipboard()); return item && !item.copy ? item : null; });
-  const beginFileAction = (slug: string, path: string, kind: "rename" | "move" | "delete") => {
-    setFileMenu(null);
-    setFileAction({ slug, path, kind });
-    setFileActionValue(kind === "rename" ? fileBaseName(path) : fileParent(path));
+  const beginFileAction = (slug: string, path: string, kind: "rename" | "move" | "delete", directory = false) => {
+    setFileMenu(null); setActionMenu(null);
+    setFileAction({ slug, path, kind, directory });
+    // A folder renamed on this device before paths could change keeps that name as the suggestion.
+    setFileActionValue(kind === "rename" ? (directory ? folderLabel(slug, path) : fileBaseName(path)) : fileParent(path));
     setFileActionError(null);
   };
   const refreshFileParents = async (slug: string, path: string, destination?: string) => {
     await loadDir(slug, fileParent(path), true);
     if (destination && fileParent(destination) !== fileParent(path)) await loadDir(slug, fileParent(destination), true);
+  };
+  const folderMoved = async (slug: string, path: string, destination: string, project = slug) => {
+    setFolderLabel(slug, path, fileBaseName(path));
+    if (expanded[`${slug}:${path}`]) setExpanded(`${project}:${destination}`, true);
+    const selected = p.selected(), prefix = `pf:${slug}:${path}`;
+    if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
+    try { if (project === slug) await moveFolderWork(slug, path, destination); }
+    finally { await Promise.all([loadMissions(slug), loadCrons(slug, true)]); }
   };
   const saveFileAction = async () => {
     const target = fileAction(), version = connectionVersion();
@@ -388,8 +397,15 @@ export function LiveProjectsSection(p: {
     setFileBusy(true); setFileActionError(null);
     try {
       const destination = target.kind === "delete" ? undefined : fileDestination(target.path, fileActionValue(), target.kind === "rename");
-      if (destination) await transferProjectFile(target.slug, target.path, destination);
-      else {
+      if (destination) {
+        await transferProjectFile(target.slug, target.path, destination);
+        if (target.directory) {
+          setFileAction(null);
+          await refreshFileParents(target.slug, target.path, destination);
+          await folderMoved(target.slug, target.path, destination);
+          return;
+        }
+      } else {
         if (target.directory) await assertFolderHasNoWork(target.slug, target.path);
         await deleteProjectFile(target.slug, target.path);
       }
@@ -397,13 +413,13 @@ export function LiveProjectsSection(p: {
       if (p.selected() === `pf:${target.slug}:${target.path}` || (target.directory && p.selected()?.startsWith(`pf:${target.slug}:${target.path}/`))) p.open(destination ? `pf:${target.slug}:${destination}` : null);
       setFileAction(null);
       await refreshFileParents(target.slug, target.path, destination);
-    } catch (e) { if (version === connectionVersion()) setFileActionError(String(e)); }
+    } catch (e) { if (version === connectionVersion()) { if (fileAction()) setFileActionError(String(e)); else setActionError(String(e)); } }
     finally { setFileBusy(false); }
   };
-  const copyFile = async (slug: string, path: string, copy: boolean) => {
-    const version = connectionVersion(); setFileMenu(null);
+  const copyFile = async (slug: string, path: string, copy: boolean, directory = false) => {
+    const version = connectionVersion(); setFileMenu(null); setActionMenu(null);
     try {
-      const text = await copyFileReference(slug, path, copy);
+      const text = await copyFileReference(slug, path, copy, directory);
       if (version !== connectionVersion()) return;
       setFileClipboard(text); setCutId(null); setPendingMoves([]); setActionError(null);
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
@@ -413,16 +429,18 @@ export function LiveProjectsSection(p: {
     if (!item || fileBusy() || text === consumedFileClipboard) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
-      if (item.slug !== slug) throw new Error("Paste into a folder in the same project.");
-      const destination = fileDestination(item.path, path, false);
-      await transferProjectFile(slug, item.path, destination, item.copy);
+      const other = item.slug !== slug;
+      const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
+      // Agents and crons belong to their project: only documents cross over.
+      if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
+      await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
       if (version !== connectionVersion()) return;
-      if (!item.copy) {
-        consumedFileClipboard = text; setFileClipboard("");
-        if (p.selected() === `pf:${slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
-      }
-      await refreshFileParents(slug, item.path, destination);
+      if (!item.copy) { consumedFileClipboard = text; setFileClipboard(""); }
+      await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
       setExpanded(path ? `${slug}:${path}` : slug, true);
+      if (item.copy) return;
+      if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
+      else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
     finally { setFileBusy(false); }
   };
@@ -701,13 +719,6 @@ export function LiveProjectsSection(p: {
     setRenameValue(title);
     setRenameError(null);
   };
-  const beginFolderRename = (slug: string, path: string) => {
-    setActionMenu(null);
-    const title = folderLabel(slug, path);
-    setRename({ slug, path, title });
-    setRenameValue(title);
-    setRenameError(null);
-  };
   const beginMissionRename = (mission: Mission) => {
     setMissionMenu(null);
     setForkTarget(null);
@@ -728,10 +739,6 @@ export function LiveProjectsSection(p: {
         for (const slug of Object.keys(missions)) {
           setMissions(slug, m => m.id === target.missionId, "title", title);
         }
-      } else if (target.path) {
-        setFolderLabel(target.slug, target.path, title);
-        setRename(null);
-        return;
       } else {
         await updateProject({ slug: target.slug, title });
       }
@@ -767,7 +774,7 @@ export function LiveProjectsSection(p: {
     ];
     if (fileClipboard()) items.push(
       { kind: "sep" },
-      { kind: "item", label: "Paste file", icon: Ic.PasteIcon, onClick: () => void pasteFile(slug, path, fileClipboard()) },
+      { kind: "item", label: readFileReference(fileClipboard())?.directory ? "Paste folder" : "Paste file", icon: Ic.PasteIcon, onClick: () => void pasteFile(slug, path, fileClipboard()) },
     );
     if (cutId()) items.push(
       { kind: "sep" },
@@ -775,10 +782,11 @@ export function LiveProjectsSection(p: {
     );
     if (path) items.push(
       { kind: "sep" },
-      { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFolderRename(slug, path) },
-      { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => {
-        setActionMenu(null); setFileActionError(null); setFileAction({ slug, path, kind: "delete", directory: true });
-      } },
+      { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(slug, path, "rename", true) },
+      { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(slug, path, "move", true) },
+      { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(slug, path, false, true) },
+      { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(slug, path, true, true) },
+      { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(slug, path, "delete", true) },
     );
     if (!path) items.push(
       { kind: "sep" },
@@ -967,9 +975,9 @@ export function LiveProjectsSection(p: {
     };
     const row = find([...tree(), ...(archivesOpen() ? archiveNodes() : [])]);
     if (!row) return;
-    if (row.kind === "file" && ['x', 'c'].includes(event.key.toLowerCase())) {
+    if ((row.kind === "file" || row.kind === "folder") && ['x', 'c'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation();
-      void copyFile(row.slug, row.path!, event.key.toLowerCase() === 'c');
+      void copyFile(row.slug, row.path!, event.key.toLowerCase() === 'c', row.kind === "folder");
     } else if (event.key.toLowerCase() === 'x' && row.mission) {
       setFileClipboard("");
       event.preventDefault(); event.stopPropagation();
@@ -1207,8 +1215,8 @@ export function LiveProjectsSection(p: {
         { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
       ]} />}</Show>
       <Show when={fileAction()} keyed>{target => <Show when={target.kind === "delete"} fallback={
-        <PromptSheet title={target.kind === "rename" ? "Rename file" : "Move file"} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.path}
-          label={target.kind === "rename" ? "File name" : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
+        <PromptSheet title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
+          label={target.kind === "rename" ? (target.directory ? "Folder name" : "File name") : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
           action={target.kind === "rename" ? "Rename" : "Move"} busy={fileBusy()} error={fileActionError()}
           disabled={target.kind === "rename" && !fileActionValue().trim()} onAction={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} />
       }><ConfirmDialog title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>

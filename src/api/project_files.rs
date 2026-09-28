@@ -339,6 +339,30 @@ async fn transfer_file(
     .map_err(internal)?
 }
 
+/// Its own route, so a backend without it refuses instead of moving the file
+/// inside the source project.
+async fn transfer_to_project(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath((slug, project)): AxumPath<(String, String)>,
+    Json(req): Json<TransferFileRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if slug == project {
+        return Err(bad_request("choose another project"));
+    }
+    let store = context_store(&state, &slug)?;
+    let target = context_store(&state, &project)?;
+    tokio::task::spawn_blocking(move || {
+        store
+            .transfer_to(&target, &req.path, &req.destination, req.copy)
+            .map_err(bad_request)?;
+        Ok(Json(
+            serde_json::json!({"project":project,"path":req.destination}),
+        ))
+    })
+    .await
+    .map_err(internal)?
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct MkdirRequest {
     path: String,
@@ -569,6 +593,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:slug/file", delete(delete_file))
         .route("/:slug/file/mkdir", post(mkdir))
         .route("/:slug/file/transfer", post(transfer_file))
+        .route("/:slug/file/transfer/:project", post(transfer_to_project))
 }
 
 #[cfg(test)]

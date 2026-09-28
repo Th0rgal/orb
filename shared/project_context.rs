@@ -478,9 +478,6 @@ impl Store {
             .get(path)
             .cloned()
             .ok_or("File not found")?;
-        if entry.directory {
-            return Err("Select a file, not a folder".into());
-        }
         if state
             .manifest
             .entries
@@ -498,6 +495,9 @@ impl Store {
             {
                 return Err("The destination folder does not exist".into());
             }
+        }
+        if entry.directory {
+            return self.transfer_folder(state, path, destination, copy);
         }
         if !copy {
             // Persist both sides together before touching the visible tree. Recovery
@@ -547,6 +547,186 @@ impl Store {
         )?;
         if receipt.conflict {
             return Err("The destination changed. No file was moved".into());
+        }
+        Ok(())
+    }
+    /// Entries below `path` on disk, including ones the manifest excludes.
+    fn disk_entries(dir: &Path) -> Result<usize> {
+        let mut count = 0;
+        for item in fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let item = item.map_err(|e| e.to_string())?;
+            count += 1;
+            if item.file_type().map_err(|e| e.to_string())?.is_dir() {
+                count += Self::disk_entries(&item.path())?;
+            }
+        }
+        Ok(count)
+    }
+    /// Move or copy a folder together with everything the manifest tracks inside
+    /// it. Both sides are committed at once; recovery creates the destination
+    /// tree before it removes the source, children first.
+    fn transfer_folder(
+        &self,
+        mut state: State,
+        path: &str,
+        destination: &str,
+        copy: bool,
+    ) -> Result<()> {
+        let prefix = format!("{path}/");
+        if destination.starts_with(&prefix) {
+            return Err("A folder cannot be moved into itself".into());
+        }
+        // A parent is a strict prefix of its children, so it always sorts first.
+        let sources: Vec<(String, Entry)> = state
+            .manifest
+            .entries
+            .iter()
+            .filter(|(p, _)| p.as_str() == path || p.starts_with(&prefix))
+            .map(|(p, e)| (p.clone(), e.clone()))
+            .collect();
+        if !copy && Self::disk_entries(&checked(&self.root, path)?)? != sources.len() - 1 {
+            return Err(
+                "This folder contains files that are not part of the project context; move or delete them first"
+                    .into(),
+            );
+        }
+        if copy {
+            if state.manifest.entries.len() + sources.len() > ENTRY_LIMIT {
+                return Err("context exceeds 5000 entries".into());
+            }
+            let total: u64 = state.manifest.entries.values().map(|e| e.size).sum();
+            let added: u64 = sources.iter().map(|(_, e)| e.size).sum();
+            if total + added > PROJECT_LIMIT {
+                return Err("context exceeds 100 MiB".into());
+            }
+        }
+        let mut changes = Vec::new();
+        for (source, entry) in &sources {
+            let target = format!("{destination}{}", &source[path.len()..]);
+            valid_path(&target)?;
+            if !entry.directory {
+                self.blob(entry.hash.as_deref().ok_or("missing content hash")?)?;
+            }
+            state.manifest.revision += 1;
+            let mut created = entry.clone();
+            created.revision = state.manifest.revision;
+            changes.push(Change {
+                before: None,
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: target.clone(),
+                entry: Some(created.clone()),
+                source: "Orb".into(),
+            });
+            state.manifest.entries.insert(target, created);
+        }
+        if !copy {
+            for (source, entry) in sources.into_iter().rev() {
+                state.manifest.revision += 1;
+                changes.push(Change {
+                    before: Some(entry),
+                    timestamp: timestamp(),
+                    revision: state.manifest.revision,
+                    path: source.clone(),
+                    entry: None,
+                    source: "Orb".into(),
+                });
+                state.manifest.entries.remove(&source);
+            }
+        }
+        state.history.extend(changes.clone());
+        state.pending.extend(changes);
+        self.save(&state)?;
+        self.recover(&mut state)
+    }
+    /// Copy a file or folder into another project's context, then remove the
+    /// exact source revisions for a move. The copy always lands first, so an
+    /// interruption can duplicate content but never lose it. The two stores are
+    /// never locked together.
+    pub fn transfer_to(
+        &self,
+        target: &Store,
+        path: &str,
+        destination: &str,
+        copy: bool,
+    ) -> Result<()> {
+        valid_path(path)?;
+        valid_path(destination)?;
+        let manifest = self.manifest()?;
+        let prefix = format!("{path}/");
+        let sources: Vec<(String, Entry)> = manifest
+            .entries
+            .iter()
+            .filter(|(p, _)| p.as_str() == path || p.starts_with(&prefix))
+            .map(|(p, e)| (p.clone(), e.clone()))
+            .collect();
+        let root = sources.first().ok_or("File not found")?;
+        if !copy
+            && root.1.directory
+            && Self::disk_entries(&checked(&self.root, path)?)? != sources.len() - 1
+        {
+            return Err(
+                "This folder contains files that are not part of the project context; move or delete them first"
+                    .into(),
+            );
+        }
+        let existing = target.manifest()?;
+        if existing
+            .entries
+            .keys()
+            .any(|p| p.to_lowercase() == destination.to_lowercase())
+        {
+            return Err("A file or folder already exists at the destination".into());
+        }
+        if let Some((parent, _)) = destination.rsplit_once('/') {
+            if !existing.entries.get(parent).is_some_and(|e| e.directory) {
+                return Err("The destination folder does not exist".into());
+            }
+        }
+        if existing.entries.len() + sources.len() > ENTRY_LIMIT {
+            return Err("context exceeds 5000 entries".into());
+        }
+        let total: u64 = existing.entries.values().map(|e| e.size).sum();
+        if total + sources.iter().map(|(_, e)| e.size).sum::<u64>() > PROJECT_LIMIT {
+            return Err("context exceeds 100 MiB".into());
+        }
+        for (source, entry) in &sources {
+            let hash = match entry.hash.as_deref() {
+                Some(hash) if !entry.directory => Some(target.put_blob(&self.blob(hash)?)?),
+                _ => None,
+            };
+            let receipt = target.apply(Operation {
+                id: uuid::Uuid::new_v4().to_string(),
+                path: format!("{destination}{}", &source[path.len()..]),
+                base: None,
+                hash,
+                directory: entry.directory,
+                delete: false,
+                source: "Orb".into(),
+            })?;
+            if receipt.conflict {
+                return Err("The destination changed. The source was kept".into());
+            }
+        }
+        if copy {
+            return Ok(());
+        }
+        for (source, entry) in sources.into_iter().rev() {
+            let receipt = self.apply(Operation {
+                id: uuid::Uuid::new_v4().to_string(),
+                path: source,
+                base: Some(entry.revision),
+                hash: None,
+                directory: false,
+                delete: true,
+                source: "Orb".into(),
+            })?;
+            if receipt.conflict {
+                return Err(
+                    "The source changed during the move; it was copied and the original was kept"
+                        .into(),
+                );
+            }
         }
         Ok(())
     }
@@ -754,7 +934,6 @@ mod tests {
             .transfer_file("renamed.bin", "missing/copy.bin", false)
             .is_err());
         assert!(s.transfer_file("renamed.bin", "../escape", false).is_err());
-        assert!(s.transfer_file("notes", "folder", false).is_err());
         assert_eq!(fs::read(s.root.join("renamed.bin")).unwrap(), bytes);
         let manifest = s.manifest().unwrap();
         assert!(!manifest.entries.contains_key("notes/source.bin"));
@@ -762,6 +941,79 @@ mod tests {
             manifest.entries["renamed.bin"].hash,
             manifest.entries["notes/copy.bin"].hash
         );
+    }
+    fn tree(s: &Store) {
+        fs::create_dir_all(s.root.join("notes/deep")).unwrap();
+        fs::write(s.root.join("notes/a.md"), "a").unwrap();
+        fs::write(s.root.join("notes/deep/b.bin"), [0u8, 255]).unwrap();
+        fs::create_dir_all(s.root.join("archive")).unwrap();
+        s.manifest().unwrap();
+    }
+    #[test]
+    fn folder_move_carries_its_tree_and_refuses_unsafe_destinations() {
+        let (_dir, s) = setup();
+        tree(&s);
+        assert!(s.transfer_file("notes", "notes/inside", false).is_err());
+        assert!(s.transfer_file("notes", "Archive", false).is_err());
+        assert!(s.transfer_file("notes", "missing/notes", false).is_err());
+        s.transfer_file("notes", "archive/renamed", false).unwrap();
+        assert!(!s.root.join("notes").exists());
+        assert_eq!(
+            fs::read(s.root.join("archive/renamed/deep/b.bin")).unwrap(),
+            [0u8, 255]
+        );
+        let paths: Vec<_> = s.manifest().unwrap().entries.into_keys().collect();
+        assert_eq!(
+            paths,
+            [
+                "archive",
+                "archive/renamed",
+                "archive/renamed/a.md",
+                "archive/renamed/deep",
+                "archive/renamed/deep/b.bin"
+            ]
+        );
+    }
+    #[test]
+    fn folder_copy_keeps_the_source_and_untracked_files_block_a_move() {
+        let (_dir, s) = setup();
+        tree(&s);
+        s.transfer_file("notes", "copy", true).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("notes/a.md")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(s.root.join("copy/a.md")).unwrap(), "a");
+        fs::write(s.root.join("notes/.secret"), "kept").unwrap();
+        assert!(s
+            .transfer_file("notes", "moved", false)
+            .unwrap_err()
+            .contains("not part of the project context"));
+        assert_eq!(
+            fs::read_to_string(s.root.join("notes/.secret")).unwrap(),
+            "kept"
+        );
+        assert!(!s.root.join("moved").exists());
+    }
+    #[test]
+    fn transfer_between_projects_copies_before_it_deletes() {
+        let (_dir, s) = setup();
+        tree(&s);
+        let other = tempfile::tempdir().unwrap();
+        let t = Store::new(other.path().join("files"), other.path().join("meta"));
+        t.manifest().unwrap();
+        fs::write(t.root.join("taken.md"), "theirs").unwrap();
+        assert!(s.transfer_to(&t, "notes/a.md", "taken.md", false).is_err());
+        assert!(s.root.join("notes/a.md").exists());
+        s.transfer_to(&t, "notes/a.md", "a.md", false).unwrap();
+        assert!(!s.root.join("notes/a.md").exists());
+        assert_eq!(fs::read_to_string(t.root.join("a.md")).unwrap(), "a");
+        s.transfer_to(&t, "notes", "notes", true).unwrap();
+        assert_eq!(
+            fs::read(t.root.join("notes/deep/b.bin")).unwrap(),
+            [0u8, 255]
+        );
+        assert!(s.root.join("notes/deep/b.bin").exists());
+        s.transfer_to(&t, "notes", "moved", false).unwrap();
+        assert!(!s.root.join("notes").exists());
+        assert!(t.root.join("moved/deep/b.bin").exists());
     }
     #[test]
     fn identical_write_keeps_file_revision_and_rejects_ambiguous_paths() {

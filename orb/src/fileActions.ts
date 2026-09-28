@@ -1,8 +1,9 @@
-import { api, ApiError, getApiUrl, getJwt, connectionVersion, listProjectCrons, type Mission } from "./api";
+import { api, ApiError, getApiUrl, getJwt, connectionVersion, listProjectCrons, updateProjectCron, type Mission } from "./api";
 import { copyText } from "./clipboard";
 import { localContextFile } from "./projectContext";
+import { moveMission } from "./missionMove";
 
-export interface FileClipboard { slug: string; path: string; copy: boolean; backend: string; account: string; nonce: string }
+export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
 const prefix = "orb:file:";
 function clipboardAccount(): string {
   try {
@@ -15,29 +16,31 @@ export const fileParent = (path: string) => path.includes("/") ? path.slice(0, p
 export const fileName = (path: string) => path.split("/").at(-1)!;
 export function fileDestination(path: string, value: string, rename: boolean): string {
   const input = value.trim();
-  if (rename && (!input || input.includes("/") || input.includes("\\"))) throw new Error("Enter a file name without slashes.");
+  if (rename && (!input || input.includes("/") || input.includes("\\"))) throw new Error("Enter a name without slashes.");
   const destination = rename ? [fileParent(path), input].filter(Boolean).join("/") : [input, fileName(path)].filter(Boolean).join("/");
   if (destination.includes("\\") || /[\x00-\x1f\x7f]/.test(destination) || destination.split("/").some(p => !p || p === "." || p === ".."))
     throw new Error("Use a relative project path without '.' or '..'.");
   if (destination === path) throw new Error("Choose a different name or folder.");
   return destination;
 }
-export async function transferProjectFile(slug: string, path: string, destination: string, copy = false): Promise<void> {
+/** Files and folders share one transfer; another project receives a copy before the source is removed. */
+export async function transferProjectFile(slug: string, path: string, destination: string, copy = false, project = slug): Promise<void> {
   const version = connectionVersion();
-  const local = await localContextFile(slug, copy ? "copy" : "move", path, destination);
+  const local = await localContextFile(slug, copy ? "copy" : "move", path, destination, undefined, project === slug ? undefined : project);
   if (local) return;
   if (version !== connectionVersion()) throw new Error("Connection changed. Try again.");
   try {
-    await api(`/api/projects/${encodeURIComponent(slug)}/file/transfer`, {
+    // A separate route: an older backend must refuse, not move within the source project.
+    await api(`/api/projects/${encodeURIComponent(slug)}/file/transfer${project === slug ? "" : `/${encodeURIComponent(project)}`}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, destination, copy }),
     });
   } catch (error) {
-    if (error instanceof ApiError && error.status === 404) throw new Error("Update the backend to enable file rename, move and copy.");
+    if (error instanceof ApiError && error.status === 404) throw new Error(project === slug ? "Update the backend to enable file rename, move and copy." : "Update the backend to move files between projects.");
     throw error;
   }
 }
-export async function copyFileReference(slug: string, path: string, copy: boolean): Promise<string> {
-  const text = prefix + JSON.stringify({ slug, path, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+export async function copyFileReference(slug: string, path: string, copy: boolean, directory = false): Promise<string> {
+  const text = prefix + JSON.stringify({ slug, path, copy, ...(directory ? { directory } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
   await copyText(text);
   return text;
 }
@@ -45,26 +48,43 @@ export function readFileReference(text: string): FileClipboard | null {
   if (!text.startsWith(prefix)) return null;
   try {
     const value = JSON.parse(text.slice(prefix.length));
-    return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && typeof value.nonce === "string" ? value : null;
+    return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && ["undefined", "boolean"].includes(typeof value.directory) && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
 
-/** Keep executable work visible: removing documents must not orphan its folder. */
-export async function assertFolderHasNoWork(slug: string, path: string): Promise<void> {
+/** Agents and crons filed in a folder or below it. */
+async function folderWork(slug: string, path: string, first = false) {
   const version = connectionVersion();
   const contains = (folder: string) => folder === path || folder.startsWith(`${path}/`);
   const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
-  const hasMission = (mission: Mission) => mission.project === slug && (mission.tags ?? []).some(tag => tag.startsWith("orb-folder:") && contains(tag.slice(11)));
-  const local = await import("./localOrigins").then(m => m.localOrigins());
+  const folder = (mission: Mission) => mission.project === slug ? (mission.tags ?? []).find(tag => tag.startsWith("orb-folder:") && contains(tag.slice(11)))?.slice(11) : undefined;
+  const missions = new Map<string, string>();
+  const collect = (list: Mission[]) => { for (const mission of list) { const at = folder(mission); if (at !== undefined) missions.set(mission.id, at); } };
+  collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
-  if (local.some(hasMission)) throw new Error("Move the agents out of this folder before deleting it.");
+  if (first && missions.size) return { missions, crons: [] };
   for (let offset = 0; ; offset += 200) {
-    const missions = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
+    const page = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
     checkConnection();
-    if (missions.some(hasMission)) throw new Error("Move the agents out of this folder before deleting it.");
-    if (missions.length < 200) break;
+    collect(page);
+    if (first && missions.size) return { missions, crons: [] };
+    if (page.length < 200) break;
   }
-  const crons = await listProjectCrons(slug);
+  const crons = (await listProjectCrons(slug)).filter(job => contains(job.folder ?? ""));
   checkConnection();
-  if (crons.some(job => contains(job.folder ?? ""))) throw new Error("Move or delete the crons in this folder before deleting it.");
+  return { missions, crons };
+}
+/** Keep executable work visible: removing documents must not orphan its folder. */
+export async function assertFolderHasNoWork(slug: string, path: string, action = "deleting"): Promise<void> {
+  const work = await folderWork(slug, path, true);
+  if (work.missions.size) throw new Error(`Move the agents out of this folder before ${action} it.`);
+  if (work.crons.length) throw new Error(`Move or delete the crons in this folder before ${action} it.`);
+}
+/** After a folder changes path, its agents and crons follow. Safe to repeat: work already moved is not found again. */
+export async function moveFolderWork(slug: string, path: string, destination: string): Promise<void> {
+  const work = await folderWork(slug, path), failed: string[] = [];
+  const target = (folder: string) => destination + folder.slice(path.length);
+  for (const [id, folder] of work.missions) await moveMission(id, slug, target(folder)).catch(() => failed.push(id.slice(0, 8)));
+  for (const job of work.crons) await updateProjectCron(slug, job.id, { folder: target(job.folder ?? "") }).catch(() => failed.push(job.name));
+  if (failed.length) throw new Error(`The folder moved, but ${failed.join(", ")} could not follow. They remain visible under the previous path; move them to ${destination}.`);
 }
