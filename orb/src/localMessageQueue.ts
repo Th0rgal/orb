@@ -6,7 +6,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -28,10 +28,44 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean}={}){
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
- await locked(key,async()=>{const rows=await read(key);if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});await write(key,rows);});
+ await locked(key,async()=>{
+  const rows=await read(key),existing=rows.find(row=>row.id===id);
+  if(options.replace){
+   // An edit keeps the message's place in the queue and releases its hold.
+   if(!existing||existing.state!=='queued')throw Error('This message was already sent. Your edit is still in the composer.');
+   // Images stay attached while their marker is still in the edited text.
+   const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
+   existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
+  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});
+  await write(key,rows);
+ });
  wake();return id;
+}
+/** A held message pauses its conversation's queue while it is being edited. Holds
+ * expire so a closed window can never block the queue for good. */
+const HOLD_MS=15*60_000;
+const held=(row:QueuedLocalMessage)=>!!row.heldAt&&Date.now()-row.heldAt<HOLD_MS;
+export async function holdQueuedMessage(id:string){
+ const key=storageKey();let text:string|undefined;
+ await locked(key,async()=>{const rows=await read(key),row=rows.find(r=>r.id===id);if(!row||row.state!=='queued')return;row.heldAt=Date.now();text=row.text;await write(key,rows);});
+ if(text===undefined)throw Error('This message was already sent.');
+ return text;
+}
+export async function releaseQueuedMessage(id:string){await update(storageKey(),id,row=>{delete row.heldAt;});wake();}
+/** Move a waiting message ahead of the other waiting messages of its conversation. */
+export async function prioritizeQueuedMessage(id:string){
+ const key=storageKey();
+ await locked(key,async()=>{
+  const rows=await read(key),index=rows.findIndex(r=>r.id===id),row=rows[index];
+  if(!row||row.state!=='queued')return;
+  rows.splice(index,1);
+  const first=rows.findIndex(r=>r.mission===row.mission&&r.state==='queued');
+  rows.splice(first<0?rows.length:first,0,row);
+  await write(key,rows);
+ });
+ wake();
 }
 export const canDiscardQueuedMessage=(row:QueuedLocalMessage)=>!['dispatching','accepted'].includes(row.state)||!!row.interrupted||(row.state==='dispatching'&&!!row.error);
 /** An interrupted send is removable only after native recovery confirms it stopped.
@@ -191,6 +225,7 @@ export function startLocalQueueWorker(){
      continue;
     }
     if(row.state!=='queued')continue;
+    if(rows.some(r=>r.mission===row.mission&&held(r)))continue;
     const binding=localBinding(row.mission);if(!binding)continue;
     try {
      try{const native=await pollLocal(row.mission);if(!native.done){await reconcileLocalRun(row.mission);continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
@@ -200,7 +235,7 @@ export function startLocalQueueWorker(){
      if(['active','running','pending','starting','resuming'].includes(mission.status))continue;
      if(!valid())return;
      // Only the durable claim is locked: enqueue/cancel never waits for the network.
-     const claimed=await locked(key,async()=>{const current=await read(key);const first=current.find(r=>r.mission===row.mission);if(first?.id!==row.id||first.state!=='queued'||!valid()||stopping.has(runKey))return false;first.state='dispatching';first.claimedAt=Date.now();await write(key,current);return true;});
+     const claimed=await locked(key,async()=>{const current=await read(key);const first=current.find(r=>r.mission===row.mission);if(first?.id!==row.id||first.state!=='queued'||current.some(r=>r.mission===row.mission&&held(r))||!valid()||stopping.has(runKey))return false;first.state='dispatching';first.claimedAt=Date.now();await write(key,current);return true;});
      if(!claimed)continue;
      row.state='dispatching';
      // Sending a saved follow-up explicitly reopens an archived conversation.

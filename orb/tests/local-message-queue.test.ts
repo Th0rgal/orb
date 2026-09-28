@@ -5,7 +5,7 @@ vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,getMission:async(
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
 vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
-import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt} from '../src/localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
 beforeEach(()=>{vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
@@ -225,4 +225,45 @@ it('surfaces a persisted unconfirmed claim after restart without launching it ag
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(100);
  expect(queuedLocalMessages('mission')[0].error).toMatch(/confirmation was lost/);
  expect(mocks.launch).not.toHaveBeenCalled();
+});
+
+it('edits a queued message in place while holding the queue, then sends in the new order',async()=>{
+ await enqueueLocalMessage(request,'message 1');await enqueueLocalMessage({...request,prompt:'message 2'},'message 2');await enqueueLocalMessage({...request,prompt:'message 3'},'message 3');
+ const [first,second,third]=queuedLocalMessages('mission');
+ expect(await holdQueuedMessage(second.id)).toBe('message 2');
+ stop=startLocalQueueWorker();mocks.active=false;window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.launch).not.toHaveBeenCalled(); // the queue waits while a message is edited
+ await enqueueLocalMessage({...request,prompt:'message 2 (edited)'},'message 2 (edited)',{id:second.id,replace:true});
+ await prioritizeQueuedMessage(third.id);
+ expect(queuedLocalMessages('mission').map(r=>r.text)).toEqual(['message 3','message 1','message 2 (edited)']);
+ await vi.advanceTimersByTimeAsync(4000);
+ expect(mocks.launch.mock.calls.map(c=>c[0].prompt)).toEqual(['message 3','first','message 2 (edited)']);
+ expect(first.id).toBeTruthy();
+});
+it('refuses an edit once the message was sent, and a released hold no longer blocks the queue',async()=>{
+ await enqueueLocalMessage(request,'only');const [row]=queuedLocalMessages('mission');
+ await holdQueuedMessage(row.id);await releaseQueuedMessage(row.id);
+ stop=startLocalQueueWorker();mocks.active=false;window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ await expect(enqueueLocalMessage(request,'too late',{id:row.id,replace:true})).rejects.toThrow('already sent');
+});
+it('an abandoned hold expires instead of blocking the queue forever',async()=>{
+ await enqueueLocalMessage(request,'first');const [row]=queuedLocalMessages('mission');
+ await holdQueuedMessage(row.id);
+ stop=startLocalQueueWorker();mocks.active=false;
+ window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.launch).not.toHaveBeenCalled();
+ vi.setSystemTime(Date.now()+16*60_000);
+ window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+});
+it('an in-place edit keeps images whose marker is still in the text',async()=>{
+ const text='look [Image #1] [Uploaded: /work/.paloma/images/a.png]';
+ await enqueueLocalMessage({...request,prompt:text,imagePaths:['/work/.paloma/images/a.png']},text);
+ const [row]=queuedLocalMessages('mission');
+ const edited='look closer [Image #1] [Uploaded: /work/.paloma/images/a.png]';
+ await enqueueLocalMessage({...request,prompt:edited,imagePaths:[]},edited,{id:row.id,replace:true});
+ expect(queuedLocalMessages('mission')[0].request.imagePaths).toEqual(['/work/.paloma/images/a.png']);
+ await enqueueLocalMessage({...request,prompt:'no image',imagePaths:[]},'no image',{id:row.id,replace:true});
+ expect(queuedLocalMessages('mission')[0].request.imagePaths).toEqual([]);
 });
