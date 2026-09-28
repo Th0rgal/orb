@@ -5,7 +5,7 @@ vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,getMission:async(
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
 vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
-import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage} from '../src/localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
 beforeEach(()=>{vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
@@ -99,19 +99,30 @@ it('editing removes only a still-unsent message and rejects stale edits',async()
  await expect(takeQueuedMessage(pending)).rejects.toThrow('already been sent');
 });
 
-it('recovers an accepted message whose native run disappeared without replaying it',async()=>{
+it('continues the session once after the app restarted under a running turn, then waits for the user',async()=>{
  mocks.active=false;
- const id=await enqueueLocalMessage(request,'resume');
+ const id=await enqueueLocalMessage(request,'resume');await enqueueLocalMessage({...request,prompt:'second'},'second');
  for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===id){row.state='accepted';row.receipt={run_id:'previous',generation:1};}
- mocks.follow.mockRejectedValueOnce(new Error('no local run'));
+ // The first follow finds no run (the app restarted); the resumed run is lost again.
+ mocks.follow.mockRejectedValueOnce(new Error('no local run')).mockRejectedValueOnce(new Error('no local run'));
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(2000);
  expect(mocks.recover).toHaveBeenCalledWith('mission');
- expect(mocks.launch).not.toHaveBeenCalled();
- expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'error',interrupted:true,error:expect.stringContaining('Your message is saved')});
- expect(mocks.follow).toHaveBeenCalledTimes(1);
- await retryQueuedMessage(id);await vi.advanceTimersByTimeAsync(100);
  expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.launch.mock.calls[0][0]).toMatchObject({prompt:resumedPrompt('first'),sessionId:'latest'});
+ expect([...mocks.store.keys()].some(key=>key.includes(':recovered:')&&key.includes('previous'))).toBe(true);
+ // Lost a second time: no loop, and the next message does not overtake it.
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'error',interrupted:true,autoResumed:true,error:expect.stringContaining('Your message is saved')});
+ await vi.advanceTimersByTimeAsync(65000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ await retryQueuedMessage(id);await vi.advanceTimersByTimeAsync(100);
+ expect(mocks.launch.mock.calls.map(call=>call[0].prompt)).toEqual([resumedPrompt('first'),resumedPrompt('first'),'second']);
  expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+it('looks again for a queued message when the running turn belongs to another window',async()=>{
+ await enqueueLocalMessage(request,'first');
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1000);expect(mocks.launch).not.toHaveBeenCalled();
+ mocks.active=false;await vi.advanceTimersByTimeAsync(31000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
 it('keeps a missing accepted run fenced until recovery confirms it stopped',async()=>{
  mocks.active=false;
