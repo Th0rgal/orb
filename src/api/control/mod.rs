@@ -13523,6 +13523,14 @@ async fn submit_leased_remote_job(
             .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
             .ok_or("native Claude session allocation lost its run lease")?;
         let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+        // Missions are created with a placeholder identity. A launch that fails
+        // before submission must not leave it behind for `--resume`.
+        if let Some(placeholder) = mission.session_id.as_deref() {
+            control
+                .mission_store
+                .clear_unsubmitted_session_id(mission.id, placeholder, "claudecode", &fence)
+                .await?;
+        }
         Some((session_id, fence))
     } else {
         None

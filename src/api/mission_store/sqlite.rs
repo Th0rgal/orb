@@ -4992,8 +4992,14 @@ impl MissionStore for SqliteMissionStore {
             ).optional().map_err(|e| e.to_string())?;
             if latest != Some(run) { return Ok(false); }
             let removed = tx.execute("DELETE FROM mission_harness_sessions WHERE mission_id=?1 AND backend=?2 AND session_id=?3", params![id.to_string(),backend,session_id]).map_err(|e| e.to_string())?;
-            if removed == 0 { return Ok(false); }
-            tx.execute("UPDATE missions SET session_id=NULL,updated_at=?4 WHERE id=?1 AND backend=?2 AND session_id=?3",params![id.to_string(),backend,session_id,now_string()]).map_err(|e| e.to_string())?;
+            if removed == 0 {
+                // Without a recorded native session, only the mission's own
+                // never-submitted placeholder identity may be cleared.
+                let recorded: i64 = tx.query_row("SELECT COUNT(*) FROM mission_harness_sessions WHERE mission_id=?1 AND backend=?2", params![id.to_string(),backend], |row| row.get(0)).map_err(|e| e.to_string())?;
+                if recorded > 0 { return Ok(false); }
+            }
+            let cleared = tx.execute("UPDATE missions SET session_id=NULL,updated_at=?4 WHERE id=?1 AND backend=?2 AND session_id=?3",params![id.to_string(),backend,session_id,now_string()]).map_err(|e| e.to_string())?;
+            if removed == 0 && cleared == 0 { return Ok(false); }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(true)
         }).await.map_err(|e| e.to_string())?
