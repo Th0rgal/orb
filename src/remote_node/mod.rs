@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn parses_env_node_list_with_default_token_env() {
         let nodes = parse_node_list(
-            "babylon=http://54.36.175.109:3088,nippur=http://37.187.92.183:3088|NIPPUR_TOKEN",
+            "babylon=http://203.0.113.10:3088,nippur=http://203.0.113.11:3088|NIPPUR_TOKEN",
         )
         .unwrap();
         assert_eq!(nodes[0].id, "babylon");

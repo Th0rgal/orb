@@ -2,31 +2,34 @@
 
 ## Remote Servers
 
+Hosts are SSH aliases; define them in your `~/.ssh/config` (addresses are kept
+out of this public repository).
+
 | Server | SSH | Domain |
 | --- | --- | --- |
-| **Thomas / agent-core** | `ssh -i ~/.ssh/paloma root@65.109.98.246` | https://agent-backend.thomas.md |
-| **Thomas / old-agent compute** | `ssh -i ~/.ssh/paloma root@95.216.112.253` | Sandboxed node only |
-| **Ben** | `ssh -i ~/.ssh/paloma root@88.99.4.254` | https://fricobackend.relens.ai |
+| **Thomas / agent-core** | `ssh agent-core` | https://agent-backend.thomas.md |
+| **Thomas / old-agent compute** | `ssh old-agent` | Sandboxed node only |
+| **Ben** | `ssh ben-backend` | (private) |
 
 ## Backend Services (Thomas / agent-core)
 
-`agent-core` (`65.109.98.246`, Tailscale `100.107.113.19`) is the only Thomas
+`agent-core` is the only Thomas
 control plane. It runs the two sandboxed.sh instances plus the Hermes assistant
 stack. Hermes's server inventory calls it **`agent-core`**; the historical
 `sepolia.rpc.starknet.id` name is only a compatibility DNS alias.
 
-`old-agent` (`95.216.112.253`) is intentionally still powered on, but only as a
+`old-agent` is intentionally still powered on, but only as a
 leaf compute host. Its Sandboxed node ID is **`old-agent`** and exposes port
-3088 only to `65.109.98.246`. Its former sandboxed.sh, Hermes, fleet-daemon, and
+3088 only to `agent-core`. Its former sandboxed.sh, Hermes, fleet-daemon, and
 nginx control-plane services remain stopped and disabled. Do not use it as a
 scheduler, relay, or rollback control plane.
 
 Network routing is direct:
 
-- `agent-core` reaches DGX Spark over Tailscale at `100.77.4.93:3088`. There is
+- `agent-core` reaches DGX Spark over Tailscale (node port 3088). There is
   no production SSH tunnel through `old-agent`.
 - Ashur, Babylon, Nippur, and `old-agent` expose their Sandboxed node API only
-  to the public address `65.109.98.246`.
+  to `agent-core`.
 - The Paloma SSH key on `agent-core` is authorized for operational reads on
   Ashur, Babylon, Nippur, DGX, and `old-agent`; `disk-sentinel` exercises these
   direct paths.
@@ -63,7 +66,7 @@ manually on `agent-core`. Check the explicit identity path and pinned host key
 for each failing entry before diagnosing a simultaneous fleet outage:
 
 ```bash
-ssh -i ~/.ssh/paloma root@65.109.98.246 \
+ssh agent-core \
   '/srv/sandboxed-storage/staging/agent-core/hermes/.hermes/scripts/disk-sentinel.sh'
 ```
 
@@ -78,7 +81,7 @@ keys or adding a relay:
 ```bash
 systemctl is-enabled tailscaled
 systemctl is-active tailscaled
-tailscale ping -c 2 100.77.4.93
+tailscale ping -c 2 dgx-spark
 ```
 
 `tailscaled` must be both enabled and active on `agent-core`. Recover the
@@ -280,20 +283,20 @@ Sync source code and build directly on the server:
 ```bash
 # Sync source (backend-only; avoids copying dashboard/ which deploys via Vercel)
 rsync -avz --exclude 'target' --exclude '.git' --exclude 'dashboard' \
-  -e "ssh -i ~/.ssh/paloma" \
-  /Users/thomas/work/paloma/sandboxed_sh/ root@65.109.98.246:/opt/sandboxed-sh-dev/
+  -e ssh \
+  /Users/thomas/work/paloma/sandboxed_sh/ agent-core:/opt/sandboxed-sh-dev/
 
 # If you need the dashboard on the server for debugging, remove the dashboard exclude:
 # rsync -avz --exclude 'target' --exclude '.git' --exclude 'dashboard/node_modules' --exclude 'dashboard/.next' \
-#   -e "ssh -i ~/.ssh/paloma" \
-#   /Users/thomas/work/paloma/sandboxed_sh/ root@65.109.98.246:/opt/sandboxed-sh-dev/
+#   -e ssh \
+#   /Users/thomas/work/paloma/sandboxed_sh/ agent-core:/opt/sandboxed-sh-dev/
 
 # Build on server (debug mode)
-ssh -i ~/.ssh/paloma root@65.109.98.246 "cd /opt/sandboxed-sh-dev && source ~/.cargo/env && cargo build"
+ssh agent-core "cd /opt/sandboxed-sh-dev && source ~/.cargo/env && cargo build"
 
 # Copy binaries (main + MCP tools) and restart
 # Note: stop service first to avoid "Text file busy" when replacing MCP binaries.
-ssh -i ~/.ssh/paloma root@65.109.98.246 "systemctl stop sandboxed-sh-dev && \
+ssh agent-core "systemctl stop sandboxed-sh-dev && \
   cp /opt/sandboxed-sh-dev/target/debug/sandboxed-sh /usr/local/bin/sandboxed-sh-dev && \
   cp /opt/sandboxed-sh-dev/target/debug/workspace-mcp /usr/local/bin/ && \
   cp /opt/sandboxed-sh-dev/target/debug/desktop-mcp /usr/local/bin/ && \
@@ -311,16 +314,16 @@ curl https://agent-backend-dev.thomas.md/api/health
 cargo build
 
 # Deploy to Thomas / agent-core (dev first, then promote to prod)
-scp -i ~/.ssh/paloma target/debug/sandboxed_sh root@65.109.98.246:/usr/local/bin/sandboxed-sh-dev
-ssh -i ~/.ssh/paloma root@65.109.98.246 "systemctl restart sandboxed-sh-dev"
+scp target/debug/sandboxed_sh agent-core:/usr/local/bin/sandboxed-sh-dev
+ssh agent-core "systemctl restart sandboxed-sh-dev"
 
 # After testing, deploy production through POST /api/system/deploy with
 # target_environment=prod and expected_service=sandboxed-sh-prod.service.
 # Never copy over the live production binary or run an unguarded raw restart.
 
 # Deploy to Ben
-scp -i ~/.ssh/paloma target/debug/sandboxed_sh root@88.99.4.254:/usr/local/bin/sandboxed-sh
-ssh -i ~/.ssh/paloma root@88.99.4.254 "systemctl restart sandboxed-sh"
+scp target/debug/sandboxed_sh ben-backend:/usr/local/bin/sandboxed-sh
+ssh ben-backend "systemctl restart sandboxed-sh"
 ```
 
 **Faster compilation tips:**
@@ -403,7 +406,7 @@ A refusal surfaces a message that explains the next step:
 For a dev-only restart without rebuilding, use the explicit service command:
 
 ```bash
-ssh -i ~/.ssh/paloma root@65.109.98.246 "systemctl restart sandboxed-sh-dev"
+ssh agent-core "systemctl restart sandboxed-sh-dev"
 ```
 
 Do not call `deploy_sandboxed_sh` from a prod mission unless you intend to
@@ -422,7 +425,7 @@ the one command we actually want it to run.
 ### Step 1 — identify the agent key
 
 ```bash
-ssh -i ~/.ssh/paloma root@65.109.98.246 \
+ssh agent-core \
   'cat /root/.ssh/authorized_keys'
 ```
 
@@ -563,7 +566,7 @@ should show `model_effort: high`.
 
 **MCPs show "Failed to spawn process" error:** The MCP binaries (`workspace-mcp`, `desktop-mcp`, `orchestrator-mcp`) need to be installed to `/usr/local/bin/`. After building, copy them:
 ```bash
-ssh -i ~/.ssh/paloma root@65.109.98.246 "cp /opt/sandboxed-sh-dev/target/debug/workspace-mcp /usr/local/bin/ && \
+ssh agent-core "cp /opt/sandboxed-sh-dev/target/debug/workspace-mcp /usr/local/bin/ && \
   cp /opt/sandboxed-sh-dev/target/debug/desktop-mcp /usr/local/bin/ && \
   cp /opt/sandboxed-sh-dev/target/debug/orchestrator-mcp /usr/local/bin/"
 ```

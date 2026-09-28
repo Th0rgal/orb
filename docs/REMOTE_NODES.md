@@ -92,7 +92,7 @@ Use one distinct secret per node. Do not paste the secret into logs or docs.
 The node binds to `127.0.0.1:3088` by default so it is never reachable over a
 network by accident. To let core reach it, set `SANDBOXED_NODE_BIND` to a
 private interface — preferably the node's tailscale IP (e.g.
-`SANDBOXED_NODE_BIND=100.77.4.93:3088`), or `0.0.0.0:3088` only when the host
+`SANDBOXED_NODE_BIND=100.64.0.10:3088`), or `0.0.0.0:3088` only when the host
 firewall restricts the port to core.
 
 Example (Babylon):
@@ -735,7 +735,7 @@ Configure the three Thomas/Paloma servers on the core backend:
 
 ```bash
 export SANDBOXED_REMOTE_NODES_ENABLED=true
-export SANDBOXED_REMOTE_NODES='babylon=http://54.36.175.109:3088,nippur=http://37.187.92.183:3088,ashur=http://188.40.69.160:3088'
+export SANDBOXED_REMOTE_NODES='babylon=http://203.0.113.10:3088,nippur=http://203.0.113.11:3088,ashur=http://203.0.113.12:3088'
 export SANDBOXED_REMOTE_NODE_BABYLON_TOKEN='<set in environment only>'
 export SANDBOXED_REMOTE_NODE_NIPPUR_TOKEN='<set in environment only>'
 export SANDBOXED_REMOTE_NODE_ASHUR_TOKEN='<set in environment only>'

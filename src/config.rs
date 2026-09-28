@@ -251,11 +251,11 @@ pub struct Config {
     /// DGX Spark build-offload config (all optional; offload is disabled unless
     /// all three are set). The host holds these credentials so workspaces never
     /// need Spark access. See `src/api/spark.rs`.
-    /// Arbiter base URL, e.g. `http://100.77.4.93:8088`.
+    /// Arbiter base URL, e.g. `http://100.64.0.10:8088`.
     pub spark_arbiter_url: Option<String>,
     /// Arbiter bearer token (matches `/etc/spark-arbiter.env` on the Spark).
     pub spark_arbiter_token: Option<String>,
-    /// SSH target for rsync of the workspace, e.g. `th0rgal@100.77.4.93`.
+    /// SSH target for rsync of the workspace, e.g. `user@100.64.0.10`.
     pub spark_ssh_target: Option<String>,
 
     /// Remote runner node configuration. Disabled unless
