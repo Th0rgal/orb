@@ -1,31 +1,42 @@
-# Agents and Execution Architecture
+# sandboxed.sh — guide for coding agents
 
-> Workspace-level map of Paloma (Hermes coordinator + sandboxed.sh executor,
-> production layout, local checkouts) lives in
-> [`../AGENTS.md`](../AGENTS.md). This file is the sandboxed.sh execution
-> contract.
+Read this file before changing the repository. For runtime incidents on a
+deployed instance, read [DEBUGGING.md](DEBUGGING.md) first: debug on the
+server, not locally.
 
-> **⚠️ Debugging Issues?** Before investigating any runtime problems, **always
-> read [DEBUGGING.md](DEBUGGING.md) first**. It contains:
-> - Remote server SSH access (Thomas/Ben servers)
-> - Systemd service management commands
-> - Log viewing and common troubleshooting steps
-> - Deployment procedures
->
-> The dashboard typically runs locally but connects to **remote backends**. Debug
-> on the server, not locally.
+## Repository map
 
-> **⚠️ IMPORTANT: Format Check Before Pushing**
->
-> **ALWAYS run `cargo fmt --all` before committing Rust code changes!**
->
-> The CI pipeline will fail if code is not properly formatted. To check locally:
-> ```bash
-> cargo fmt --all --check  # Check if formatting is needed
-> cargo fmt --all          # Apply formatting
-> ```
->
-> Make this part of your pre-commit routine to avoid CI failures.
+| Path | What it is |
+| --- | --- |
+| `src/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`) |
+| `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
+| `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
+| `dashboard/` | Next.js web dashboard (admin console, served by the Docker image) |
+| `docs-site/` | Nextra documentation site |
+| `android_dashboard/` | Android app |
+| `shared/` | Rust sources included by both the backend and `orb/src-tauri` via `#[path]` |
+| `catalog/`, `capabilities/` | Model catalog snapshots (compiled in by `build.rs`) and the capability matrix checked in CI |
+| `scripts/`, `deploy/`, `docker/` | Operational scripts (some are embedded with `include_str!`), systemd units, Docker entrypoint |
+| `docs/` | Reference documentation; `docs/archive/` holds design history |
+
+## Build and test before pushing
+
+CI runs all of these; run the ones for the area you touched.
+
+```bash
+cargo fmt --all                                   # CI fails on unformatted Rust
+cargo clippy --locked --workspace -- -D clippy::all
+cargo test --locked --workspace
+scripts/harness_contract_tests.sh
+scripts/check-capability-matrix.sh
+(cd orb && pnpm install --frozen-lockfile && pnpm build && pnpm test && pnpm test:browser)
+(cd dashboard && bun install --frozen-lockfile && bun run test:unit && bun run build)
+```
+
+`.githooks/pre-push` runs the format check; enable it with
+`git config core.hooksPath .githooks`.
+
+# Execution architecture
 
 This document describes how Sandboxed.sh executes missions after the per-workspace
 harness refactor. The core change: **agent harnesses run inside
@@ -115,6 +126,12 @@ execution context:
 - Auth uses OpenAI API keys or Codex/ChatGPT credentials discovered by the
   backend.
 
+### ChatGPT UI
+
+- Drives the ChatGPT web app through a service-side browser profile pool
+  (`src/backend/chatgpt_ui`, `scripts/chatgpt_ui_driver.py`). It is also the
+  engine behind ChatGPT cloud agents. See `docs/CHATGPT_UI_HARNESS.md`.
+
 ### Gemini and Grok
 
 - Run **per workspace** using their native CLI backends.
@@ -132,14 +149,13 @@ execution context:
 If a mission truly requires MCP tools, re-enable them per workspace or per
 backend in configuration. The default is to avoid host-proxy tooling.
 
-## Desktop streaming (X11)
+## Desktop streaming
 
-- The desktop stream is hosted on the **Sandboxed.sh host** (Xvfb + MJPEG).
-- Container workspaces do **not** see the host desktop by default because the
-  X11 socket (`/tmp/.X11-unix`) is not bind-mounted for harness/MCP execution.
-- Interactive shells bind X11 when a runtime display is present, but harnesses
-  and MCPs do not. If you need container agents to drive the shared desktop, add
-  an explicit X11 bind + `DISPLAY`, or run the mission on a host workspace.
+- Desktop sessions are Wayland-first: each session runs a compositor whose
+  socket lives under the workspace (`.sandboxed-sh/wayland/<display>/`), see
+  `src/api/desktop.rs`. Xvfb is only kept as a fallback for legacy sessions.
+- Harnesses and MCPs do not get a display unless the mission asks for the
+  desktop tools; run such missions on a workspace that has a desktop session.
 
 ## Configuration sources
 
@@ -269,7 +285,7 @@ Recommended smoke tests after changes:
 If files appear in the wrong place, the harness is not running inside the
 workspace execution context.
 
-## Debugging Deployed Instances
+## Debugging deployed instances
 
-For debugging production deployments, SSH access, systemd service management,
-and log analysis, see **[DEBUGGING.md](DEBUGGING.md)**.
+See **[DEBUGGING.md](DEBUGGING.md)** for service management, logs and
+deployment procedures.

@@ -716,7 +716,7 @@ retuned live from the dashboard **Resources** panel (or
 `POST /api/workspaces/:id/resources` with `cpu_weight`/`cpu_quota`). Setting any
 CPU property is also what makes systemd delegate the `cpu` controller into
 `missions.slice` — without it, a per-scope `CPUQuota` is silently unenforced.
-See the "Resource isolation" section in `CLAUDE.md` for the architecture.
+See the "Resource isolation" section in `AGENTS.md` for the architecture.
 
 ## Pausing / Resuming the DGX Spark (node cordon)
 

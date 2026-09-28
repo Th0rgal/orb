@@ -17,7 +17,7 @@ so your accumulated understanding of the repository is your main value.
 
 On your first message, invest in context **once**:
 
-- Read the architecture docs (README, CLAUDE.md, docs/) and skim the module
+- Read the architecture docs (README, AGENTS.md, docs/) and skim the module
   layout of the areas the first question touches.
 - Build a mental map: key modules, data flow, conventions, test layout.
 - Then answer the first question.
