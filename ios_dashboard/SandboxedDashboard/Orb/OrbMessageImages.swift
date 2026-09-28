@@ -49,8 +49,13 @@ struct OrbMessageImages: Equatable {
     static let limit = 20 * 1024 * 1024
     static func load(_ path: String, missionID: String?) async -> UIImage? {
         // Legacy desktop messages carry the image inline; never send it to a server.
-        if path.hasPrefix("data:image/"), let comma = path.firstIndex(of: ","),
-           let data = Data(base64Encoded: String(path[path.index(after: comma)...])), data.count <= limit {
+        if path.hasPrefix("data:image/") {
+            // Reject by encoded length before decoding, and never fall through to
+            // the network with an inline payload as the "path".
+            guard let comma = path.firstIndex(of: ","),
+                  path.utf8.count - path[..<comma].utf8.count <= limit / 3 * 4 + 4,
+                  let data = Data(base64Encoded: String(path[path.index(after: comma)...])),
+                  data.count <= limit else { return nil }
             return UIImage(data: data)
         }
         // Scoped to server, account and mission: the same path elsewhere is another file.
