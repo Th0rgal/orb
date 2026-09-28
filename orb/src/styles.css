@@ -19,8 +19,8 @@
   color-scheme: dark;
   --bg: #141414;
   --bg-sidebar: #121313;
-  --sidebar-opacity: 86%;
-  --surface-opacity: 96%;
+  --sidebar-opacity: 76%;
+  --surface-opacity: 91%;
   --composer-shadow: 0 3px 16px rgb(0 0 0 / 12%);
   --bg-elev: #212121;
   --bg-hover: #1e1e1e;
@@ -74,8 +74,8 @@
   color-scheme: light;
   --bg: #ffffff;
   --bg-sidebar: #f6f6f4;
-  --sidebar-opacity: 70%;
-  --surface-opacity: 98%;
+  --sidebar-opacity: 60%;
+  --surface-opacity: 93%;
   --composer-shadow: 0 3px 16px rgb(0 0 0 / 6%);
   --bg-elev: #f1f0ed;
   --bg-hover: #efeee9;
