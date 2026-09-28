@@ -821,6 +821,7 @@ fn truncate_description(description: &str) -> String {
 /// `models_query` is appended after `/models` (e.g. `?sort=most-popular` for
 /// OpenRouter). When `sort_results_by_id` is false the API response order is
 /// preserved (used for server-side popularity sorts).
+#[cfg(test)]
 pub async fn fetch_openai_compatible_models(
     base_url: &str,
     api_key: &str,
@@ -1167,6 +1168,7 @@ async fn store_kimi_models_if_current(
 
 /// Fetch models from the Anthropic /v1/models endpoint.
 /// Uses Anthropic's custom auth headers and `display_name` field.
+#[cfg(test)]
 pub async fn fetch_anthropic_models(api_key: &str) -> Result<Vec<ProviderModel>, String> {
     let client = reqwest::Client::new();
     let url = "https://api.anthropic.com/v1/models?limit=100";

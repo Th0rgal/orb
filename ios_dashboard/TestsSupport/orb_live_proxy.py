@@ -6,7 +6,7 @@ from urllib.parse import unquote
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 PROJECT='orb-ios-validation'
 script="import runpy,sys;sys.argv=['probe','probe'];d=runpy.run_path('/tmp/orb-cloud-prod-install.py');print(d['t'])"
-token=subprocess.check_output(['ssh','-i',str(__import__('pathlib').Path.home()/'.ssh/paloma'),'root@65.109.98.246','python3 -c '+__import__('shlex').quote(script)],text=True).strip()
+token=subprocess.check_output(['ssh',__import__('os').environ.get('ORB_LIVE_SSH','agent-core'),'python3 -c '+__import__('shlex').quote(script)],text=True).strip()
 owned=set()
 def request(path,body=None,method='GET'):
     return urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:18768'+path,data=json.dumps(body).encode() if body is not None else None,method=method,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}),timeout=90)

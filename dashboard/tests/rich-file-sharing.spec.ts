@@ -1,6 +1,6 @@
 import { test, expect, APIRequestContext } from "@playwright/test";
 
-const API_BASE = process.env.OPEN_AGENT_API_BASE || "http://95.216.112.253:3002";
+const API_BASE = process.env.OPEN_AGENT_API_BASE || "http://127.0.0.1:3002";
 
 async function waitForAssistantMessage(
   request: APIRequestContext,

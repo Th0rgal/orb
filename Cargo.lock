@@ -1943,7 +1943,6 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
- "idna_adapter",
  "jsonwebtoken",
  "libc",
  "md5",

@@ -66,7 +66,8 @@ pub struct Permit {
     pub generation: u64,
     pub client_id: String,
 }
-#[tauri::command]
+/// Recovery-only entry point: not exposed over IPC, so the webview cannot
+/// start runs with a caller-supplied permit.
 pub async fn local_agents_start_authorized(
     request: crate::local_agents::StartRequest,
     permit: Permit,

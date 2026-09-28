@@ -4,7 +4,7 @@ test.describe('Workspace Templates Flow', () => {
   test.setTimeout(240000);
 
   test('create template, create workspace from template, verify init script and env', async ({ page, request }) => {
-    const apiBase = process.env.OPEN_AGENT_API_BASE || 'http://95.216.112.253:3000';
+    const apiBase = process.env.OPEN_AGENT_API_BASE || 'http://127.0.0.1:3000';
     const runId = Date.now();
     const templateName = `pw-template-${runId}`;
     const seedWorkspaceName = `pw-template-seed-${runId}`;

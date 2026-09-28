@@ -4,7 +4,7 @@ on:
   push:
     branches: [master, main, "release/*"]
   pull_request:
-    branches: [master, main, feat/add-orb-client]
+    branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]
   # Run CI on a schedule to catch issues even without new commits
   schedule:
@@ -168,6 +168,18 @@ jobs:
       - name: Run policy lint unit tests
         run: python3 -m unittest scripts/test_policy_lint.py
 
+      # Operational scripts shipped with the server; their tests were never run.
+      - name: Run script unit tests
+        run: >-
+          python3 -m unittest
+          scripts/test_chatgpt_cloud_resume.py
+          scripts/test_chatgpt_message_layout.py
+          scripts/test_chatgpt_ui_pool_health.py
+          scripts/test_node_harness_updates.py
+          scripts/test_orb_stage_conversation.py
+          scripts/test_retag_project_missions.py
+          scripts/test_storage_inventory.py
+
   dashboard-test:
     name: Dashboard Unit Tests
     runs-on: ubuntu-latest
@@ -239,3 +251,19 @@ jobs:
         with:
           name: orb-browser-evidence
           path: orb/test-results
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      # The image is the documented install path; build it so a missing
+      # input (lockfile, build.rs, shared/ sources, a binary) fails here.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

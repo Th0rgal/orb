@@ -30,7 +30,7 @@ installer does not provide a separate signed checksum manifest.
 
 Checks validate executable contracts, not account eligibility or successful
 inference. Grok's managed login must be provisioned separately. See
-`HARNESS_PERFORMANCE_AUDIT.md` for the observed Core authentication failure.
+`archive/HARNESS_PERFORMANCE_AUDIT.md` for the observed Core authentication failure.
 
 The reconciler retains two recent versions, the explicit rollback target and
 any version mapped by a live process. If process inspection is incomplete it
@@ -93,5 +93,5 @@ On the later 22 September retry, a resumable artifact transfer completed. The
 node upload binary was installed, an authenticated Core→Babylon upload passed
 byte-exact readback, and Babylon was uncordoned. An Orb OpenCode/K3 mission
 (`37010f5b-7418-4805-b429-2fa845cbe48f`) then completed in 28.9 seconds. No host
-reboot was required. See `HARNESS_PERFORMANCE_AUDIT.md` for the remaining
+reboot was required. See `archive/HARNESS_PERFORMANCE_AUDIT.md` for the remaining
 network-cause uncertainty; the earlier cordon note is historical.

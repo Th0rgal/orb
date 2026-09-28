@@ -6,7 +6,7 @@ test.describe('Minecraft workspace mission', () => {
   test.setTimeout(900_000);
 
   test('creates and builds minecraft workspace', async ({ page, request }) => {
-    const apiBase = process.env.OPEN_AGENT_API_BASE || 'http://95.216.112.253:3000';
+    const apiBase = process.env.OPEN_AGENT_API_BASE || 'http://127.0.0.1:3000';
     const runId = Date.now();
     const workspaceName = `mc-ws-${runId}`;
     const missionTitle = `mc-mission-${runId}`;

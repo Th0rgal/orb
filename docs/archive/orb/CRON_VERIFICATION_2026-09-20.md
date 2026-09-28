@@ -36,10 +36,10 @@ test reports one dead-code warning. No compilation or test failures remain.
 Screenshots use the real Orb components with all API traffic intercepted by the
 local test harness; they do not show production state:
 
-- [Create, light](../screenshots/orb-cron-create-light.png)
-- [Create, dark](../screenshots/orb-cron-create-dark.png)
-- [Edit, light](../screenshots/orb-cron-edit-light.png)
-- [Edit, dark](../screenshots/orb-cron-edit-dark.png)
+- [Create, light](../../../screenshots/orb-cron-create-light.png)
+- [Create, dark](../../../screenshots/orb-cron-create-dark.png)
+- [Edit, light](../../../screenshots/orb-cron-edit-light.png)
+- [Edit, dark](../../../screenshots/orb-cron-edit-dark.png)
 
 Release dependency: Hermes production source at `882881de` stores the advanced
 fields but its REST API filters them. The companion
@@ -87,7 +87,7 @@ Additional review fixes — 2026-09-20:
 - Rust tests exercise the HTTP adapter against a local Axum server, real Hermes
   record fixtures, exclusive project/job ownership, and delivery validation.
   These supplement the browser's intercepted API tests.
-- [Narrow sidebar drawer](../screenshots/orb-narrow-drawer.png). Updated form
+- [Narrow sidebar drawer](../../../screenshots/orb-narrow-drawer.png). Updated form
   screenshots reflect the visible delivery destination and explanation.
 
 No deployment or native Mac integration was performed.
@@ -122,7 +122,7 @@ stored snapshot moves relative to tools. The actual DOM regression passes.
 Final production frontend build, all 29 unit/component tests and all 11 browser
 tests passed. Screenshots were refreshed from this final build's components.
 
-Launch and capability follow-up: see [LAUNCH-VERIFICATION.md](LAUNCH-VERIFICATION.md).
+Launch and capability follow-up: see [LAUNCH-VERIFICATION.md](LAUNCH_VERIFICATION.md).
 Passed 37 unit/component tests, 22 browser tests and the frontend build. Compact
 unsupported-cron state, preserved launch drafts, visible initial prompts/status,
 remote selection guards and startup timing artifacts are committed. Backend

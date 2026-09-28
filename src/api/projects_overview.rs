@@ -183,6 +183,7 @@ struct PendingModeWrite {
 /// This is THE delivery router: alias resolution, roster auto-upsert, state
 /// and mode recording, and unrouted triage all happen here, once, in the
 /// background — the overview handler only reads the store back.
+#[cfg(test)]
 fn ingest_deliveries(
     projects: &super::projects_store::ProjectsStore,
     aliases: &HashMap<String, String>,
@@ -1323,6 +1324,7 @@ pub(crate) const IRREVERSIBLE_KINDS: [&str; 6] = [
 /// coerce granted+decided into an owner escalation instead of failing, so a
 /// mis-calibrated controller degrades to asking rather than erroring — and
 /// `act_reversible` additionally escalates the irreversible kinds.
+#[cfg(test)]
 pub(crate) fn resolve_decision_disposition(
     autonomy_level: Option<&str>,
     authority: Option<&str>,

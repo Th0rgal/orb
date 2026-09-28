@@ -8,7 +8,6 @@ target/
 # Node modules (rebuilt in Docker)
 dashboard/node_modules/
 dashboard/.next/
-context/oh-my-opencode/node_modules/
 
 # Documentation & non-essential
 docs/

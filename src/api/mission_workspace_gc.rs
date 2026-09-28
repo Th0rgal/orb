@@ -281,6 +281,9 @@ fn workspace_ids_for_directory(
 /// Whether the most protective known owner of a shared short-id directory is
 /// terminal and past retention. Phase 1 must use the same collision policy as
 /// the disk-driven sweep before proposing or removing the shared path.
+/// Production resolves the exact entry per directory (`entry_for_directory`);
+/// this owner-level rule is only exercised by tests.
+#[cfg(test)]
 fn indexed_mission_directory_is_collectible(
     entries: &[MissionIndexEntry],
     workspace_id: uuid::Uuid,

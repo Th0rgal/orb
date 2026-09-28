@@ -4,7 +4,7 @@ Date: 2026-05-22
 
 ## Objective
 
-Implement the distilled plan in `docs/PALOMA_QWENPAW_ADAPTATION_PLAN.md` and
+Implement the distilled plan in `docs/archive/PALOMA_QWENPAW_ADAPTATION_PLAN.md` and
 test every feature using the user's Telegram account.
 
 ## Prompt-to-Artifact Checklist

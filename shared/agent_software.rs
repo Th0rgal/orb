@@ -29,7 +29,17 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+#[cfg(test)]
+thread_local! {
+    /// Per-test state directory. A process-wide env var would also capture the
+    /// launches of unrelated tests running in parallel.
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 pub fn root() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(p) = TEST_ROOT.with(|r| r.borrow().clone()) {
+        return Ok(p);
+    }
     if let Some(p) = std::env::var_os("AGENT_SOFTWARE_STATE_DIR") {
         return Ok(p.into());
     }
@@ -855,10 +865,9 @@ mod tests {
         }
         use std::os::unix::fs::{symlink, PermissionsExt};
         let temp = tempfile::tempdir().unwrap();
-        let old_root = std::env::var_os("AGENT_SOFTWARE_STATE_DIR");
         let old_path = std::env::var_os("PATH");
         let root = temp.path().join("state");
-        std::env::set_var("AGENT_SOFTWARE_STATE_DIR", &root);
+        TEST_ROOT.with(|r| *r.borrow_mut() = Some(root.clone()));
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::env::set_var(
@@ -1059,10 +1068,7 @@ CLI
             std::fs::canonicalize(&global).unwrap().to_str().unwrap(),
             "preserve the owning npm prefix"
         );
-        match old_root {
-            Some(v) => std::env::set_var("AGENT_SOFTWARE_STATE_DIR", v),
-            None => std::env::remove_var("AGENT_SOFTWARE_STATE_DIR"),
-        };
+        TEST_ROOT.with(|r| *r.borrow_mut() = None);
         match old_path {
             Some(v) => std::env::set_var("PATH", v),
             None => std::env::remove_var("PATH"),

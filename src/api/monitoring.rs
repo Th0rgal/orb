@@ -180,6 +180,7 @@ impl DiskHealthLevel {
 /// Fresh snapshot of root-filesystem usage as `(used, total, percent)`.
 /// Standalone (its own sysinfo read) so admission checks, fleet health and
 /// the disk watcher can call it without the monitoring collector's state.
+#[cfg(not(unix))]
 pub fn current_disk_usage() -> (u64, u64, f32) {
     let disks = Disks::new_with_refreshed_list();
     let (used, total) = root_disk_usage(&disks);

@@ -93,7 +93,7 @@ runs of 1,000 exchanges and 100 updates each produced:
 
 Focus, text and selection survived 20 equivalent question snapshots. The native
 subscription received one initial value and no idle repetitions. Raw results are
-in `performance-20260927/tauri-virtualized.json`. The fixture now includes a scroll
+in `docs/archive/orb/performance-20260927/tauri-virtualized.json`. The fixture now includes a scroll
 container and FindBar; the prior audit was a single pass, so this comparison is
 indicative rather than a statistically controlled CPU experiment. The
 `metrics.cpu_percent` field measures the host, **not Orb's process CPU**.

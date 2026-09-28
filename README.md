@@ -92,7 +92,7 @@ The same control plane is available over MCP for coordinators such as
 [Hermes](https://github.com/Th0rgal/hermes-agent). Automation uses the same project
 and mission records as Orb.
 
-[Execution architecture](agents.md) ·
+[Execution architecture](AGENTS.md) ·
 [Workspaces](docs/WORKSPACES.md) ·
 [MCP and Hermes](docs/HERMES_ORCHESTRATION.md) ·
 [Development and troubleshooting](DEBUGGING.md)
