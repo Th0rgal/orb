@@ -23,3 +23,19 @@ it("sends a transfer to the authoritative API and surfaces an old backend", asyn
   fetch.mockResolvedValue(new Response('Not found', {status:404}));
   await expect(transferProjectFile("test", "context.md", "renamed.md")).rejects.toThrow("Update the backend");
 });
+
+it("blocks folder deletion when a nested agent exists beyond the first page", async () => {
+  const { assertFolderHasNoWork } = await import('../src/fileActions');
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(new Response(JSON.stringify(Array.from({length:200},(_,i)=>({id:String(i),project:'test',tags:[]})))))
+    .mockResolvedValueOnce(new Response(JSON.stringify([{id:'nested',project:'test',tags:['orb-folder:notes/deep']}])));
+  await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('Move the agents');
+  expect(String(fetch.mock.calls[1][0])).toContain('offset=200');
+});
+it("allows a document folder but blocks a nested cron", async () => {
+  const { assertFolderHasNoWork } = await import('../src/fileActions');
+  const fetch = vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response('{"jobs":[]}'));
+  await expect(assertFolderHasNoWork('test','notes')).resolves.toBeUndefined();
+  fetch.mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response(JSON.stringify({jobs:[{id:'job',name:'Cron',folder:'notes/deep',enabled:true}]})));
+  await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('crons');
+});

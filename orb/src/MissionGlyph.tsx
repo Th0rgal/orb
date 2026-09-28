@@ -1,5 +1,5 @@
 import { Dynamic } from "solid-js/web";
-import { Show } from "solid-js";
+import { Show, type JSX } from "solid-js";
 import * as Icon from "./sidebarIcons";
 import "./sidebar-status.css";
 import { pendingMissionInteraction, type PendingInteraction } from "./missionAttention";
@@ -35,10 +35,10 @@ export function missionStatusPresentation(status: string, request?: PendingInter
   }
 }
 
-export function MissionGlyph(p: { status: string; missionId?: string }) {
+export function MissionGlyph(p: { status: string; missionId?: string; identity?: JSX.Element }) {
   const state = () => missionStatusPresentation(p.status, pendingMissionInteraction(p.missionId));
   return <span class={`mission-glyph ${state().tone}`} data-mission-status={p.status} title={state().label}>
-    <Icon.Bot />
-    <Show when={state().icon}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={12} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
+    <Show when={p.identity} fallback={<Icon.Bot />}>{p.identity}</Show>
+    <Show when={state().icon}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
   </span>;
 }

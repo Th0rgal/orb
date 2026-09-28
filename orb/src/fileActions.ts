@@ -1,4 +1,4 @@
-import { api, ApiError, getApiUrl, getJwt, connectionVersion } from "./api";
+import { api, ApiError, getApiUrl, getJwt, connectionVersion, listProjectCrons, type Mission } from "./api";
 import { copyText } from "./clipboard";
 import { localContextFile } from "./projectContext";
 
@@ -47,4 +47,24 @@ export function readFileReference(text: string): FileClipboard | null {
     const value = JSON.parse(text.slice(prefix.length));
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
+}
+
+/** Keep executable work visible: removing documents must not orphan its folder. */
+export async function assertFolderHasNoWork(slug: string, path: string): Promise<void> {
+  const version = connectionVersion();
+  const contains = (folder: string) => folder === path || folder.startsWith(`${path}/`);
+  const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
+  const hasMission = (mission: Mission) => mission.project === slug && (mission.tags ?? []).some(tag => tag.startsWith("orb-folder:") && contains(tag.slice(11)));
+  const local = await import("./localOrigins").then(m => m.localOrigins());
+  checkConnection();
+  if (local.some(hasMission)) throw new Error("Move the agents out of this folder before deleting it.");
+  for (let offset = 0; ; offset += 200) {
+    const missions = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
+    checkConnection();
+    if (missions.some(hasMission)) throw new Error("Move the agents out of this folder before deleting it.");
+    if (missions.length < 200) break;
+  }
+  const crons = await listProjectCrons(slug);
+  checkConnection();
+  if (crons.some(job => contains(job.folder ?? ""))) throw new Error("Move or delete the crons in this folder before deleting it.");
 }

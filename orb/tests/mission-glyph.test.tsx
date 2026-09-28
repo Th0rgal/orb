@@ -32,3 +32,9 @@ it("keeps agent identity while a live mission completes, pauses or fails", () =>
   expect(missionStatusPresentation('active',{id:'p',method:'permission'}).label).toBe('Approval requested');
   expect(missionStatusPresentation('completed',{id:'old',method:'questions'}).label).toBe('Completed');
  });
+
+it('keeps cloud identity and its status badge together', () => {
+  const {container} = render(() => <MissionGlyph status="active" identity={<span data-testid="provider">Cloud</span>} />);
+  expect(container.querySelector('.mission-glyph [data-testid="provider"]')).not.toBeNull();
+  expect(container.querySelector('.mission-glyph .mission-status-spin')).not.toBeNull();
+});

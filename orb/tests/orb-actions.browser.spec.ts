@@ -165,7 +165,7 @@ test("reference subfolder: hover reveals +, whose menu creates agents, crons and
 
   await plus.click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "Cloud agent", "New cron", "New file", "New folder", "Rename"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "Cloud agent", "New cron", "New file", "New folder", "Rename", "Delete…"]);
 
   await menu.getByRole("menuitem", { name: "New file" }).click();
   await page.getByLabel("File name").fill("spec");
@@ -482,4 +482,32 @@ test("file actions rename, cut/paste, copy/paste, move and delete actual paths",
   await expect.poll(() => files.has('archive/renamed.md')).toBe(false);
   expect(files.get('renamed.md')).toBe('Important content');
   expect(transfers[0]).toEqual({path:'context.md',destination:'renamed.md',copy:false});
+});
+
+test('folder deletion requires confirmation and agent badges overlap their icon', async ({page}) => {
+  await setup(page);
+  let deleted = false;
+  await page.route('**/api/projects/test/files?*', route => route.fulfill({json:{entries:deleted ? [] : [{name:'reference',kind:'dir'}]}}));
+  await page.route('**/api/projects/test/file?*', async route => {
+    if(route.request().method() !== 'DELETE') return route.fallback();
+    expect(new URL(route.request().url()).searchParams.get('path')).toBe('reference');
+    deleted=true; await route.fulfill({json:{}});
+  });
+  await expandProject(page);
+  const glyph=page.locator('.mission-glyph').first();
+  const identity=await glyph.boundingBox(), badge=await glyph.locator('.mission-status-mark').boundingBox();
+  expect(identity!.width).toBeLessThanOrEqual(18);
+  expect(badge!.x).toBeLessThan(identity!.x+identity!.width);
+  expect(badge!.y).toBeLessThan(identity!.y+identity!.height);
+  const folder=page.locator('.row.folder').filter({hasText:'reference'});
+  await folder.click({button:'right'});
+  await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('all files and subfolders');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(deleted).toBe(false);
+  await page.getByRole('button',{name:'Folder actions for reference'}).click();
+  await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  await page.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(folder).toHaveCount(0);
+  expect(deleted).toBe(true);
 });

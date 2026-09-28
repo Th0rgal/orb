@@ -2,7 +2,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import type {UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { copyFileReference, readFileReference, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, copyFileReference, readFileReference, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -365,7 +365,7 @@ export function LiveProjectsSection(p: {
   const [newCron, setNewCron] = createSignal<string | null>(null);
   const [actionFocus, setActionFocus] = createSignal(true);
   const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
-  const [fileAction, setFileAction] = createSignal<{ slug: string; path: string; kind: "rename" | "move" | "delete" } | null>(null);
+  const [fileAction, setFileAction] = createSignal<{ slug: string; path: string; kind: "rename" | "move" | "delete"; directory?: boolean } | null>(null);
   const [fileActionValue, setFileActionValue] = createSignal("");
   const [fileActionError, setFileActionError] = createSignal<string | null>(null);
   const [fileBusy, setFileBusy] = createSignal(false);
@@ -389,9 +389,12 @@ export function LiveProjectsSection(p: {
     try {
       const destination = target.kind === "delete" ? undefined : fileDestination(target.path, fileActionValue(), target.kind === "rename");
       if (destination) await transferProjectFile(target.slug, target.path, destination);
-      else await deleteProjectFile(target.slug, target.path);
+      else {
+        if (target.directory) await assertFolderHasNoWork(target.slug, target.path);
+        await deleteProjectFile(target.slug, target.path);
+      }
       if (version !== connectionVersion()) return;
-      if (p.selected() === `pf:${target.slug}:${target.path}`) p.open(destination ? `pf:${target.slug}:${destination}` : null);
+      if (p.selected() === `pf:${target.slug}:${target.path}` || (target.directory && p.selected()?.startsWith(`pf:${target.slug}:${target.path}/`))) p.open(destination ? `pf:${target.slug}:${destination}` : null);
       setFileAction(null);
       await refreshFileParents(target.slug, target.path, destination);
     } catch (e) { if (version === connectionVersion()) setFileActionError(String(e)); }
@@ -773,6 +776,9 @@ export function LiveProjectsSection(p: {
     if (path) items.push(
       { kind: "sep" },
       { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFolderRename(slug, path) },
+      { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => {
+        setActionMenu(null); setFileActionError(null); setFileAction({ slug, path, kind: "delete", directory: true });
+      } },
     );
     if (!path) items.push(
       { kind: "sep" },
@@ -1147,7 +1153,7 @@ export function LiveProjectsSection(p: {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null);
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<Show when={m().backend?.startsWith("cloud_")} fallback={<MissionGlyph missionId={m().id} status={m().status} />}><ProviderLogo type={m().backend!} /></Show>}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} />
     </button>;
   };
@@ -1205,7 +1211,7 @@ export function LiveProjectsSection(p: {
           label={target.kind === "rename" ? "File name" : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
           action={target.kind === "rename" ? "Rename" : "Move"} busy={fileBusy()} error={fileActionError()}
           disabled={target.kind === "rename" && !fileActionValue().trim()} onAction={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} />
-      }><ConfirmDialog title="Delete file?" description={`Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
+      }><ConfirmDialog title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
       <Show when={actionMenu()}>
         {(menu) => <PopupMenu {...menu()} focus={actionFocus()} items={menuItems(menu().slug, menu().path)} onClose={() => setActionMenu(null)} />}
       </Show>

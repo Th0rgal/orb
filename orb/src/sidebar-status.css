@@ -1,7 +1,8 @@
-/* Agent identity stays constant; the adjacent mark describes its actual state. */
-.row .row-ico.mission-lead { width: auto; height: 18px; }
-.mission-glyph { display: inline-flex; align-items: center; gap: 4px; height: 18px; width: max-content; color: var(--fg-3); }
-.mission-status-mark { display: inline-flex; width: 12px; height: 12px; flex: none; }
+/* State badges share the identity icon slot, just like folder activity. */
+.row .row-ico.mission-lead { width: 18px; height: 18px; overflow: visible; }
+.mission-glyph { position: relative; display: inline-flex; align-items: center; justify-content: center; height: 18px; width: 18px; flex: none; color: var(--fg-3); }
+.mission-status-mark { position: absolute; right: -4px; bottom: -3px; display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; border-radius: 50%; background: var(--bg, #141414); }
+.mission-status-mark svg { display: block; }
 .mission-glyph.running .mission-status-mark { color: var(--blue); }
 .mission-glyph.success .mission-status-mark { color: var(--green); }
 .mission-glyph.attention .mission-status-mark { color: var(--amber); }
