@@ -2,8 +2,9 @@
  * harnesses actually emit (same markers as src/api/runners/errors.rs). */
 export type ProviderLimit = { kind: "quota" | "rate"; provider?: string; resets?: string; url?: string };
 
-const QUOTA = /usageLimitExceeded|hit your (?:usage )?limit|usage limit (?:reached|exceeded)|weekly (?:usage )?(?:limit|quota) (?:reached|exhausted|exceeded)|out of (?:usage |extra usage|regular usage)?credits|out of (?:extra|regular) usage|purchase more credits|insufficient_quota|RESOURCE_EXHAUSTED|quota exceeded|Claude AI usage limit reached/i;
-const RATE = /\b(?:429|529)\b|too many requests|overloaded_error|rate[ _]limit(?:ed| reached| exceeded|_error)?/i;
+const QUOTA = /usageLimitExceeded|hit your (?:usage )?limit|usage limit (?:reached|exceeded)|weekly (?:usage )?(?:limit|quota) (?:reached|exhausted|exceeded)|out of (?:usage |extra usage|regular usage)?credits|out of (?:extra|regular) usage|purchase more credits|insufficient_quota|quota exceeded|Claude AI usage limit reached/i;
+// Google reports per-minute throttling as RESOURCE_EXHAUSTED; the backend treats it as transient too.
+const RATE = /\b(?:429|529)\b|too many requests|overloaded_error|RESOURCE_EXHAUSTED|rate[ _]limit(?:ed| reached| exceeded|_error)?/i;
 
 function provider(raw: string): string | undefined {
   if (/codexErrorInfo|chatgpt\.com\/codex|\bcodex\b/i.test(raw)) return "Codex";
