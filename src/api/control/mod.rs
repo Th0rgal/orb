@@ -1590,6 +1590,20 @@ mod campaign_guard_tests {
             Path::new("/gone/work/repo")
         ));
         assert!(same_directory(&repo, &repo.join("src/deep")));
+        #[cfg(unix)]
+        {
+            // link -> repo/src: link/../docs is repo/docs, not <root>/docs.
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::os::unix::fs::symlink(repo.join("src"), root.path().join("link")).unwrap();
+            assert!(same_directory(
+                &root.path().join("link/../docs"),
+                &repo.join("docs")
+            ));
+            assert!(!same_directory(
+                &root.path().join("link/../docs"),
+                &root.path().join("docs")
+            ));
+        }
         assert!(!same_directory(&repo, &root.path().join("other")));
         assert!(!same_directory(&repo, &root.path().join("repo-two")));
         assert!(!same_directory(Path::new("po"), &repo));
@@ -10314,38 +10328,33 @@ async fn live_mission_on_workspace(
         })
 }
 
-/// The directory as the runner reaches it: `.` and `..` folded, and symlinks
-/// resolved for the part of the path that exists.
+/// The directory as the runner reaches it. An absolute path is walked one
+/// component at a time, resolving symlinks before `..` is applied, for as far
+/// as the path exists. A relative path is only folded: it belongs to a
+/// workspace root this comparison does not know, never to the daemon's
+/// current directory.
 fn normalized_directory(path: &std::path::Path) -> std::path::PathBuf {
-    let mut folded = std::path::PathBuf::new();
+    let absolute = path.is_absolute();
+    let mut out = std::path::PathBuf::new();
     for part in path.components() {
         match part {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if !folded.pop() {
-                    folded.push("..");
+                if !out.pop() {
+                    out.push("..");
                 }
             }
-            other => folded.push(other),
-        }
-    }
-    let mut missing = Vec::new();
-    let mut existing = folded.as_path();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(existing) {
-            return missing
-                .iter()
-                .rev()
-                .fold(real, |path, part| path.join(part));
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                missing.push(name.to_owned());
-                existing = parent;
+            other => {
+                out.push(other);
+                if absolute {
+                    if let Ok(real) = std::fs::canonicalize(&out) {
+                        out = real;
+                    }
+                }
             }
-            _ => return folded,
         }
     }
+    out
 }
 
 /// Two spellings of one directory must compare equal, and a directory inside
