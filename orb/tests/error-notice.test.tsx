@@ -29,3 +29,28 @@ it("shows clipboard failures without claiming success", async () => {
   await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Permission denied"));
   expect(screen.queryByRole("button", { name: "Error copied" })).toBeNull();
 });
+
+describe("provider usage limits", () => {
+  const codex = "Remote codex job 4a509fc2-a3a7-4a96-8e6c-04aed3e20cb3 on node 'old-agent' finished with state 'failed' (exit Some(1)); error: command exited with Some(1).\nCLI error: {'message': 'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 3rd, 2026 6:58 PM.', 'codexErrorInfo': 'usageLimitExceeded', 'additionalDetails': None, 'misalignment': None}\n\ndiagnostics:\n2026-09-28T13:40:28.541097Z ERROR codex_app_server: Codex's Linux sandbox uses bubblewrap";
+  it("names the provider, the reset time and links to the usage page instead of a generic failure", async () => {
+    const open = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../src/api", () => ({ openExternalUrl: open }));
+    render(() => <ErrorNotice error={codex} title="Mission failed" />);
+    const alert = screen.getByRole("alert");
+    expect(alert.classList.contains("warning")).toBe(true);
+    expect(alert.textContent).toContain("Codex usage limit reached");
+    expect(alert.textContent).not.toContain("Mission failed");
+    expect(alert.textContent).toContain("It resets on Oct 3, 2026 6:58 PM.");
+    fireEvent.click(screen.getByRole("button", { name: "View usage" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("https://chatgpt.com/codex/settings/usage"));
+    expect(alert.querySelector("details pre")?.textContent).toBe(codex);
+    vi.doUnmock("../src/api");
+  });
+  it("reads Claude's reset formats and separates transient rate limits", async () => {
+    const { describeError } = await import("../src/ErrorNotice");
+    expect(describeError("You've hit your limit · resets 9pm")).toMatchObject({ title: "Usage limit reached", message: expect.stringContaining("It resets at 9pm.") });
+    expect(describeError("Claude AI usage limit reached|1790600000").title).toBe("Claude usage limit reached");
+    expect(describeError("Error: 429 Too Many Requests").title).toBe("The provider is rate-limiting requests");
+    expect(describeError("Increased the rate of the limit checker loop.").tone).toBeUndefined();
+  });
+});

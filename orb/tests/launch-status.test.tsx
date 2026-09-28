@@ -42,7 +42,7 @@ it("does not allocate a routine running banner above an active transcript", () =
 
 it("uses the transcript failure as the sole error, using a red notice when no error arrived", () => {
   const [inTranscript, setInTranscript] = createSignal(false);
-  const mission = { id: "failed", status: "failed", terminal_reason: "rate limited" } as Mission;
+  const mission = { id: "failed", status: "failed", terminal_reason: "harness exited" } as Mission;
   const { container } = render(() => <><LaunchStatus destination="Core" mission={mission} failureInTranscript={inTranscript()} /><MissionFailure mission={mission} failureInTranscript={inTranscript()}/></>);
   expect(container.textContent).toContain("Mission failed");
   expect(container.querySelector(".error-notice")).not.toBeNull();

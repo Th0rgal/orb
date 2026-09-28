@@ -2,8 +2,18 @@ import { Show, createMemo, createSignal, createEffect, type JSX } from "solid-js
 import { copyText } from "./clipboard";
 import { CloseIcon, CopyIcon, CheckIcon } from "./icons";
 import { Dialog, DialogButton } from "./Dialog";
+import { providerLimit, resetPhrase } from "./usageLimit";
 
-export function describeError(raw: string, fallback = "Something went wrong") {
+export type ErrorInfo = { title: string; message: string; tone?: "warning"; link?: { label: string; url: string } };
+export function describeError(raw: string, fallback = "Something went wrong"): ErrorInfo {
+  const limit = providerLimit(raw);
+  if (limit?.kind === "quota") return {
+    tone: "warning",
+    title: `${limit.provider ? `${limit.provider} usage` : "Usage"} limit reached`,
+    message: `${limit.resets ? `It resets ${resetPhrase(limit.resets)}. ` : ""}Your conversation is saved: resume it then, or switch to another account or model to continue now.`,
+    link: limit.url ? { label: "View usage", url: limit.url } : undefined,
+  };
+  if (limit?.kind === "rate") return { tone: "warning", title: `${limit.provider ?? "The provider"} is rate-limiting requests`, message: "Wait a moment, then retry. Your conversation is saved." };
   if (/\[claude-code:unrecognized_model\]/.test(raw)) return { title: "Claude Code does not recognize this model", message: "Update Claude Code on the machine running this conversation (claude update), then retry. If it persists, choose a model available to that Claude account." };
   const disk = raw.match(/\((\d+(?:\.\d+)?) GiB required\), but only (\d+(?:\.\d+)?) GiB is free/i);
   if (disk) return { title: "Not enough disk space", message: `${disk[2]} GiB available · ${disk[1]} GiB required, including the safety reserve. Choose another machine or free up space.` };
@@ -30,10 +40,13 @@ export function ErrorNotice(p: { error: string; title?: string; onDismiss?: () =
     }
   };
   const info = createMemo(() => describeError(p.error, p.title));
-  return <section class="error-notice" role="alert">
+  return <section class="error-notice" classList={{ warning: info().tone === "warning" }} role="alert">
     <svg class="error-notice-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     <div class="error-notice-body"><strong>{info().title}</strong><p>{info().message}</p>
-      <Show when={p.children}><div class="error-notice-actions">{p.children}</div></Show>
+      <Show when={p.children || info().link}><div class="error-notice-actions">
+        <Show when={info().link}>{link => <button type="button" class="error-notice-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(() => {})}>{link().label}</button>}</Show>
+        {p.children}
+      </div></Show>
       <Show when={info().message !== p.error}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
       <Show when={copyError()}><p class="error-copy-status" role="status">{copyError()}</p></Show>
     </div>

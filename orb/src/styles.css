@@ -1454,6 +1454,11 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Shared inline errors sit beside the action that failed, without competing with the draft. */
 .error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--red) 28%, var(--stroke)); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--red) 3%, var(--bg)); color: var(--fg-2); text-align: left; font-size: 13px; line-height: 1.5; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
+/* Provider limits are a wait, not a failure: amber instead of red. */
+.error-notice.warning { border-color: color-mix(in srgb, var(--amber) 32%, var(--stroke)); background: color-mix(in srgb, var(--amber) 4%, var(--bg)); }
+.error-notice.warning .error-notice-icon { color: var(--amber); }
+.error-notice-link { padding: 3px 10px; border: 1px solid var(--stroke-strong); border-radius: var(--radius-sm); background: var(--bg-btn); color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+.error-notice-link:hover { background: var(--hover-1); }
 .error-notice-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .error-notice strong { color: var(--fg); font-weight: 500; }
 .error-notice p { margin: 3px 0 0; white-space: pre-wrap; }
