@@ -1431,14 +1431,22 @@ mod campaign_guard_tests {
     async fn live_mission_on_workspace_is_the_unique_occupant() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
         let writer = store
-            .create_mission(Some("writer"), None, None, None, None, None, None)
+            .create_mission(
+                Some("writer"),
+                Some(Uuid::new_v4()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("create");
         store
             .update_mission_status(writer.id, MissionStatus::Active)
             .await
             .expect("active");
-        let occupant = live_mission_on_workspace(&store, writer.workspace_id)
+        let occupant = live_mission_on_workspace(&store, writer.workspace_id, None)
             .await
             .expect("occupant");
         assert_eq!(occupant.id, writer.id);
@@ -1447,7 +1455,7 @@ mod campaign_guard_tests {
             .await
             .expect("complete");
         assert!(
-            live_mission_on_workspace(&store, writer.workspace_id)
+            live_mission_on_workspace(&store, writer.workspace_id, None)
                 .await
                 .is_none(),
             "a finished writer frees the worktree"
@@ -1457,7 +1465,7 @@ mod campaign_guard_tests {
     #[tokio::test]
     async fn cloud_conversations_do_not_occupy_native_workspaces() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
-        let workspace = Uuid::nil();
+        let workspace = Uuid::new_v4();
         for backend in ["cloud_chatgpt", "cloud_grok_bot", "cloud_cursor"] {
             let mission = store
                 .create_mission(
@@ -1476,7 +1484,9 @@ mod campaign_guard_tests {
                 .await
                 .unwrap();
         }
-        assert!(live_mission_on_workspace(&store, workspace).await.is_none());
+        assert!(live_mission_on_workspace(&store, workspace, None)
+            .await
+            .is_none());
         let native = store
             .create_mission(
                 Some("native"),
@@ -1494,12 +1504,110 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         assert_eq!(
-            live_mission_on_workspace(&store, workspace)
+            live_mission_on_workspace(&store, workspace, None)
                 .await
                 .unwrap()
                 .id,
             native.id
         );
+    }
+
+    #[tokio::test]
+    async fn default_workspace_is_occupied_only_through_the_same_directory() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let host = workspace::DEFAULT_WORKSPACE_ID;
+        let mut ids = Vec::new();
+        for backend in ["claudecode", "codex"] {
+            let mission = store
+                .create_mission(
+                    Some(backend),
+                    Some(host),
+                    None,
+                    None,
+                    None,
+                    Some(backend),
+                    None,
+                )
+                .await
+                .unwrap();
+            ids.push(mission.id);
+        }
+        // An idle Claude chat elsewhere on the host; the Codex source is blocked.
+        store
+            .update_mission_status(ids[0], MissionStatus::AwaitingUser)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(ids[1], MissionStatus::Blocked)
+            .await
+            .unwrap();
+        let source_dir = format!("/root/workspaces/mission-{}", &ids[1].to_string()[..8]);
+        assert!(live_mission_on_workspace(&store, host, None)
+            .await
+            .is_none());
+        assert!(
+            live_mission_on_workspace(&store, host, Some(&source_dir))
+                .await
+                .is_none(),
+            "forking a blocked mission must not collide with unrelated host chats"
+        );
+        store
+            .update_mission_status(ids[1], MissionStatus::Active)
+            .await
+            .unwrap();
+        assert_eq!(
+            live_mission_on_workspace(&store, host, Some(&source_dir))
+                .await
+                .unwrap()
+                .id,
+            ids[1],
+            "a live source still owns its directory"
+        );
+        assert_eq!(
+            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")))
+                .await
+                .unwrap()
+                .id,
+            ids[1],
+            "a directory below the mission root is the same worktree"
+        );
+    }
+
+    #[test]
+    fn one_directory_written_differently_is_the_same_directory() {
+        use std::path::Path;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo, root.path().join("alias")).unwrap();
+        assert!(same_directory(&repo, &root.path().join("repo/../repo/.")));
+        #[cfg(unix)]
+        assert!(same_directory(&repo, &root.path().join("alias")));
+        assert!(same_directory(Path::new("repo"), &repo));
+        assert!(same_directory(
+            Path::new("/gone/work/./a/../repo"),
+            Path::new("/gone/work/repo")
+        ));
+        assert!(same_directory(&repo, &repo.join("src/deep")));
+        #[cfg(unix)]
+        {
+            // link -> repo/src: link/../docs is repo/docs, not <root>/docs.
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::os::unix::fs::symlink(repo.join("src"), root.path().join("link")).unwrap();
+            assert!(same_directory(
+                &root.path().join("link/../docs"),
+                &repo.join("docs")
+            ));
+            assert!(!same_directory(
+                &root.path().join("link/../docs"),
+                &root.path().join("docs")
+            ));
+        }
+        assert!(!same_directory(&repo, &root.path().join("other")));
+        assert!(!same_directory(&repo, &root.path().join("repo-two")));
+        assert!(!same_directory(Path::new("po"), &repo));
+        assert!(!same_directory(Path::new(""), &repo));
     }
 
     #[tokio::test]
@@ -10188,11 +10296,22 @@ fn chatgpt_oauth_refresh_invalidated(text: &str) -> bool {
     t.contains("refresh_token_invalidated") || t.contains("chatgpt oauth refresh failed")
 }
 
+/// The default host workspace is not one worktree: each mission gets its own
+/// generated `mission-<id8>` directory. There, only a mission using the
+/// requested directory occupies it (a fork of a blocked mission must not be
+/// refused because an unrelated chat is idle on the host). Dedicated
+/// workspaces stay single-occupant.
 async fn live_mission_on_workspace(
     mission_store: &Arc<dyn MissionStore>,
     workspace_id: Uuid,
+    working_directory: Option<&str>,
 ) -> Option<Mission> {
     const PAGE: usize = 200;
+    let shared = workspace_id == workspace::DEFAULT_WORKSPACE_ID;
+    if shared && working_directory.is_none() {
+        return None;
+    }
+    let directory = working_directory.map(std::path::Path::new);
     mission_store
         .list_missions(PAGE, 0)
         .await
@@ -10205,7 +10324,65 @@ async fn live_mission_on_workspace(
                     "cloud_chatgpt" | "cloud_grok_bot" | "cloud_cursor"
                 )
                 && campaign_slot_held_by(mission.status)
+                && (!shared || directory.is_some_and(|dir| mission_uses_directory(mission, dir)))
         })
+}
+
+/// The directory as the runner reaches it. An absolute path is walked one
+/// component at a time, resolving symlinks before `..` is applied, for as far
+/// as the path exists. A relative path is only folded: it belongs to a
+/// workspace root this comparison does not know, never to the daemon's
+/// current directory.
+fn normalized_directory(path: &std::path::Path) -> std::path::PathBuf {
+    let absolute = path.is_absolute();
+    let mut out = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => {
+                out.push(other);
+                if absolute {
+                    if let Ok(real) = std::fs::canonicalize(&out) {
+                        out = real;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Two spellings of one directory must compare equal, and a directory inside
+/// another belongs to the same worktree. A relative path is matched against
+/// the end of an absolute one: when in doubt the directory is occupied,
+/// because two harnesses writing the same files is the worse error.
+fn same_directory(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (a, b) = (normalized_directory(a), normalized_directory(b));
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
+    a == b
+        || (a.is_absolute() && b.is_absolute() && (a.starts_with(&b) || b.starts_with(&a)))
+        || (a.is_relative() && b.ends_with(&a))
+        || (b.is_relative() && a.ends_with(&b))
+}
+
+fn mission_uses_directory(mission: &Mission, dir: &std::path::Path) -> bool {
+    match mission.working_directory.as_deref() {
+        Some(own) => same_directory(std::path::Path::new(own), dir),
+        // Its generated root, or anything the runner accepts below it.
+        None => {
+            let root = format!("mission-{}", &mission.id.to_string()[..8]);
+            normalized_directory(dir)
+                .components()
+                .any(|part| part.as_os_str() == root.as_str())
+        }
+    }
 }
 
 async fn recent_codex_oauth_invalidation(mission_store: &Arc<dyn MissionStore>) -> Option<Mission> {
@@ -10792,7 +10969,12 @@ pub(super) async fn create_mission_inner(
     // files. Sequential certify-after-repair is fine: the writer is terminal.
     if let Some(ws_id) = req.workspace_id.filter(|_| !shared_side_workspace) {
         let control_state = control_for_user(&state, &user).await;
-        if let Some(existing) = live_mission_on_workspace(&control_state.mission_store, ws_id).await
+        if let Some(existing) = live_mission_on_workspace(
+            &control_state.mission_store,
+            ws_id,
+            req.working_directory.as_deref(),
+        )
+        .await
         {
             tracing::info!(
                 workspace_id = %ws_id,
