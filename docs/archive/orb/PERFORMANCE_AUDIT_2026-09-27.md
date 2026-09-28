@@ -1,6 +1,6 @@
 # Orb — audit de performances du 27 septembre 2026
 
-> État historique avant la refonte complète. Voir [l’architecture implémentée et les nouvelles mesures](EVENT_ARCHITECTURE.md) pour le résultat final.
+> État historique avant la refonte complète. Voir [l’architecture implémentée et les nouvelles mesures](../../../orb/docs/EVENT_ARCHITECTURE.md) pour le résultat final.
 
 ## Résultat et périmètre
 
@@ -59,13 +59,13 @@ Composants réels `Transcript`, `buildTranscript`, `applyStreamEvent`, `NativeIn
 
 Aucun des 100 fragments n’a pris plus de 16 ms dans ces scénarios. Un nœud ajouté, aucun supprimé pendant chaque séquence de streaming : la réconciliation conserve bien l’historique. L’ouverture d’un long historique et la croissance du DOM sont des cibles plus nettes que le remplacement complet du moteur Markdown. Les temps n’incluent pas une garantie sur la peinture GPU, les pièces jointes lourdes, les formules nombreuses ou tous les types de messages.
 
-Une question a également reçu 20 snapshots équivalents : même élément `input`, focus conservé, texte et sélection `[2,5]` inchangés. [Résultats](performance-20260927/tauri-lab.json), [fixture](../tests/performance-native.tsx).
+Une question a également reçu 20 snapshots équivalents : même élément `input`, focus conservé, texte et sélection `[2,5]` inchangés. [Résultats](performance-20260927/tauri-lab.json), [fixture](../../../orb/tests/performance-native.tsx).
 
 ### Hypothèse testée et non retenue
 
 Le collecteur natif parcourt les processus toutes les trois secondes. Un exemple Rust compare le rafraîchissement par défaut et celui limité à la mémoire, avec deux instances `System`, un échauffement et 12 relevés alternés. Sur une première exécution, les médianes étaient environ 3,12 / 3,01 ms; sur la seconde, **6,73 / 6,82 ms**. Aucun gain robuste n’est établi. Ne pas présenter la restriction des champs comme une optimisation significative du CPU global.
 
-Le coût du collecteur complet (disques, `ioreg`, classification et scans) reste à isoler. Adapter la cadence à la demande est une piste à mesurer; supprimer les métriques de fond sans préserver leur historique changerait le produit. [Exemple](../src-tauri/examples/profile_process_refresh.rs), [seconde exécution](performance-20260927/process-refresh.json).
+Le coût du collecteur complet (disques, `ioreg`, classification et scans) reste à isoler. Adapter la cadence à la demande est une piste à mesurer; supprimer les métriques de fond sans préserver leur historique changerait le produit. [Exemple](../../../orb/src-tauri/examples/profile_process_refresh.rs), [seconde exécution](performance-20260927/process-refresh.json).
 
 ## Architecture et refactors proposés
 
