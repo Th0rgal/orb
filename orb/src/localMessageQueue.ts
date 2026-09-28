@@ -200,6 +200,16 @@ export function startLocalQueueWorker(){
     if(!valid())return;if(seen.has(row.mission))continue;seen.add(row.mission);
     const runKey=`${key}:${row.mission}`;
     if(settling.has(runKey)||stopping.has(runKey))continue;
+    if(row.interrupted&&row.state==='accepted'&&!row.autoResumed){
+     // The previous agent was still finishing when recovery was first tried. Look again.
+     try{
+      await recoverLocalLaunch(row.mission);if(!valid())return;
+      recordLocalFailure(row.mission,null);
+      await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted){stored.state='error';stored.error=lostRun;}});
+      again=true;
+     }catch{/* Still running or unreachable: the next periodic check tries again. */}
+     continue;
+    }
     if(row.interrupted){
      // The app restarted under a running turn and recovery confirmed that agent stopped.
      // Continue its session once without asking; a second loss waits for the user.

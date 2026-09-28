@@ -124,19 +124,24 @@ it('looks again for a queued message when the running turn belongs to another wi
  mocks.active=false;await vi.advanceTimersByTimeAsync(31000);
  expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
-it('keeps a missing accepted run fenced until recovery confirms it stopped',async()=>{
+it('keeps a missing accepted run fenced until recovery confirms it stopped, then continues it',async()=>{
  mocks.active=false;
  const id=await enqueueLocalMessage(request,'resume');
  for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===id){row.state='accepted';row.receipt={run_id:'previous',generation:1};}
- mocks.follow.mockRejectedValue(new Error('no local run'));
+ mocks.follow.mockRejectedValueOnce(new Error('no local run'));
  mocks.recover.mockRejectedValue(new Error('agent still running'));
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(2000);
  expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'accepted',interrupted:true});
  await expect(retryQueuedMessage(id)).rejects.toThrow('agent still running');
+ await vi.advanceTimersByTimeAsync(65000);
  expect(mocks.launch).not.toHaveBeenCalled();
- expect(mocks.follow).toHaveBeenCalledTimes(1);
+ // The previous agent has now stopped: the next periodic check continues the session.
+ mocks.recover.mockResolvedValue(undefined);
+ await vi.advanceTimersByTimeAsync(31000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.launch.mock.calls[0][0].prompt).toBe(resumedPrompt('first'));
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
-
 it('makes a closed receipt recoverable without replaying it in the background',async()=>{
  mocks.active=false;mocks.append.mockRejectedValue(new Error('409 Local execution already ended or moved'));
  stop=startLocalQueueWorker();await enqueueLocalMessage(request,'first');await vi.advanceTimersByTimeAsync(2500);
