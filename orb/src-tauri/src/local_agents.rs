@@ -638,6 +638,7 @@ fn spawn_claude(
         let mut stdin = child.stdin.take().ok_or("Claude stdin missing")?;
         let stdout = child.stdout.take().ok_or("Claude stdout missing")?;
         let mission_id = crate::interactions::session(&request.id);
+        let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
         let prompt = plan.unwrap_or(&request.prompt).to_owned();
         let mut execution_approved = plan.is_none();
         let output = Arc::clone(text);
@@ -654,12 +655,17 @@ fn spawn_claude(
                 let mut implement_after_result = false;
                 let mut claude_text = ClaudeText::default();
                 let mut background = ClaudeBackground::default();
+                let mut request_started = false;
+                let mut stale_result_skipped = false;
                 for line in BufReader::new(stdout).lines() {
                     let line = line.map_err(|e| e.to_string())?;
                     let Ok(event) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
                     output.claude_activity(&event);
+                    if matches!(event["type"].as_str(), Some("assistant" | "stream_event")) {
+                        request_started = true;
+                    }
                     if event["type"] != "stream_event"
                         || matches!(
                             event["event"]["type"].as_str(),
@@ -735,8 +741,19 @@ fn spawn_claude(
                     } else if event["type"] == "result" {
                         // A resumed session first settles what the previous process
                         // left behind (a stopped background task) and reports it as
-                        // a result of zero turns. The request has not run yet.
-                        if event["num_turns"] == 0 && event["is_error"] != true {
+                        // an empty result of zero turns. The request has not run yet.
+                        // Only that leading result is skipped: any later one ends the
+                        // turn as usual, or the run would wait forever.
+                        if resumed
+                            && !request_started
+                            && !stale_result_skipped
+                            && event["num_turns"] == 0
+                            && event["is_error"] != true
+                            && event["result"]
+                                .as_str()
+                                .is_none_or(|text| text.trim().is_empty())
+                        {
+                            stale_result_skipped = true;
                             continue;
                         }
                         if let Some(piece) = claude_text.consume(&event) {
@@ -2452,6 +2469,47 @@ printf '%s\n' '{"type":"result"}'
         runs().lock().unwrap().remove(&id);
         assert!(state.done, "the run did not finish");
         assert_eq!(state.text, "Resumed reply.");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_zero_turn_result_still_ends_a_fresh_or_started_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        for (resume, events) in [
+            (None, concat!(r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}"#, "\n").to_string()),
+            (Some("00000000-0000-0000-0000-000000000002"), concat!(
+                r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}"#, "\n",
+                r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Reply."}]}}"#, "\n",
+                r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}"#, "\n",
+            ).to_string()),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("events.jsonl");
+            std::fs::write(&file, events).unwrap();
+            let bin = dir.path().join("claude");
+            // Like the real CLI, it exits only once its input is closed.
+            std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let id = format!("zero-turn-{}", uuid_like());
+            local_agents_start(StartRequest {
+                id: id.clone(),
+                harness: "claudecode".into(),
+                bin: bin.to_string_lossy().into_owned(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "test".into(),
+                model: None,
+                session_id: resume.map(Into::into),
+                image_paths: vec![],
+            })
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !local_agents_poll(id.clone()).unwrap().done {
+                assert!(Instant::now() < deadline, "the run never ended (resume={resume:?})");
+                thread::sleep(Duration::from_millis(20));
+            }
+            let _ = local_agents_stop(id.clone());
+            runs().lock().unwrap().remove(&id);
+        }
     }
 
     #[test]
