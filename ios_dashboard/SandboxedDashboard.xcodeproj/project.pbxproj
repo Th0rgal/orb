@@ -27,6 +27,7 @@
 		3481363ED532A70935FA6B9E /* ChatHistoryReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F77025B7F25E968FE5757E18 /* ChatHistoryReducer.swift */; };
 		3A706E457E3E27DA1B69E152 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 750C4C8090EAD0168794EEE4 /* Assets.xcassets */; };
 		40C09530EC6F9C083B5474C4 /* GlassButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = D81DFFD4B67ABE07FB546B2B /* GlassButton.swift */; };
+		42EB1014A46E016216A63172 /* OrbQuiz.swift in Sources */ = {isa = PBXBuildFile; fileRef = 273DF8C1DD6EDF4D4D8627A0 /* OrbQuiz.swift */; };
 		45E3B02A9F7E3B159E60CA3F /* OrbRichTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4734279056A622F4537AFA07 /* OrbRichTextTests.swift */; };
 		46420BF679A3BD9FD381FB0A /* ModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7559F3F4553AD74130B1BC34 /* ModelTests.swift */; };
 		48ADF499E7EE67D254FBE45A /* LoadingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC2B6E9848FF220F103DED2 /* LoadingView.swift */; };
@@ -66,6 +67,7 @@
 		A302B87C0F47502BF4719F5F /* OrbDocuments.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB1276147AB3D26931AC35DA /* OrbDocuments.swift */; };
 		A33E2BD727A828E6F776D94D /* MissionSwitcherSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AED7C0B17601881E8725F04D /* MissionSwitcherSheet.swift */; };
 		A6630933655F984C81618775 /* OrbProjects.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */; };
+		A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E793D17A373009D35033D9E /* OrbMessageImages.swift */; };
 		A9B4F30DDAD9DBAEB009F77B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8600F588B036A2D57AEC9FC6 /* SettingsView.swift */; };
 		AA2F722EE90CC2C4E182861E /* OrbConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E2A5583F19E1A058C7F0C73 /* OrbConversation.swift */; };
 		B12C86DF039026D6FFFD2B52 /* HermesConversationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F0AD1E30FB3F3BC08A39FB /* HermesConversationUITests.swift */; };
@@ -82,6 +84,7 @@
 		D057B578B2884C4B2B36B1C3 /* FidoApprovalState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EB13B92B70F6884D323E5FF /* FidoApprovalState.swift */; };
 		D0646F9EE2D2E984F0446C57 /* NewMissionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1834CB7B575220FDE7679F7B /* NewMissionSheet.swift */; };
 		D5968B6DE2272A9C8C3A4A0E /* AutomationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A33016C6075CC02E61C315A /* AutomationsView.swift */; };
+		D88BAEAA28DF9920DCABF1A0 /* OrbDesktopParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */; };
 		DEEC0DB78E50196BEEA6AFC1 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABA66FA1F19D379397ABA68 /* TerminalView.swift */; };
 		EB7DDF2652018CBEBD1D3F52 /* WorkspaceState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADBAC1664CAF3CD9DCCDB8B4 /* WorkspaceState.swift */; };
 		EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12549983596F9F58C1C2A71C /* OrbContractTests.swift */; };
@@ -125,6 +128,7 @@
 		1C4A3F89D6619F821ED8143D /* ImageMemoryCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageMemoryCache.swift; sourceTree = "<group>"; };
 		1FF9A2A12846A5FFB3FC7497 /* WorkerPeekView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerPeekView.swift; sourceTree = "<group>"; };
 		22EA3B4E94755F7712ED534F /* AutoApprovalRulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoApprovalRulesView.swift; sourceTree = "<group>"; };
+		273DF8C1DD6EDF4D4D8627A0 /* OrbQuiz.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbQuiz.swift; sourceTree = "<group>"; };
 		27F5D3EB21B6FF298AF5CD32 /* GlassCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCard.swift; sourceTree = "<group>"; };
 		28244CFFEB655FD5E5F3EB17 /* StatusBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBadge.swift; sourceTree = "<group>"; };
 		2A33016C6075CC02E61C315A /* AutomationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsView.swift; sourceTree = "<group>"; };
@@ -146,6 +150,7 @@
 		55F4658A2D65748FC7AC5DE3 /* APIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIService.swift; sourceTree = "<group>"; };
 		62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FidoApprovalOverlay.swift; sourceTree = "<group>"; };
 		6922E2F0E17EDB3A8400D473 /* TerminalState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalState.swift; sourceTree = "<group>"; };
+		6E793D17A373009D35033D9E /* OrbMessageImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMessageImages.swift; sourceTree = "<group>"; };
 		717FFF091D1EDB3F27D08712 /* OrbCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbCore.swift; sourceTree = "<group>"; };
 		750C4C8090EAD0168794EEE4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7559F3F4553AD74130B1BC34 /* ModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelTests.swift; sourceTree = "<group>"; };
@@ -188,6 +193,7 @@
 		D9E023EEFFFA9B1092B66006 /* ANSIParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANSIParser.swift; sourceTree = "<group>"; };
 		E387E6A01D00EAD668074CCC /* WorkerBuckets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerBuckets.swift; sourceTree = "<group>"; };
 		E4CA8C69928B3838868EE34A /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
+		E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDesktopParityTests.swift; sourceTree = "<group>"; };
 		EB25F60D74459F14EEB22EFD /* ControlSupportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlSupportViews.swift; sourceTree = "<group>"; };
 		EB3EDA65C036030CC45BAD0E /* NavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationState.swift; sourceTree = "<group>"; };
 		EFD2C112534D498211B26C38 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
@@ -309,8 +315,10 @@
 				717FFF091D1EDB3F27D08712 /* OrbCore.swift */,
 				CB1276147AB3D26931AC35DA /* OrbDocuments.swift */,
 				BDD651E846151C5070BA0765 /* OrbMath.swift */,
+				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
 				BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */,
 				B053370536BB82FE142FF2E5 /* OrbQuestions.swift */,
+				273DF8C1DD6EDF4D4D8627A0 /* OrbQuiz.swift */,
 				B134E3A21E30BFC16C6AC7AA /* OrbRichText.swift */,
 			);
 			path = Orb;
@@ -392,6 +400,7 @@
 				7559F3F4553AD74130B1BC34 /* ModelTests.swift */,
 				1828D2FC9160FC8677E10502 /* NetworkResilienceTests.swift */,
 				12549983596F9F58C1C2A71C /* OrbContractTests.swift */,
+				E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */,
 				4734279056A622F4537AFA07 /* OrbRichTextTests.swift */,
 				16444DBBDC6D78A5324C783D /* ProjectTests.swift */,
 				0C2AB7D53F29AB97345FA4DA /* ThemeTests.swift */,
@@ -534,7 +543,6 @@
 				};
 			};
 			buildConfigurationList = 210E554B4D49DD6F4EE7F3FD /* Build configuration list for PBXProject "SandboxedDashboard" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -544,6 +552,7 @@
 			mainGroup = 9402FD943158ED3148A81A0C;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			productRefGroup = 057719CAD3366030137C44B3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -614,8 +623,10 @@
 				86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */,
 				A302B87C0F47502BF4719F5F /* OrbDocuments.swift in Sources */,
 				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
+				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
 				A6630933655F984C81618775 /* OrbProjects.swift in Sources */,
 				2BF91FF226E55712A9B5C080 /* OrbQuestions.swift in Sources */,
+				42EB1014A46E016216A63172 /* OrbQuiz.swift in Sources */,
 				7EB05EBADEA32903B21527E9 /* OrbRichText.swift in Sources */,
 				B2C28CDD378203A229D62B9B /* PhosphorIcon.swift in Sources */,
 				6EC32F7CE8BFDB84428DFF4A /* Project.swift in Sources */,
@@ -653,6 +664,7 @@
 				46420BF679A3BD9FD381FB0A /* ModelTests.swift in Sources */,
 				2BBA61051DFCB7A780604B87 /* NetworkResilienceTests.swift in Sources */,
 				EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */,
+				D88BAEAA28DF9920DCABF1A0 /* OrbDesktopParityTests.swift in Sources */,
 				45E3B02A9F7E3B159E60CA3F /* OrbRichTextTests.swift in Sources */,
 				66F676EDC1A217D788AF9656 /* ProjectTests.swift in Sources */,
 				7EF75A17733EE6E54126C7A7 /* ThemeTests.swift in Sources */,
