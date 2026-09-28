@@ -6,7 +6,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -17,6 +17,9 @@ export const acceptedLocalMessages=(mission:string)=>accepted().filter(row=>row.
 export function forgetAcceptedLocalMessages(ids:Set<string>){setAccepted(rows=>rows.filter(row=>!ids.has(row.id)));}
 const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
+const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
+/** The agent keeps its session: it is told what happened instead of being handed the request as new work. */
+export const resumedPrompt=(prompt:string)=>`Orb restarted while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.\n\n${prompt}`;
 const wake=()=>window.dispatchEvent(new Event(wakeEvent));
 async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
  if(!navigator.locks)throw new Error('Update Orb to queue messages safely on this computer.');
@@ -122,6 +125,7 @@ export function startLocalQueueWorker(){
  }
  function follow(row:QueuedLocalMessage){
   const runKey=`${key}:${row.mission}`;if(settling.has(runKey))return;
+  // Set once the run is settled or confirmed stopped: the queue may then look at this mission again.
   let finished=false;
   const promise=navigator.locks.request(`${runKey}:follow`,{ifAvailable:true},async lock=>{
    if(!lock)return;
@@ -140,7 +144,7 @@ export function startLocalQueueWorker(){
     if(!valid())return;
     if(/no local run/i.test(String(error))){
      let recovered=false;
-     let detail='Orb lost the local run. Your message is saved. Retry to resume it.';
+     let detail=lostRun;
      try{await recoverLocalLaunch(row.mission);recovered=true;}
      catch(recovery){detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;}
      if(!valid())return;
@@ -148,6 +152,7 @@ export function startLocalQueueWorker(){
      recordLocalFailure(row.mission,null);
      await update(key,row.id,stored=>{stored.interrupted=true;stored.error=detail;if(recovered)stored.state='error';});
      window.dispatchEvent(new Event('orb:refresh'));
+     finished=recovered;
     }else await syncFailed(row,error);
    }
   }).then(()=>{}).finally(()=>{settling.delete(runKey);if(finished)wake();});settling.set(runKey,promise);
@@ -161,7 +166,20 @@ export function startLocalQueueWorker(){
     if(!valid())return;if(seen.has(row.mission))continue;seen.add(row.mission);
     const runKey=`${key}:${row.mission}`;
     if(settling.has(runKey)||stopping.has(runKey))continue;
-    if(row.interrupted)continue;
+    if(row.interrupted){
+     // The app restarted under a running turn and recovery confirmed that agent stopped.
+     // Continue its session once without asking; a second loss waits for the user.
+     if(row.state==='error'&&row.error===lostRun&&!row.autoResumed){
+      if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+      await update(key,row.id,stored=>{
+       if(stored.state!=='error'||stored.error!==lostRun||stored.autoResumed)return;
+       stored.state='queued';stored.autoResumed=true;delete stored.error;delete stored.interrupted;
+       delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+      });
+      again=true;
+     }
+     continue;
+    }
     if(row.state==='accepted'){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
      continue;
@@ -194,7 +212,7 @@ export function startLocalQueueWorker(){
       }
       if(!valid())return;
      }
-     const receipt=await startLocal({...row.request,sessionId:localBinding(row.mission)?.sessionId});
+     const receipt=await startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId});
      row.state='accepted';row.receipt=receipt;
      await update(key,row.id,stored=>{stored.state='accepted';stored.receipt=receipt;delete stored.error;});
      follow(row);
@@ -203,6 +221,7 @@ export function startLocalQueueWorker(){
   }catch{/* Durable entries stay available for the next attempt. */}
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}
  };
- const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();const timer=setInterval(()=>{if(entries().some(row=>row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
+ const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.
+ const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
  return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
 }
