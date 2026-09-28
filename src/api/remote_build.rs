@@ -2496,6 +2496,7 @@ printf '%s' "$REMOTE_BUILD_TEST_HTTP_STATUS"
             mission_id: Uuid::nil(),
             lease_token: String::new(),
             payload: JobPayload::RawCommand {
+                long_running: false,
                 command: "true".into(),
                 timeout_secs: None,
                 env: None,
@@ -3347,7 +3348,12 @@ case "$url" in
         ;;
     *)
         if [ "$REMOTE_BUILD_TEST_POLL_MODE" = "persist-fail" ]; then
-            chmod 500 "$REMOTE_BUILD_TEST_STATE_DIR"
+            # Permission bits do not fail writes when tests run as root.
+            # Block the receipt's atomic rename without disturbing the
+            # pre-submission lock/recovery blocker that must survive failure.
+            for lock in "$REMOTE_BUILD_TEST_STATE_DIR"/*.json.lock; do
+                [ ! -d "$lock" ] || mkdir "${lock%.lock}"
+            done
         fi
         count=0
         [ ! -f "$REMOTE_BUILD_TEST_SUBMIT_COUNT" ] || count=$(cat "$REMOTE_BUILD_TEST_SUBMIT_COUNT")
@@ -3499,6 +3505,12 @@ esac
                 .expect("remove prior receipt");
         }
         let persistence_failed = run("persist-fail");
+        for entry in std::fs::read_dir(&state).expect("read failed receipt sentinels") {
+            let path = entry.unwrap().path();
+            if path.is_dir() && path.extension().is_some_and(|ext| ext == "json") {
+                std::fs::remove_dir(&path).expect("remove receipt rename blocker");
+            }
+        }
         if state.is_file() {
             std::fs::remove_file(&state).expect("remove persistence-failure sentinel");
             std::fs::create_dir(&state).expect("restore state directory");

@@ -11,6 +11,9 @@ import argparse
 import asyncio
 import json
 import mimetypes
+import os
+import socket
+from contextlib import AsyncExitStack
 import re
 import sys
 from pathlib import Path
@@ -20,6 +23,18 @@ COMPAT_VERSION = "chatgpt-ui-v2"
 CHATGPT_URL = "https://chatgpt.com/"
 MAX_DOWNLOAD_FILES = 8
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+# Both observed ChatGPT layouts. Exclude nested current-layout nodes inside
+# legacy wrappers so one message is counted once during gradual UI rollouts.
+USER_MESSAGE_SELECTOR = (
+    '[data-message-author-role="user"], '
+    'main [class~="group/user-message"]:not([data-message-author-role="user"] *)'
+)
+ASSISTANT_MESSAGE_SELECTOR = (
+    '[data-message-author-role="assistant"], '
+    'main [data-conversation-role="assistant"] + [data-chatgpt-selection-message-id]'
+    ':not([data-message-author-role="assistant"] *)'
+)
+
 # Account/bootstrap hydration can lag substantially behind the composer on the
 # current ChatGPT shell.  Keep this bounded, but do not classify a healthy
 # account as UI-incompatible merely because the intelligence pill missed the
@@ -139,9 +154,65 @@ def normalized_prompt(text: str) -> str:
 def model_selection(requested: str) -> tuple[str, str]:
     """Return the exact visible picker label and canonical model identifier."""
     normalized = " ".join(requested.strip().lower().split())
+    if normalized.startswith("gpt-6-"):
+        labels = {"instant": "Instant", "medium": "Medium", "high": "High", "extra-high": "Extra High", "pro": "Pro"}
+        suffix = normalized.removeprefix("gpt-6-")
+        if suffix not in labels:
+            raise RuntimeError("unsupported GPT-6 mode")
+        return labels[suffix], normalized
     if normalized in PRO_MODEL_ALIASES:
         return "Pro", "gpt-5.6-pro"
     return requested.strip(), requested.strip()
+
+
+async def assistant_markdown(locator):
+    """Read semantic content, preserving tables, source links and original TeX."""
+    return (await locator.evaluate(r'''root => {
+      const escape = text => text.replace(/([\\`*_[\]])/g, '\\$1');
+      const children = node => Array.from(node.childNodes).map(walk).join('');
+      function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) return escape(node.textContent || '');
+        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+        const tag = node.tagName.toLowerCase();
+        if (['script','style','button','svg'].includes(tag)) return '';
+        if (node.matches('[data-markdown-copy="exclude"]')) return '';
+        const math = node.matches('.katex-display, .katex') && node.querySelector('annotation[encoding="application/x-tex"]');
+        if (math) return node.matches('.katex-display') ? '\n\n$$\n'+math.textContent+'\n$$\n\n' : '\\('+math.textContent+'\\)';
+        if (tag === 'pre' || node.matches('[data-markdown-copy="code-block"]')) {
+          const header = node.querySelector('[data-markdown-copy="exclude"]');
+          const headerLabel = header?.innerText?.trim().split('\n')[0] || '';
+          const code = node.querySelector('pre code, pre, .cm-content, code');
+          const body = node.cloneNode(true);
+          body.querySelectorAll('[data-markdown-copy="exclude"], button, svg, [aria-hidden="true"]').forEach(e => e.remove());
+          const language = (code?.className || '').match(/language-([\w+-]+)/)?.[1]
+            || (/^[\w+#.-]+$/.test(headerLabel) ? headerLabel.toLowerCase() : '');
+          const content = code?.textContent || body.textContent || '';
+          const fence = '`'.repeat(Math.max(3, ...Array.from(content.matchAll(/`+/g), m => m[0].length + 1)));
+          return '\n\n'+fence+language+'\n'+content+'\n'+fence+'\n\n';
+        }
+        if (tag === 'code') return '`'+(node.textContent || '').replace(/`/g,'\\`')+'`';
+        if (tag === 'table') {
+          const rows = Array.from(node.querySelectorAll('tr')).map(row => Array.from(row.children).filter(c => /^(TH|TD)$/.test(c.tagName)).map(c => children(c).trim().replace(/\|/g,'\\|').replace(/\s*\n\s*/g,' ')));
+          if (!rows.length) return '';
+          return '\n\n'+[rows[0], rows[0].map(()=>'---'), ...rows.slice(1)].map(row => '| '+row.join(' | ')+' |').join('\n')+'\n\n';
+        }
+        if (tag === 'a') {
+          const text = children(node).trim(), href = node.getAttribute('href') || '';
+          return /^https?:\/\//i.test(href) ? '['+(text || escape(href))+']('+href.replace(/\(/g,'%28').replace(/\)/g,'%29')+')' : text;
+        }
+        if (tag === 'img') return node.getAttribute('alt') ? '[Image: '+escape(node.getAttribute('alt'))+']' : '';
+        const text = children(node);
+        if (/^h[1-6]$/.test(tag)) return '\n\n'+'#'.repeat(Number(tag[1]))+' '+text.trim()+'\n\n';
+        if (tag === 'strong' || tag === 'b') return '**'+text+'**';
+        if (tag === 'em' || tag === 'i') return '*'+text+'*';
+        if (tag === 'br') return '\n';
+        if (tag === 'li') return '\n'+(node.parentElement?.tagName === 'OL' ? (Array.from(node.parentElement.children).indexOf(node)+1)+'. ' : '- ')+text.trim()+'\n';
+        if (tag === 'blockquote') return '\n\n'+text.trim().split('\n').map(line => '> '+line).join('\n')+'\n\n';
+        if (['p','div','section','ul','ol'].includes(tag)) return '\n\n'+text.trim()+'\n\n';
+        return text;
+      }
+      return children(root).replace(/\n{3,}/g,'\n\n').trim();
+    }''')).strip()
 
 
 async def locate_composer_control(page, testid_selectors, accessible_name):
@@ -294,15 +365,17 @@ async def select_intelligence_slider(page, overlay, slider, pill, label: str) ->
             except Exception:
                 if (await pill.inner_text()).strip() != label:
                     return False
+            await page.wait_for_timeout(1000)
             return True
         if now < 0:
             return False
-        await slider.press("ArrowRight" if now < target else "ArrowLeft")
+        control = overlay.get_by_role("menuitem", name="Power", exact=True) if await slider.get_attribute("aria-hidden") == "true" else slider
+        await control.press("ArrowRight" if now < target else "ArrowLeft")
         await page.wait_for_timeout(250)
     return False
 
 
-async def choose_intelligence_model(page, label: str) -> bool:
+async def choose_intelligence_model(page, label: str, family: str | None = None) -> bool:
     """Select a current composer intelligence option without touching the sidebar."""
     # The current ChatGPT shell hydrates the composer in two phases: the
     # textbox can be ready several seconds before the model pill is attached.
@@ -328,15 +401,41 @@ async def choose_intelligence_model(page, label: str) -> bool:
                 continue
             current = (await button.inner_text()).strip()
             if current not in INTELLIGENCE_LABELS:
+                current = next((candidate for candidate in INTELLIGENCE_LABELS if re.search(r"(?:^|\s)"+re.escape(candidate)+r"$", current)), "")
+            if current not in INTELLIGENCE_LABELS and not (family and "Thinking effort" in (await button.inner_text())):
                 continue
-            if current == label:
+            if current == label and family is None:
                 emit("diagnostic", message="stage=model_already_selected")
                 return True
             await button.click()
+            await page.wait_for_timeout(800)
+            # New rollouts keep the semantic menu/slider but drop the test id.
+            # Require a unique visible picker after clicking the composer pill;
+            # never fall back to arbitrary page text or sidebar controls.
             overlay = page.locator(
-                '[data-testid="composer-intelligence-picker-content"]:visible'
-            ).last
+                '[data-testid="composer-intelligence-picker-content"]:visible, '
+                '[role="menu"]:visible:has([role="slider"])'
+            )
             await overlay.wait_for(state="visible", timeout=3_000)
+            if family is not None:
+                toggle = overlay.get_by_role("menuitem", name="Select model", exact=True)
+                if not re.match(r"^"+re.escape(family)+r"(?:\s|$)", (await toggle.inner_text()).strip()):
+                    latest = overlay.locator('[role="menuitemradio"][aria-checked="true"]').filter(has_text=re.compile(r"^Latest$"))
+                    if not await latest.count():
+                        await toggle.click()
+                        await overlay.get_by_role("menuitemradio", name="Latest", exact=True).click()
+                        if not await overlay.is_visible():
+                            await button.click()
+                    # The UI hides the generation label at intermediate power levels.
+                    # Pro exposes it. Verify that label before choosing the requested power.
+                    slider = overlay.locator('[role="slider"]').first
+                    if not await select_intelligence_slider(page, overlay, slider, button, "Pro"):
+                        raise RuntimeError("cannot verify model generation")
+                    await button.click()
+                    await page.wait_for_timeout(800)
+                    toggle = overlay.get_by_role("menuitem", name="Select model", exact=True)
+                    if not re.match(r"^"+re.escape(family)+r"(?:\s|$)", (await toggle.inner_text()).strip()):
+                        raise RuntimeError("requested model generation is not selected")
             slider = overlay.locator('[role="slider"]')
             if await slider.count() and await slider.first.is_visible():
                 if await select_intelligence_slider(
@@ -363,7 +462,7 @@ async def choose_model(page, requested: str) -> str:
         return ""
     visible_label, canonical_model = model_selection(requested)
     if visible_label in INTELLIGENCE_LABELS and await choose_intelligence_model(
-        page, visible_label
+        page, visible_label, "6" if canonical_model.startswith("gpt-6-") else None
     ):
         return canonical_model
 
@@ -445,6 +544,8 @@ def download_control_key(
     """Identify a narrowly scoped ChatGPT artifact control."""
     if tag_name.lower() == "a" and downloadable_href(href):
         return f"href:{href}"
+    if tag_name.lower() == "button" and aria_label == "Download file":
+        return "direct-download"
     if tag_name.lower() != "button" or "behavior-btn" not in (class_name or "").split():
         return None
     label = (aria_label or text or "").strip()
@@ -458,7 +559,7 @@ def download_control_key(
 
 async def collect_downloads(page, response, download_dir: Path) -> None:
     """Download bounded assistant-generated artifacts and emit typed receipts."""
-    controls = response.locator('a[href], button.behavior-btn[aria-label]')
+    controls = response.locator('a[href], button.behavior-btn[aria-label], button[aria-label="Download file"]')
     seen_controls: set[str] = set()
     used_names: set[str] = set()
     total_bytes = 0
@@ -475,12 +576,14 @@ async def collect_downloads(page, response, download_dir: Path) -> None:
         control_key = download_control_key(
             tag_name, href, aria_label, class_name, text
         )
+        if control_key == "direct-download":
+            control_key = f"direct-download:{index}"
         if control_key is None or control_key in seen_controls:
             continue
         seen_controls.add(control_key)
         preview_open = False
         try:
-            if tag_name.lower() == "button":
+            if tag_name.lower() == "button" and aria_label != "Download file":
                 # Current ChatGPT opens an artifact preview first. The preview
                 # owns the actual browser download action.
                 await control.click()
@@ -493,7 +596,14 @@ async def collect_downloads(page, response, download_dir: Path) -> None:
                     await download_button.click(no_wait_after=True)
             else:
                 async with page.expect_download(timeout=15_000) as pending:
-                    await control.click(no_wait_after=True)
+                    if aria_label == "Download file" and tag_name.lower() == "button":
+                        # Current file cards cover this accessible button with
+                        # the preview overlay. Keyboard activation reaches its
+                        # own handler without opening that overlay instead.
+                        await control.focus()
+                        await control.press("Enter")
+                    else:
+                        await control.click(no_wait_after=True)
             download = await pending.value
             name = safe_download_name(download.suggested_filename, emitted + 1)
             stem = Path(name).stem
@@ -536,7 +646,7 @@ async def assert_blank_chat(page) -> None:
     parsed = urlparse(page.url)
     if parsed.netloc != "chatgpt.com" or parsed.path not in ("", "/"):
         raise RuntimeError("new-chat navigation did not reach a blank route")
-    if await page.locator('[data-message-author-role="assistant"]').count():
+    if await page.locator(ASSISTANT_MESSAGE_SELECTOR).count():
         raise RuntimeError("fresh-chat baseline contains prior content")
 
 
@@ -615,6 +725,12 @@ async def wait_out_cloudflare(page, timeout_ms: int = 45_000) -> None:
             body = await page.inner_text("body")
         except Exception:
             body = ""
+        # DOMContentLoaded may precede both the challenge title and the app
+        # shell. An empty bootstrap document is not proof of a cleared gate.
+        # Keep waiting before classifying it as a logged-out account.
+        if not title.strip() and not body.strip():
+            await page.wait_for_timeout(500)
+            continue
         if not is_cloudflare_challenge_title(title) and not CLOUDFLARE_BODY.search(body or ""):
             if waited:
                 emit("diagnostic", message="stage=cloudflare_cleared")
@@ -623,7 +739,7 @@ async def wait_out_cloudflare(page, timeout_ms: int = 45_000) -> None:
             emit("diagnostic", message="stage=cloudflare_wait")
             waited = True
         await page.wait_for_timeout(500)
-    raise TransportUnavailable("Cloudflare interstitial did not clear")
+    raise TransportUnavailable("Browser page did not settle or its Cloudflare interstitial did not clear")
 
 
 async def account_picker_visible(page) -> bool:
@@ -736,11 +852,9 @@ async def verify_authentication(page) -> None:
 async def establish_resumed_chat(page, conversation_path: str, message: str) -> int:
     """Reattach to a recorded conversation and prove it holds this prompt.
 
-    All verification happens in memory; nothing from the page is emitted. The
-    conversation is expected to hold exactly one user message (mission turns
-    always start from a blank chat), and that message must equal the prompt
-    this run was asked to submit — otherwise reattaching would return someone
-    else's response.
+    Verify the latest user message in the recorded conversation, including
+    resumed follow-up turns. Wait for history hydration before deciding that
+    the durable route or prompt is missing. Never submit from this path.
     """
     await page.goto(
         f"https://chatgpt.com{conversation_path}",
@@ -752,22 +866,31 @@ async def establish_resumed_chat(page, conversation_path: str, message: str) -> 
     await complete_saved_account_picker(page)
     await raise_if_rate_limited(page)
     await verify_authentication(page)
-    # Unknown or deleted conversations redirect away from the recorded route.
-    await page.wait_for_timeout(2_000)
-    parsed = urlparse(page.url)
-    if parsed.netloc.lower() not in CHATGPT_HOSTS or parsed.path != conversation_path:
-        raise ResumeNotFound()
-    user_messages = page.locator('[data-message-author-role="user"]')
-    count = await user_messages.count()
-    if count == 0:
-        raise ResumeNotFound()
-    if count != 1:
+    user_messages = page.locator(USER_MESSAGE_SELECTOR)
+    for _ in range(40):
+        parsed = urlparse(page.url)
+        if (parsed.netloc.lower() in CHATGPT_HOSTS
+                and parsed.path == conversation_path
+                and await user_messages.count() > 0
+                and normalized_prompt(await user_messages.last.inner_text())
+                    == normalized_prompt(message)):
+            break
+        await page.wait_for_timeout(500)
+    else:
+        parsed = urlparse(page.url)
+        if (parsed.netloc.lower() not in CHATGPT_HOSTS
+                or parsed.path != conversation_path
+                or await user_messages.count() == 0):
+            raise ResumeNotFound()
         raise ResumeMismatch()
-    text = await user_messages.first.inner_text()
-    if normalized_prompt(text) != normalized_prompt(message):
-        raise ResumeMismatch()
+    # Count responses before this user turn, not all currently rendered
+    # responses: the requested response may already have finished offline.
+    baseline = await user_messages.last.evaluate("""(node, selector) =>
+        [...document.querySelectorAll(selector)]
+        .filter(a => a.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+        .length""", ASSISTANT_MESSAGE_SELECTOR)
     emit("diagnostic", message="stage=resume_verified")
-    return 0
+    return baseline
 
 
 async def establish_continued_chat(page, conversation_path: str) -> int:
@@ -785,8 +908,8 @@ async def establish_continued_chat(page, conversation_path: str) -> int:
     parsed = urlparse(page.url)
     if parsed.netloc.lower() not in CHATGPT_HOSTS or parsed.path != conversation_path:
         raise ResumeNotFound()
-    user_messages = page.locator('[data-message-author-role="user"]')
-    responses = page.locator('[data-message-author-role="assistant"]')
+    user_messages = page.locator(USER_MESSAGE_SELECTOR)
+    responses = page.locator(ASSISTANT_MESSAGE_SELECTOR)
     # The route and account shell settle before the historical messages are
     # hydrated. A fixed two-second delay was flaky under concurrent profiles:
     # the same conversation became visible on an immediate retry. Wait for
@@ -830,6 +953,61 @@ async def establish_fresh_chat(page) -> int:
     await page.wait_for_timeout(2_000)
     await assert_blank_chat(page)
     return 0
+
+
+async def stop_owned_browser(process) -> None:
+    if process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+
+async def launch_direct_context(playwright, args, cleanup):
+    """Use the same ordinary Chromium launch as the operator/login helper.
+
+    Attach only to a loopback browser process owned by this invocation. This
+    does not import another session or change browser identity/security flags.
+    """
+    if args.browser != "chromium":
+        raise ValueError("Direct launch supports Chromium only")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = int(listener.getsockname()[1])
+    # Keep the deployable driver self-contained; no login/credential helpers
+    # are imported into mission execution.
+    command = [
+        playwright.chromium.executable_path,
+        "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run",
+        "--no-default-browser-check", "--window-size=1440,1000",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={Path(args.profile_dir).resolve()}",
+    ]
+    if args.proxy_server:
+        command.append(f"--proxy-server={args.proxy_server}")
+    command.append("about:blank")
+    if args.headless == "true":
+        command.insert(-1, "--headless=new")
+    process = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    cleanup.push_async_callback(stop_owned_browser, process)
+    browser = None
+    for _ in range(120):
+        if process.returncode is not None:
+            raise RuntimeError("Owned Chromium exited before its local endpoint was ready")
+        try:
+            browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=1_000)
+            break
+        except Exception:
+            await asyncio.sleep(0.25)
+    if browser is None or not browser.contexts:
+        raise RuntimeError("Owned Chromium did not expose its persistent context")
+    cleanup.push_async_callback(close_context_quietly, browser)
+    return browser.contexts[0]
 
 
 async def run(args, request) -> None:
@@ -889,7 +1067,7 @@ async def run(args, request) -> None:
     context = None
     stage = "launch"
     try:
-        async with async_playwright() as playwright:
+        async with async_playwright() as playwright, AsyncExitStack() as cleanup:
             browser_type = getattr(playwright, args.browser, None)
             if browser_type is None:
                 fail("invalid_config", f"unsupported browser: {args.browser}")
@@ -906,9 +1084,13 @@ async def run(args, request) -> None:
                     launch_options["downloads_path"] = str(download_dir)
                 if args.proxy_server:
                     launch_options["proxy"] = {"server": args.proxy_server}
-                context = await browser_type.launch_persistent_context(
-                    **launch_options,
-                )
+                if getattr(args, "launch_mode", "persistent") == "direct":
+                    context = await launch_direct_context(playwright, args, cleanup)
+                else:
+                    context = await browser_type.launch_persistent_context(**launch_options)
+                # Close while Playwright is still alive, including on early
+                # probe/error returns, so the profile flushes before unlock.
+                cleanup.push_async_callback(close_context_quietly, context)
             except Exception:
                 fail(
                     "browser_launch",
@@ -932,6 +1114,7 @@ async def run(args, request) -> None:
                 await assert_blank_chat(page)
                 emit("probe_ready")
                 return
+            submission_user_count = 0
             if resume_path is not None:
                 stage = "resume"
                 baseline = await establish_resumed_chat(page, resume_path, message)
@@ -943,6 +1126,7 @@ async def run(args, request) -> None:
             elif continuation_path is not None:
                 stage = "continuation"
                 baseline = await establish_continued_chat(page, continuation_path)
+                submission_user_count = await page.locator(USER_MESSAGE_SELECTOR).count()
                 stage = "composer"
                 composer = await composer_locator(page)
                 await composer.fill(message)
@@ -970,6 +1154,7 @@ async def run(args, request) -> None:
             stable = 0
             stop_fallback_reported = False
             submitted_emitted = resume_path is not None
+            final_history_loaded = resume_path is not None
             deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
             while asyncio.get_running_loop().time() < deadline:
                 await raise_if_rate_limited(page)
@@ -978,13 +1163,17 @@ async def run(args, request) -> None:
                     # prompt is accepted. That route is the only durable
                     # pointer this driver ever reports.
                     submitted_route = conversation_path_from_url(page.url)
-                    if submitted_route is not None:
+                    submitted_users = page.locator(USER_MESSAGE_SELECTOR)
+                    if (submitted_route is not None
+                            and await submitted_users.count() > submission_user_count
+                            and normalized_prompt(await submitted_users.last.inner_text())
+                                == normalized_prompt(message)):
                         submitted_emitted = True
                         emit("submitted", conversation_path=submitted_route)
-                responses = page.locator('[data-message-author-role="assistant"]')
+                responses = page.locator(ASSISTANT_MESSAGE_SELECTOR)
                 count = await responses.count()
                 if count > baseline:
-                    text = (await responses.nth(count - 1).inner_text()).strip()
+                    text = await assistant_markdown(responses.nth(count - 1))
                     if text and text != last:
                         last, stable = text, 0
                         emit("text_delta", content=text)
@@ -997,7 +1186,19 @@ async def run(args, request) -> None:
                     stop_fallback_reported = True
                     emit("diagnostic", message="stage=stop_button_fallback")
                 stop_visible = stop is not None
-                if last and count > baseline and not stop_visible and stable >= 2:
+                if last and count > baseline and not stop_visible and stable >= 4:
+                    # Streaming code cards can still expose plain text after
+                    # generation stops. Read the persisted conversation once
+                    # before finalizing, verifying its latest prompt again.
+                    # This path never sends a message or creates a new chat.
+                    route = conversation_path_from_url(page.url)
+                    if route is not None and not final_history_loaded:
+                        stage = "final_history"
+                        baseline = await establish_resumed_chat(page, route, message)
+                        final_history_loaded = True
+                        last, stable = "", 0
+                        stage = "response"
+                        continue
                     if durability and not submitted_emitted:
                         emit(
                             "diagnostic",
@@ -1046,9 +1247,6 @@ async def run(args, request) -> None:
             f"{COMPAT_VERSION}: UI check failed at {stage} ({type(exc).__name__}); verify selectors against a blank, non-private chat",
             stage=stage,
         )
-    finally:
-        if context is not None:
-            await close_context_quietly(context)
 
 
 def main() -> None:
@@ -1057,6 +1255,7 @@ def main() -> None:
     parser.add_argument("--browser", choices=("chromium", "firefox", "webkit"), default="chromium")
     parser.add_argument("--headless", choices=("true", "false"), default="true")
     parser.add_argument("--proxy-server")
+    parser.add_argument("--launch-mode", choices=("persistent", "direct"), default=os.environ.get("CHATGPT_UI_LAUNCH_MODE", "persistent"))
     args = parser.parse_args()
     try:
         request = json.loads(sys.stdin.readline())

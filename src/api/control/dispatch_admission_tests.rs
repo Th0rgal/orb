@@ -62,7 +62,10 @@ impl Harness {
         nodes: Vec<crate::remote_node::RemoteNodeConfig>,
     ) -> Self {
         let path = dir.path();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::new(path.to_path_buf());
+        config.port = listener.local_addr().unwrap().port();
+        config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
         let root_agent: AgentRef = Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
@@ -81,6 +84,10 @@ impl Harness {
             id: "admission-test".into(),
             username: "admission-test".into(),
         };
+        hub.identities
+            .write()
+            .await
+            .insert(user.id.clone(), user.clone());
         let store: Arc<dyn MissionStore> = Arc::new(
             SqliteMissionStore::new(path.join("missions"), &user.id)
                 .await
@@ -161,6 +168,7 @@ impl Harness {
             attention_snapshot: Default::default(),
         });
         state.control.bind_admission_state(&state);
+        crate::control_mcp::gateway::start_worker(state.clone()).unwrap();
         state
             .projects
             .upsert_project("lido", None, None, None, None)
@@ -175,16 +183,23 @@ impl Harness {
             .route("/missions/:id", axum::routing::get(get_mission))
             .route("/missions/:id/resume", axum::routing::post(resume_mission))
             .route(
+                "/missions/:id/board/tasks",
+                axum::routing::post(upsert_mission_board_tasks),
+            )
+            .route(
                 "/missions/:id/title",
                 axum::routing::post(set_mission_title),
             )
             .route(
                 "/missions/:id/project",
-                axum::routing::patch(update_mission_project),
+                axum::routing::patch(update_mission_project).post(update_mission_project),
             )
             .layer(Extension(user.clone()))
             .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = axum::Router::new()
+            .route("/api/health", axum::routing::get(|| async { "ready" }))
+            .nest("/api/control", app.clone())
+            .merge(app);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -4972,6 +4987,9 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
                         }
                         let job_id = body["job_id"].clone();
                         submissions.lock().unwrap().push(body);
+                        if state.lock().unwrap().as_str() == "ambiguous-submit" {
+                            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"fixture lost submit response after accepting job"})));
+                        }
                         (
                             StatusCode::ACCEPTED,
                             Json(json!({"job_id": job_id, "state": state.lock().unwrap().clone()})),
@@ -6246,6 +6264,7 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
             false,
         )));
         registry.register(Arc::new(crate::backend::grok::GrokBackend::new()));
+        registry.register(Arc::new(crate::backend::gemini::GeminiBackend::new()));
     }
     let store = h.control.mission_store.clone();
 
@@ -6317,6 +6336,12 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
         .as_str()
         .unwrap()
         .contains(&key));
+    let credential = payload["env"]["SANDBOXED_MCP_TOKEN"].as_str().unwrap();
+    let principal = crate::control_mcp::gateway::verify(&h.state, credential).unwrap();
+    assert_eq!(principal.mission_id, Some(mission_id));
+    assert_eq!(principal.role, crate::control_mcp::Role::Executor);
+    assert!(!command.contains(credential));
+    assert!(command.contains("sandboxed-mcp launch --harness opencode"));
     assert!(h.state.proxy_api_keys.verify(&key).await);
     let dispatched = store
         .get_events(mission_id, Some(&["mission_status_changed"]), None, None)
@@ -6379,10 +6404,26 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     assert!(detail.contains("managed-auth"), "{detail}");
     let caps = remote_launch_capabilities();
     assert!(caps.typed && caps.raw_command && caps.proxy_url_configured);
-    assert_eq!(
-        caps.harnesses,
-        vec!["claudecode", "opencode", "grok", "codex"]
-    );
+    for harness in ["claudecode", "opencode", "grok", "codex", "gemini"] {
+        assert!(caps.harnesses.iter().any(|h| h == harness));
+    }
+    let refused = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(
+            &json!({"prompt":"inspect only", "project":"lido", "backend":"gemini",
+            "remote_node_id":"typed-fixture", "idempotency_key":"gemini-without-node-auth"}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert!(refused
+        .text()
+        .await
+        .unwrap()
+        .starts_with("REMOTE_AUTH_REQUIRED:"));
     assert_eq!(
         store
             .list_missions_filtered(&crate::api::mission_store::MissionFilter::default(), 50, 0)
@@ -6459,6 +6500,7 @@ async fn native_grok_auto_track_continuation(
     intent: Option<&str>,
     expected_mode: &str,
 ) {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
     let fixture =
         spawn_fixture_node("native-grok", "REMOTE_NATIVE_GROK_TEST_TOKEN", "running").await;
     let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
@@ -6527,7 +6569,14 @@ async fn native_grok_auto_track_continuation(
             && lease.mode == expected_mode));
     let payload = fixture.submissions.lock().unwrap()[0]["payload"].clone();
     assert_eq!(payload["managed_auth"], json!(["grok"]));
-    assert_eq!(payload["env"], json!({"NO_COLOR":"1"}));
+    assert_eq!(payload["env"]["NO_COLOR"], "1");
+    let credential = payload["env"]["SANDBOXED_MCP_TOKEN"].as_str().unwrap();
+    let principal = crate::control_mcp::gateway::verify(&h.state, credential).unwrap();
+    assert_eq!(principal.mission_id, Some(id));
+    assert_eq!(principal.role, crate::control_mcp::Role::Executor);
+    assert!(payload["env"].get("JWT_SECRET").is_none());
+    assert!(payload["env"].get("HERMES_SANDBOXED_API_TOKEN").is_none());
+    assert!(!payload["command"].as_str().unwrap().contains(credential));
     let command = payload["command"].as_str().unwrap();
     assert!(
         command.ends_with(&format!("-p '{}'", objective)),
@@ -6702,6 +6751,36 @@ async fn native_grok_auto_track_continuation(
     let duplicate = h.request(true, id, json!({})).await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    // A live job on an explicit track must refuse without suggesting a
+    // replacement: Orb treats that suggestion as authorization to dispatch.
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                track: Some(Some("explicit-track".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let live_followup = h
+        .request(false, id, json!({"content":"latest request"}))
+        .await;
+    assert_eq!(live_followup.status(), StatusCode::CONFLICT);
+    let refusal = live_followup.text().await.unwrap();
+    assert!(refusal.contains("REMOTE_JOB_STILL_RUNNING"), "{refusal}");
+    assert!(!refusal.contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                track: Some(Some(auto_track.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     fixture.log.lock().unwrap().push_str(&format!(
         "{{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"{session_id}\"}}\n"
     ));
@@ -7718,4 +7797,1126 @@ fn http_restored_scheduler_batch_retry_preserves_pending_and_consumed_state() {
             NATIVE_FIXTURES.lock().unwrap().remove(&m.id);
         });
     }
+}
+
+#[tokio::test]
+async fn unified_mcp_action_dispatches_through_core_once_and_returns_durable_result() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "MCP action fixture").await;
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Coordinator,
+            mission_id: None,
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let call = gateway::Call {
+        name: "link_mission_to_project".into(),
+        arguments: json!({"mission_id":mission.id,"slug":"lido","writer":false,"idempotency_key":"link-once"}),
+    };
+    let first = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call.clone()),
+    )
+    .await
+    .0;
+    assert_eq!(first["ok"], true, "{first}");
+    let id = first["result"]["action_id"].clone();
+    assert!(id.is_string());
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        let response = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":id}),
+            }),
+        )
+        .await
+        .0;
+        receipt = response["result"].clone();
+        if !matches!(receipt["state"].as_str(), Some("queued" | "dispatching")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(receipt["state"], "completed", "{receipt}");
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .project
+            .project
+            .as_deref(),
+        Some("lido")
+    );
+    let retry = gateway::call(State(h.state.clone()), Extension(principal), Json(call))
+        .await
+        .0;
+    assert_eq!(retry["result"], receipt);
+    let count: i64 = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM mcp_actions_v1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn unified_mcp_http_session_cannot_escape_role_mission_or_gateway() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let own = active_mission(&h, "MCP owner").await;
+    let unrelated = active_mission(&h, "unrelated").await;
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: None,
+            role: Role::Executor,
+            mission_id: Some(own.id),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let token = session["token"].as_str().unwrap();
+    let principal = gateway::verify(&h.state, token).unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/api/mcp/capabilities",
+            axum::routing::get(gateway::capabilities),
+        )
+        .route("/api/mcp/call", axum::routing::post(gateway::call))
+        .route("/api/mcp/renew", axum::routing::post(gateway::renew))
+        .route("/api/mcp/session", axum::routing::post(gateway::session))
+        .route(
+            "/api/control/missions",
+            axum::routing::get(|| async { "must remain inaccessible" }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            h.state.clone(),
+            crate::api::auth::require_auth,
+        ))
+        .with_state(h.state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let caps: Value = http
+        .get(format!("{url}/api/mcp/capabilities"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(caps["identity"]["mission_id"], own.id.to_string());
+    assert!(caps["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "start_mission"));
+    assert!(!caps["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "set_project_grant"));
+    for (name, arguments) in [
+        ("list_missions", json!({})),
+        ("get_mission", json!({"mission_id":unrelated.id})),
+        (
+            "start_mission",
+            json!({"title":"invalid relay","prompt":"do not launch","supersedes_mission_id":unrelated.id,"idempotency_key":"foreign-relay"}),
+        ),
+        (
+            "start_mission",
+            json!({"title":"invalid authority","prompt":"do not launch","request_merge_authority":true,"idempotency_key":"authority"}),
+        ),
+    ] {
+        let result: Value = http
+            .post(format!("{url}/api/mcp/call"))
+            .bearer_auth(token)
+            .json(&json!({"name":name,"arguments":arguments}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], false, "{name}: {result}");
+        assert_eq!(result["error"]["code"], "forbidden", "{name}: {result}");
+        assert_eq!(result["error"]["accepted"], "no");
+    }
+    assert_eq!(
+        http.get(format!("{url}/api/control/missions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        http.post(format!("{url}/api/mcp/session"))
+            .bearer_auth(token)
+            .json(&json!({"role":"operator"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    h.state
+        .projects
+        .upsert_project("mcp-test", None, None, None, None)
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            own.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("mcp-test".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let project_session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Coordinator,
+            mission_id: Some(own.id),
+            project: Some("mcp-test".into()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let project_token = project_session["token"].as_str().unwrap();
+    for (name, arguments) in [
+        ("get_mission", json!({"mission_id":unrelated.id})),
+        ("get_project", json!({"slug":"another-project"})),
+        ("list_missions", json!({"project_prefix":"mcp"})),
+        ("list_workspaces", json!({})),
+        (
+            "start_mission",
+            json!({"title":"escape", "prompt":"must not launch",
+            "project":"another-project", "idempotency_key":"project-escape"}),
+        ),
+    ] {
+        let result: Value = http
+            .post(format!("{url}/api/mcp/call"))
+            .bearer_auth(project_token)
+            .json(&json!({"name":name,"arguments":arguments}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["error"]["code"], "forbidden", "{name}: {result}");
+        assert_eq!(result["error"]["accepted"], "no");
+    }
+    // A previously valid session loses access if its mission changes project.
+    h.control
+        .mission_store
+        .update_mission_project(
+            own.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("another-project".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let result: Value = http
+        .post(format!("{url}/api/mcp/call"))
+        .bearer_auth(project_token)
+        .json(&json!({"name":"get_capabilities","arguments":{}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["error"]["code"], "forbidden");
+    let _ = gateway::revoke(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        axum::extract::Path(principal.session_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        http.post(format!("{url}/api/mcp/renew"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn unified_mcp_delegation_follows_committed_transfer_and_fences_in_progress_move() {
+    use crate::api::mission_store::transfer::{Machine, Transfer};
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let own = active_mission(&h, "moving MCP parent").await;
+    h.control
+        .mission_store
+        .update_mission_status(own.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    let own = h
+        .control
+        .mission_store
+        .get_mission(own.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: None,
+            role: Role::Executor,
+            mission_id: Some(own.id),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let mut transfer = h
+        .control
+        .mission_store
+        .save_machine_transfer(
+            Transfer {
+                id: Uuid::new_v4(),
+                mission_id: own.id,
+                key: "mcp-placement-test".into(),
+                revision: 0,
+                phase: "preparing".into(),
+                source: Machine::Core,
+                destination: Machine::Node {
+                    id: "old-agent".into(),
+                },
+                source_revision: own.updated_at,
+                source_generation: 0,
+                generation: 1,
+                backend: "codex".into(),
+                model: None,
+                effort: None,
+                source_root: None,
+                destination_root: None,
+                manifest: None,
+                receipt: None,
+                context: "test history".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let launch = || gateway::Call {
+        name: "start_mission".into(),
+        arguments: json!({
+            "title":"child", "prompt":"test only", "backend":"codex", "idempotency_key":"child-after-move"
+        }),
+    };
+    let refused = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(launch()),
+    )
+    .await
+    .0;
+    assert_eq!(refused["error"]["accepted"], "no");
+    transfer.phase = "verified".into();
+    transfer.destination_root = Some("mission:test".into());
+    transfer.receipt = Some(json!({"verified":true}));
+    let revision = transfer.revision;
+    transfer = h
+        .control
+        .mission_store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    transfer.phase = "activated".into();
+    let revision = transfer.revision;
+    h.control
+        .mission_store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    // The most recent run is the transfer receipt, with no remote-node scope.
+    // Acceptance must nevertheless bind the child to the committed destination.
+    let accepted = gateway::call(State(h.state.clone()), Extension(principal), Json(launch()))
+        .await
+        .0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let raw: String = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT arguments FROM mcp_actions_v1 WHERE id=?1",
+            [accepted["result"]["action_id"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let arguments: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(arguments["remote_node_id"], "old-agent");
+    assert_eq!(arguments["parent_mission_id"], own.id.to_string());
+}
+
+#[tokio::test]
+async fn unified_mcp_git_executes_on_the_node_and_retry_does_not_repeat_it() {
+    use crate::control_mcp::{gateway, Role};
+    let remote = tempfile::tempdir().unwrap();
+    let root = remote.path().to_path_buf();
+    let node_app = axum::Router::new().route(
+        "/execute",
+        axum::routing::post(
+            move |Json(request): Json<crate::remote_node::LeaseRequest>| {
+                let root = root.clone();
+                async move {
+                    Json(
+                        crate::remote_node::run_lease_command(
+                            "git-node",
+                            "git-fixture-secret",
+                            root,
+                            request,
+                        )
+                        .await
+                        .unwrap(),
+                    )
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, node_app).await.unwrap() });
+    std::env::set_var("MCP_GIT_FIXTURE_TOKEN", "git-fixture-secret");
+    let h = Harness::with_nodes(vec![crate::remote_node::RemoteNodeConfig {
+        id: "git-node".into(),
+        base_url,
+        token_env: "MCP_GIT_FIXTURE_TOKEN".into(),
+        labels: None,
+    }])
+    .await;
+    let mission = active_mission(&h, "node Git fixture").await;
+    h.control
+        .mission_store
+        .begin_mission_run(
+            mission.id,
+            &format!("remote-job:{}", Uuid::new_v4()),
+            Some("remote-node:git-node"),
+        )
+        .await
+        .unwrap();
+    let repo = remote.path().join(mission.id.to_string()).join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: None,
+            role: Role::Coordinator,
+            mission_id: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let call = gateway::Call {
+        name: "create_worktree".into(),
+        arguments: json!({
+            "mission_id":mission.id,"repo_path":"repo","path":"worker","branch":"worker","idempotency_key":"node-worktree-once"
+        }),
+    };
+    let accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call.clone()),
+    )
+    .await
+    .0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":accepted["result"]["action_id"]}),
+            }),
+        )
+        .await
+        .0["result"]
+            .clone();
+        if !matches!(receipt["state"].as_str(), Some("queued" | "dispatching")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(receipt["state"], "completed", "{receipt}");
+    assert_eq!(receipt["result"]["success"], true, "{receipt}");
+    assert_eq!(receipt["result"]["machine"], "git-node");
+    assert!(remote
+        .path()
+        .join(mission.id.to_string())
+        .join("worker/.git")
+        .exists());
+    assert!(!h._dir.path().join("worker").exists());
+    let retry = gateway::call(State(h.state.clone()), Extension(principal), Json(call))
+        .await
+        .0;
+    assert_eq!(retry["result"], receipt);
+    server.abort();
+    std::env::remove_var("MCP_GIT_FIXTURE_TOKEN");
+}
+
+#[tokio::test]
+async fn unified_mcp_remote_workspace_job_never_falls_back_to_core() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "remote job boundary").await;
+    h.control
+        .mission_store
+        .begin_mission_run(
+            mission.id,
+            &format!("remote-job:{}", Uuid::new_v4()),
+            Some("remote-node:old-agent"),
+        )
+        .await
+        .unwrap();
+    let request = crate::api::durable_jobs::StartDurableJobRequest {
+        command: "printf must-not-run-on-core".into(),
+        cwd: None,
+        started_by_mission_id: Some(mission.id),
+        workspace_id: Some(mission.workspace_id),
+        env: HashMap::new(),
+        timeout_secs: Some(10),
+        resource_class: None,
+        idempotency_key: Some("remote-job-boundary".into()),
+    };
+    let error = crate::api::durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(serde_json::to_value(error.1 .0).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("no Core process was started"));
+}
+
+#[tokio::test]
+async fn unified_mcp_remote_workspace_job_keeps_identity_across_retry_logs_and_cancel() {
+    use crate::api::durable_jobs::{self, DurableJobStatus, StartDurableJobRequest};
+    let fixture = spawn_fixture_node("job-node", "MCP_JOB_FIXTURE_TOKEN", "running").await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let mission = active_mission(&h, "node background job").await;
+    h.control
+        .mission_store
+        .begin_mission_run(
+            mission.id,
+            &format!("remote-job:{}", Uuid::new_v4()),
+            Some("remote-node:job-node"),
+        )
+        .await
+        .unwrap();
+    let request = || StartDurableJobRequest {
+        command: "printf node-only".into(),
+        cwd: Some("repo".into()),
+        started_by_mission_id: Some(mission.id),
+        workspace_id: Some(mission.workspace_id),
+        env: HashMap::new(),
+        timeout_secs: Some(120),
+        resource_class: None,
+        idempotency_key: Some("stable-node-job".into()),
+    };
+    let first = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(first.remote.as_ref().unwrap().node_id, "job-node");
+    assert!(first.spawn_accepted);
+    assert!(first.pid.is_none());
+    let retry = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(retry.id, first.id);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+    let payload = fixture.submissions.lock().unwrap()[0].clone();
+    assert!(payload["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .contains("job deadline elapsed before launch"));
+    assert_eq!(payload["payload"]["env"], json!({}));
+    assert!(
+        durable_jobs::has_unsettled_mission_jobs(&h.state, &h.user, mission.id)
+            .await
+            .unwrap()
+    );
+    let logs = durable_jobs::job_logs(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        axum::extract::Path(first.id),
+        axum::extract::Query(durable_jobs::JobLogsQuery {
+            tail_bytes: 1024,
+            stream: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(logs.stdout.contains("fixture log for running"));
+    let cancelled = durable_jobs::cancel_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        axum::extract::Path(first.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(fixture.cancels(), 1);
+    // Cancellation is reported only after the fixture confirms termination.
+    assert_eq!(cancelled.status, DurableJobStatus::Cancelled);
+    fixture.set_state("cancelled");
+    let settled = durable_jobs::get_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        axum::extract::Path(first.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(settled.status, DurableJobStatus::Cancelled);
+    assert!(
+        !durable_jobs::has_unsettled_mission_jobs(&h.state, &h.user, mission.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unified_mcp_remote_job_lost_response_is_observed_without_resubmission() {
+    use crate::api::durable_jobs::{self, DurableJobStatus, StartDurableJobRequest};
+    let fixture = spawn_fixture_node(
+        "ambiguous-job-node",
+        "MCP_AMBIGUOUS_JOB_TOKEN",
+        "ambiguous-submit",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let mission = active_mission(&h, "ambiguous node job").await;
+    h.control
+        .mission_store
+        .begin_mission_run(
+            mission.id,
+            &format!("remote-job:{}", Uuid::new_v4()),
+            Some("remote-node:ambiguous-job-node"),
+        )
+        .await
+        .unwrap();
+    let request = || StartDurableJobRequest {
+        command: "printf once".into(),
+        cwd: None,
+        started_by_mission_id: Some(mission.id),
+        workspace_id: Some(mission.workspace_id),
+        env: HashMap::new(),
+        timeout_secs: Some(120),
+        resource_class: None,
+        idempotency_key: Some("ambiguous-node-job".into()),
+    };
+    let first = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(first.status, DurableJobStatus::Unknown);
+    assert!(!first.spawn_accepted);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+    fixture.set_state("running");
+    let retry = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(retry.id, first.id);
+    assert!(retry.spawn_accepted);
+    assert_eq!(retry.status, DurableJobStatus::Running);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+    let mut changed = request();
+    changed.command = "printf different".into();
+    let refusal = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(changed),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refusal.0, StatusCode::CONFLICT);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+    let receipt_path = std::path::Path::new(&first.stdout_log)
+        .parent()
+        .unwrap()
+        .join("job.json");
+    std::fs::write(receipt_path, b"{interrupted old receipt").unwrap();
+    let refused = durable_jobs::start_job(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(request()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unified_mcp_core_board_worktrees_use_the_boss_workspace() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let workspace = h.state.workspaces.get_default().await;
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("worktree board"),
+            Some(workspace.id),
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    let root = crate::workspace::mission_workspace_dir_for_workspace(&workspace, mission.id);
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Coordinator,
+            mission_id: Some(mission.id),
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let accepted=gateway::call(State(h.state.clone()),Extension(principal.clone()),Json(gateway::Call{name:"plan_tasks".into(),arguments:json!({"idempotency_key":"board-worktree-once","tasks":[{
+        "task_key":"fixture","title":"fixture","prompt":"No harness is run by this test","backend":"codex","model_override":"gpt-6-astra",
+        "acceptance_criteria":["fixture only"],"worktree":{"path":"worker","branch":"worker","repo_path":"repo"}
+    }]})})).await.0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":accepted["result"]["action_id"]}),
+            }),
+        )
+        .await
+        .0["result"]
+            .clone();
+        if !matches!(receipt["state"].as_str(), Some("queued" | "dispatching")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(receipt["state"], "completed", "{receipt}");
+    assert!(root.join("worker/.git").exists());
+    let tasks = h
+        .control
+        .mission_store
+        .list_board_tasks(mission.id)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].working_directory.as_deref(),
+        root.join("worker").canonicalize().unwrap().to_str()
+    );
+}
+
+#[tokio::test]
+async fn unified_mcp_operator_auth_discovery_does_not_require_a_mission() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Operator,
+            mission_id: None,
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let result = gateway::call(
+        State(h.state.clone()),
+        Extension(principal),
+        Json(gateway::Call {
+            name: "get_backend_auth_status".into(),
+            arguments: json!({"backend":"codex"}),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(
+        result["ok"], true,
+        "Unscoped operator discovery must reach its read-only handler"
+    );
+}
+
+#[tokio::test]
+async fn remote_claude_allocates_and_resumes_native_session() {
+    let fixture = spawn_fixture_node(
+        "claude-transfer-fixture",
+        "CLAUDE_TRANSFER_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let response = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "title":"Claude continuity", "prompt":"first turn", "project":"lido",
+            "backend":"claudecode", "model_override":"claude-opus-5-5",
+            "remote_node_id":"claude-transfer-fixture", "idempotency_key":"claude-continuity-test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+    let session = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    assert!(Uuid::parse_str(&session).is_ok());
+    let command = fixture.submissions.lock().unwrap()[0]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        command.contains(&format!("--session-id '{}'", session)),
+        "{command}"
+    );
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
+    fixture.set_state("succeeded");
+    wait_until("Claude first turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("Claude first ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    let response = h.request(false, id, json!({"content":"second turn"})).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 2);
+    let command = submissions[1]["payload"]["command"].as_str().unwrap();
+    assert!(
+        command.contains(&format!("--resume '{}'", session)),
+        "{command}"
+    );
+    assert!(!command.contains("--session-id"));
+    assert!(command.contains("--output-format stream-json"));
+    assert!(command.contains("--include-partial-messages"));
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
+    fixture.set_state("succeeded");
+}
+
+#[tokio::test]
+async fn transferred_claude_starts_with_context_then_resumes_same_session() {
+    let fixture = spawn_fixture_node(
+        "claude-moved-fixture",
+        "CLAUDE_MOVED_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    use crate::api::mission_store::transfer::{Machine, Transfer};
+    let store = h.control.mission_store.clone();
+    let mission = store
+        .create_mission(
+            Some("Transferred Claude"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = mission.id;
+    store
+        .update_mission_status(id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    let mission = store.get_mission(id).await.unwrap().unwrap();
+    let mut transfer = store
+        .save_machine_transfer(
+            Transfer {
+                id: Uuid::new_v4(),
+                mission_id: id,
+                key: "claude-transfer".into(),
+                revision: 0,
+                phase: "preparing".into(),
+                source: Machine::Client {
+                    id: "source-mac".into(),
+                },
+                destination: Machine::Node {
+                    id: "claude-moved-fixture".into(),
+                },
+                source_revision: mission.updated_at,
+                source_generation: 0,
+                generation: 1,
+                backend: "claudecode".into(),
+                model: Some("claude-opus-5-5".into()),
+                effort: None,
+                source_root: Some("/source".into()),
+                destination_root: None,
+                manifest: None,
+                receipt: None,
+                context: "portable-context-sentinel".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    transfer.phase = "verified".into();
+    transfer.destination_root = Some("/transferred-workspace".into());
+    transfer.receipt = Some(json!({"verified":true}));
+    let revision = transfer.revision;
+    transfer = store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    transfer.phase = "activated".into();
+    let revision = transfer.revision;
+    store
+        .save_machine_transfer(transfer, Some(revision))
+        .await
+        .unwrap();
+    let response = h
+        .request(false, id, json!({"content":"first turn after move"}))
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let session = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    assert!(Uuid::parse_str(&session).is_ok());
+    let command = fixture.submissions.lock().unwrap()[0]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        command.contains(&format!("--session-id '{}'", session)),
+        "{command}"
+    );
+    assert!(command.contains("portable-context-sentinel"), "{command}");
+    assert!(command.contains("/transferred-workspace"), "{command}");
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
+    fixture.set_state("succeeded");
+    wait_until("Claude first turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("Claude first ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    let response = h.request(false, id, json!({"content":"second turn"})).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 2);
+    let command = submissions[1]["payload"]["command"].as_str().unwrap();
+    assert!(
+        command.contains(&format!("--resume '{}'", session)),
+        "{command}"
+    );
+    assert!(!command.contains("--session-id"));
+    assert!(command.contains("--output-format stream-json"));
+    assert!(command.contains("--include-partial-messages"));
+    assert!(
+        !command.contains("portable-context-sentinel"),
+        "history must not be injected on native resume: {command}"
+    );
+    assert!(command.contains("/transferred-workspace"), "{command}");
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
+    fixture.set_state("succeeded");
 }

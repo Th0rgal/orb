@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_URL="${HERMES_SANDBOXED_API_URL:-${SANDBOXED_SH_DEV_URL:-https://agent-backend-dev.thomas.md}}"
 TOKEN="${HERMES_SANDBOXED_API_TOKEN:-${SANDBOXED_SH_TOKEN:-}}"
-MCP_COMMAND="${HERMES_ASSISTANT_MCP_COMMAND:-$ROOT_DIR/target/debug/assistant-mcp}"
+MCP_COMMAND="${HERMES_ASSISTANT_MCP_COMMAND:-$ROOT_DIR/target/debug/sandboxed-mcp}"
 LIMIT="3"
 REQUIRE_HERMES_RUNTIME=0
 
@@ -15,13 +15,13 @@ Usage:
 
 Runs a sandboxed.sh-side Hermes bridge smoke:
 1) /api/system/components reports assistant_mcp installed and ok
-2) initialize assistant-mcp over stdio
+2) initialize sandboxed-mcp over stdio
 3) tools/call list_active_missions
 
 Options:
   --base-url URL             Sandboxed.sh backend URL (env: HERMES_SANDBOXED_API_URL, SANDBOXED_SH_DEV_URL)
   --token TOKEN              Optional control API bearer token (env: HERMES_SANDBOXED_API_TOKEN, SANDBOXED_SH_TOKEN)
-  --command PATH             assistant-mcp command (env: HERMES_ASSISTANT_MCP_COMMAND)
+  --command PATH             sandboxed-mcp command (env: HERMES_ASSISTANT_MCP_COMMAND)
   --limit N                  list_active_missions limit (default: 3)
   --require-hermes-runtime   Fail unless hermes_assistant is installed and ok
   -h, --help                 Show this help
@@ -72,13 +72,13 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-if [[ "$MCP_COMMAND" == "$ROOT_DIR/target/debug/assistant-mcp" && ! -x "$MCP_COMMAND" ]]; then
-  echo "Building assistant-mcp debug binary..."
-  cargo build --bin assistant-mcp --manifest-path "$ROOT_DIR/Cargo.toml"
+if [[ "$MCP_COMMAND" == "$ROOT_DIR/target/debug/sandboxed-mcp" && ! -x "$MCP_COMMAND" ]]; then
+  echo "Building sandboxed-mcp debug binary..."
+  cargo build --bin sandboxed-mcp --manifest-path "$ROOT_DIR/Cargo.toml"
 fi
 
 if [[ ! -x "$MCP_COMMAND" && -z "$(command -v "$MCP_COMMAND" 2>/dev/null)" ]]; then
-  echo "assistant-mcp command is not executable or on PATH: $MCP_COMMAND" >&2
+  echo "sandboxed-mcp command is not executable or on PATH: $MCP_COMMAND" >&2
   exit 2
 fi
 
@@ -131,15 +131,15 @@ echo "component hermes_assistant=$hermes_runtime_status"
 
 
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"assistant-mcp-smoke","version":"0"}}}' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"sandboxed-mcp-smoke","version":"0"}}}' \
   "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list_active_missions\",\"arguments\":{\"limit\":$LIMIT}}}" \
   | HERMES_SANDBOXED_API_URL="$BASE_URL" \
     HERMES_SANDBOXED_API_TOKEN="$TOKEN" \
-    "$MCP_COMMAND" >"$tmp_output"
+    "$MCP_COMMAND" --profile coordinator >"$tmp_output"
 
 jq -e '
   select(.id == 1)
-  | .result.serverInfo.name == "sandboxed-hermes-assistant"
+  | .result.serverInfo.name == "sandboxed-mcp"
   and (.result.serverInfo.version | type == "string")
 ' "$tmp_output" >/dev/null
 
@@ -147,13 +147,13 @@ jq -e '
   select(.id == 2)
   | .result.content[0].text
   | fromjson
-  | (.missions | type == "array")
+  | (.result.missions | type == "array")
 ' "$tmp_output" >/dev/null
 
-echo "assistant-mcp smoke passed against $BASE_URL"
+echo "sandboxed-mcp smoke passed against $BASE_URL"
 jq -r '
   select(.id == 2)
   | .result.content[0].text
   | fromjson
-  | "missions_returned=\(.missions | length)"
+  | "missions_returned=\(.result.missions | length)"
 ' "$tmp_output"

@@ -46,6 +46,7 @@ pub mod hermes_tools;
 pub mod library;
 pub mod mcp;
 pub mod model_policy;
+pub mod model_selection;
 pub mod node;
 pub mod nspawn;
 pub mod opencode;
@@ -92,3 +93,5 @@ pub mod local_origin;
 
 #[path = "../shared/agent_software.rs"]
 pub mod agent_software;
+
+pub mod control_mcp;

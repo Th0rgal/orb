@@ -1,0 +1,19 @@
+.cloud-form label,.cloud-conversation label{display:grid;gap:6px;margin:16px 0}.cloud-form input,.cloud-form select,.cloud-form textarea,.cloud-conversation textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--border,#aaa);border-radius:6px;padding:10px;width:100%;box-sizing:border-box}.cloud-form button,.cloud-conversation button{font:inherit;padding:8px 14px;border:1px solid var(--border,#aaa);border-radius:6px}.cloud-form button:disabled,.cloud-conversation button:disabled{opacity:.5}.cloud-note{font-size:12px;opacity:.7}.cloud-badge{font-size:11px;border:1px solid currentColor;padding:2px 6px;border-radius:4px}.cloud-conversation{max-width:900px;width:100%;margin:0 auto;padding:30px;overflow:auto}.cloud-conversation article{padding:20px 0;border-bottom:1px solid var(--border,#ddd)}.cloud-prompt,.cloud-result{white-space:pre-wrap;overflow-wrap:anywhere}.cloud-prompt{font-weight:600}.cloud-conversation a{color:inherit;text-decoration:underline}
+
+.cloud-agent-page .picks { flex-wrap:wrap; min-width:0; }
+.cloud-agent-page .plus-wrap { display:flex; color:var(--fg-3); }
+.cloud-agent-page .send:disabled { opacity:.35; cursor:default; }
+.cloud-page-details { position:absolute; top:100%; left:4px; right:4px; padding-top:10px; color:var(--fg-2); }
+.cloud-page-details .cloud-note { margin:6px 0; line-height:1.5; }
+.cloud-repository { display:flex; gap:12px; flex-wrap:wrap; }
+.cloud-agent-page .composer textarea { width:100%; resize:none; }
+@media(max-height:600px) { .cloud-agent-page { justify-content:flex-start; padding-top:80px; overflow:auto; } .cloud-page-details { position:static; } }
+
+.cloud-agent-page .na-menu .pick-name { flex:1; min-width:0; overflow-wrap:anywhere; }
+.cloud-agent-page .na-menu .pick-check { flex:none; width:12px; color:var(--fg-2); }
+
+.cloud-transcript{padding-top:24px}.cloud-conversation-meta{display:flex;gap:12px;flex-wrap:wrap;color:var(--fg-3);font-size:11px;padding:10px 4px}.cloud-conversation-meta a{color:inherit}
+
+.cloud-experimental{display:inline-flex;align-items:center;color:var(--fg-3)}
+
+.cloud-choice-list{max-height:320px;overflow:auto}.model-menu:has(.cloud-choice-list){max-width:min(420px,90vw)}

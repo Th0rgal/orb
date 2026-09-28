@@ -79,6 +79,7 @@ struct Settings {
     python_path: String,
     profile_dirs: Vec<PathBuf>,
     browser: String,
+    launch_mode: String,
     proxy_server: Option<String>,
     display: Option<String>,
     timeout: Duration,
@@ -348,6 +349,14 @@ fn validated_settings(app_working_dir: &Path) -> Result<Settings, String> {
     if !matches!(browser.as_str(), "chromium" | "firefox" | "webkit") {
         return Err("chatgpt_ui browser must be chromium, firefox, or webkit".to_string());
     }
+    let launch_mode = get_backend_string_setting("chatgpt_ui", "launch_mode")
+        .unwrap_or_else(|| "persistent".to_string());
+    if !matches!(launch_mode.as_str(), "persistent" | "direct") {
+        return Err("chatgpt_ui launch_mode must be persistent or direct".to_string());
+    }
+    if launch_mode == "direct" && browser != "chromium" {
+        return Err("chatgpt_ui direct launch requires chromium".to_string());
+    }
     let proxy_server = get_backend_string_setting("chatgpt_ui", "proxy_server")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -370,6 +379,7 @@ fn validated_settings(app_working_dir: &Path) -> Result<Settings, String> {
             .unwrap_or_else(|| "python3".to_string()),
         profile_dirs,
         browser,
+        launch_mode,
         proxy_server,
         display,
         timeout: Duration::from_secs(timeout_secs),
@@ -498,6 +508,8 @@ async fn run_recovery_probe(
         .arg(profile_dir)
         .arg("--browser")
         .arg(&settings.browser)
+        .arg("--launch-mode")
+        .arg(&settings.launch_mode)
         .arg("--headless")
         .arg(if settings.headless { "true" } else { "false" });
     if let Some(proxy_server) = settings.proxy_server.as_deref() {
@@ -587,33 +599,89 @@ pub async fn run_chatgpt_ui_turn(
     cancel: CancellationToken,
     app_working_dir: &Path,
 ) -> AgentResult {
+    run_chatgpt_ui_account_turn(
+        work_dir,
+        message,
+        model,
+        mission_id,
+        events_tx,
+        cancel,
+        app_working_dir,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_chatgpt_ui_account_turn(
+    work_dir: &Path,
+    message: &str,
+    model: Option<&str>,
+    mission_id: Uuid,
+    events_tx: broadcast::Sender<AgentEvent>,
+    cancel: CancellationToken,
+    app_working_dir: &Path,
+    account: Option<&str>,
+    expected_conversation: Option<&str>,
+) -> AgentResult {
     let settings = match validated_settings(app_working_dir) {
         Ok(settings) => settings,
         Err(error) => {
             return AgentResult::failure(error, 0).with_terminal_reason(TerminalReason::AuthError)
         }
     };
+    if let Some(account) = account {
+        if settings
+            .profile_dirs
+            .iter()
+            .filter(|dir| profile_basename(dir) == account)
+            .count()
+            != 1
+        {
+            return AgentResult::failure(
+                "The selected ChatGPT browser account is unavailable or ambiguous",
+                0,
+            )
+            .with_terminal_reason(TerminalReason::AuthError);
+        }
+    }
     let fingerprint = jobs::prompt_fingerprint(message, model);
+    let retained_record = account.and_then(|_| jobs::load_job(app_working_dir, mission_id));
+    if expected_conversation.is_some_and(|expected| {
+        retained_record
+            .as_ref()
+            .is_none_or(|r| r.conversation_path != expected)
+    }) {
+        return unresolved_resume_result("continuation_not_found");
+    }
+    if retained_record.as_ref().is_some_and(|r| {
+        !jobs::continuable_conversation(r)
+            && !jobs::resumable_job(r, &fingerprint, chrono::Utc::now())
+    }) {
+        return unresolved_resume_result("continuation_not_found");
+    }
     let _ = jobs::reconcile_jobs(app_working_dir);
     let mut prior_attempts = 0u32;
     let mut continuation_record = None;
-    let mut resume_record = match jobs::load_job(app_working_dir, mission_id) {
-        Some(record) if jobs::resumable_job(&record, &fingerprint, chrono::Utc::now()) => {
-            Some(record)
-        }
-        Some(record) => {
-            prior_attempts = record.attempts;
-            if jobs::continuable_conversation(&record) {
-                continuation_record = Some(record);
-            } else if record.state == jobs::JobState::Submitted {
-                // Same mission, different prompt: the old submission can no
-                // longer be reattached to this turn.
-                jobs::mark_abandoned(app_working_dir, mission_id, "superseded");
+    let mut resume_record =
+        match retained_record.or_else(|| jobs::load_job(app_working_dir, mission_id)) {
+            Some(record) if jobs::resumable_job(&record, &fingerprint, chrono::Utc::now()) => {
+                Some(record)
             }
-            None
-        }
-        None => None,
-    };
+            Some(record) => {
+                prior_attempts = record.attempts;
+                if jobs::continuable_conversation(&record) {
+                    continuation_record = Some(record);
+                } else if record.state == jobs::JobState::Submitted {
+                    // Same mission, different prompt: the old submission can no
+                    // longer be reattached to this turn.
+                    jobs::mark_abandoned(app_working_dir, mission_id, "superseded");
+                }
+                None
+            }
+            None => None,
+        };
     let download_dir = match prepare_download_dir(work_dir).await {
         Ok(path) => path,
         Err(error) => {
@@ -635,6 +703,14 @@ pub async fn run_chatgpt_ui_turn(
     // pool scan — quarantine and retry-slot exclusions must not reroute a
     // reattach to an account that cannot see the conversation.
     let pinned_record = attempt_resume.as_ref().or(attempt_continuation.as_ref());
+    if let (Some(account), Some(record)) = (account, pinned_record) {
+        if record.profile != account {
+            return unresolved_resume_result("profile_unavailable");
+        }
+    }
+    let pinned_name = pinned_record
+        .map(|record| record.profile.as_str())
+        .or(account);
     let (profile_slot, profile_dir, _profile_lock) = loop {
         let paced_transition_id = match wait_for_available_launch_turn(
             &settings, mission_id, &events_tx, &cancel,
@@ -644,11 +720,11 @@ pub async fn run_chatgpt_ui_turn(
             Ok(transition_id) => transition_id,
             Err(result) => return result,
         };
-        let acquisition = if let Some(record) = pinned_record {
+        let acquisition = if let Some(profile_name) = pinned_name {
             match settings
                 .profile_dirs
                 .iter()
-                .position(|dir| profile_basename(dir) == record.profile)
+                .position(|dir| profile_basename(dir) == profile_name)
             {
                 Some(index) => {
                     let pinned = settings.profile_dirs[index].clone();
@@ -867,6 +943,8 @@ async fn drive_once(
         .arg(profile_dir)
         .arg("--browser")
         .arg(&settings.browser)
+        .arg("--launch-mode")
+        .arg(&settings.launch_mode)
         .arg("--headless")
         .arg(if settings.headless { "true" } else { "false" });
     if let Some(proxy_server) = settings.proxy_server.as_deref() {
@@ -1279,6 +1357,7 @@ async fn drive_once(
     const MAX_ARTIFACT_BYTES: u64 = 50 * 1024 * 1024;
     let mut artifact_count = 0usize;
     let mut artifact_bytes = 0u64;
+    let mut validated_artifacts = Vec::new();
     for (path, name) in artifact_receipts {
         if artifact_count >= MAX_ARTIFACT_FILES {
             tracing::warn!(mission_id = %mission_id, "Rejected excess ChatGPT UI artifact receipt");
@@ -1288,6 +1367,13 @@ async fn drive_once(
             Ok((tag, size)) if artifact_bytes.saturating_add(size) <= MAX_ARTIFACT_BYTES => {
                 output.push_str("\n\n");
                 output.push_str(&tag);
+                if let (Ok(root), Ok(file)) =
+                    (work_dir.canonicalize(), Path::new(&path).canonicalize())
+                {
+                    if let Ok(relative) = file.strip_prefix(root) {
+                        validated_artifacts.push(serde_json::json!({"path": relative.to_string_lossy(), "sizeBytes": size}));
+                    }
+                }
                 artifact_count += 1;
                 artifact_bytes += size;
             }
@@ -1311,6 +1397,7 @@ async fn drive_once(
             "profile_slot": profile_slot + 1,
             "artifact_count": artifact_count,
             "artifact_bytes": artifact_bytes,
+            "artifacts": validated_artifacts,
             "durability": {
                 "resumed": resume.is_some(),
                 "durable": submitted_recorded,

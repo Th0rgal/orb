@@ -11,46 +11,23 @@ model:
 
 terminal:
   # Keep Hermes' own shell/tool execution scoped to the assistant workspace.
-  # Sandboxed mission work should go through assistant-mcp.
+  # Sandboxed mission work should go through sandboxed-mcp.
   backend: local
   cwd: /var/lib/hermes-assistant-dev/workspace
 
 mcp_servers:
   sandboxed_assistant:
     command: ${HERMES_ASSISTANT_MCP_COMMAND}
+    args: [--profile, coordinator]
     env:
-      HERMES_SANDBOXED_API_URL: ${HERMES_SANDBOXED_API_URL}
-      HERMES_SANDBOXED_API_TOKEN: ${HERMES_SANDBOXED_API_TOKEN}
-      HERMES_DEFAULT_WORKSPACE_ID: ${HERMES_DEFAULT_WORKSPACE_ID}
-    # Ask turns can make multiple sequential LLM/tool calls.
-    timeout: 600
-    connect_timeout: 15
+      SANDBOXED_MCP_API_URL: ${SANDBOXED_MCP_API_URL}
+      SANDBOXED_MCP_TOKEN_FILE: ${SANDBOXED_MCP_TOKEN_FILE}
+    # Mutations return durable receipts; follow them with get_action.
+    timeout: 60
+    connect_timeout: 30
     tools:
-      include:
-        - list_active_missions
-        - list_missions
-        - get_mission
-        - get_mission_digest
-        - get_mission_events
-        - get_mission_health
-        - get_mission_diagnostics
-        - start_mission
-        - send_message_to_mission
-        - ask_mission
-        - update_mission_settings
-        - resume_mission
-        - cancel_mission
-        - list_workspaces
-        - get_workspace
-        - create_workspace
-        - update_workspace
-        - delete_workspace
-        - list_workspace_templates
-        - get_workspace_template
-        - save_workspace_template
-        - delete_workspace_template
-        - rebuild_workspace_from_template
-        - workspace_bash
+      # The coordinator catalogue is supplied by Core. Do not copy a list
+      # here; migrate_unified_mcp.py can pin the installed catalogue at cutover.
       prompts: false
       resources: false
 

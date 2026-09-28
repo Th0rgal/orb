@@ -2735,10 +2735,9 @@ pub struct MissionRunner {
     /// Optional working directory override (e.g. git worktree path for orchestrated workers)
     pub working_directory: Option<String>,
 
-    /// API user that owns this mission. Forwarded into the orchestrator MCP
-    /// so worker missions land in this user's per-user mission store instead
-    /// of the MCP's own `orchestrator-mcp` store.
-    pub user_id: Option<String>,
+    /// Authenticated owner used by Core to bootstrap a mission-scoped MCP
+    /// grant. Native runtime launch refuses a missing identity.
+    pub user: Option<crate::api::auth::AuthUser>,
 
     /// Number of tool calls currently in flight (tool_use seen, no tool_result
     /// yet). Used by the stall classifier to avoid Severe-stalling a worker
@@ -2814,7 +2813,7 @@ impl MissionRunner {
             current_activity: None,
             subtasks: Vec::new(),
             working_directory: None,
-            user_id: None,
+            user: None,
             active_tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             background_tasks: HashMap::new(),
             durable_run: None,
@@ -3175,7 +3174,7 @@ impl MissionRunner {
         let session_id = self.session_id.clone();
         let config_profile = self.config_profile.clone();
         let working_directory = self.working_directory.clone();
-        let user_id = self.user_id.clone();
+        let user_id = self.user.clone();
         let user_message = msg.content.clone();
         let msg_id = msg.id;
         let msg_source = msg.source.clone();
@@ -3628,9 +3627,20 @@ async fn run_mission_turn(
     session_id: Option<String>,
     mission_config_profile: Option<String>,
     mission_working_directory: Option<String>,
-    boss_user_id: Option<String>,
+    boss_user_id: Option<crate::api::auth::AuthUser>,
     pr_readonly: bool,
 ) -> AgentResult {
+    if backend_id.starts_with("cloud_") {
+        return AgentResult::failure(
+            "Hosted execution is owned by the cloud observer; use a cloud follow-up",
+            0,
+        );
+    }
+    if let Err(error) =
+        crate::control_mcp::launch::require_runtime_owner(&backend_id, boss_user_id.as_ref())
+    {
+        return AgentResult::failure(error, 0);
+    }
     let _software_execution =
         match crate::agent_software::begin(&mission_id.to_string(), &backend_id, None) {
             Ok(guard) => guard,
@@ -3864,7 +3874,7 @@ async fn run_mission_turn(
             &backend_id,
             None, // custom_providers: TODO integrate with provider store
             effective_config_profile.as_deref(),
-            boss_user_id.as_deref(),
+            boss_user_id.as_ref(),
             Some(&config.working_dir),
             !pr_readonly,
             explicit_worktree.as_deref(),

@@ -7,6 +7,7 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
+pub(crate) mod btw_context;
 pub(crate) mod client_placement;
 pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
@@ -15,7 +16,7 @@ pub(crate) mod dispatch_admission_tests;
 pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
-mod remote_grok;
+pub(crate) mod remote_grok;
 #[cfg(test)]
 use dispatch_admission::admit_dispatch;
 pub use dispatch_admission::DispatchAdmission;
@@ -1450,6 +1451,54 @@ mod campaign_guard_tests {
                 .await
                 .is_none(),
             "a finished writer frees the worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_conversations_do_not_occupy_native_workspaces() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let workspace = Uuid::nil();
+        for backend in ["cloud_chatgpt", "cloud_grok_bot", "cloud_cursor"] {
+            let mission = store
+                .create_mission(
+                    Some("cloud"),
+                    Some(workspace),
+                    None,
+                    None,
+                    None,
+                    Some(backend),
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .update_mission_status(mission.id, MissionStatus::AwaitingUser)
+                .await
+                .unwrap();
+        }
+        assert!(live_mission_on_workspace(&store, workspace).await.is_none());
+        let native = store
+            .create_mission(
+                Some("native"),
+                Some(workspace),
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(native.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        assert_eq!(
+            live_mission_on_workspace(&store, workspace)
+                .await
+                .unwrap()
+                .id,
+            native.id
         );
     }
 
@@ -4433,6 +4482,7 @@ pub struct ControlHub {
     admission_state: Arc<std::sync::OnceLock<std::sync::Weak<AppState>>>,
     admission_ready: Arc<tokio::sync::Notify>,
     sessions: Arc<RwLock<HashMap<String, ControlState>>>,
+    identities: Arc<RwLock<HashMap<String, AuthUser>>>,
     config: Config,
     root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -4462,6 +4512,7 @@ impl ControlHub {
             admission_state: Arc::new(std::sync::OnceLock::new()),
             admission_ready: Arc::new(tokio::sync::Notify::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            identities: Arc::new(RwLock::new(HashMap::new())),
             config,
             root_agent,
             mcp,
@@ -4501,7 +4552,25 @@ impl ControlHub {
         sessions.values().next().map(|s| s.events_tx.clone())
     }
 
+    pub(crate) async fn identity_for_store(
+        &self,
+        store: &Arc<dyn MissionStore>,
+    ) -> Option<AuthUser> {
+        let owner = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|(_, state)| Arc::ptr_eq(&state.mission_store, store))
+            .map(|(owner, _)| owner.clone())?;
+        self.identities.read().await.get(&owner).cloned()
+    }
+
     pub async fn get_or_spawn(&self, user: &AuthUser) -> ControlState {
+        self.identities
+            .write()
+            .await
+            .insert(user.id.clone(), user.clone());
         if let Some(existing) = self.sessions.read().await.get(&user.id).cloned() {
             return existing;
         }
@@ -4544,6 +4613,10 @@ impl ControlHub {
             self.secrets.clone(),
             self.telegram_bridge.clone(),
             user.id.clone(),
+        );
+        super::cloud_agents::worker::start(
+            state.mission_store.clone(),
+            self.config.working_dir.clone(),
         );
         sessions.insert(user.id.clone(), state.clone());
 
@@ -5096,6 +5169,10 @@ pub async fn post_message(
     }
     crate::api::mission_payload::validate_user_content(&content)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let cloud_store = state.control.get_or_spawn(&user).await.mission_store;
+    if let Some(response) = super::cloud_agents::http::follow_up(cloud_store, &req).await? {
+        return Ok(response);
+    }
     let id = req.client_message_id.unwrap_or_else(Uuid::new_v4);
     let agent = req.agent;
     let target_mission_id = req.mission_id;
@@ -6196,6 +6273,21 @@ async fn recoverable_remote_continuation(
     working_dir: &std::path::Path,
     mission_id: Uuid,
 ) -> anyhow::Result<Option<Uuid>> {
+    // A remote harness owns the entire mission, unlike a delegated build.
+    // The build-only resolver intentionally excludes Mission handles; excluding
+    // them here turns a healthy remote run into an operator cancellation on boot.
+    if let Some(handle) = crate::remote_node::job_ledger::load(working_dir)
+        .await?
+        .into_iter()
+        .filter(|handle| {
+            handle.mission_id == mission_id
+                && handle.kind == crate::remote_node::job_ledger::JobHandleKind::Mission
+                && handle.accepted_at.is_some()
+        })
+        .max_by_key(|handle| (handle.submission_sequence, handle.started_at))
+    {
+        return Ok(Some(handle.job_id));
+    }
     if let Some(handle) =
         crate::remote_node::job_ledger::current_remote_build_wait_handle(working_dir, mission_id)
             .await?
@@ -7468,6 +7560,26 @@ pub async fn get_mission(
         .map_err(internal_error)?
     {
         Some(mut mission) => {
+            if mission.backend.starts_with("cloud_") {
+                let execution = control
+                    .mission_store
+                    .cloud_executions()
+                    .await
+                    .map_err(internal_error)?
+                    .into_iter()
+                    .find(|e| e.mission_id == id)
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::CONFLICT,
+                            "Hosted receipt missing; do not launch a replacement".into(),
+                        )
+                    })?;
+                let mut value = serde_json::to_value(&mission).map_err(internal_error)?;
+                value["execution_kind"] = serde_json::json!("hosted");
+                value["cloud"] = serde_json::to_value(execution).map_err(internal_error)?;
+                return Ok(Json(value));
+            }
+
             // Populate workspace_name + spark_offload from the workspace (P#7).
             let workspace = state.workspaces.get(mission.workspace_id).await;
             if let Some(ws) = workspace.as_ref() {
@@ -10119,7 +10231,12 @@ async fn live_mission_on_workspace(
         .ok()?
         .into_iter()
         .find(|mission| {
-            mission.workspace_id == workspace_id && campaign_slot_held_by(mission.status)
+            mission.workspace_id == workspace_id
+                && !matches!(
+                    mission.backend.as_str(),
+                    "cloud_chatgpt" | "cloud_grok_bot" | "cloud_cursor"
+                )
+                && campaign_slot_held_by(mission.status)
         })
 }
 
@@ -10349,6 +10466,19 @@ pub async fn create_mission(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
 ) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
+    let mut body = body;
+    if let Some(req) = body.as_mut() {
+        if let Some(selection) = req.extra.remove("cloud") {
+            let selection = serde_json::from_value(selection).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid cloud selection: {e}"),
+                )
+            })?;
+            return super::cloud_agents::http::create(state, user, body.unwrap().0, selection)
+                .await;
+        }
+    }
     create_mission_inner(State(state), Extension(user), body, false).await
 }
 
@@ -11943,7 +12073,8 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &["claudecode", "opencode", "grok", "codex"];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
+    &["claudecode", "opencode", "grok", "codex", "gemini"];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -11979,6 +12110,10 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 /// from the client's selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
+    Gemini {
+        model: Option<String>,
+        prompt: String,
+    },
     Codex {
         effort: Option<String>,
         fast_mode: bool,
@@ -11998,6 +12133,7 @@ pub(crate) enum RemoteHarnessPlan {
     ClaudeCode {
         model: Option<String>,
         prompt: String,
+        resume_session_id: Option<String>,
     },
     /// OpenCode CLI on the node, model routed through this core's
     /// OpenAI-compatible proxy endpoint.
@@ -12020,6 +12156,10 @@ impl RemoteHarnessPlan {
 
     pub(crate) fn label(&self) -> String {
         match self {
+            RemoteHarnessPlan::Gemini { model, .. } => format!(
+                "gemini/{}",
+                model.as_deref().unwrap_or("node default model")
+            ),
             RemoteHarnessPlan::Codex { model, .. } => format!("codex/{model}"),
             RemoteHarnessPlan::Raw { .. } => "raw command".to_string(),
             RemoteHarnessPlan::Grok { model, .. } => {
@@ -12065,7 +12205,6 @@ pub(crate) fn plan_remote_harness(
         .filter(|m| !m.is_empty())
         .map(str::to_string);
     match backend {
-        "codex" if prompt.starts_with("/goal") => Err("REMOTE_GOAL_UNSUPPORTED: remote Codex supports native exec sessions, but not app-server goals yet; use Codex on core for /goal".to_string()),
         "codex" => Ok(RemoteHarnessPlan::Codex {
             effort: None,
             fast_mode: false,
@@ -12074,7 +12213,9 @@ pub(crate) fn plan_remote_harness(
             resume_session_id: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
+        "gemini" => Ok(RemoteHarnessPlan::Gemini { model, prompt }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             // Claude Code expects bare model ids.
             model: model.map(|m| {
                 m.strip_prefix("anthropic/")
@@ -12194,11 +12335,7 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
-            let mut command = String::from(
-                "command -v codex >/dev/null 2>&1 || { echo 'codex is not installed on this node' >&2; exit 127; }; exec codex",
-            );
-            // CLI overrides keep configuration and credentials out of project files.
-            for setting in [
+            let mut settings = vec![
                 "model_provider=\"sandboxed\"".to_string(),
                 "model_providers.sandboxed.name=\"Sandboxed\"".to_string(),
                 format!(
@@ -12208,34 +12345,24 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
                 format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
-            ] {
-                command.push_str(" -c ");
-                command.push_str(&shell_single_quote(&setting));
-            }
+            ];
             if let Some(effort) = effort {
-                command.push_str(" -c ");
-                command.push_str(&shell_single_quote(&format!(
+                settings.push(format!(
                     "model_reasoning_effort={}",
                     serde_json::to_string(effort).unwrap()
-                )));
+                ));
             }
             if *fast_mode {
-                command.push_str(" -c 'service_tier=\"fast\"'");
+                settings.push("service_tier=\"fast\"".into());
             }
-            command.push_str(" exec");
-            if resume_session_id.is_some() {
-                command.push_str(" resume");
-            }
-            command.push_str(
-                " --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --model ",
+            let configuration = serde_json::json!({"model": model, "prompt": prompt, "session": resume_session_id, "settings": settings});
+            // Embed the versioned driver in the job; no node install race, no
+            // secret in argv. Native app-server owns the goal continuation loop.
+            let command = format!(
+                "exec python3 -c {} {}",
+                shell_single_quote(include_str!("../../../scripts/remote_codex_app_server.py")),
+                shell_single_quote(&configuration.to_string())
             );
-            command.push_str(&shell_single_quote(model));
-            command.push_str(" -- ");
-            if let Some(session) = resume_session_id {
-                command.push_str(&shell_single_quote(session));
-                command.push(' ');
-            }
-            command.push_str(&shell_single_quote(prompt));
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -12258,20 +12385,43 @@ pub(crate) fn remote_execution_for_plan(
             new_session_id.as_deref(),
             label,
         ),
+        RemoteHarnessPlan::Gemini { model, prompt } => {
+            let mut command = String::from("command -v gemini >/dev/null 2>&1 || { echo 'gemini is not installed on this node' >&2; exit 127; }; gemini --yolo");
+            if let Some(model) = model {
+                command.push_str(" --model ");
+                command.push_str(&shell_single_quote(model));
+            }
+            command.push_str(" --prompt ");
+            command.push_str(&shell_single_quote(prompt));
+            RemoteExecution {
+                managed_auth: vec!["gemini".into()],
+                command,
+                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
+                label,
+            }
+        }
         RemoteHarnessPlan::Raw { command } => RemoteExecution {
             managed_auth: Vec::new(),
             command: command.clone(),
             env: None,
             label,
         },
-        RemoteHarnessPlan::ClaudeCode { model, prompt } => {
+        RemoteHarnessPlan::ClaudeCode {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
             let mut command = String::from(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
-                 claude -p --dangerously-skip-permissions",
+                 claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages",
             );
             if let Some(model) = model {
                 command.push_str(" --model ");
                 command.push_str(&shell_single_quote(model));
+            }
+            if let Some(session) = resume_session_id {
+                command.push_str(" --resume ");
+                command.push_str(&shell_single_quote(session));
             }
             command.push(' ');
             command.push_str(&shell_single_quote(&positional_prompt(prompt)));
@@ -13178,7 +13328,9 @@ async fn finalize_remote_mission(
         let _ = owner.mission_store.log_event(mission_id, &event).await;
         owner.send(event);
     }
-    let status = if success {
+    let status = if status_reason == "native_goal_stopped" {
+        MissionStatus::Blocked
+    } else if success {
         MissionStatus::Completed
     } else {
         MissionStatus::Failed
@@ -13312,6 +13464,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
     };
@@ -13326,13 +13479,51 @@ async fn submit_leased_remote_job(
         }
     }
     let plan = &resolved_plan;
-    let workspace_prefix =
+    let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
             let root = t.destination_root.ok_or("Transferred workspace missing")?;
             format!("cd -- {} || exit 78; ", shell_single_quote(&root))
         } else {
             fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
         };
+    let context_prompt = match plan {
+        RemoteHarnessPlan::Codex { prompt, .. }
+        | RemoteHarnessPlan::Grok { prompt, .. }
+        | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Gemini { prompt, .. }
+        | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
+        _ => "",
+    };
+    let context_prefix = btw_context::remote_prefix(mission, context_prompt);
+    if !context_prefix.is_empty() {
+        workspace_prefix = format!(
+            r#"btw_upload_root="$(dirname -- "$PWD")/uploads"; {workspace_prefix}{context_prefix}"#
+        );
+    }
+    let claude_session = if let RemoteHarnessPlan::ClaudeCode {
+        resume_session_id: None,
+        ..
+    } = plan
+    {
+        let session_id = Uuid::new_v4().to_string();
+        let run = control
+            .mission_store
+            .get_active_mission_run(mission.id)
+            .await?
+            .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+            .ok_or("native Claude session allocation lost its run lease")?;
+        let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+        if !control
+            .mission_store
+            .update_mission_session_id(mission.id, &session_id, "claudecode", Some(&fence))
+            .await?
+        {
+            return Err("native Claude session allocation rejected by run generation fence".into());
+        }
+        Some(session_id)
+    } else {
+        None
+    };
     if let RemoteHarnessPlan::Grok {
         new_session_id: Some(session_id),
         resume_session_id: None,
@@ -13363,6 +13554,16 @@ async fn submit_leased_remote_job(
                 node.id, node.token_env
             )
         })?;
+    let long_running = mission.goal_mode && matches!(plan, RemoteHarnessPlan::Codex { .. });
+    if long_running {
+        let heartbeat = crate::remote_node::RemoteNodeClient::default()
+            .heartbeat(&node, &shared_token)
+            .await
+            .map_err(|error| format!("Cannot verify native goal lifetime support: {error}"))?;
+        if heartbeat.protocol_version < 5 {
+            return Err(format!("Node '{}' requires protocol 5 for native goals; upgrade sandboxed-node before resuming", node.id));
+        }
+    }
     let claims = crate::remote_node::LeaseClaims {
         mission_id: mission.id,
         node_id: node.id.clone(),
@@ -13377,7 +13578,37 @@ async fn submit_leased_remote_job(
     // never in the logged command line. Raw commands carry their own auth.
     // Minted last, after every other fallible pre-submit step, so each path
     // below that can fail after this point retires it explicitly.
-    let (execution, proxy_key_id) = if plan.uses_core_proxy() {
+    let mcp_session = if matches!(plan, RemoteHarnessPlan::Raw { .. }) {
+        None
+    } else {
+        let owner = state
+            .control
+            .identity_for_store(&control.mission_store)
+            .await
+            .ok_or("Remote mission owner identity is unavailable")?;
+        let url = super::mission_runner::public_api_base_url_from_env()
+            .ok_or("Remote MCP requires SANDBOXED_PUBLIC_URL")?;
+        let grant = crate::control_mcp::gateway::session(
+            State(state.clone()),
+            Extension(owner),
+            Json(crate::control_mcp::gateway::SessionRequest {
+                project: None,
+                role: crate::control_mcp::Role::Executor,
+                mission_id: Some(mission.id),
+            }),
+        )
+        .await
+        .map_err(|(_, message)| message)?
+        .0;
+        Some((
+            url,
+            grant["token"]
+                .as_str()
+                .ok_or("Missing scoped MCP credential")?
+                .to_string(),
+        ))
+    };
+    let (mut execution, proxy_key_id) = if plan.uses_core_proxy() {
         let api_base_url = super::mission_runner::public_api_base_url_from_env()
             .ok_or_else(|| {
                 "SANDBOXED_PUBLIC_URL is not configured; a remote harness launch needs a core URL the node can reach".to_string()
@@ -13394,11 +13625,65 @@ async fn submit_leased_remote_job(
     } else {
         (remote_execution_for_plan(plan, "", ""), None)
     };
+    if let Some(session_id) = claude_session {
+        execution.command = execution.command.replacen(
+            "claude -p ",
+            &format!(
+                "claude -p --session-id {} ",
+                shell_single_quote(&session_id)
+            ),
+            1,
+        );
+    }
+    if let Some((url, token)) = mcp_session {
+        let harness = match plan {
+            RemoteHarnessPlan::Codex { .. } => "codex",
+            RemoteHarnessPlan::ClaudeCode { .. } => "claudecode",
+            RemoteHarnessPlan::OpenCode { .. } => "opencode",
+            RemoteHarnessPlan::Grok { .. } => "grok",
+            RemoteHarnessPlan::Gemini { .. } => "gemini",
+            RemoteHarnessPlan::Raw { .. } => unreachable!(),
+        };
+        let env = execution.env.get_or_insert_with(HashMap::new);
+        env.insert("SANDBOXED_MCP_API_URL".into(), url);
+        env.insert("SANDBOXED_MCP_TOKEN".into(), token);
+        env.insert("SANDBOXED_SH_MISSION_ID".into(), mission.id.to_string());
+        env.insert(
+            "SANDBOXED_MCP_WRAPPER".into(),
+            "/usr/local/bin/sandboxed-mcp".into(),
+        );
+        // Codex's embedded app-server driver applies the wrapper to codex,
+        // not to the Python driver. Other plans execute their CLI directly.
+        execution.command = match harness {
+            "claudecode" => execution.command.replacen(
+                "claude -p ",
+                "/usr/local/bin/sandboxed-mcp launch --harness claudecode -- claude -p ",
+                1,
+            ),
+            "opencode" => execution.command.replacen(
+                "opencode run ",
+                "/usr/local/bin/sandboxed-mcp launch --harness opencode -- opencode run ",
+                1,
+            ),
+            "gemini" => execution.command.replacen(
+                "gemini --yolo",
+                "/usr/local/bin/sandboxed-mcp launch --harness gemini -- gemini --yolo",
+                1,
+            ),
+            "grok" => execution.command.replacen(
+                "exec grok ",
+                "exec /usr/local/bin/sandboxed-mcp launch --harness grok -- grok ",
+                1,
+            ),
+            _ => execution.command,
+        };
+    }
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
+            long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,
             env: execution.env.clone(),
@@ -14315,6 +14600,15 @@ async fn poll_remote_job(
                 }
                 if terminal {
                     terminal_observation = Some(status.clone());
+                    // Publish the observed node result before terminal mission/lease
+                    // state and ledger retirement become visible to API readers.
+                    // Cleanup may retry, but the job itself has already terminated.
+                    fleet.record_outcome(outcome(
+                        &status.state,
+                        status.exit_code,
+                        status.error.clone(),
+                        true,
+                    ));
                     let success = status.state == "succeeded";
                     let content = format!(
                         "Remote node '{}' job {} finished with state '{}' (exit {:?}){}\n\nlog tail:\n{}",
@@ -14432,12 +14726,6 @@ async fn poll_remote_job(
                         dispatch_admission_tests::notify_wait(job_id, "remote_cleanup_failed");
                         continue;
                     }
-                    fleet.record_outcome(outcome(
-                        &status.state,
-                        status.exit_code,
-                        status.error.clone(),
-                        true,
-                    ));
                     return;
                 }
                 // A successful non-terminal observation is the liveness proof
@@ -14964,6 +15252,12 @@ pub async fn update_mission_settings(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+    if current.backend.starts_with("cloud_") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cloud service and account cannot be replaced by a local harness".into(),
+        ));
+    }
     let previous_status = current.status;
 
     let backend = req.backend.as_ref().and_then(|backend| {
@@ -16665,6 +16959,17 @@ pub async fn cancel_mission(
     let (tx, rx) = oneshot::channel();
 
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .cloud_executions()
+        .await
+        .map_err(internal_error)?
+        .iter()
+        .any(|e| e.mission_id == mission_id)
+    {
+        return super::cloud_agents::http::cancel(State(state), Extension(user), Path(mission_id))
+            .await;
+    }
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?
@@ -16748,6 +17053,18 @@ pub async fn pause_mission(
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let actor = resolve_actor(body.and_then(|b| b.0.actor), &user);
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .map_err(internal_error)?
+        .is_some_and(|m| m.backend.starts_with("cloud_"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cloud pause is unsupported; use capability-gated cancellation".into(),
+        ));
+    }
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?
@@ -17119,6 +17436,16 @@ pub async fn delete_mission(
     Path(mission_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .cloud_executions()
+        .await
+        .map_err(internal_error)?
+        .iter()
+        .any(|e| e.mission_id == mission_id && e.turns.iter().any(|t| !t.phase.terminal()))
+    {
+        return Err((StatusCode::CONFLICT, "Cloud work is still active or unconfirmed; archive the conversation or confirm cancellation before deleting its receipts".into()));
+    }
     let running = get_running_missions(&control).await?;
 
     let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_delete(
@@ -22755,7 +23082,7 @@ async fn control_actor_loop(
                                             );
                                             runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                             runner.working_directory = mission.working_directory.clone();
-                                            runner.user_id = Some(session_user_id.clone());
+                                            runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
                                             // Load existing history
                                             for entry in &mission.history {
                                                 runner.history.push((entry.role.clone(), entry.content.clone()));
@@ -23274,7 +23601,7 @@ async fn control_actor_loop(
                                 main_runner_subtasks.clear();
                                 main_runner_active_tool_calls
                                     .store(0, std::sync::atomic::Ordering::Relaxed);
-                                let user_id_for_turn = session_user_id.clone();
+                                let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                                 running_run = match acquire_execution_run(
                                     &mission_store,
                                     mission_id,
@@ -23350,7 +23677,7 @@ async fn control_actor_loop(
                                         session_id,
                                         false, // force_session_resume: regular message, not a resume
                                         mission_config_profile,
-                                        Some(user_id_for_turn),
+                                        user_id_for_turn,
                                         pr_readonly,
                                     ))
                                     .await;
@@ -23875,7 +24202,7 @@ async fn control_actor_loop(
                             );
                             runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                             runner.working_directory = mission.working_directory.clone();
-                            runner.user_id = Some(session_user_id.clone());
+                            runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
 
                             // Load existing history into runner to preserve conversation context
                             for entry in &mission.history {
@@ -24523,7 +24850,7 @@ async fn control_actor_loop(
                                     );
                                     runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                     runner.working_directory = mission.working_directory.clone();
-                                    runner.user_id = Some(session_user_id.clone());
+                                    runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
                                     for entry in &mission.history {
                                         runner
                                             .history
@@ -24765,7 +25092,7 @@ async fn control_actor_loop(
                                         main_runner_subtasks.clear();
                                         main_runner_active_tool_calls
                                             .store(0, std::sync::atomic::Ordering::Relaxed);
-                                        let user_id_for_turn = session_user_id.clone();
+                                        let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                                         running_run = match acquire_execution_run(
                                             &mission_store,
                                             Some(mission_id),
@@ -24830,7 +25157,7 @@ async fn control_actor_loop(
                                                 session_id,
                                                 true, // force_session_resume: this is a resume operation
                                                 mission_config_profile,
-                                                Some(user_id_for_turn),
+                                                user_id_for_turn,
                                                 pr_readonly,
                                             ))
                                             .await;
@@ -25918,7 +26245,7 @@ async fn control_actor_loop(
                     main_runner_subtasks.clear();
                     main_runner_active_tool_calls
                         .store(0, std::sync::atomic::Ordering::Relaxed);
-                    let user_id_for_turn = session_user_id.clone();
+                    let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                     let turn_mission_store = mission_store.clone();
                     let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
                     running = Some(tokio::spawn(async move {
@@ -25948,7 +26275,7 @@ async fn control_actor_loop(
                             session_id,
                             false, // force_session_resume: continuation turn, not a resume
                             mission_config_profile,
-                            Some(user_id_for_turn),
+                            user_id_for_turn,
                             pr_readonly,
                         ))
                         .await;
@@ -27401,7 +27728,7 @@ async fn run_single_control_turn(
     session_id: Option<String>,
     force_session_resume: bool,
     mission_config_profile: Option<String>,
-    boss_user_id: Option<String>,
+    boss_user_id: Option<AuthUser>,
     pr_readonly: bool,
 ) -> crate::agents::AgentResult {
     #[cfg(test)]
@@ -27467,6 +27794,12 @@ async fn run_single_control_turn(
     }
     // Ensure a workspace directory for this mission (if applicable).
     let (working_dir_path, runtime_workspace) = if let Some(mid) = mission_id {
+        if let Err(error) = crate::control_mcp::launch::require_runtime_owner(
+            backend_id.as_deref().unwrap_or("opencode"),
+            boss_user_id.as_ref(),
+        ) {
+            return crate::agents::AgentResult::failure(error, 0);
+        }
         let mut ws = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
         if let Err(e) =
             workspace::sync_workspace_mcp_binaries_for_workspace(&config.working_dir, &ws).await
@@ -27488,7 +27821,7 @@ async fn run_single_control_turn(
             backend_id.as_deref().unwrap_or("opencode"),
             None, // custom_providers: TODO integrate with provider store
             effective_config_profile.as_deref(),
-            boss_user_id.as_deref(),
+            boss_user_id.as_ref(),
             Some(&config.working_dir),
             !pr_readonly,
         ))
@@ -31328,6 +31661,61 @@ mod tests {
             .await
             .unwrap();
         assert!(!mission_should_park_on_remote_build(&store, dir.path(), mission.id).await);
+    }
+
+    #[tokio::test]
+    async fn actor_startup_preserves_accepted_remote_harnesses() {
+        use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+        let dir = tempfile::tempdir().unwrap();
+        for (kind, accepted, preserve) in [
+            (JobHandleKind::Mission, true, true),
+            (JobHandleKind::Mission, false, false),
+            (JobHandleKind::Tentative, true, false),
+        ] {
+            let mission_id = Uuid::new_v4();
+            let job_id = Uuid::new_v4();
+            job_ledger::record(
+                dir.path(),
+                JobHandle {
+                    mission_id,
+                    job_id,
+                    node_id: "old-agent".into(),
+                    started_at: chrono::Utc::now(),
+                    submission_sequence: 0,
+                    accepted_at: accepted.then(chrono::Utc::now),
+                    heartbeat_at: None,
+                    disk_reservation_bytes: 0,
+                    kind,
+                    identity: None,
+                    wait_for_completion: None,
+                    wake_on_terminal: false,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                recoverable_inherited_remote_wait(
+                    dir.path(),
+                    mission_id,
+                    MissionExecutionState::WaitingRemoteJob,
+                    MissionStatus::Active
+                )
+                .await
+                .unwrap(),
+                preserve.then_some(job_id)
+            );
+            assert_eq!(
+                recoverable_inherited_remote_wait(
+                    dir.path(),
+                    mission_id,
+                    MissionExecutionState::WaitingRemoteJob,
+                    MissionStatus::Interrupted
+                )
+                .await
+                .unwrap(),
+                None
+            );
+        }
     }
 
     #[tokio::test]
@@ -36766,6 +37154,7 @@ Investigate <service/> failures.
             )
             .unwrap(),
             RemoteHarnessPlan::ClaudeCode {
+                resume_session_id: None,
                 model: Some("claude-opus-5".into()),
                 prompt: "do it".into()
             }
@@ -36827,12 +37216,10 @@ Investigate <service/> failures.
         let execution =
             remote_execution_for_plan(&plan, "https://core.example/", "secret-test-key");
         assert!(!execution.command.contains("secret-test-key"));
-        assert!(execution.command.contains("exec codex"));
-        assert!(execution.command.contains("wire_api=\"responses\""));
+        assert!(execution.command.contains("exec python3 -c"));
+        assert!(execution.command.contains("wire_api"));
         assert!(execution.command.contains("https://core.example/v1"));
-        assert!(execution
-            .command
-            .contains(&shell_single_quote("say 'hi'; $(false)")));
+        assert!(execution.command.contains("$(false)"));
         assert_eq!(
             execution.env.unwrap()[REMOTE_PROXY_KEY_ENV],
             "secret-test-key"
@@ -36846,17 +37233,13 @@ Investigate <service/> failures.
         };
         let execution =
             remote_execution_for_plan(&resume, "https://core.example", "secret-test-key");
-        assert!(execution.command.contains("exec resume --json"));
-        assert!(execution
-            .command
-            .contains("model_reasoning_effort=\"high\""));
-        assert!(execution.command.contains("service_tier=\"fast\""));
+        assert!(execution.command.contains("thread/resume"));
+        assert!(execution.command.contains("model_reasoning_effort"));
+        assert!(execution.command.contains("service_tier"));
         assert!(
-            plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test"))
-                .unwrap_err()
-                .starts_with("REMOTE_GOAL_UNSUPPORTED")
+            plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test")).is_ok()
         );
-        assert!(execution.command.ends_with("-- 'thread-123' 'continue'"));
+        assert!(execution.command.contains("thread-123"));
         assert!(plan_remote_harness(None, "codex", None, Some("do it"))
             .unwrap_err()
             .starts_with(REMOTE_MODEL_REQUIRED));
@@ -36865,13 +37248,14 @@ Investigate <service/> failures.
     #[test]
     fn remote_execution_routes_selected_model_through_core_proxy_env() {
         let plan = RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             model: Some("claude-opus-5".into()),
             prompt: "say 'hi'".into(),
         };
         let exec = remote_execution_for_plan(&plan, "https://core.example", "sk-proxy-abc");
         assert!(
             exec.command
-                .contains("claude -p --dangerously-skip-permissions --model 'claude-opus-5' "),
+                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model 'claude-opus-5' "),
             "{}",
             exec.command
         );
@@ -36934,6 +37318,7 @@ Investigate <service/> failures.
             serde_json::from_str(&exec.env.unwrap()[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
         assert!(config["provider"]["builtin"]["models"]["xai/grok-4.6"].is_object());
         let plan = RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             model: None,
             prompt: "--help".into(),
         };

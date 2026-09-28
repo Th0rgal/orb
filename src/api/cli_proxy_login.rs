@@ -72,7 +72,7 @@ fn login_flag_for(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" | "claude" => Some("-claude-login"),
         "openai" | "codex" => Some("-codex-login"),
-        "xai" | "grok" => Some("-grok-login"),
+        "xai" | "grok" => Some("-xai-login"),
         "kimi" => Some("-kimi-login"),
         _ => None,
     }
@@ -481,7 +481,7 @@ mod tests {
     fn login_flag_mapping() {
         assert_eq!(login_flag_for("anthropic"), Some("-claude-login"));
         assert_eq!(login_flag_for("openai"), Some("-codex-login"));
-        assert_eq!(login_flag_for("xai"), Some("-grok-login"));
+        assert_eq!(login_flag_for("xai"), Some("-xai-login"));
         assert_eq!(login_flag_for("unknown"), None);
     }
 

@@ -4,6 +4,8 @@ import asyncio
 import unittest
 
 from scripts.chatgpt_ui_driver import (
+    USER_MESSAGE_SELECTOR,
+    ASSISTANT_MESSAGE_SELECTOR,
     complete_saved_account_picker,
     intelligence_slider_index,
     is_cloudflare_challenge_title,
@@ -228,9 +230,9 @@ class HydratingConversationPage:
     def locator(self, selector):
         if selector == f'[data-testid="{RATE_LIMIT_MODAL_TESTID}"]:visible':
             return HydratingLocator([0])
-        if selector == '[data-message-author-role="user"]':
+        if selector == USER_MESSAGE_SELECTOR:
             return self.user_messages
-        if selector == '[data-message-author-role="assistant"]':
+        if selector == ASSISTANT_MESSAGE_SELECTOR:
             return self.assistant_messages
         if selector == "#prompt-textarea":
             return self.composer
@@ -402,6 +404,16 @@ class ChatGptUiDriverTests(unittest.TestCase):
     def test_cloudflare_wait_returns_once_the_interstitial_clears(self) -> None:
         page = CloudflareClearingPage()
         asyncio.run(wait_out_cloudflare(page, timeout_ms=2_000))
+        self.assertGreaterEqual(page.index, 2)
+
+    def test_empty_bootstrap_waits_for_late_challenge(self) -> None:
+        class DelayedPage(CloudflareClearingPage):
+            async def title(self):
+                return "" if self.index == 0 else await super().title()
+            async def inner_text(self, selector):
+                return "" if self.index == 0 else await super().inner_text(selector)
+        page = DelayedPage()
+        asyncio.run(wait_out_cloudflare(page, timeout_ms=3_000))
         self.assertGreaterEqual(page.index, 2)
 
     def test_cloudflare_wait_fails_closed_when_stuck(self) -> None:

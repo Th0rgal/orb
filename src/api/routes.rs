@@ -613,6 +613,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    crate::control_mcp::gateway::start_worker(state.clone()).map_err(anyhow::Error::msg)?;
+
     // Start background desktop session cleanup task
     {
         let state_clone = Arc::clone(&state);
@@ -670,6 +672,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         tokio::spawn(async move {
             let default_user = super::auth::implicit_single_tenant_user(&state_clone.config);
             let _ = state_clone.control.get_or_spawn(&default_user).await;
+            // Hosted observers resume even when their Orb windows remain closed.
+            for key in ["CURSOR_CLOUD_OWNER", "CHATGPT_CLOUD_OWNER"] {
+                if let Ok(owner) = std::env::var(key) {
+                    if !owner.trim().is_empty() && owner != default_user.id {
+                        let cloud_user = super::auth::AuthUser {
+                            id: owner.clone(),
+                            username: owner,
+                        };
+                        let _ = state_clone.control.get_or_spawn(&cloud_user).await;
+                    }
+                }
+            }
             tracing::info!("Eagerly booted default control session (Telegram webhooks registered)");
         });
     }
@@ -804,6 +818,48 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // Mission management endpoints
         .route("/api/health/fleet", get(control::fleet_health))
         .route("/api/control/tracks", get(control::list_tracks))
+        .route(
+            "/api/control/missions/:id/cloud/events",
+            get(super::cloud_agents::http::events),
+        )
+        .route(
+            "/api/control/missions/:id/cloud/artifact",
+            get(super::cloud_agents::http::artifact),
+        )
+        .route(
+            "/api/mcp/session",
+            post(crate::control_mcp::gateway::session),
+        )
+        .route("/api/mcp/renew", post(crate::control_mcp::gateway::renew))
+        .route(
+            "/api/mcp/sessions/:id",
+            axum::routing::delete(crate::control_mcp::gateway::revoke),
+        )
+        .route(
+            "/api/mcp/capabilities",
+            get(crate::control_mcp::gateway::capabilities),
+        )
+        .route("/api/mcp/call", post(crate::control_mcp::gateway::call))
+        .route(
+            "/api/cloud/accounts",
+            get(super::cloud_agents::http::accounts),
+        )
+        .route(
+            "/api/cloud/chatgpt/options",
+            get(super::cloud_agents::http::chatgpt_options),
+        )
+        .route(
+            "/api/cloud/cursor/options",
+            get(super::cloud_agents::http::options),
+        )
+        .route(
+            "/api/control/missions/:id/cloud",
+            get(super::cloud_agents::http::get),
+        )
+        .route(
+            "/api/control/missions/:id/cloud/cancel",
+            post(super::cloud_agents::http::cancel),
+        )
         .route("/api/control/missions", get(control::list_missions))
         .route("/api/control/missions", post(control::create_mission))
         .route(

@@ -60,12 +60,24 @@ fn lock(name: &str, exclusive: bool) -> Result<File, String> {
     Ok(f)
 }
 /// Held for the entire execution, across all local windows and worker processes.
-pub fn execution_guard() -> Result<File, String> {
-    let guard = lock("execution.lock", false)?;
-    if jobs().iter().any(|j| j.state == "installing") {
+fn execution_guards(harness: &str) -> Result<Vec<File>, String> {
+    let known = TOOLS.iter().any(|tool| tool.0 == harness);
+    let components: Vec<_> = TOOLS
+        .iter()
+        .filter(|tool| !known || tool.0 == harness)
+        .map(|tool| tool.0)
+        .collect();
+    let guards = components
+        .iter()
+        .map(|component| lock(&format!("execution-{component}.lock"), false))
+        .collect::<Result<Vec<_>, _>>()?;
+    if jobs()
+        .iter()
+        .any(|job| job.state == "installing" && components.contains(&job.component.as_str()))
+    {
         return Err("Software update recovery is pending; retry after recovery completes".into());
     }
-    Ok(guard)
+    Ok(guards)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -293,7 +305,7 @@ fn write_json(p: &Path, value: &impl Serialize) -> Result<(), String> {
 }
 // Runtime launch records are historical; live state is maintained by RAII receipts.
 pub struct Execution {
-    _guard: File,
+    _guard: Vec<File>,
     receipt: PathBuf,
 }
 impl Drop for Execution {
@@ -302,7 +314,7 @@ impl Drop for Execution {
     }
 }
 pub fn begin(session: &str, harness: &str, path: Option<&Path>) -> Result<Execution, String> {
-    let guard = execution_guard()?;
+    let guard = execution_guards(harness)?;
     let record = Launch {
         session: session.into(),
         harness: harness.into(),
@@ -601,7 +613,7 @@ pub fn cancel(id: &str) -> Result<(), String> {
     save_jobs(&all)
 }
 
-fn external_harness_running() -> bool {
+fn external_harness_running(component: &str) -> bool {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut s = System::new();
     s.refresh_processes_specifics(
@@ -613,17 +625,15 @@ fn external_harness_running() -> bool {
         let n = p.name().to_string_lossy().to_lowercase();
         TOOLS
             .iter()
+            .filter(|t| t.0 == component)
             .any(|t| n == t.2 || n.starts_with(&format!("{}-", t.2)))
             || p.cmd().iter().take(4).any(|arg| {
                 let arg = arg.to_string_lossy();
-                [
-                    "/node_modules/@openai/codex/",
-                    "/node_modules/@anthropic-ai/claude-code/",
-                    "/node_modules/opencode-ai/",
-                    "/node_modules/@google/gemini-cli/",
-                ]
-                .iter()
-                .any(|part| arg.contains(part))
+                TOOLS
+                    .iter()
+                    .filter(|t| t.0 == component)
+                    .filter_map(|t| t.3)
+                    .any(|package| arg.contains(&format!("/node_modules/{package}/")))
             })
     })
 }
@@ -645,7 +655,7 @@ fn install(job: &UpdateJob) -> Result<(), String> {
     let path = Path::new(&job.path);
     if let Some(installer) = &job.installer {
         if owner(path) != *installer
-            || std::fs::read_link(path).map_err(io)? != PathBuf::from(&job.previous_target)
+            || std::fs::read_link(path).map_err(io)? != Path::new(&job.previous_target)
         {
             return Err(
                 "Installation changed since this update was queued. Refresh and retry.".into(),
@@ -668,7 +678,7 @@ fn install(job: &UpdateJob) -> Result<(), String> {
         }
         return Ok(());
     }
-    if std::fs::read_link(path).map_err(io)? != PathBuf::from(&job.previous_target)
+    if std::fs::read_link(path).map_err(io)? != Path::new(&job.previous_target)
         || !codex_launcher(path)
     {
         return Err("Executable changed since this update was queued. Refresh and retry.".into());
@@ -701,7 +711,7 @@ fn install(job: &UpdateJob) -> Result<(), String> {
     if !help.contains("app-server") {
         return Err("Codex app-server protocol check failed".into());
     }
-    if std::fs::read_link(path).map_err(io)? != PathBuf::from(&job.previous_target) {
+    if std::fs::read_link(path).map_err(io)? != Path::new(&job.previous_target) {
         return Err("Executable changed during staging; activation cancelled".into());
     }
     switch_link(path, &next)?;
@@ -716,7 +726,7 @@ fn install(job: &UpdateJob) -> Result<(), String> {
 pub fn tick() -> Result<(), String> {
     tick_with_busy(external_harness_running)
 }
-fn tick_with_busy(busy: fn() -> bool) -> Result<(), String> {
+fn tick_with_busy(busy: fn(&str) -> bool) -> Result<(), String> {
     let _worker = match lock("worker.lock", true) {
         Ok(l) => l,
         Err(_) => return Ok(()),
@@ -729,16 +739,15 @@ fn tick_with_busy(busy: fn() -> bool) -> Result<(), String> {
     {
         return Ok(());
     }
-    let _maintenance = match lock("execution.lock", true) {
-        Ok(l) => l,
-        Err(_) => return Ok(()),
-    };
-    if busy() {
-        return Ok(());
-    }
     // Recover a crashed activation before admitting another execution. The
     // worker lock proves no other installer owns these in-progress receipts.
     for j in all.iter_mut().filter(|j| j.state == "installing") {
+        let Ok(_guard) = lock(&format!("execution-{}.lock", j.component), true) else {
+            continue;
+        };
+        if busy(&j.component) {
+            continue;
+        }
         if j.installer.is_some() {
             clear_versions();
             j.state = "failed".into();
@@ -759,7 +768,24 @@ fn tick_with_busy(busy: fn() -> bool) -> Result<(), String> {
         j.updated_at = now();
     }
     save_jobs(&all)?;
-    let Some(index) = all.iter().position(|j| j.state == "queued") else {
+    // Skip blocked components so one long-running Codex goal cannot starve
+    // unrelated installers. Legacy launch receipts still identify their users.
+    let live = active();
+    let mut candidate = None;
+    for (index, job) in all.iter().enumerate().filter(|(_, j)| j.state == "queued") {
+        if live
+            .iter()
+            .any(|r| r.harness == job.component || !TOOLS.iter().any(|t| t.0 == r.harness))
+            || busy(&job.component)
+        {
+            continue;
+        }
+        if let Ok(guard) = lock(&format!("execution-{}.lock", job.component), true) {
+            candidate = Some((index, guard));
+            break;
+        }
+    }
+    let Some((index, _maintenance)) = candidate else {
         return Ok(());
     };
     all[index].state = "installing".into();
@@ -810,6 +836,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn durable_queue_waits_cancels_switches_and_rolls_back() {
+        // This fixture overrides process-wide PATH and the receipt directory.
+        // Run it alone so concurrently running native harness tests cannot
+        // acquire its execution lock or accidentally use its fake installers.
+        const ISOLATED: &str = "SANDBOXED_SOFTWARE_TEST_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent_software::tests::durable_queue_waits_cancels_switches_and_rolls_back",
+                    "--nocapture",
+                ])
+                .env(ISOLATED, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated software update fixture failed");
+            return;
+        }
         use std::os::unix::fs::{symlink, PermissionsExt};
         let temp = tempfile::tempdir().unwrap();
         let old_root = std::env::var_os("AGENT_SOFTWARE_STATE_DIR");
@@ -852,6 +895,15 @@ SCRIPT
 chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
 "#,
         );
+        let claude_version = temp.path().join("claude/versions/2.1.281");
+        std::fs::create_dir_all(claude_version.parent().unwrap()).unwrap();
+        script(&claude_version, "#!/bin/sh\necho '2.1.281 (Claude Code)'\n");
+        let claude = bin.join("claude");
+        symlink(&claude_version, &claude).unwrap();
+        assert_eq!(
+            native_update(&claude, "claudecode", "2.1.283"),
+            Some((claude.clone(), vec!["install".into(), "2.1.283".into()]))
+        );
         let path = launcher.to_str().unwrap();
         let job = queue("codex", "1.1.0", path).unwrap();
         assert_eq!(
@@ -860,19 +912,21 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
             "duplicate clicks share one job"
         );
         let run = begin("test-session", "codex", Some(&launcher)).unwrap();
-        tick_with_busy(|| false).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert_eq!(jobs()[0].state, "queued", "live sessions fence updates");
         cancel(&job.id).unwrap();
         drop(run);
         let job = queue("codex", "1.1.0", path).unwrap();
-        tick_with_busy(|| true).unwrap();
+        tick_with_busy(|_| true).unwrap();
         assert_eq!(
             jobs().last().unwrap().state,
             "queued",
             "untracked agents also fence updates"
         );
-        tick_with_busy(|| false).unwrap();
+        let unrelated = begin("gemini-session", "gemini", None).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert_eq!(jobs().last().unwrap().state, "completed");
+        drop(unrelated);
         assert_eq!(
             numeric_version(&version(&launcher).unwrap()).as_deref(),
             Some("1.1.0")
@@ -887,7 +941,7 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
         );
         let bad = queue("codex", "1.2.0", path).unwrap();
         let current = std::fs::read_link(&launcher).unwrap();
-        tick_with_busy(|| false).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert_eq!(
             jobs().last().unwrap().state,
             "failed",
@@ -901,7 +955,7 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
         let npm_script=std::fs::read_to_string(bin.join("npm")).unwrap().replace("codex-cli 1.1.0", "codex-cli 1.2.0").replace("if [ \"$1\" = \"--version\" ];", "case \"$0\" in */bin/codex) echo 'codex-cli 0.0.0'; exit 0;; esac\nif [ \"$1\" = \"--version\" ];");
         script(&bin.join("npm"), &npm_script);
         queue("codex", "1.2.0", path).unwrap();
-        tick_with_busy(|| false).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert!(jobs()
             .last()
             .unwrap()
@@ -927,7 +981,7 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
             begin("new-session", "codex", Some(&launcher)).is_err(),
             "uncertain activation fences new launches"
         );
-        tick_with_busy(|| false).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert_eq!(
             std::fs::read_link(&launcher).unwrap(),
             current,
@@ -973,7 +1027,7 @@ CLI
         );
         let bun_job = queue("codex", "1.3.0", bun_launcher.to_str().unwrap()).unwrap();
         assert_eq!(bun_job.installer.as_deref(), Some("Bun"));
-        tick_with_busy(|| false).unwrap();
+        tick_with_busy(|_| false).unwrap();
         assert_eq!(jobs().last().unwrap().state, "completed");
         assert_eq!(
             owner(&bun_launcher),

@@ -23,9 +23,10 @@ and machine-checked by `scripts/policy_lint.py`.
   mission workspace and exposed as ordinary sandboxed.sh shared files. A turn
   accepts at most 8 files and 50 MiB total; paths are canonicalized and must
   remain inside that mission workspace.
-- Conversation continuation currently sends sandboxed.sh's bounded text
-  history in a fresh ChatGPT conversation. It does not persist ChatGPT
-  conversation URLs.
+- Conversation continuation reuses the recorded ChatGPT conversation route and
+  its owning browser profile. If that conversation cannot be verified, the turn
+  fails with `continuation_not_found`; it must not silently create a new chat.
+  The durable job ledger retains the conversation pointer for recovery.
 - There is no CAPTCHA bypass, fingerprint spoofing, or anti-bot evasion.
 - Check the applicable ChatGPT terms and your organization's policy. UI
   automation can lead to challenges, throttling, or account restrictions.
@@ -170,3 +171,14 @@ The architecture was informed by CatGPT-Gateway at commit
 No source code was copied or vendored. This adapter is an original,
 smaller process protocol integrated with sandboxed.sh's lifecycle rather than
 an OpenAI-compatible proxy.
+
+### Browser launch mode
+
+`settings.launch_mode` defaults to `persistent` (Playwright's persistent
+context). `direct` starts ordinary Chromium with the selected service-owned
+profile and attaches through a loopback DevTools endpoint. It requires
+`browser: chromium`; both recovery probes and mission turns receive the same
+explicit setting. The driver is self-contained and closes its owned browser
+on exit. This mode does not import a desktop session or automate a browser
+challenge. An empty page during bootstrap is treated as transport readiness,
+not evidence that the account needs a new login.
