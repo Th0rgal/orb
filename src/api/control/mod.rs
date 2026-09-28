@@ -13343,10 +13343,7 @@ async fn dispatch_remote_job(
 fn bind_remote_claude_session(execution: &mut RemoteExecution, session_id: &str) {
     execution.command = execution.command.replacen(
         "claude -p ",
-        &format!(
-            "claude -p --session-id {} ",
-            shell_single_quote(&session_id)
-        ),
+        &format!("claude -p --session-id {} ", shell_single_quote(session_id)),
         1,
     );
 }

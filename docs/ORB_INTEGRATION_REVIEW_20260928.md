@@ -34,6 +34,10 @@ instructions document unsupported tracked/scheduled cloud admission.
 
 ## Validation
 
+- Client: 642 passed, 3 skipped; TypeScript and Vite build passed.
+- Backend: cloud 12 passed/1 ignored, remote stream 17 passed, context store 7 passed,
+  Claude identity regression passed; assistant MCP compile check passed.
+
 - Native Orb: 89 passed, 6 ignored (serialized to avoid existing shared-state tests).
 - WebKit: fork selection, provider layout, queue recovery and sidebar responsiveness passed.
 - ChatGPT extraction/browser fixtures: 93 passed; remote Codex driver: 5 passed.
