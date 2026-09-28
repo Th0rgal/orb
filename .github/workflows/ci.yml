@@ -173,12 +173,23 @@ jobs:
         run: >-
           python3 -m unittest
           scripts/test_chatgpt_cloud_resume.py
-          scripts/test_chatgpt_message_layout.py
           scripts/test_chatgpt_ui_pool_health.py
           scripts/test_node_harness_updates.py
           scripts/test_orb_stage_conversation.py
           scripts/test_retag_project_missions.py
           scripts/test_storage_inventory.py
+          scripts/test_remote_codex_app_server.py
+
+      # The layout tests skip silently without Python Playwright and Chromium.
+      - name: Install Python Playwright
+        run: |
+          python3 -m pip install --user playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Run ChatGPT message layout tests
+        run: |
+          set -o pipefail
+          python3 -m unittest -v scripts/test_chatgpt_message_layout.py 2>&1 | tee /tmp/layout.log
+          ! grep -q "skipped" /tmp/layout.log
 
   dashboard-test:
     name: Dashboard Unit Tests
