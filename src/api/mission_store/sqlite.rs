@@ -11760,48 +11760,6 @@ impl MissionStore for SqliteMissionStore {
 const BOARD_TASK_PROJECT_FAMILY_PREDICATE: &str =
     "(m.project = ?1 OR substr(m.project, 1, length(?1) + 1) = ?1 || '-')";
 
-/// Read board tasks for a project family straight from a mission DB file —
-/// the offline-store path (`ControlHub::collect_project_board_tasks` for
-/// users with no live control session). Read-only, tolerant of pre-board
-/// databases (no `board_tasks` table → empty).
-pub(crate) fn read_board_tasks_for_project(
-    path: &std::path::Path,
-    project: &str,
-) -> Result<Vec<BoardTask>, String> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
-    let has_board: bool = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'board_tasks'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .map_err(|error| error.to_string())?;
-    if !has_board {
-        return Ok(Vec::new());
-    }
-    let columns = BOARD_TASK_COLUMNS
-        .split(',')
-        .map(|column| format!("bt.{}", column.trim()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT {columns} FROM board_tasks bt \
-             JOIN missions m ON m.id = bt.boss_mission_id \
-             WHERE {BOARD_TASK_PROJECT_FAMILY_PREDICATE} \
-             ORDER BY bt.created_at ASC, bt.task_key ASC"
-        ))
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map(params![project], parse_board_task_row)
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
-}
-
 /// Column list shared by every board task SELECT so `parse_board_task_row`
 /// indices stay in sync.
 const BOARD_TASK_COLUMNS: &str = "id, boss_mission_id, task_key, title, prompt, backend, \
@@ -16839,11 +16797,6 @@ mod tests {
             .expect("underscore literal")
             .is_empty());
 
-        // The offline read path (raw DB file, no live store) sees the same
-        // families — this is what a fresh restart serves the roadmap from.
-        let db_path = temp_dir.path().join("missions-test-user.db");
-        let offline = super::read_board_tasks_for_project(&db_path, "verity").expect("offline");
-        assert_eq!(offline.len(), 3, "offline read matches the live family");
     }
 
     #[tokio::test]

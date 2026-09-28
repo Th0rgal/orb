@@ -25,7 +25,6 @@ toml = "0.8"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-reqwest-eventsource = "0.6"
 
 # Logging
 tracing = "0.1"
@@ -80,8 +79,6 @@ tokio-util = { version = "0.7", features = ["io"] }
 
 # Backup/restore
 zip = "2"
-# Keep MSRV-compatible idna_adapter for the production builder (rustc 1.75).
-idna_adapter = "=1.1.0"
 
 # File locking for OAuth token refresh synchronization
 fs2 = "0.4"

@@ -4760,40 +4760,6 @@ impl ControlHub {
         (waits, complete)
     }
 
-    /// Board tasks across every store whose boss mission belongs to this
-    /// project family. Kept for boss-internal / debug reads. The public
-    /// project roadmap is the item list (`load_project_items`), not this.
-    #[allow(dead_code)]
-    pub(crate) async fn collect_project_board_tasks(
-        &self,
-        project: &str,
-    ) -> Result<Vec<mission_store::BoardTask>, String> {
-        let inventory = self.mission_store_inventory().await?;
-        let mut collected = Vec::new();
-        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-        for store in inventory.live {
-            for task in store.list_board_tasks_for_project(project).await? {
-                if seen.insert(task.id) {
-                    collected.push(task);
-                }
-            }
-        }
-        for path in inventory.offline_sqlite {
-            let project = project.to_string();
-            let tasks = tokio::task::spawn_blocking(move || {
-                mission_store::sqlite::read_board_tasks_for_project(&path, &project)
-            })
-            .await
-            .map_err(|error| error.to_string())??;
-            for task in tasks {
-                if seen.insert(task.id) {
-                    collected.push(task);
-                }
-            }
-        }
-        Ok(collected)
-    }
-
     /// Attention-horizon missions for one project: live / waiting / blocked
     /// and unabsorbed failed/interrupted attempts. Used by the item-first
     /// project read so controllers do not walk historical missions.
@@ -11933,99 +11899,6 @@ fn remote_dispatch_is_scheduled_for_future(
         && not_before.is_some_and(|t| t > now)
 }
 
-#[allow(dead_code)]
-async fn dispatch_remote_mission_mvp(
-    state: &Arc<AppState>,
-    control: &ControlState,
-    mission: &Mission,
-    remote_node_id: &str,
-    remote_command: &str,
-) -> Result<Mission, String> {
-    let node = crate::remote_node::placement_for_selected_node(
-        &state.config.remote_nodes,
-        Some(remote_node_id),
-    )
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| "remote node placement unexpectedly returned local".to_string())?;
-    let shared_token = std::env::var(&node.token_env)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "remote node '{}' has no token in {}",
-                node.id, node.token_env
-            )
-        })?;
-    let claims = crate::remote_node::LeaseClaims {
-        mission_id: mission.id,
-        node_id: node.id.clone(),
-        scope: crate::remote_node::SCOPE_MISSION_EXECUTE.to_string(),
-        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(15)).timestamp(),
-        job_id: None,
-    };
-    let lease_token = crate::remote_node::create_lease_token(&claims, &shared_token)
-        .map_err(|e| e.to_string())?;
-    let request = crate::remote_node::LeaseRequest {
-        mission_id: mission.id,
-        node_id: node.id.clone(),
-        lease_token,
-        command: remote_command.to_string(),
-    };
-
-    control
-        .mission_store
-        .update_mission_status(mission.id, MissionStatus::Active)
-        .await?;
-    let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
-        completion: None,
-        execution: None,
-        mission_id: mission.id,
-        status: MissionStatus::Active,
-        summary: Some(format!("Dispatching to remote node '{}'", node.id)),
-    });
-
-    let started_at = chrono::Utc::now();
-    let client = crate::remote_node::RemoteNodeClient::default();
-    let response = client
-        .execute(node, &shared_token, &request)
-        .await
-        .map_err(|e| e.to_string())?;
-    let success = response.exit_code == Some(0);
-    let content = format!(
-        "Remote node '{}' exited with {:?}\n\nstdout:\n{}\n\nstderr:\n{}",
-        node.id, response.exit_code, response.stdout, response.stderr
-    );
-    let owner = RemoteMissionOwner::live(control);
-    finalize_remote_mission(
-        &owner,
-        mission.id,
-        None,
-        &node.id,
-        success,
-        content,
-        "remote_node_mvp",
-        false,
-    )
-    .await?;
-    state
-        .fleet
-        .record_outcome(crate::remote_node::DispatchOutcome {
-            mission_id: mission.id,
-            node_id: node.id.clone(),
-            job_id: None,
-            state: if success { "succeeded" } else { "failed" }.to_string(),
-            exit_code: response.exit_code,
-            error: None,
-            started_at,
-            finished_at: Some(chrono::Utc::now()),
-        });
-    control
-        .mission_store
-        .get_mission(mission.id)
-        .await?
-        .ok_or_else(|| format!("Mission {} disappeared after remote dispatch", mission.id))
-}
-
 /// Terminal bookkeeping shared by the sync (`/execute`) and async (job) remote
 /// paths: log the final assistant message, flip the mission to
 /// completed/failed with `status_reason`, and broadcast the status change.
@@ -13370,10 +13243,6 @@ async fn finalize_remote_mission(
     Ok(())
 }
 
-/// Async remote dispatch: mint a `job:submit` lease, queue the command on the
-/// node's job API, mark the mission Active immediately, and finalize it from
-/// a background poll loop. Unlike [`dispatch_remote_mission_mvp`], the create
-/// request does not block for the command's duration.
 /// Terminal reason of a remote launch whose dispatch failed or whose
 /// submitting process died before the node acceptance became durable.
 pub(crate) const REMOTE_DISPATCH_FAILED: &str = "remote_dispatch_failed";
