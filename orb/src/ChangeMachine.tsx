@@ -11,12 +11,13 @@ import { appendClientTranscript, setClientMissionStatus } from "./api";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView } from "./machineTransfer";
 
 type Loaded = { view: TransferView; rows: Destination[]; client?: string };
-const loads = new Map<string, { at: number; promise: Promise<Loaded> }>();
-/** One request per mission, reused briefly so a preload serves the menu that opens next. */
+const loads = new Map<string, Promise<Loaded>>();
+/** Shares an in-flight request, e.g. a preload, with the menu that opens meanwhile.
+ * A settled result is never reused: transfer actions must be read fresh. */
 export function loadMachineDestinations(missionId: string, force = false): Promise<Loaded> {
   const key = `${connectionVersion()}:${missionId}`;
-  const hit = loads.get(key);
-  if (hit && !force && Date.now() - hit.at < 15_000) return hit.promise;
+  const pending = loads.get(key);
+  if (pending && !force) return pending;
   const version = connectionVersion();
   const promise = (async () => {
     const local = async (): Promise<Destination> => {
@@ -32,8 +33,9 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
     if (version === connectionVersion()) cacheMachineDestinations(rows);
     return { view, rows, client: computer.machine.kind === "client" ? computer.machine.id : undefined };
   })();
-  loads.set(key, { at: Date.now(), promise });
-  promise.catch(() => { if (loads.get(key)?.promise === promise) loads.delete(key); });
+  loads.set(key, promise);
+  const settle = () => { if (loads.get(key) === promise) loads.delete(key); };
+  promise.then(settle, settle);
   return promise;
 }
 /** Forget reusable loads (connection reset, tests). */

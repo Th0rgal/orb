@@ -66,13 +66,20 @@ it.each(['ashur','babylon','nippur','old-agent','dgx-spark-admin','sepolia'])('k
   expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
 });
 
-it("opens instantly from a preload with a single request", async () => {
-  const inspect = vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({ version: 1, actions: [], destinations: [{ machine: { kind: "node", id: "spark" }, label: "Spark", available: true }] });
+it("shares an in-flight preload and reads transfer state fresh on every open", async () => {
+  cacheMachineDestinations([{ machine: { kind: "node", id: "spark" }, label: "Spark", available: true }]);
+  let finish!: (view: transfers.TransferView) => void;
+  const view = { version: 1, actions: [], destinations: [{ machine: { kind: "node" as const, id: "spark" }, label: "Spark", available: true }] };
+  const inspect = vi.spyOn(transfers, "inspectTransfer").mockReturnValueOnce(new Promise(resolve => finish = resolve)).mockResolvedValue(view);
   preloadMachineDestinations(mission.id);
-  await waitFor(() => expect(inspect).toHaveBeenCalledTimes(1));
-  await new Promise(resolve => setTimeout(resolve, 0));
   const ui = render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
   expect(ui.queryByText("Checking machines…")).toBeNull();
-  await waitFor(() => expect((ui.getByRole("menuitem", { name: /Spark/ }) as HTMLButtonElement).disabled).toBe(false));
+  expect(ui.getByRole("menuitem", { name: /Spark/ })).toBeTruthy();
   expect(inspect).toHaveBeenCalledTimes(1);
+  finish(view);
+  await waitFor(() => expect(ui.queryByText("Updating machines…")).toBeNull());
+  ui.unmount();
+  const reopened = render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
+  await waitFor(() => expect(inspect).toHaveBeenCalledTimes(2));
+  reopened.unmount();
 });

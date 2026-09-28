@@ -2397,7 +2397,10 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   // Core rewrites a local run's reply in place and never streams it, so a
   // transcript read mid-run stays partial. Re-read once the native worker
   // (2s cadence) has posted the final snapshot.
-  createEffect(on(() => localRunActive(p.id), (active, was) => {
+  // A memo notifies only on real transitions: rewriting the same inactive
+  // state must not rerun the effect and cancel the pending re-reads.
+  const localActive = createMemo(() => localRunActive(p.id));
+  createEffect(on(localActive, (active, was) => {
     if (active || !was) return;
     const timers = [3000, 8000].map(ms => setTimeout(() => void resync(true), ms));
     onCleanup(() => timers.forEach(clearTimeout));
