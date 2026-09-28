@@ -8684,6 +8684,8 @@ fn disk_admission_hard_required_bytes(emergency: u64, candidate: u64) -> u64 {
     emergency.saturating_add(candidate)
 }
 
+/// Soft budget including paper reservations; only tests still assert it.
+#[cfg(test)]
 fn disk_admission_required_bytes(emergency: u64, reserved: u64, candidate: u64) -> u64 {
     disk_admission_hard_required_bytes(emergency, candidate).saturating_add(reserved)
 }
