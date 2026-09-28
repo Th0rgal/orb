@@ -1563,6 +1563,14 @@ mod campaign_guard_tests {
             ids[1],
             "a live source still owns its directory"
         );
+        assert_eq!(
+            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")))
+                .await
+                .unwrap()
+                .id,
+            ids[1],
+            "a directory below the mission root is the same worktree"
+        );
     }
 
     #[test]
@@ -1581,7 +1589,9 @@ mod campaign_guard_tests {
             Path::new("/gone/work/./a/../repo"),
             Path::new("/gone/work/repo")
         ));
+        assert!(same_directory(&repo, &repo.join("src/deep")));
         assert!(!same_directory(&repo, &root.path().join("other")));
+        assert!(!same_directory(&repo, &root.path().join("repo-two")));
         assert!(!same_directory(Path::new("po"), &repo));
         assert!(!same_directory(Path::new(""), &repo));
     }
@@ -10325,22 +10335,31 @@ fn normalized_directory(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
-/// Two spellings of one directory must compare equal. A relative path is
-/// matched against the end of an absolute one: when in doubt the directory is
-/// occupied, because two harnesses writing the same files is the worse error.
+/// Two spellings of one directory must compare equal, and a directory inside
+/// another belongs to the same worktree. A relative path is matched against
+/// the end of an absolute one: when in doubt the directory is occupied,
+/// because two harnesses writing the same files is the worse error.
 fn same_directory(a: &std::path::Path, b: &std::path::Path) -> bool {
     let (a, b) = (normalized_directory(a), normalized_directory(b));
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
     a == b
-        || (a.is_relative() && !a.as_os_str().is_empty() && b.ends_with(&a))
-        || (b.is_relative() && !b.as_os_str().is_empty() && a.ends_with(&b))
+        || (a.is_absolute() && b.is_absolute() && (a.starts_with(&b) || b.starts_with(&a)))
+        || (a.is_relative() && b.ends_with(&a))
+        || (b.is_relative() && a.ends_with(&b))
 }
 
 fn mission_uses_directory(mission: &Mission, dir: &std::path::Path) -> bool {
     match mission.working_directory.as_deref() {
         Some(own) => same_directory(std::path::Path::new(own), dir),
-        None => dir
-            .file_name()
-            .is_some_and(|name| *name == *format!("mission-{}", &mission.id.to_string()[..8])),
+        // Its generated root, or anything the runner accepts below it.
+        None => {
+            let root = format!("mission-{}", &mission.id.to_string()[..8]);
+            normalized_directory(dir)
+                .components()
+                .any(|part| part.as_os_str() == root.as_str())
+        }
     }
 }
 
