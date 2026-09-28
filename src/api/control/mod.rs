@@ -13408,14 +13408,7 @@ async fn submit_leased_remote_job(
             .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
             .ok_or("native Claude session allocation lost its run lease")?;
         let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
-        if !control
-            .mission_store
-            .update_mission_session_id(mission.id, &session_id, "claudecode", Some(&fence))
-            .await?
-        {
-            return Err("native Claude session allocation rejected by run generation fence".into());
-        }
-        Some(session_id)
+        Some((session_id, fence))
     } else {
         None
     };
@@ -13480,8 +13473,8 @@ async fn submit_leased_remote_job(
     } else {
         (remote_execution_for_plan(plan, "", ""), None)
     };
-    if let Some(session_id) = claude_session {
-        bind_remote_claude_session(&mut execution, &session_id);
+    if let Some((session_id, _)) = &claude_session {
+        bind_remote_claude_session(&mut execution, session_id);
     }
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
@@ -13540,6 +13533,22 @@ async fn submit_leased_remote_job(
             "remote job recovery handle could not be prepared: {error}"
         ));
     }
+    // All preflight work and the recovery journal succeeded. Publish the native
+    // identity immediately before submission; definitive rejection rolls it back.
+    // An ambiguous response retains it because Claude may already have started.
+    if let Some((session_id, fence)) = &claude_session {
+        let persisted = control
+            .mission_store
+            .update_mission_session_id(mission.id, session_id, "claudecode", Some(fence))
+            .await;
+        if !matches!(persisted, Ok(true)) {
+            crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+            retire_proxy_key().await;
+            return Err(persisted.err().unwrap_or_else(|| {
+                "native Claude session allocation rejected by run generation fence".into()
+            }));
+        }
+    }
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
         Err(crate::remote_node::RemoteNodeError::Request(message)) => {
@@ -13564,6 +13573,15 @@ async fn submit_leased_remote_job(
         Err(error) => {
             // A node HTTP rejection is definitive: the handler did not queue
             // the job, so this pre-submit handle can be discarded.
+            if let Some((session_id, fence)) = &claude_session {
+                if let Err(rollback) = control
+                    .mission_store
+                    .clear_unsubmitted_session_id(mission.id, session_id, "claudecode", fence)
+                    .await
+                {
+                    tracing::error!(mission_id = %mission.id, %rollback, "could not clear rejected Claude session identity");
+                }
+            }
             crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
             retire_proxy_key().await;
             return Err(error.to_string());

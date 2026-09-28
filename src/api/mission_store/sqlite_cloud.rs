@@ -32,6 +32,7 @@ pub(super) async fn save(
     let conn = store.conn.clone();
     tokio::task::spawn_blocking(move || {
         let mut c = conn.blocking_lock(); let tx = c.transaction().map_err(err)?;
+        let mut new_turn = false;
         let old: Option<String> = tx.query_row("SELECT data FROM cloud_executions WHERE request_key=?1", [&execution.request_key], |r| r.get(0)).optional().map_err(err)?;
         if let Some(old) = old {
             let old: Execution = serde_json::from_str(&old).map_err(err)?;
@@ -40,6 +41,7 @@ pub(super) async fn save(
                 return Ok(old);
             }
             if expected != Some(old.revision) || execution.mission_id != old.mission_id || execution.selection != old.selection { return Err("Cloud execution revision changed".into()); }
+            new_turn = execution.turns.iter().any(|turn| turn.phase == crate::api::cloud_agents::Phase::Queued && !old.turns.iter().any(|previous| previous.key == turn.key));
             execution.revision = old.revision + 1;
         } else {
             if expected.is_some() { return Err("Cloud execution not found".into()); }
@@ -48,7 +50,7 @@ pub(super) async fn save(
         }
         tx.execute("INSERT INTO cloud_executions(mission_id,request_key,revision,data) VALUES(?1,?2,?3,?4) ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,data=excluded.data",params![execution.mission_id.to_string(),execution.request_key,execution.revision,serde_json::to_string(&execution).map_err(err)?]).map_err(err)?;
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {
-            tx.execute("UPDATE missions SET status=?2,updated_at=?3 WHERE id=?1 AND status<>'acknowledged'",params![execution.mission_id.to_string(),turn.phase.mission_status(),now_string()]).map_err(err)?;
+            tx.execute("UPDATE missions SET status=?2,updated_at=?3 WHERE id=?1 AND (status<>'acknowledged' OR ?4)",params![execution.mission_id.to_string(),turn.phase.mission_status(),now_string(),new_turn]).map_err(err)?;
         }
         tx.commit().map_err(err)?; Ok(execution)
     }).await.map_err(err)?
@@ -157,6 +159,68 @@ mod tests {
         assert_eq!(mission.project.project.as_deref(), Some("project"));
         assert!(!mission.requires_local_disk);
         assert_eq!(mission.history[0].content, "Say hello");
+    }
+    #[tokio::test]
+    async fn new_followup_reopens_archive_but_receipts_and_retries_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "cloud-archive")
+            .await
+            .unwrap();
+        let mut e = execution();
+        e.turns[0].phase = Phase::ResponseComplete;
+        let mut e = store
+            .save_cloud_execution(e, None, None, None, vec![])
+            .await
+            .unwrap();
+        store
+            .update_mission_status(e.mission_id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        e = store
+            .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_mission(e.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Acknowledged
+        );
+        e.enqueue("second".into(), "Continue".into()).unwrap();
+        e = store
+            .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_mission(e.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Active
+        );
+        store
+            .update_mission_status(e.mission_id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        e.enqueue("second".into(), "Continue".into()).unwrap();
+        store
+            .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_mission(e.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Acknowledged
+        );
     }
     #[tokio::test]
     async fn replayed_events_are_deduplicated_per_run_and_type() {

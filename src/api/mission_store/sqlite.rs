@@ -4972,6 +4972,33 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|e| e.to_string())?
     }
 
+    async fn clear_unsubmitted_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: &super::SessionUpdateRun,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        let session_id = session_id.to_string();
+        let backend = backend.to_string();
+        let run = (run.run_id.to_string(), run.generation);
+        tokio::task::spawn_blocking(move || {
+            let mut c = conn.blocking_lock();
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let latest: Option<(String,u64)> = tx.query_row(
+                "SELECT run_id,generation FROM mission_runs WHERE mission_id=?1 ORDER BY generation DESC LIMIT 1",
+                [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional().map_err(|e| e.to_string())?;
+            if latest != Some(run) { return Ok(false); }
+            let removed = tx.execute("DELETE FROM mission_harness_sessions WHERE mission_id=?1 AND backend=?2 AND session_id=?3", params![id.to_string(),backend,session_id]).map_err(|e| e.to_string())?;
+            if removed == 0 { return Ok(false); }
+            tx.execute("UPDATE missions SET session_id=NULL,updated_at=?4 WHERE id=?1 AND backend=?2 AND session_id=?3",params![id.to_string(),backend,session_id,now_string()]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
+    }
+
     async fn update_mission_goal(
         &self,
         id: Uuid,

@@ -2501,6 +2501,19 @@ pub trait MissionStore: Send + Sync {
         run: Option<&SessionUpdateRun>,
     ) -> Result<bool, String>;
 
+    /// Clear a definitively unsubmitted native identity, only if both the
+    /// execution generation and exact identity still match. Ambiguous launches
+    /// must retain their identity until remote recovery settles them.
+    async fn clear_unsubmitted_session_id(
+        &self,
+        _id: Uuid,
+        _session_id: &str,
+        _backend: &str,
+        _run: &SessionUpdateRun,
+    ) -> Result<bool, String> {
+        Err("native identity rollback is unavailable".into())
+    }
+
     /// Durable native-attempt intent (session creation or prompt). Never a native ID
     /// or proof that a user prompt actually executed.
     async fn native_prompt_attempted(&self, _id: Uuid, _backend: &str) -> Result<bool, String> {
@@ -4703,6 +4716,79 @@ fn select_harness_session(
 mod harness_session_tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn unsubmitted_session_rollback_is_fenced_by_generation_and_identity() {
+        for kind in ["memory", "file", "sqlite"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().into(), "rollback")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().into(), "rollback")
+                        .await
+                        .unwrap(),
+                ),
+                _ => Arc::new(InMemoryMissionStore::new()),
+            };
+            let m = store
+                .create_mission(None, None, None, None, None, Some("grok"), None)
+                .await
+                .unwrap();
+            let old = store.begin_mission_run(m.id, "first", None).await.unwrap();
+            let old_fence = SessionUpdateRun::from(&old);
+            store
+                .update_mission_session_id(m.id, "unsubmitted", "grok", Some(&old_fence))
+                .await
+                .unwrap();
+            assert!(!store
+                .clear_unsubmitted_session_id(m.id, "different", "grok", &old_fence)
+                .await
+                .unwrap());
+            assert!(store
+                .clear_unsubmitted_session_id(m.id, "unsubmitted", "grok", &old_fence)
+                .await
+                .unwrap());
+            assert!(store
+                .get_mission(m.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id
+                .is_none());
+            store
+                .finish_mission_run(old.run_id, old.generation, Some("failed"))
+                .await
+                .unwrap();
+            let new = store.begin_mission_run(m.id, "second", None).await.unwrap();
+            let new_fence = SessionUpdateRun::from(&new);
+            store
+                .update_mission_session_id(m.id, "new-native", "grok", Some(&new_fence))
+                .await
+                .unwrap();
+            assert!(!store
+                .clear_unsubmitted_session_id(m.id, "new-native", "grok", &old_fence)
+                .await
+                .unwrap());
+            assert!(!store
+                .clear_unsubmitted_session_id(m.id, "unsubmitted", "grok", &new_fence)
+                .await
+                .unwrap());
+            assert_eq!(
+                store
+                    .get_mission(m.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .session_id
+                    .as_deref(),
+                Some("new-native")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn native_session_updates_reject_old_same_backend_generations() {

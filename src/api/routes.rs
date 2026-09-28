@@ -671,7 +671,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             let default_user = super::auth::implicit_single_tenant_user(&state_clone.config);
             let _ = state_clone.control.get_or_spawn(&default_user).await;
             // Hosted observers resume even when their Orb windows remain closed.
-            for key in ["CURSOR_CLOUD_OWNER", "CHATGPT_CLOUD_OWNER"] {
+            for key in [
+                "CURSOR_CLOUD_OWNER",
+                "CHATGPT_CLOUD_OWNER",
+                "GROK_BOT_OWNER",
+            ] {
                 if let Ok(owner) = std::env::var(key) {
                     if !owner.trim().is_empty() && owner != default_user.id {
                         let cloud_user = super::auth::AuthUser {

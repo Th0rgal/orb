@@ -1033,6 +1033,45 @@ impl MissionStore for FileMissionStore {
         Ok(true)
     }
 
+    async fn clear_unsubmitted_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: &super::SessionUpdateRun,
+    ) -> Result<bool, String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {id} not found"))?;
+        let runs = self.runs.read().await;
+        let latest = runs
+            .values()
+            .filter(|r| r.mission_id == id)
+            .max_by_key(|r| r.generation)
+            .map(super::SessionUpdateRun::from);
+        let mut sessions = self.harness_sessions.write().await;
+        if latest.as_ref() != Some(run)
+            || sessions
+                .get(&id)
+                .and_then(|s| s.get(backend))
+                .map(String::as_str)
+                != Some(session_id)
+        {
+            return Ok(false);
+        }
+        sessions.get_mut(&id).unwrap().remove(backend);
+        if mission.backend == backend && mission.session_id.as_deref() == Some(session_id) {
+            mission.session_id = None;
+            mission.updated_at = now_string();
+        }
+        drop(sessions);
+        drop(runs);
+        drop(missions);
+        self.persist().await?;
+        Ok(true)
+    }
+
     async fn update_mission_tree(&self, id: Uuid, tree: &AgentTreeNode) -> Result<(), String> {
         self.trees.write().await.insert(id, tree.clone());
         self.persist().await
