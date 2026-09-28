@@ -1,5 +1,5 @@
 import { ErrorNotice } from "./ErrorNotice";
-import { Show, createContext, createSignal, createUniqueId, onCleanup, onMount, splitProps, useContext, type JSX } from "solid-js";
+import { Show, createContext, createEffect, createSignal, createUniqueId, onCleanup, onMount, splitProps, useContext, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { trapFocus } from "./focusScope";
 import { CloseIcon } from "./icons";
@@ -32,6 +32,15 @@ export function Dialog(p: {
   const index = () => layers().indexOf(layer);
   const top = () => layers().at(-1) === layer;
   const close = () => { if (top() && !p.busy) p.onClose(); };
+  createEffect(() => {
+    // Disabling the submit button can drop focus onto the document body.
+    // Keep Escape and Tab owned by the dialog while a request settles.
+    const busy = p.busy;
+    if (root && top() && !root.contains(document.activeElement)) {
+      if (busy) root.focus();
+      else (root.querySelector<HTMLElement>("[autofocus], input:not(:disabled)") ?? root).focus();
+    }
+  });
   onMount(() => {
     if (p.anchor) {
       const place = () => {

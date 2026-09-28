@@ -33,6 +33,32 @@ the target workspace**, so native bash and file effects are scoped to the correc
 environment. The host proxy bash tools are no longer required for normal
 missions.
 
+## Local build resource budget
+
+- On Thomas's Mac, prefer dev/debug builds for routine development and
+  validation. Use release builds only when the task requires a release artifact
+  or measuring optimized runtime behaviour; explain that need before starting.
+  The backend deploy rule above remains stricter: use debug builds.
+- Before starting a heavy Rust build/test or native app build, check for active
+  builds across **all worktrees**, not just this checkout. Run one heavy build
+  at a time on this 16 GB Mac. Wait for an existing build; do not terminate
+  another agent's work or silently offload it remotely.
+- Use `cargo check -j 1` for compile-only feedback and targeted
+  `cargo test -j 1 --lib <filter>` or `--bin <name>` when execution is needed.
+  Run required validation, but avoid duplicate full-workspace builds.
+  `-- --test-threads=1` limits test execution, **not compilation**; use `-j 1`
+  to limit Cargo build concurrency. A single large rustc process can still
+  consume several GB, so this does not replace cross-worktree serialization.
+- For routine local validation without debugger requirements, prefer consistent
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` settings to reduce
+  debug-symbol overhead. Preserve symbols when needed for debugging/profiling.
+  Changing profile settings can rebuild dependencies: do not alternate settings
+  or change a running task's environment in an attempt to recover memory.
+- Reuse the checkout's existing build cache. Avoid `cargo clean`, gratuitous
+  new target directories, and parallel builds merely to bypass Cargo's lock.
+  If memory pressure/swapping is high, defer new heavy builds and report which
+  task is holding resources. Keep build ownership and command visible in updates.
+
 ## High-level flow
 
 1. User creates a mission with a workspace + agent (backend).

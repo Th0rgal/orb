@@ -1,3 +1,5 @@
+import {CloudProviders} from './CloudProviders';
+import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
 import { codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, usageWindows } from "./providerUsage";
 import { PopupMenu } from "./Menu";
@@ -315,7 +317,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
     <div class="page">
       <div class="page-head">
         <h2>Providers</h2>
-        <button class="s-btn" onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); }}>
+        <button class="s-btn" onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
           Refresh
         </button>
       </div>
@@ -332,6 +334,8 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
           </Show>
         </div>
       </section>
+
+      <CloudProviders />
 
       <section class="s-sec">
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
@@ -595,19 +599,7 @@ function fmtResetEpoch(sec: number): string {
   return `in ${Math.round(hours / 24)}d`;
 }
 
-function DetailBar(p: { label: string; usedPct: number; reset?: string }) {
-  const pct = () => Math.max(0, Math.min(100, Math.round(p.usedPct)));
-  return (
-    <div class="p-usage-grid">
-      <div class="p-meter-meta"><span class="p-meter-caption">{p.label === "7d" ? "Weekly" : p.label}<span class="p-dot">·</span><span>{pct()}% used</span></span>
-        <Show when={p.reset}><span class="p-usage-reset" title={p.reset}><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 3M18 18a8 8 0 0 1-13-3" /></svg>{p.reset!.replace(/^reset\s+/i, "")}</span></Show>
-      </div>
-      <div class="p-bar" role="progressbar" aria-label={`${p.label} usage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct()}>
-        <div class={`p-bar-fill ${pct() >= 100 ? "hot" : ""}`} style={{ width: `${pct()}%` }} />
-      </div>
-    </div>
-  );
-}
+const DetailBar = ProviderUsageMeter;
 
 function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHeader?: boolean }) {
   const u = () => p.usage;

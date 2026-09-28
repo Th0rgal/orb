@@ -122,6 +122,7 @@ fn main() {
             }
         })
         .setup(|app| {
+            interactions::initialize(app.handle().clone());
             // Local voice input: the Python worker starts on first use and
             // is released again after a stretch of inactivity.
             app.state::<voice::VoiceState>().start_idle_reaper();
@@ -155,6 +156,7 @@ fn main() {
             run_recovery::local_run_launch,
             run_recovery::local_run_reconcile,
             interactions::local_interaction,
+            interactions::local_interaction_events_supported,
             interactions::local_interaction_answer,
             paloma_ssh_pubkey,
             session_preview::local_session_git,

@@ -2,23 +2,18 @@
  * hidden, never overlaps an in-flight run, and fires once as soon as the
  * window becomes visible again. Returns a stop function. */
 export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number): () => void {
-  let busy = false;
+  let busy = false, stopped = false;
   const tick = () => {
-    if (busy || document.visibilityState === "hidden") return;
-    const r = run();
-    if (r && typeof (r as Promise<unknown>).then === "function") {
-      busy = true;
-      void (r as Promise<unknown>).finally(() => {
-        busy = false;
-      });
-    }
+    if (stopped || busy || document.visibilityState === "hidden") return;
+    busy = true;
+    // A failed refresh must neither overlap nor create an unhandled rejection.
+    void Promise.resolve().then(run).catch(() => {}).finally(() => { busy = false; });
   };
   const timer = window.setInterval(tick, ms);
-  const onVisible = () => {
-    if (document.visibilityState === "visible") tick();
-  };
+  const onVisible = () => { if (document.visibilityState === "visible") tick(); };
   document.addEventListener("visibilitychange", onVisible);
   return () => {
+    stopped = true;
     clearInterval(timer);
     document.removeEventListener("visibilitychange", onVisible);
   };
@@ -28,7 +23,7 @@ export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number)
  * entries that did not change, so keyed `<For>` rows are not re-rendered on
  * every poll. Order and membership follow `next`. */
 export function mergeById<T extends { id: string }>(prev: T[], next: T[]): T[] {
-  if (prev.length === 0) return next;
+  if (prev.length === 0) return next.length === 0 ? prev : next;
   const byId = new Map(prev.map((p) => [p.id, p]));
   let changed = prev.length !== next.length;
   const out = next.map((n, i) => {

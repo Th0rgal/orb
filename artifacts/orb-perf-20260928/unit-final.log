@@ -1,0 +1,5 @@
+
+> orb@0.1.0 test
+> vitest run --maxWorkers=2 --reporter=json --outputFile=../artifacts/orb-perf-20260928/unit-final.json
+
+JSON report written to /Users/thomas/work/paloma/sandboxed_sh-orb-client/artifacts/orb-perf-20260928/unit-final.json

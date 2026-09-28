@@ -1,4 +1,5 @@
 import {createSignal,batch} from 'solid-js';
+import {mergeById} from './poll';
 import {connectionVersion,getMission,appendClientTranscript,setClientMissionStatus} from './api';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
@@ -6,7 +7,10 @@ import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
 export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
-const [entries,setEntries]=createSignal<QueuedLocalMessage[]>([]);
+const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
+// IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
+// heartbeat does not invalidate every mounted conversation and its markdown.
+const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(previous,rows));
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
 export const acceptedLocalMessages=(mission:string)=>accepted().filter(row=>row.mission===mission);
@@ -63,7 +67,12 @@ export async function sendQueuedNow(mission:string){
  stopping.add(runKey);
  try {
   if(!(await read(key)).some(row=>row.mission===mission&&row.state==='queued'))return;
-  await stopLocal(mission);
+  // An idle/recovered conversation has nothing to stop. Only an explicit
+  // missing-run response grants recovery; transport failures remain failures.
+  let running = false;
+  try { running = !(await pollLocal(mission)).done; }
+  catch (error) { if (!/no local run/i.test(String(error))) throw error; }
+  if (running) await stopLocal(mission);
   // The follower saves the partial answer before closing its run receipt.
   const follower=settling.get(runKey);
   if(follower)await follower;else await recoverLocalLaunch(mission);
@@ -143,6 +152,12 @@ export function startLocalQueueWorker(){
     if(row.interrupted)continue;
     if(row.state==='accepted'){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
+     continue;
+    }
+    if(row.state==='dispatching'&&!row.error&&Date.now()-(row.claimedAt??0)>30_000){
+     await update(key,row.id,stored=>{
+      if(stored.state==='dispatching'&&!stored.error)stored.error='Launch confirmation was lost. Check the previous run before retrying; this message will not be sent again automatically.';
+     });
      continue;
     }
     if(row.state!=='queued')continue;

@@ -806,9 +806,9 @@ export function FilePanelProvider(p: {
               >
                 <Ic.SearchIcon size={16} />
               </button>
-              <div class="file-tab-list">
+              <div class="file-tab-list" data-tauri-drag-region>
                 <Show when={!tabs().length}>
-                  <span class="file-header-title">Files</span>
+                  <span class="file-header-title" data-tauri-drag-region>Files</span>
                 </Show>
                 <For each={tabs()}>
                   {(tab) => (

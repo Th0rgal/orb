@@ -8,7 +8,7 @@ it("double-click edits a draft and reuses it without changing the historic promp
   fireEvent.dblClick(screen.getByText("Original prompt"));
   const editor = screen.getByRole("textbox", { name: "Edit prompt text" });
   fireEvent.input(editor, { target: { value: "Updated prompt" } });
-  fireEvent.click(screen.getByRole("button", { name: "Send follow-up" }));
+  fireEvent.click(screen.getByRole("button", { name: "Send again" }));
   expect(reuse).toHaveBeenCalledWith("Updated prompt");
   await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
   expect(screen.getByText("Original prompt")).toBeTruthy();
@@ -27,14 +27,15 @@ it("awaits dispatch, disables duplicate sends and preserves the draft on failure
   render(() => <UserTurn text="Original" onSend={send} />);
   fireEvent.click(screen.getByRole("button", {name:"Edit prompt"}));
   fireEvent.input(screen.getByRole("textbox"), {target:{value:"Retry me"}});
-  fireEvent.click(screen.getByRole("button", {name:"Send follow-up"}));
-  expect(screen.getByRole("button", {name:"Sending follow-up"})).toHaveProperty("disabled",true);
-  fireEvent.click(screen.getByRole("button", {name:"Sending follow-up"}));
+  fireEvent.click(screen.getByRole("button", {name:"Send again"}));
+  expect(screen.queryByRole("textbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", {name:"Edit prompt"}));
+  expect(screen.queryByRole("textbox")).toBeNull();
   expect(send).toHaveBeenCalledTimes(1);
   reject(new Error("Network unavailable"));
   await screen.findByText("Network unavailable");
   expect(screen.getByRole("textbox")).toHaveProperty("value","Retry me");
-  expect(screen.getByRole("button", {name:"Send follow-up"})).toHaveProperty("disabled",false);
+  expect(screen.getByRole("button", {name:"Send again"})).toHaveProperty("disabled",false);
 });
 it("supports Ctrl+Enter and keeps declined sends editable", async () => {
   const send=vi.fn().mockResolvedValue(false);

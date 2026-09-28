@@ -1,0 +1,11 @@
+
+ RUN  v3.2.4 /Users/thomas/work/paloma/sandboxed_sh-orb-client/orb
+
+ ✓ tests/machine-transfer-context.test.ts (3 tests) 7ms
+ ✓ tests/change-machine.test.tsx (4 tests) 84ms
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  16:07:22
+   Duration  850ms (transform 466ms, setup 149ms, collect 539ms, tests 90ms, environment 379ms, prepare 91ms)
+

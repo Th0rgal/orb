@@ -6,6 +6,7 @@ import { LaptopIcon } from "./icons";
 import { pollWhileVisible } from "./poll";
 
 type Snapshot = {
+  sampled_at?: number;
   history?: ResourceSample[];
   gpu_percent?: number | null; cpu_percent: number | null; memory_used: number; memory_total: number;
   disk_used: number; disk_total: number;
@@ -38,7 +39,7 @@ export function LocalMachine() {
     onCleanup(() => { disposed = true; stop(); saveHistory("local", history(), true); });
   });
   return <div class="s-card local-machine"><button class="s-row p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
-    <LaptopIcon size={18} /><div class="s-row-text"><div class="s-row-title">This Mac</div><div class="s-row-desc">{error() || "This computer"}</div></div>
+    <LaptopIcon size={18} /><div class="s-row-text"><div class="s-row-title">This Mac</div><div class="s-row-desc">{error() || (sample()?.sampled_at && Date.now() - sample()!.sampled_at! > 10_000 ? "Refreshing metrics…" : "This computer")}</div></div>
     <Show when={sample()}>{s => <span class="s-row-desc">RAM {percent(s().memory_used, s().memory_total)}</span>}</Show>
     <span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
   </button><Show when={open()}><div class="p-acc-body machine-expanded">

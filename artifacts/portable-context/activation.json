@@ -1,0 +1,21 @@
+{
+  "id": "631f935b-1c7e-4d17-9ddb-1e18e995dc4d",
+  "mission_id": "ebb2f1fe-8d03-4cc0-b966-68b3cb86077f",
+  "phase": "activated",
+  "source": {
+    "id": "3ca54946-9af5-4ee6-83a2-983bc4b946b0",
+    "kind": "client"
+  },
+  "destination": {
+    "id": "old-agent",
+    "kind": "node"
+  },
+  "destination_root": "/var/lib/sandboxed-node/work/.transfers/631f935b-1c7e-4d17-9ddb-1e18e995dc4d/destination/workspace",
+  "generation": 9,
+  "receipt": {
+    "bytes": 199756696,
+    "digest": "05a0f7fd120bd9b5f11e7604a46f18ab6bde36cb94c3a20e8e8a5799087e47e1",
+    "files": 115,
+    "root": "/var/lib/sandboxed-node/work/.transfers/631f935b-1c7e-4d17-9ddb-1e18e995dc4d/destination/workspace"
+  }
+}

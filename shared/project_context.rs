@@ -434,6 +434,80 @@ impl Store {
         let _lock = self.lock()?;
         self.apply_locked(operation, self.load()?, None)
     }
+    /// Copy by immutable blob identity, then remove only the exact source revision.
+    /// A concurrent filesystem edit is retained, never deleted as part of a move.
+    pub fn transfer_file(&self, path: &str, destination: &str, copy: bool) -> Result<()> {
+        valid_path(path)?;
+        valid_path(destination)?;
+        if path == destination {
+            return Err("Choose a different destination".into());
+        }
+        let _lock = self.lock()?;
+        let mut state = self.load()?;
+        self.reconcile(&mut state)?;
+        let entry = state
+            .manifest
+            .entries
+            .get(path)
+            .cloned()
+            .ok_or("File not found")?;
+        if entry.directory {
+            return Err("Select a file, not a folder".into());
+        }
+        if state
+            .manifest
+            .entries
+            .keys()
+            .any(|p| p.to_lowercase() == destination.to_lowercase())
+        {
+            return Err("A file or folder already exists at the destination".into());
+        }
+        if let Some((parent, _)) = destination.rsplit_once('/') {
+            if !state
+                .manifest
+                .entries
+                .get(parent)
+                .is_some_and(|e| e.directory)
+            {
+                return Err("The destination folder does not exist".into());
+            }
+        }
+        let receipt = self.apply_locked(
+            Operation {
+                id: uuid::Uuid::new_v4().to_string(),
+                path: destination.into(),
+                base: None,
+                hash: entry.hash,
+                directory: false,
+                delete: false,
+                source: "Orb".into(),
+            },
+            state,
+            None,
+        )?;
+        if receipt.conflict {
+            return Err("The destination changed. No file was moved".into());
+        }
+        if !copy {
+            let receipt = self.apply_locked(
+                Operation {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    path: path.into(),
+                    base: Some(entry.revision),
+                    hash: None,
+                    directory: false,
+                    delete: true,
+                    source: "Orb".into(),
+                },
+                self.load()?,
+                None,
+            )?;
+            if receipt.conflict {
+                return Err(format!("The source changed during the move. Both files were kept; the copy is at {destination}"));
+            }
+        }
+        Ok(())
+    }
     fn apply_locked(
         &self,
         operation: Operation,
@@ -583,6 +657,36 @@ mod tests {
                 source: "test".into(),
             })
             .unwrap()
+    }
+    #[test]
+    fn transfer_preserves_bytes_and_refuses_overwrite() {
+        let (_dir, s) = setup();
+        let bytes = vec![0, 255, 128, 42];
+        fs::create_dir_all(s.root.join("notes")).unwrap();
+        fs::write(s.root.join("notes/source.bin"), &bytes).unwrap();
+        s.transfer_file("notes/source.bin", "renamed.bin", false)
+            .unwrap();
+        assert!(!s.root.join("notes/source.bin").exists());
+        assert_eq!(fs::read(s.root.join("renamed.bin")).unwrap(), bytes);
+        s.transfer_file("renamed.bin", "notes/copy.bin", true)
+            .unwrap();
+        assert!(s.root.join("renamed.bin").exists());
+        assert_eq!(fs::read(s.root.join("notes/copy.bin")).unwrap(), bytes);
+        assert!(s
+            .transfer_file("renamed.bin", "notes/copy.bin", false)
+            .is_err());
+        assert!(s
+            .transfer_file("renamed.bin", "missing/copy.bin", false)
+            .is_err());
+        assert!(s.transfer_file("renamed.bin", "../escape", false).is_err());
+        assert!(s.transfer_file("notes", "folder", false).is_err());
+        assert_eq!(fs::read(s.root.join("renamed.bin")).unwrap(), bytes);
+        let manifest = s.manifest().unwrap();
+        assert!(!manifest.entries.contains_key("notes/source.bin"));
+        assert_eq!(
+            manifest.entries["renamed.bin"].hash,
+            manifest.entries["notes/copy.bin"].hash
+        );
     }
     #[test]
     fn identical_write_keeps_file_revision_and_rejects_ambiguous_paths() {

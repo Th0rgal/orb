@@ -12,7 +12,6 @@ test('queue matches the composer width and accepts and removes messages',async({
  await expect(queue).toContainText('2 Queued');
  const panel=await queue.boundingBox(),composer=await page.locator('.composer').boundingBox();
  expect(panel!.width).toBe(composer!.width);expect(panel!.x).toBe(composer!.x);expect(composer!.y-panel!.y-panel!.height).toBe(8);
- await page.screenshot({path:'/tmp/orb-queued-messages.png'});
  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
 
@@ -49,3 +48,15 @@ test('editing returns a queued message to the input without losing an existing d
   await expect(page.getByPlaceholder('Send follow-up')).toHaveValue('ceci est un message dans la queue');
   await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('1 Queued');
  });
+
+test('long queued prompts remain compact and can be expanded without sending',async({page})=>{
+ await page.goto('/tests/queued-messages.html');
+ const text='A long repository review request. '.repeat(100);
+ const input=page.getByPlaceholder('Send follow-up');await input.fill(text);await input.press('Enter');
+ const preview=page.locator('.queue-message-preview').last();
+ await expect(preview).toContainText(text.trim());
+ expect((await preview.boundingBox())!.height).toBeLessThanOrEqual(44);
+ await preview.locator('summary').click();await expect(preview).toHaveAttribute('open','');
+ await expect(preview.locator('div')).toBeVisible();
+ await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('3 Queued');
+});

@@ -1,4 +1,4 @@
-import { clearConnection, getApiUrl, getJwt } from "./api";
+import { clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
 
 export interface StoredEvent {
   id: number;
@@ -16,7 +16,7 @@ const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const REMOTE_JOB_RUNNING = new RegExp(`^Remote job ${UUID} on node '[^']+' is now (queued|running|finished)$`);
 const DISPATCHED_JOB = new RegExp(`^Dispatched job ${UUID} to remote node '[^']+'(?: \\([^\\n]*\\))?$`);
 
-export function isGeneratedRemoteJobStatus(ev: StoredEvent): boolean {
+export function isGeneratedRemoteJobStatus(ev: Pick<StoredEvent, "content" | "metadata">): boolean {
   const meta = ev.metadata ?? {};
   if (meta.kind === "remote_job_status" || meta.remote_job_status === true) return true;
   return REMOTE_JOB_RUNNING.test(ev.content) || DISPATCHED_JOB.test(ev.content);
@@ -31,10 +31,13 @@ export interface StreamEvent {
 }
 
 async function apiRaw(path: string): Promise<Response> {
+  const version = connectionVersion();
   const jwt = getJwt();
   const res = await fetch(`${getApiUrl()}${path}`, {
     headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+    signal: AbortSignal.timeout(30_000),
   });
+  if (connectionVersion() !== version) throw new Error("Connection changed");
   if (res.status === 401) {
     clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
@@ -43,9 +46,13 @@ async function apiRaw(path: string): Promise<Response> {
   return res;
 }
 
-export async function getMissionEvents(id: string): Promise<StoredEvent[]> {
-  const res = await apiRaw(`/api/control/missions/${id}/events?limit=4000`);
+export async function getMissionEvents(id: string, page?: {limit: number; beforeSequence?: number}): Promise<StoredEvent[]> {
+  const version = connectionVersion();
+  const limit = page?.limit ?? 4000;
+  const cursor = page?.beforeSequence == null ? "" : `&before_seq=${page.beforeSequence}`;
+  const res = await apiRaw(`/api/control/missions/${id}/events?limit=${limit}${cursor}`);
   const data = (await res.json()) as StoredEvent[] | { events?: StoredEvent[] };
+  if (connectionVersion() !== version) throw new Error("Connection changed");
   return Array.isArray(data) ? data : (data.events ?? []);
 }
 

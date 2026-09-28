@@ -1,0 +1,16 @@
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-06c3dab971941a71)
+
+running 9 tests
+test machine_transfer::tests::rejects_traversal_and_corrupt_chunks ... ok
+test api::control::machine_transfer::portable_context_tests::small_history_stays_inline_and_archive_reads_are_confined ... ok
+test machine_transfer::integrity_tests::machine_transfer_refuses_symlinks_and_preserves_executable_bits ... ok
+test machine_transfer::integrity_tests::machine_transfer_detects_corruption_and_supports_sealed_retry ... ok
+test machine_transfer::integrity_tests::machine_transfer_preserves_git_history_and_uncommitted_work ... ok
+test machine_transfer::tests::copies_binary_and_excludes_credentials_and_retries_blocks ... ok
+test api::control::machine_transfer::portable_context_tests::large_unicode_history_round_trips_through_verified_checkpoint ... ok
+test api::mission_store::sqlite::machine_transfer::tests::machine_transfer_cancellation_and_source_revision_conflicts ... ok
+test api::mission_store::sqlite::machine_transfer::tests::machine_transfer_preserves_identity_and_fences_execution_across_restart ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2512 filtered out; finished in 1.45s
+
+c70e43c0085d666ed288ec2aa843859c92fd93572175baf765dabbdd91112cdb  /usr/local/bin/sandboxed-sh-prod

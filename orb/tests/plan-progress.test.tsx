@@ -1,3 +1,4 @@
+import {createSignal} from 'solid-js';
 import {expect,it,vi,afterEach} from 'vitest';
 import {render,screen,cleanup} from '@solidjs/testing-library';
 import {PlanProgress,planSteps,rememberApprovedPlan} from '../src/PlanProgress';
@@ -49,4 +50,17 @@ it('does not resurrect a saved approved plan after a normal question',async()=>{
  {kind:'tool',key:'approval',callId:'approval',name:'ExitPlanMode',args:{plan:'Saved plan'},done:true},
  {kind:'user',key:'ordinary',text:'Explain the result'}]}/>);
  await new Promise(resolve=>setTimeout(resolve,0));expect(screen.queryByText(/Plan ·/)).toBeNull();
+});
+
+it('updates memoized progress when tool output changes during a turn',async()=>{
+ const [items,setItems]=createSignal<any[]>([
+  {kind:'user',key:'plan',text:'/plan Build and verify'},
+  {kind:'tool',key:'tasks',callId:'tasks',name:'update_plan',args:{plan:[{step:'Build',status:'in_progress'}]},done:true}
+ ]);
+ render(()=><PlanProgress mission="streamed-plan" items={items()} active/>);
+ await screen.findByText(/Plan · In progress/);
+ setItems(rows=>[rows[0],{...rows[1],args:{plan:[{step:'Build',status:'completed'}]}}]);
+ await screen.findByText('Steps reported complete',{exact:false});
+ setItems(rows=>[...rows,{kind:'user',key:'next',text:'Explain the result'}]);
+ expect(screen.queryByText(/Plan ·/)).toBeNull();
 });

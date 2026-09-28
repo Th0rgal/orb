@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { Providers } from "../src/Providers";
 import { clearConnection, setConnection } from "../src/api";
@@ -33,7 +33,7 @@ it("keeps the login modal open during callback submission and exposes a rejected
   expect((screen.getByRole("button", { name: "Close", exact: true }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "Cancel", exact: true }) as HTMLButtonElement).disabled).toBe(true);
   finish(new Response(JSON.stringify({ status: "failed", message: "Callback rejected" })));
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Callback rejected"));
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain("Callback rejected"));
   fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
   expect(screen.queryByRole("dialog")).toBeNull();
 });

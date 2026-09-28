@@ -1,0 +1,620 @@
+{
+  "samples": [
+    {
+      "monotonic": 0.103292416,
+      "time": "2026-09-28T11:47:17.176193+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 2.182319625,
+      "time": "2026-09-28T11:47:19.255139+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59456,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 4.300563958,
+      "time": "2026-09-28T11:47:21.373386+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59408,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 6.389786458,
+      "time": "2026-09-28T11:47:23.462615+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59408,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 8.545388166,
+      "time": "2026-09-28T11:47:25.618226+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 10.644457375,
+      "time": "2026-09-28T11:47:27.717313+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 12.712999791,
+      "time": "2026-09-28T11:47:29.785850+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 14.817672666,
+      "time": "2026-09-28T11:47:31.890529+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.14,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 16.893486708,
+      "time": "2026-09-28T11:47:33.966349+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.15,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 18.971474875,
+      "time": "2026-09-28T11:47:36.044354+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.15,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 21.05065475,
+      "time": "2026-09-28T11:47:38.123532+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.15,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 23.127836916,
+      "time": "2026-09-28T11:47:40.200723+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.15,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 25.220012708,
+      "time": "2026-09-28T11:47:42.292901+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.15,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 27.336664208,
+      "time": "2026-09-28T11:47:44.409558+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 29.459955666,
+      "time": "2026-09-28T11:47:46.532856+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 31.579854791,
+      "time": "2026-09-28T11:47:48.652759+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59392,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 33.704005291,
+      "time": "2026-09-28T11:47:50.776917+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 35.796830375,
+      "time": "2026-09-28T11:47:52.869753+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 37.889496875,
+      "time": "2026-09-28T11:47:54.962422+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59344,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 39.97391225,
+      "time": "2026-09-28T11:47:57.046844+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59376,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4032,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 42.06338025,
+      "time": "2026-09-28T11:47:59.136318+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59248,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 44.183079208,
+      "time": "2026-09-28T11:48:01.256033+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59264,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 46.291241541,
+      "time": "2026-09-28T11:48:03.364203+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59264,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 48.382810333,
+      "time": "2026-09-28T11:48:05.455772+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59216,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 50.493916833,
+      "time": "2026-09-28T11:48:07.566887+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59216,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 52.615307041,
+      "time": "2026-09-28T11:48:09.688280+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59216,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 54.742497958,
+      "time": "2026-09-28T11:48:11.815480+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59200,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 56.863289291,
+      "time": "2026-09-28T11:48:13.936285+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59200,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 58.981931625,
+      "time": "2026-09-28T11:48:16.054924+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59200,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    },
+    {
+      "monotonic": 60.154312958,
+      "time": "2026-09-28T11:48:17.227311+00:00",
+      "processes": [
+        {
+          "pid": 85830,
+          "ppid": 82923,
+          "rss_kib": 59200,
+          "cpu_seconds": 3.16,
+          "executable": "target/debug/orb"
+        },
+        {
+          "pid": 86171,
+          "ppid": 1,
+          "rss_kib": 4016,
+          "cpu_seconds": 3.26,
+          "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "pid": 85830,
+      "observed_seconds": 60.051020541999996,
+      "cpu_percent_one_core": 0.03330501267003766,
+      "rss_min_mib": 57.8125,
+      "rss_max_mib": 58.0625
+    },
+    {
+      "pid": 86171,
+      "observed_seconds": 60.051020541999996,
+      "cpu_percent_one_core": 0.0,
+      "rss_min_mib": 3.921875,
+      "rss_max_mib": 3.9375
+    }
+  ]
+}

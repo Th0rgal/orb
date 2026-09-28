@@ -1,0 +1,27 @@
+HTTP 200
+data: {"event_type":"log","message":"Starting deploy with safety rails","progress":0}
+
+data: {"event_type":"log","message":"Source repo: /opt/sandboxed-sh-transfer-context-final-20260926","progress":5}
+
+data: {"event_type":"log","message":"skip_build=true; using existing target/debug/ binaries","progress":60}
+
+data: {"event_type":"log","message":"Installing /opt/sandboxed-sh-transfer-context-final-20260926/target/debug/sandboxed-sh → /usr/local/bin/sandboxed-sh-prod","progress":75}
+
+data: {"event_type":"log","message":"Installing /opt/sandboxed-sh-transfer-context-final-20260926/target/debug/orchestrator-mcp → /usr/local/bin/orchestrator-mcp","progress":82}
+
+data: {"event_type":"log","message":"Installing /opt/sandboxed-sh-transfer-context-final-20260926/target/debug/assistant-mcp → /usr/local/bin/assistant-mcp","progress":85}
+
+data: {"event_type":"log","message":"Recycled 2 stale assistant-mcp process(es) still running the replaced binary","progress":86}
+
+data: {"event_type":"log","message":"Installing /opt/sandboxed-sh-transfer-context-final-20260926/target/debug/palomactl → /var/lib/hermes-assistant/bin/palomactl.real","progress":87}
+
+data: {"event_type":"log","message":"Installing /opt/sandboxed-sh-transfer-context-final-20260926/scripts/chatgpt_ui_driver.py → /opt/sandboxed-sh/scripts/chatgpt_ui_driver.py","progress":88}
+
+data: {"event_type":"log","message":"Backups: /usr/local/bin/sandboxed-sh-prod.pre-deploy-67b7df9fd34b, /usr/local/bin/orchestrator-mcp.pre-deploy-67b7df9fd34b, /usr/local/bin/assistant-mcp.pre-deploy-67b7df9fd34b, /var/lib/hermes-assistant/bin/palomactl.real.pre-deploy-67b7df9fd34b, /opt/sandboxed-sh/scripts/chatgpt_ui_driver.py.pre-deploy-67b7df9fd34b","progress":88}
+
+data: {"event_type":"log","message":"Scheduling guarded restart: stop sandboxed-sh-prod.service, wait up to 20s for port 3000 to be released (SIGTERM then SIGKILL any lingering holder), then start","progress":90}
+
+data: {"event_type":"log","message":"Launching guarded restart as a transient systemd-run unit (sibling cgroup, survives the service stop)","progress":91}
+
+data: {"event_type":"deployed","message":"Deployed commit 67b7df9fd34b; service sandboxed-sh-prod.service will restart in ~2s","progress":100}
+

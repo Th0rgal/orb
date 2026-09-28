@@ -1,0 +1,4869 @@
+[
+  {
+    "time": 1790590496.42274,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2560,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 92512,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7440,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 13936,
+        "cpu_time": "0:33.46",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12576,
+        "cpu_time": "6:49.60",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.98",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 11.7,
+        "rss_kib": 133664,
+        "cpu_time": "0:02.67",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 40320,
+        "cpu_time": "0:00.51",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 399440,
+        "cpu_time": "0:01.96",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 53200,
+        "cpu_time": "0:00.84",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.76",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.49",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "8:49.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590498.5122812,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2560,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 92528,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7440,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 2.0,
+        "rss_kib": 13936,
+        "cpu_time": "0:33.47",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12576,
+        "cpu_time": "6:49.60",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 1.5,
+        "rss_kib": 133664,
+        "cpu_time": "0:02.74",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 40272,
+        "cpu_time": "0:00.53",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.8,
+        "rss_kib": 400368,
+        "cpu_time": "0:02.01",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 53104,
+        "cpu_time": "0:00.88",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.76",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.51",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "8:49.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590500.601805,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2912,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 92384,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7392,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 13936,
+        "cpu_time": "0:33.48",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.61",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 3.2,
+        "rss_kib": 135568,
+        "cpu_time": "0:02.87",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 2.0,
+        "rss_kib": 38848,
+        "cpu_time": "0:00.56",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 3.4,
+        "rss_kib": 289552,
+        "cpu_time": "0:02.07",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 24144,
+        "cpu_time": "0:00.89",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.53",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12528,
+        "cpu_time": "8:49.81",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590502.677897,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2912,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 92464,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7392,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.48",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.62",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 18.8,
+        "rss_kib": 136208,
+        "cpu_time": "0:03.09",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 6.1,
+        "rss_kib": 39488,
+        "cpu_time": "0:00.61",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 16.3,
+        "rss_kib": 234720,
+        "cpu_time": "0:02.22",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 4.5,
+        "rss_kib": 22784,
+        "cpu_time": "0:00.96",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.55",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12576,
+        "cpu_time": "8:49.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590504.7673159,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 92064,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7440,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.48",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.62",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 4.4,
+        "rss_kib": 136096,
+        "cpu_time": "0:03.24",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 39584,
+        "cpu_time": "0:00.64",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 5.7,
+        "rss_kib": 244384,
+        "cpu_time": "0:02.38",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 2.0,
+        "rss_kib": 23728,
+        "cpu_time": "0:01.04",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.56",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "8:49.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590506.852958,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.81",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 4064,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 91824,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7440,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.48",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.63",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 8.2,
+        "rss_kib": 136176,
+        "cpu_time": "0:03.48",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 3.5,
+        "rss_kib": 39392,
+        "cpu_time": "0:00.68",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 11.5,
+        "rss_kib": 255072,
+        "cpu_time": "0:02.54",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 4.1,
+        "rss_kib": 23936,
+        "cpu_time": "0:01.10",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.58",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "8:49.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590508.951076,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.81",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6944,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 91824,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7440,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.49",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.64",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 6.1,
+        "rss_kib": 135680,
+        "cpu_time": "0:03.65",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 39968,
+        "cpu_time": "0:00.69",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.9,
+        "rss_kib": 264880,
+        "cpu_time": "0:02.64",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 24080,
+        "cpu_time": "0:01.13",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.59",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "8:49.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590511.03982,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12336,
+        "cpu_time": "7:37.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68192,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7488,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.49",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.64",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 5.2,
+        "rss_kib": 132480,
+        "cpu_time": "0:03.74",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 1.9,
+        "rss_kib": 39024,
+        "cpu_time": "0:00.73",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 4.9,
+        "rss_kib": 261712,
+        "cpu_time": "0:02.72",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 23792,
+        "cpu_time": "0:01.17",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.60",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590513.113197,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68208,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7504,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.49",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.65",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 4.8,
+        "rss_kib": 132544,
+        "cpu_time": "0:03.96",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 1.8,
+        "rss_kib": 39424,
+        "cpu_time": "0:00.77",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 6.9,
+        "rss_kib": 276256,
+        "cpu_time": "0:02.87",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 2.8,
+        "rss_kib": 23376,
+        "cpu_time": "0:01.23",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.8,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.61",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590515.238512,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2528,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.5,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68224,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7504,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.50",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.65",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 2.8,
+        "rss_kib": 132784,
+        "cpu_time": "0:04.10",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 39616,
+        "cpu_time": "0:00.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 276432,
+        "cpu_time": "0:02.93",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 23312,
+        "cpu_time": "0:01.24",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 2.2,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.63",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590517.347778,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2848,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68224,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7504,
+        "cpu_time": "0:07.42",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.50",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12592,
+        "cpu_time": "6:49.66",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.1,
+        "rss_kib": 132960,
+        "cpu_time": "0:04.16",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 39312,
+        "cpu_time": "0:00.79",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 281424,
+        "cpu_time": "0:02.97",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 23616,
+        "cpu_time": "0:01.29",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 5.5,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.66",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590519.482574,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2848,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.5,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68224,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7520,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.50",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.67",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7888,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 1.2,
+        "rss_kib": 133008,
+        "cpu_time": "0:04.35",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 36000,
+        "cpu_time": "0:00.80",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 263152,
+        "cpu_time": "0:03.00",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 22352,
+        "cpu_time": "0:01.33",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 2.8,
+        "rss_kib": 13648,
+        "cpu_time": "10:27.67",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590521.574599,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2848,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 1.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68272,
+        "cpu_time": "0:35.16",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7520,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.51",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.68",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7888,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 2.0,
+        "rss_kib": 132896,
+        "cpu_time": "0:04.44",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 35520,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.4,
+        "rss_kib": 262816,
+        "cpu_time": "0:03.02",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 1.2,
+        "rss_kib": 22336,
+        "cpu_time": "0:01.35",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 3.5,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.68",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.90",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590523.673053,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2816,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 1.1,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68288,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7536,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.51",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.68",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7856,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.4,
+        "rss_kib": 132976,
+        "cpu_time": "0:04.49",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 35520,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 269248,
+        "cpu_time": "0:03.06",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 22768,
+        "cpu_time": "0:01.39",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.69",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 12560,
+        "cpu_time": "8:49.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590525.764575,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2816,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68320,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7536,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.52",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.69",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7856,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.8,
+        "rss_kib": 132896,
+        "cpu_time": "0:04.56",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 35488,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 269296,
+        "cpu_time": "0:03.07",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 22768,
+        "cpu_time": "0:01.40",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.81",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.70",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 12592,
+        "cpu_time": "8:49.92",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590527.853426,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2400,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12384,
+        "cpu_time": "7:37.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.8,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68160,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.52",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.70",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7856,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.8,
+        "rss_kib": 132672,
+        "cpu_time": "0:04.70",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 34160,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 264656,
+        "cpu_time": "0:03.09",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 22640,
+        "cpu_time": "0:01.41",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.71",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 12592,
+        "cpu_time": "8:49.93",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590529.9294798,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2384,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12384,
+        "cpu_time": "7:37.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6736,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68176,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7376,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.53",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12560,
+        "cpu_time": "6:49.70",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7856,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 18.7,
+        "rss_kib": 132672,
+        "cpu_time": "0:04.77",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 34000,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 264752,
+        "cpu_time": "0:03.09",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 22608,
+        "cpu_time": "0:01.41",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.73",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 1.2,
+        "rss_kib": 12608,
+        "cpu_time": "8:49.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590532.01876,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2672,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12416,
+        "cpu_time": "7:37.90",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6608,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68192,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7392,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.53",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 12544,
+        "cpu_time": "6:49.71",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7632,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 2.1,
+        "rss_kib": 132480,
+        "cpu_time": "0:04.80",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 33776,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.1,
+        "rss_kib": 262960,
+        "cpu_time": "0:03.11",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 2.6,
+        "rss_kib": 22320,
+        "cpu_time": "0:01.45",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.75",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 1.4,
+        "rss_kib": 12608,
+        "cpu_time": "8:49.96",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590534.1030211,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2672,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 12416,
+        "cpu_time": "7:37.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6608,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 68208,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7792,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.54",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.5,
+        "rss_kib": 12544,
+        "cpu_time": "6:49.72",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7632,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.5,
+        "rss_kib": 132528,
+        "cpu_time": "0:04.92",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 33776,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 268656,
+        "cpu_time": "0:03.14",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 1.7,
+        "rss_kib": 22880,
+        "cpu_time": "0:01.49",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 3.7,
+        "rss_kib": 12608,
+        "cpu_time": "8:49.98",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590536.175971,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2672,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 12416,
+        "cpu_time": "7:37.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 65760,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7712,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.54",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.73",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 17.1,
+        "rss_kib": 132736,
+        "cpu_time": "0:05.04",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 33776,
+        "cpu_time": "0:00.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.8,
+        "rss_kib": 267936,
+        "cpu_time": "0:03.15",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 1.4,
+        "rss_kib": 22448,
+        "cpu_time": "0:01.51",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 1.9,
+        "rss_kib": 12608,
+        "cpu_time": "8:49.98",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590538.273302,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2672,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 12416,
+        "cpu_time": "7:37.92",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.90",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 57984,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7712,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.55",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.5,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.74",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7344,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 1.2,
+        "rss_kib": 132848,
+        "cpu_time": "0:05.13",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 34400,
+        "cpu_time": "0:00.83",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 1.3,
+        "rss_kib": 270768,
+        "cpu_time": "0:03.25",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 22784,
+        "cpu_time": "0:01.54",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.84",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 1.3,
+        "rss_kib": 12608,
+        "cpu_time": "8:49.99",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590540.373718,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2384,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 12384,
+        "cpu_time": "7:37.93",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.90",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 39904,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7712,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.55",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 1.3,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.75",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7328,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 7.6,
+        "rss_kib": 133152,
+        "cpu_time": "0:05.31",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 34240,
+        "cpu_time": "0:00.84",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 7.8,
+        "rss_kib": 270416,
+        "cpu_time": "0:03.30",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 5.4,
+        "rss_kib": 23024,
+        "cpu_time": "0:01.59",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 14368,
+        "cpu_time": "10:27.82",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.00",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590542.461356,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1792,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.93",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 27632,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7312,
+        "cpu_time": "0:07.43",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.56",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.9,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.76",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7120,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 15.4,
+        "rss_kib": 127104,
+        "cpu_time": "0:05.48",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 31024,
+        "cpu_time": "0:00.85",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 2.1,
+        "rss_kib": 248400,
+        "cpu_time": "0:03.34",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 2.8,
+        "rss_kib": 19744,
+        "cpu_time": "0:01.63",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 14176,
+        "cpu_time": "10:27.83",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.00",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590544.55166,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1792,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 1.0,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.92",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 27632,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7552,
+        "cpu_time": "0:07.44",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.56",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 1.5,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.77",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7312,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.0,
+        "rss_kib": 127056,
+        "cpu_time": "0:05.49",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 31024,
+        "cpu_time": "0:00.85",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 252496,
+        "cpu_time": "0:03.35",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 19808,
+        "cpu_time": "0:01.64",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.7,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.85",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.01",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590546.63484,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1792,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 1.2,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.93",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 25456,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7456,
+        "cpu_time": "0:07.44",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.57",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 1.5,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7312,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 5.3,
+        "rss_kib": 127232,
+        "cpu_time": "0:05.68",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 2.1,
+        "rss_kib": 29904,
+        "cpu_time": "0:00.87",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 4.9,
+        "rss_kib": 164752,
+        "cpu_time": "0:03.41",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 19824,
+        "cpu_time": "0:01.69",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12048,
+        "cpu_time": "3:54.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 1.8,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.86",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.02",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590548.711086,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1792,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 1.5,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.95",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.93",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 25472,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7552,
+        "cpu_time": "0:07.44",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.57",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 1.6,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.78",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 7312,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 6.7,
+        "rss_kib": 132784,
+        "cpu_time": "0:05.85",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 30048,
+        "cpu_time": "0:00.88",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 3.3,
+        "rss_kib": 177984,
+        "cpu_time": "0:03.50",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 20208,
+        "cpu_time": "0:01.71",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12080,
+        "cpu_time": "3:54.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 2.8,
+        "rss_kib": 14400,
+        "cpu_time": "10:27.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.04",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590550.7913191,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1728,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 1.0,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.95",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 25056,
+        "cpu_time": "0:35.17",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 7408,
+        "cpu_time": "0:07.44",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.58",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.4,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 6352,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.0,
+        "rss_kib": 131552,
+        "cpu_time": "0:05.88",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 29296,
+        "cpu_time": "0:00.89",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 166384,
+        "cpu_time": "0:03.52",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 18944,
+        "cpu_time": "0:01.71",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12064,
+        "cpu_time": "3:54.87",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 1.1,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.05",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590552.866463,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1728,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 12368,
+        "cpu_time": "7:37.95",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14240,
+        "cpu_time": "4:06.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 102.3,
+        "rss_kib": 145200,
+        "cpu_time": "0:35.88",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 3.5,
+        "rss_kib": 21648,
+        "cpu_time": "0:07.46",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.58",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12528,
+        "cpu_time": "6:49.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 6352,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 2.0,
+        "rss_kib": 132080,
+        "cpu_time": "0:06.02",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 1.8,
+        "rss_kib": 30176,
+        "cpu_time": "0:00.90",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 4.9,
+        "rss_kib": 179984,
+        "cpu_time": "0:03.56",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 4.0,
+        "rss_kib": 21360,
+        "cpu_time": "0:01.77",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12064,
+        "cpu_time": "3:54.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14384,
+        "cpu_time": "10:27.90",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.06",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590554.963402,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1728,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.96",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14208,
+        "cpu_time": "4:06.95",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 145200,
+        "cpu_time": "0:35.88",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 21680,
+        "cpu_time": "0:07.46",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.59",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "6:49.79",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 6352,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 2.0,
+        "rss_kib": 130896,
+        "cpu_time": "0:06.12",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 29712,
+        "cpu_time": "0:00.91",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 142160,
+        "cpu_time": "0:03.60",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 21760,
+        "cpu_time": "0:01.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14400,
+        "cpu_time": "10:27.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.07",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590557.058999,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1728,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.96",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14208,
+        "cpu_time": "4:06.95",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 145216,
+        "cpu_time": "0:35.88",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 21680,
+        "cpu_time": "0:07.46",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.59",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "6:49.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 6352,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.0,
+        "rss_kib": 130656,
+        "cpu_time": "0:06.12",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 29712,
+        "cpu_time": "0:00.91",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 142480,
+        "cpu_time": "0:03.61",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 21760,
+        "cpu_time": "0:01.81",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.88",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.1,
+        "rss_kib": 14400,
+        "cpu_time": "10:27.91",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.07",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  },
+  {
+    "time": 1790590559.1499488,
+    "processes": [
+      {
+        "pid": 2028,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 1728,
+        "cpu_time": "0:12.78",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 2031,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 2832,
+        "cpu_time": "0:00.74",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 15325,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12352,
+        "cpu_time": "7:37.97",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 24088,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 14208,
+        "cpu_time": "4:06.96",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 45690,
+        "ppid": 38562,
+        "cpu": 0.0,
+        "rss_kib": 3856,
+        "cpu_time": "0:00.33",
+        "command": "node"
+      },
+      {
+        "pid": 45708,
+        "ppid": 45690,
+        "cpu": 0.0,
+        "rss_kib": 6288,
+        "cpu_time": "0:01.16",
+        "command": "node"
+      },
+      {
+        "pid": 45907,
+        "ppid": 45854,
+        "cpu": 0.0,
+        "rss_kib": 145216,
+        "cpu_time": "0:35.88",
+        "command": "node"
+      },
+      {
+        "pid": 45913,
+        "ppid": 45907,
+        "cpu": 0.0,
+        "rss_kib": 21680,
+        "cpu_time": "0:07.46",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/node_modules/.pnpm/@esbuild+darwin-arm64@0.25.12/node_modules/@esbuild/darwin-arm64/bin/esbuild"
+      },
+      {
+        "pid": 46445,
+        "ppid": 1,
+        "cpu": 0.3,
+        "rss_kib": 13952,
+        "cpu_time": "0:33.60",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 58550,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12544,
+        "cpu_time": "6:49.80",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 62069,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 3136,
+        "cpu_time": "0:00.31",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 69968,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 6352,
+        "cpu_time": "0:04.99",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71777,
+        "ppid": 45708,
+        "cpu": 0.0,
+        "rss_kib": 130880,
+        "cpu_time": "0:06.21",
+        "command": "target/debug/orb"
+      },
+      {
+        "pid": 71870,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 29616,
+        "cpu_time": "0:00.91",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+      },
+      {
+        "pid": 71872,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 143200,
+        "cpu_time": "0:03.62",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+      },
+      {
+        "pid": 71879,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 21744,
+        "cpu_time": "0:01.82",
+        "command": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+      },
+      {
+        "pid": 96722,
+        "ppid": 1,
+        "cpu": 0.2,
+        "rss_kib": 12032,
+        "cpu_time": "3:54.89",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 97573,
+        "ppid": 1,
+        "cpu": 0.6,
+        "rss_kib": 14400,
+        "cpu_time": "10:27.94",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      },
+      {
+        "pid": 98103,
+        "ppid": 1,
+        "cpu": 0.0,
+        "rss_kib": 12608,
+        "cpu_time": "8:50.09",
+        "command": "/Users/thomas/work/paloma/sandboxed_sh-orb-client/orb/src-tauri/target/debug/orb"
+      }
+    ]
+  }
+]
