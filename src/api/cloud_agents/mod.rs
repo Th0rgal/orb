@@ -121,6 +121,8 @@ impl Turn {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Execution {
+    #[serde(default)]
+    pub parent_mission_id: Option<Uuid>,
     pub mission_id: Uuid,
     pub request_key: String,
     pub request_signature: String,
@@ -197,6 +199,7 @@ mod tests {
     #[test]
     fn duplicate_message_is_not_a_second_turn() {
         let mut e = Execution {
+            parent_mission_id: None,
             mission_id: Uuid::new_v4(),
             request_key: "create".into(),
             request_signature: "test".into(),

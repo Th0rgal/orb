@@ -70,6 +70,31 @@ pub(crate) const HOST0_GATEWAY_DISCOVERY: &str =
          int(n / 65536) % 256, int(n / 256) % 256, n % 256 \
      }'); ";
 
+fn harness_environment(workspace: &HashMap<String, String>) -> HashMap<String, String> {
+    // Preserve process basics explicitly, then apply workspace/provider config.
+    // Everything else in Core's service environment stays in Core.
+    let mut env = HashMap::new();
+    for key in [
+        "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.into(), value);
+        }
+    }
+    env.extend(workspace.clone());
+    for key in [
+        "JWT_SECRET",
+        "API_SERVER_KEY",
+        "HERMES_SANDBOXED_API_TOKEN",
+        "SANDBOXED_API_TOKEN",
+        "OPEN_AGENT_API_TOKEN",
+        "API_TOKEN",
+    ] {
+        env.remove(key);
+    }
+    env
+}
+
 fn replace_command_env(cmd: &mut Command, env: HashMap<String, String>) {
     cmd.env_clear().envs(env);
 }
@@ -2224,6 +2249,16 @@ impl WorkspaceExec {
         env: HashMap<String, String>,
     ) -> anyhow::Result<Child> {
         let env = self.build_env(env);
+        let (launch_program, launch_args) =
+            crate::control_mcp::launch::wrap_command(program, args, &env);
+        let program = launch_program.as_str();
+        let args = launch_args.as_slice();
+        let host_env = (env.contains_key("SANDBOXED_MCP_WRAPPER")
+            && durable_command_runs_on_api_host(
+                self.workspace.workspace_type,
+                use_nspawn_for_workspace(&self.workspace),
+            ))
+        .then(|| harness_environment(&env));
         // Validate merged inputs: std::process::Command can replace a NUL-
         // containing value internally while remembering a deferred spawn error.
         if program.contains('\0')
@@ -2251,6 +2286,9 @@ impl WorkspaceExec {
                 ConfirmedNoLaunch(error.context("Failed to build workspace command"))
             })?;
 
+        if let Some(host_env) = host_env {
+            replace_command_env(&mut cmd, host_env);
+        }
         spawn_streaming_command(&mut cmd)
     }
 
@@ -2324,6 +2362,10 @@ impl WorkspaceExec {
         env: HashMap<String, String>,
     ) -> anyhow::Result<PtyChild> {
         let mut env = self.build_env(env);
+        let (launch_program, launch_args) =
+            crate::control_mcp::launch::wrap_command(program, args, &env);
+        let program = launch_program.as_str();
+        let args = launch_args.as_slice();
         // A number of CLIs (notably Claude Code) behave differently without TERM.
         env.entry("TERM".to_string())
             .or_insert_with(|| "xterm-256color".to_string());
@@ -2610,6 +2652,16 @@ impl WorkspaceExec {
         if self.workspace.workspace_type == WorkspaceType::Container {
             cmd.env_clear();
         }
+        let sanitized;
+        let env = if env.contains_key("SANDBOXED_MCP_WRAPPER")
+            && self.workspace.workspace_type == WorkspaceType::Host
+        {
+            cmd.env_clear();
+            sanitized = harness_environment(env);
+            &sanitized
+        } else {
+            env
+        };
         for (k, v) in env {
             if !Self::valid_env_key(k) {
                 continue;

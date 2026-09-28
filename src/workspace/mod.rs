@@ -3340,7 +3340,9 @@ fn filter_mcp_configs_for_workspace(
                 // No explicit list → fall back to default MCPs
                 c.default_enabled
             } else {
-                let in_list = workspace_mcps.iter().any(|name| name == &c.name);
+                let in_list = workspace_mcps.iter().any(|name| {
+                    name == &c.name || (name == "orchestrator" && c.name == "sandboxed")
+                });
                 if replace_defaults {
                     // Explicit list is the complete set — only listed MCPs
                     in_list
@@ -3708,11 +3710,10 @@ fn read_managed_opencode_provider_keys(workspace_root: &Path) -> HashSet<String>
 
 /// Prepare a workspace directory for a mission with skill and tool syncing for a specific backend.
 ///
-/// `boss_user_id` is the API user that owns this (boss) mission. When set, it
-/// is injected into the orchestrator MCP environment as `BOSS_USER_ID` so the
-/// MCP mints a service JWT scoped to that user — putting any worker missions
-/// it creates into the same per-user mission store as the boss instead of the
-/// MCP's own implicit `orchestrator-mcp` store.
+/// `boss_user_id` is the authenticated owner used by Core to bootstrap a
+/// mission-scoped MCP grant. Runtime callers require it for native harnesses;
+/// offline workspace/config generation may omit it. The owner's JWT never
+/// enters the generated harness environment.
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_mission_workspace_with_skills_backend(
     workspace: &mut Workspace,
@@ -3722,7 +3723,7 @@ pub async fn prepare_mission_workspace_with_skills_backend(
     backend_id: &str,
     custom_providers: Option<&[AIProvider]>,
     config_profile: Option<&str>,
-    boss_user_id: Option<&str>,
+    boss_user_id: Option<&crate::api::auth::AuthUser>,
     app_working_dir: Option<&Path>,
     allow_git_mutations: bool,
 ) -> anyhow::Result<PathBuf> {
@@ -3751,7 +3752,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
     backend_id: &str,
     custom_providers: Option<&[AIProvider]>,
     config_profile: Option<&str>,
-    boss_user_id: Option<&str>,
+    boss_user_id: Option<&crate::api::auth::AuthUser>,
     app_working_dir: Option<&Path>,
     allow_git_mutations: bool,
     explicit_worktree: Option<&Path>,
@@ -3931,13 +3932,61 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         None
     };
 
+    let unified_mcp = if matches!(
+        backend_id,
+        "codex" | "claudecode" | "opencode" | "gemini" | "grok"
+    ) {
+        if let Some(user) = boss_user_id {
+            let (url, token) = crate::control_mcp::launch::bootstrap(mission_id, user)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            workspace
+                .env_vars
+                .insert("SANDBOXED_MCP_API_URL".into(), url.clone());
+            workspace
+                .env_vars
+                .insert("SANDBOXED_MCP_TOKEN".into(), token.clone());
+            workspace
+                .env_vars
+                .insert("SANDBOXED_SH_MISSION_ID".into(), mission_id.to_string());
+            workspace
+                .env_vars
+                .insert("SANDBOXED_MCP_HARNESS".into(), backend_id.into());
+            let binary = if workspace.workspace_type == WorkspaceType::Container {
+                "/usr/local/bin/sandboxed-mcp".into()
+            } else {
+                crate::util::current_service_companion_binary_path("sandboxed-mcp")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "sandboxed-mcp".into())
+            };
+            workspace
+                .env_vars
+                .insert("SANDBOXED_MCP_WRAPPER".into(), binary);
+            Some((url, token))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Inject mission runtime env into stdio MCP server env vars. Mission-owned
     // fields are authoritative per generated workspace: profile/workspace env
     // must not be allowed to preserve a stale MISSION_ID from another mission.
     let mcp_configs: Vec<McpServerConfig> = mcp_configs
         .into_iter()
+        // The unified server is injected per process by the launcher. Never
+        // persist a mission credential in shared checkout configuration.
+        .filter(|cfg| cfg.name != "sandboxed" || unified_mcp.is_none())
+        .filter(|cfg| !matches!(&cfg.transport, McpTransport::Stdio { command, .. }
+            if cfg.name == "automation-manager" && Path::new(command).file_name()
+                .and_then(|s| s.to_str()).is_some_and(|s| matches!(s, "automation-manager-mcp" | "automation-manager-mcp-dev"))))
         .map(|mut cfg| {
             if let McpTransport::Stdio { ref mut env, .. } = cfg.transport {
+                for key in ["JWT_SECRET", "API_SERVER_KEY", "HERMES_SANDBOXED_API_TOKEN",
+                    "SANDBOXED_API_TOKEN", "OPEN_AGENT_API_TOKEN"] {
+                    env.remove(key);
+                }
                 let previous_mission_id =
                     env.insert("MISSION_ID".to_string(), mission_id.to_string());
                 if let Some(previous) = previous_mission_id.as_deref() {
@@ -3975,22 +4024,14 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
                         format!("http://{}:{}", host_ip, port),
                     );
                 }
-                // Forward JWT_SECRET to trusted internal MCPs so they can
-                // mint service tokens.  Other MCPs (including third-party ones)
-                // must not receive this secret.
-                if cfg.name == "orchestrator" || cfg.name == "automation-manager" {
-                    if let Ok(secret) = std::env::var("JWT_SECRET") {
-                        env.entry("JWT_SECRET".to_string()).or_insert(secret);
+                if cfg.name == "sandboxed" {
+                    for key in ["JWT_SECRET", "API_TOKEN", "SANDBOXED_API_TOKEN"] {
+                        env.remove(key);
                     }
-                }
-                // Tell the orchestrator MCP which user owns the boss
-                // mission so it mints its service JWT as that user. Without
-                // this, worker missions end up in `missions-orchestrator-mcp.db`
-                // and never appear in the boss's `/api/control/missions` list,
-                // breaking the dashboard's worker chips and the WorkerPanel.
-                if cfg.name == "orchestrator" {
-                    if let Some(user_id) = boss_user_id {
-                        env.insert("BOSS_USER_ID".to_string(), user_id.to_string());
+                    if let Some((url, token)) = &unified_mcp {
+                        env.insert("SANDBOXED_MCP_API_URL".into(), url.clone());
+                        env.insert("SANDBOXED_MCP_TOKEN".into(), token.clone());
+                        env.insert("SANDBOXED_MCP_PROFILE".into(), "executor".into());
                     }
                 }
             }
@@ -4541,7 +4582,7 @@ async fn sync_workspace_mcp_binaries(
         "opencode",
         "workspace-mcp",
         "desktop-mcp",
-        "orchestrator-mcp",
+        "sandboxed-mcp",
         "automation-manager-mcp",
     ] {
         if find_host_binary(binary, working_dir).is_none() {

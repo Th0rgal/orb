@@ -1,5 +1,6 @@
 //! Native-owned initial runs: identity and outbox reach disk before spawning.
 //! Existing missions never enter this path; resuming still requires Core.
+use crate::local_origin_confirmed::{self as confirmed, Confirmation, Confirmed};
 use crate::local_origin_wire::{Origin, Snapshot};
 use crate::{local_agents, run_recovery::Connection};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,13 @@ struct Record {
     snapshot: Snapshot,
     acked: u64,
     error: Option<String>,
+    /// Archive, restore and title changes confirmed by Core after synchronization.
+    #[serde(default)]
+    confirmed: Option<Confirmed>,
+}
+/// Local work Core has not accepted yet is the only truth about itself.
+fn pending(r: &Record) -> bool {
+    r.acked < r.snapshot.sequence || r.snapshot.status == "active"
 }
 fn account(c: &Connection) -> Result<PathBuf, String> {
     use base64::Engine;
@@ -79,7 +87,8 @@ fn view(r: &Record) -> Value {
         .filter(|rest| rest.starts_with(char::is_whitespace))
         .map(str::trim)
         .filter(|rest| !rest.is_empty());
-    json!({"id":o.id,"title":o.title,"status":s.status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"model_override":o.model,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_sync_error":r.error})
+    let (status, title) = confirmed::shown(r.confirmed.as_ref(), pending(r), &s.status, &o.title);
+    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"model_override":o.model,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_sync_error":r.error})
 }
 fn workers() -> &'static Mutex<HashSet<PathBuf>> {
     static W: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -240,11 +249,43 @@ pub async fn local_origin_list(connection: Connection) -> Result<Vec<Value>, Str
         let record = read(&path)?;
         // Fully synchronized history is served by Core; retain the disk journal.
         rows.push(view(&record));
-        if record.acked < record.snapshot.sequence || record.snapshot.status == "active" {
+        if pending(&record) {
             start_worker(path, connection.clone()).await;
         }
     }
     Ok(rows)
+}
+/// Remember what Core confirmed, so a restart without Core shows the same list.
+#[tauri::command]
+pub async fn local_origin_confirm(
+    connection: Connection,
+    confirmations: Vec<Confirmation>,
+) -> Result<(), String> {
+    let root = account(&connection)?;
+    if !root.exists() || confirmations.is_empty() {
+        return Ok(());
+    }
+    for confirmation in &confirmations {
+        confirmation.validate()?;
+    }
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let mut record = read(&path)?;
+        let id = record.snapshot.origin.id.to_string();
+        let local_pending = pending(&record);
+        let mut changed = false;
+        for confirmation in confirmations.iter().filter(|c| c.id == id) {
+            changed |= confirmed::merge(&mut record.confirmed, local_pending, confirmation, now);
+        }
+        if changed {
+            write(&path, &record)?;
+        }
+    }
+    Ok(())
 }
 #[tauri::command]
 pub async fn local_origin_launch(
@@ -319,6 +360,7 @@ pub async fn local_origin_launch(
         snapshot,
         acked: 0,
         error: None,
+        confirmed: None,
     };
     write(&path, &record)?;
     crate::local_bindings(
@@ -327,9 +369,42 @@ pub async fn local_origin_launch(
             json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model}),
         ),
     )?;
-    if let Err(error) =
+    // Core must know the durable identity before it can issue this mission's
+    // MCP grant. Registering the snapshot never dispatches a second harness.
+    let started = async {
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| "Cannot initialize Core registration".to_string())?
+            .post(format!(
+                "{}/api/control/local-origins",
+                connection.api_url.trim_end_matches('/')
+            ))
+            .bearer_auth(&connection.token)
+            .json(&record.snapshot)
+            .send()
+            .await
+            .map_err(|_| "Connect to Core before starting a mission with MCP access".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Core refused local mission registration ({})",
+                response.status()
+            ));
+        }
+        let receipt: Value = response
+            .json()
+            .await
+            .map_err(|_| "Invalid Core registration receipt".to_string())?;
+        if receipt["ok"] != true {
+            return Err("Core did not acknowledge the local mission".into());
+        }
+        record.acked = record.snapshot.sequence;
+        write(&path, &record)?;
         crate::routed_opencode::start(request, &connection.api_url, &connection.token).await
-    {
+    }
+    .await;
+    if let Err(error) = started {
         record.snapshot.status = "failed".into();
         record.snapshot.sequence += 1;
         record.snapshot.error = Some(error);

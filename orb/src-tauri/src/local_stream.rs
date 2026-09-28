@@ -160,6 +160,47 @@ impl Output {
         self.publish_activities();
     }
     pub fn native_activity(&self, value: &serde_json::Value) {
+        if matches!(
+            value["type"].as_str(),
+            Some("tool_call" | "tool_call_update")
+        ) {
+            let Some(id) = value["toolCallId"].as_str() else {
+                return;
+            };
+            let id = format!("native:{id}");
+            let mut activities = self.2.lock().unwrap();
+            let index = activities
+                .iter()
+                .position(|a| a.id == id)
+                .unwrap_or_else(|| {
+                    let label = value
+                        .pointer("/rawInput/tool_name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value["toolName"].as_str())
+                        .or_else(|| value["title"].as_str())
+                        .unwrap_or("Tool");
+                    activities.push(Activity::new(id, label.into(), "tool", false));
+                    activities.len() - 1
+                });
+            let activity = &mut activities[index];
+            activity.updated_at = activity_now();
+            if value.get("rawOutput").is_some() || value.get("rawInput").is_some() {
+                activity.detail = Some(
+                    serde_json::to_string_pretty(value)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(8000)
+                        .collect(),
+                );
+            }
+            match value["status"].as_str() {
+                Some("completed") => activity.finish("completed"),
+                Some("failed") => activity.finish("failed"),
+                Some("cancelled") => activity.finish("stopped"),
+                _ => {}
+            }
+            return;
+        }
         let method = value["method"].as_str().unwrap_or("");
         let opencode = value["type"] == "tool_use";
         if !opencode && !matches!(method, "item/started" | "item/completed") {
@@ -558,6 +599,21 @@ mod tests {
         assert_ne!(token, next_token);
         next.unsubscribe(token);
         assert_eq!(next.0.lock().unwrap().listeners.len(), 1);
+    }
+
+    #[test]
+    fn grok_tool_updates_preserve_mcp_identity_until_terminal_receipt() {
+        let output = Output::default();
+        output.native_activity(&serde_json::json!({"type":"tool_call","toolCallId":"call-1","toolName":"use_tool","status":"pending","rawInput":{"tool_name":"sandboxed__get_capabilities","tool_input":{}}}));
+        output.native_activity(
+            &serde_json::json!({"type":"tool_call_update","toolCallId":"call-1","content":[]}),
+        );
+        assert!(!output.activities()[0].done);
+        output.native_activity(&serde_json::json!({"type":"tool_call_update","toolCallId":"call-1","status":"completed","rawOutput":{"role":"executor"}}));
+        let rows = output.activities();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "sandboxed__get_capabilities");
+        assert!(rows[0].done && !rows[0].failed);
     }
     #[test]
     fn native_tools_preserve_identity_and_terminal_errors() {

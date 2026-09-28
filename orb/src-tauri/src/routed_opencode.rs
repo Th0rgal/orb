@@ -19,8 +19,9 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
 }
 
 pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result<(), String> {
+    let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
     if request.harness != "opencode" {
-        return local_agents::local_agents_start(request);
+        return local_agents::start_with_env(request, &launch_env);
     }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -80,13 +81,11 @@ pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result
     let config = configuration(base, &route, &request.id);
     request.model = Some(format!("orb-routing/{route}"));
     let mission = request.id.clone();
-    let started = local_agents::start_with_env(
-        request,
-        &[
-            ("OPENCODE_CONFIG_CONTENT".into(), config.to_string()),
-            ("ORB_ROUTING_KEY".into(), secret.into()),
-        ],
-    );
+    launch_env.extend([
+        ("OPENCODE_CONFIG_CONTENT".into(), config.to_string()),
+        ("ORB_ROUTING_KEY".into(), secret.into()),
+    ]);
+    let started = local_agents::start_with_env(request, &launch_env);
     let generation = local_agents::native_generation(&mission);
     let (base, token) = (base.to_string(), token.to_string());
     let failed = started.is_err();

@@ -69,6 +69,22 @@ Install the node binary on each runner:
 sudo install -m 0755 target/debug/sandboxed-node /usr/local/bin/sandboxed-node
 ```
 
+## Native goal lifetime (protocol 5)
+
+Core submits native Codex `/goal` harnesses with `long_running: true`.
+These jobs have no node-wide absolute deadline when `timeout_secs` is absent:
+the native goal retains its objective, budget, usage and stop conditions.
+An explicit timeout still applies. Ordinary commands and Lean builds continue
+to use `SANDBOXED_NODE_MAX_JOB_SECS`; old payloads default to bounded execution.
+Cancellation, capacity accounting and process/cgroup containment are unchanged.
+Core checks the target's heartbeat before dispatch and refuses native goals on
+nodes below protocol 5 rather than silently reverting to a bounded lifetime.
+Upgrade idle nodes before resuming goals; node restarts still interrupt jobs.
+
+A node timeout is reported as `remote_node_timeout`, not a native goal stop.
+Recover an interrupted goal with `resume_mission` on its existing mission ID;
+never replace its native thread or reset its budget to work around a stop.
+
 ## Node Configuration
 
 Use one distinct secret per node. Do not paste the secret into logs or docs.
@@ -899,3 +915,30 @@ initial dispatch. If the node or native session is missing, the API returns
 `supersedes_mission_id` pointing to the original. Do not silently resume
 legacy remote work locally. A CLI exit alone is insufficient for goal
 success: an `end` event with `end_turn` is also required.
+
+## Native Codex goals after a machine transfer
+
+Remote Codex now uses `scripts/remote_codex_app_server.py`, embedded in the node
+job by Core. It resumes the recorded thread through `codex app-server` with the
+`goals` feature; it does not pass `/goal` as plain text to `codex exec`.
+The native goal record owns objective, usage, budget and continuation. Resume
+sends only its active status, preserving the existing counters. Missing goals,
+thread/cwd mismatches, exhausted budgets and objective mismatches fail explicitly.
+There is no fresh-thread fallback or host-driven iteration loop.
+
+A completed turn is not a completed goal. Core consumes explicit native goal
+status and iteration receipts. A stopped or unconfirmed Codex goal is resumable
+and blocked, not successful. Node disconnects cannot fabricate completion.
+
+Incident evidence: mission `ebb2f1fe-8d03-4cc0-b966-68b3cb86077f` emitted a false
+Core `goal_status=complete` at 2026-09-26 15:24:49 UTC from an exec turn exit,
+while its native goal remained active. The native thread is
+`01a0de07-cadd-7a61-b0c5-6aa62dfae607`; its existing usage was preserved on recovery.
+Regression tests cover multi-turn continuation, unchanged native counters,
+budget exhaustion, missing native goal, and foreign-thread notifications.
+
+Live verification on 2026-09-26: canary `dec3eeff-1d53-42e2-a7ea-f2c2345e2d78`
+produced native iterations 1 and 2, then explicit `complete`. The affected
+mission resumed at 16:04:27 UTC on old-agent with unchanged native thread and
+goal ID; Core observed native active status and new tool events. Guarded deployment
+waited for other live work to finish and did not use the force override.

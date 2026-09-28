@@ -532,6 +532,19 @@ pub async fn update_backend_config(
                     "browser must be chromium, firefox, or webkit".to_string(),
                 ));
             }
+            let launch_mode = settings
+                .get("launch_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("persistent");
+            if !matches!(launch_mode, "persistent" | "direct")
+                || (launch_mode == "direct" && browser != "chromium")
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "launch_mode must be persistent or direct; direct requires chromium"
+                        .to_string(),
+                ));
+            }
             let model = settings
                 .get("model")
                 .and_then(|value| value.as_str())
@@ -609,6 +622,7 @@ pub async fn update_backend_config(
                 "driver_path": driver_path,
                 "python_path": python_path,
                 "browser": browser,
+                "launch_mode": launch_mode,
                 "headless": headless,
                 "display": display,
                 "timeout_secs": timeout_secs,

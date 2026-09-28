@@ -4,9 +4,13 @@ mod agent_software;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 
+#[cfg(test)]
+mod live_mcp_tests;
 mod local_origin;
+mod local_origin_confirmed;
 #[path = "../../../shared/local_origin.rs"]
 mod local_origin_wire;
+mod mcp_launch;
 #[path = "../../../shared/project_context.rs"]
 mod project_context_store;
 mod run_recovery;
@@ -140,6 +144,7 @@ fn main() {
             bindings::local_bindings_unsubscribe,
             local_origin::local_origin_launch,
             local_origin::local_origin_list,
+            local_origin::local_origin_confirm,
             local_origin::local_origin_disconnect,
             run_recovery::local_run_launch,
             run_recovery::local_run_reconcile,

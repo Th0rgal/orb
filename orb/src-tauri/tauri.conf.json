@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "md.thomas.orb",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "python3 scripts/build-mcp.py && pnpm dev",
     "devUrl": "http://localhost:1430",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "python3 scripts/build-mcp.py && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -43,6 +43,9 @@
     ],
     "macOS": {
       "entitlements": "Entitlements.plist"
-    }
+    },
+    "externalBin": [
+      "binaries/sandboxed-mcp"
+    ]
   }
 }

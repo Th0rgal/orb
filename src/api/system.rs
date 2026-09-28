@@ -765,11 +765,15 @@ async fn get_grok_info() -> ComponentInfo {
 }
 
 async fn get_assistant_mcp_info() -> ComponentInfo {
-    match Command::new("assistant-mcp")
-        .arg("--version")
-        .output()
-        .await
-    {
+    let path = which_assistant_mcp().await;
+    let probe = match path.as_deref() {
+        Some(binary) => Command::new(binary).arg("--version").output().await,
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "MCP companion is not installed",
+        )),
+    };
+    match probe {
         Ok(output) if output.status.success() => {
             let version = extract_version_token(&String::from_utf8_lossy(&output.stdout));
 
@@ -778,7 +782,7 @@ async fn get_assistant_mcp_info() -> ComponentInfo {
                 version,
                 installed: true,
                 update_available: None,
-                path: which_assistant_mcp().await,
+                path: path.clone(),
                 source_path: None,
                 status: ComponentStatus::Ok,
             }
@@ -788,7 +792,7 @@ async fn get_assistant_mcp_info() -> ComponentInfo {
             version: None,
             installed: false,
             update_available: None,
-            path: which_assistant_mcp().await,
+            path,
             source_path: None,
             status: ComponentStatus::NotInstalled,
         },
@@ -1182,7 +1186,7 @@ fn hermes_config_yaml(
     api_key: &str,
     mcp_command: &str,
     api_url: &str,
-    jwt_secret: &str,
+    mcp_credential_file: &str,
     user_id: &str,
     default_workspace_id: &str,
 ) -> String {
@@ -1207,14 +1211,14 @@ terminal:
 mcp_servers:
   sandboxed_assistant:
     command: {mcp_command}
+    args: ['--profile', 'coordinator']
     env:
       HERMES_SANDBOXED_API_URL: {api_url}
-      JWT_SECRET: {jwt_secret}
+      SANDBOXED_MCP_TOKEN_FILE: {mcp_credential_file}
       HERMES_ASSISTANT_USER_ID: {user_id}
       HERMES_DEFAULT_WORKSPACE_ID: {default_workspace_id}
-    # Ask turns can make multiple sequential LLM/tool calls. Keep the MCP
-    # request alive long enough for the synchronous /ask endpoint to finish.
-    timeout: 600
+    # Mutations return durable receipts; long work continues on Core.
+    timeout: 60
     connect_timeout: 15
     tools:
       include:
@@ -1233,7 +1237,7 @@ display:
         api_key = yaml_squote(api_key),
         mcp_command = yaml_squote(mcp_command),
         api_url = yaml_squote(api_url),
-        jwt_secret = yaml_squote(jwt_secret),
+        mcp_credential_file = yaml_squote(mcp_credential_file),
         user_id = yaml_squote(user_id),
         default_workspace_id = yaml_squote(default_workspace_id),
         tools_include = crate::hermes_tools::yaml_include_items("        "),
@@ -1588,87 +1592,6 @@ fn upsert_env_lines(contents: &str, updates: &[(&str, &str)]) -> String {
         out.push_str(&env_line(key, value));
     }
     out
-}
-
-fn upsert_hermes_mcp_command(contents: &str, command: &str) -> String {
-    let mut output = String::new();
-    let mut in_sandboxed_assistant = false;
-    let mut replaced = false;
-
-    for line in contents.lines() {
-        if line == "  sandboxed_assistant:" {
-            in_sandboxed_assistant = true;
-        } else if in_sandboxed_assistant
-            && line.starts_with("  ")
-            && !line.starts_with("    ")
-            && !line.trim().is_empty()
-        {
-            in_sandboxed_assistant = false;
-        }
-
-        if in_sandboxed_assistant && line.starts_with("    command:") {
-            output.push_str("    command: ");
-            output.push_str(&yaml_squote(command));
-            output.push('\n');
-            replaced = true;
-        } else {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-
-    if replaced {
-        output
-    } else {
-        contents.to_string()
-    }
-}
-
-/// Keep already-adopted Hermes installations on the companion binary owned
-/// by this sandboxed.sh environment. This migration runs on every deploy so a
-/// dev service cannot keep spawning the historical production connector.
-async fn migrate_hermes_assistant_mcp_command(
-    runtime_name: &str,
-    command: &str,
-) -> Result<bool, String> {
-    let updates = [("HERMES_ASSISTANT_MCP_COMMAND", command)];
-    let mut planned_writes = Vec::new();
-    for env_path in hermes_env_paths(runtime_name) {
-        let Ok(contents) = tokio::fs::read_to_string(&env_path).await else {
-            continue;
-        };
-        let updated = upsert_env_lines(&contents, &updates);
-        if updated != contents {
-            planned_writes.push((env_path, contents, updated));
-        }
-    }
-
-    let config_path = format!("/var/lib/{runtime_name}/config.yaml");
-    if let Ok(contents) = tokio::fs::read_to_string(&config_path).await {
-        let updated = upsert_hermes_mcp_command(&contents, command);
-        if updated != contents {
-            planned_writes.push((config_path, contents, updated));
-        }
-    }
-
-    for (committed, (path, _, updated)) in planned_writes.iter().enumerate() {
-        if let Err(error) = write_private_file(path, updated).await {
-            let mut restore_errors = Vec::new();
-            for (restore_path, original, _) in planned_writes.iter().take(committed) {
-                if let Err(restore_error) = write_private_file(restore_path, original).await {
-                    restore_errors.push(restore_error);
-                }
-            }
-            let restore_suffix = if restore_errors.is_empty() {
-                String::new()
-            } else {
-                format!("; rollback errors: {}", restore_errors.join("; "))
-            };
-            return Err(format!("{error}{restore_suffix}"));
-        }
-    }
-
-    Ok(!planned_writes.is_empty())
 }
 
 fn generate_hermes_remote_key() -> String {
@@ -2034,7 +1957,18 @@ async fn adopt_hermes_assistant(
     let proxy_key = ensure_hermes_proxy_key(&state, &env_path, runtime_name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
+    let mcp_credential_file = format!("/var/lib/{runtime_name}/mcp-credential");
+    let mcp_session = crate::control_mcp::gateway::session(
+        State(state.clone()),
+        Extension(user.clone()),
+        Json(crate::control_mcp::gateway::SessionRequest {
+            project: None,
+            role: crate::control_mcp::Role::Coordinator,
+            mission_id: None,
+        }),
+    )
+    .await?
+    .0;
     let user_id = user.id.clone();
     let default_workspace_id = channel
         .default_workspace_id
@@ -2046,8 +1980,8 @@ async fn adopt_hermes_assistant(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let home_channel = choose_telegram_home_channel(&channel.allowed_chat_ids, &chat_mappings);
-    let assistant_mcp_command = current_service_companion_binary_path("assistant-mcp")
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/assistant-mcp"))
+    let assistant_mcp_command = current_service_companion_binary_path("sandboxed-mcp")
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/sandboxed-mcp"))
         .to_string_lossy()
         .to_string();
 
@@ -2064,6 +1998,15 @@ async fn adopt_hermes_assistant(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    write_private_file(
+        &mcp_credential_file,
+        mcp_session["token"].as_str().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Missing MCP session credential".into(),
+        ))?,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut env = String::new();
     env.push_str(&env_line("HOME", &format!("/var/lib/{runtime_name}")));
     env.push_str(&env_line(
@@ -2073,8 +2016,7 @@ async fn adopt_hermes_assistant(
     env.push_str("HERMES_ACCEPT_HOOKS=1\n");
     env.push_str("HERMES_INFERENCE_PROVIDER=custom\n");
     env.push_str(&env_line("HERMES_SANDBOXED_API_URL", &api_url));
-    env.push_str("HERMES_SANDBOXED_API_TOKEN=\n");
-    env.push_str(&env_line("JWT_SECRET", &jwt_secret));
+    env.push_str(&env_line("SANDBOXED_MCP_TOKEN_FILE", &mcp_credential_file));
     env.push_str(&env_line("HERMES_ASSISTANT_USER_ID", &user_id));
     env.push_str(&env_line(
         "HERMES_DEFAULT_WORKSPACE_ID",
@@ -2134,7 +2076,7 @@ async fn adopt_hermes_assistant(
             &proxy_key,
             &assistant_mcp_command,
             &api_url,
-            &jwt_secret,
+            &mcp_credential_file,
             &user_id,
             &default_workspace_id,
         ),
@@ -2547,12 +2489,10 @@ async fn which_grok() -> Option<String> {
 
 /// Find the path to the Hermes assistant MCP connector.
 async fn which_assistant_mcp() -> Option<String> {
-    if let Some(path) = current_service_companion_binary_path("assistant-mcp") {
-        if path.exists() {
-            return Some(path.to_string_lossy().to_string());
-        }
+    if let Some(path) = current_service_companion_binary_path("sandboxed-mcp") {
+        return path.exists().then(|| path.to_string_lossy().to_string());
     }
-    which_binary("assistant-mcp", &["/usr/local/bin/assistant-mcp"]).await
+    which_binary("sandboxed-mcp", &["/usr/local/bin/sandboxed-mcp"]).await
 }
 
 /// Find the path to the OpenCode binary.
@@ -3043,7 +2983,7 @@ fn stream_sandboxed_update(
         yield sse("log", "Building sandboxed.sh (this may take a few minutes)...", Some(20));
 
         match Command::new("bash")
-            .args(["-c", "source /root/.cargo/env && cargo build --bin sandboxed-sh --bin workspace-mcp --bin desktop-mcp --bin assistant-mcp"])
+            .args(["-c", "source /root/.cargo/env && cargo build --bin sandboxed-sh --bin workspace-mcp --bin desktop-mcp --bin sandboxed-mcp"])
             .current_dir(repo_path)
             .output()
             .await
@@ -3122,7 +3062,7 @@ fn stream_sandboxed_update(
         let companion_plans: Vec<(&str, String, String)> = [
             "workspace-mcp",
             "desktop-mcp",
-            "assistant-mcp",
+            "sandboxed-mcp",
         ]
         .into_iter()
         .map(|binary| {
@@ -3254,27 +3194,7 @@ fn stream_sandboxed_update(
             }
         }
 
-        let assistant_mcp_dest = companion_plans
-            .iter()
-            .find(|(binary, _, _)| *binary == "assistant-mcp")
-            .map(|(_, _, destination)| destination.clone())
-            .expect("assistant-mcp plan");
-        let hermes_runtime = assistant_runtime_name(&state.config);
-        match migrate_hermes_assistant_mcp_command(hermes_runtime, &assistant_mcp_dest).await {
-            Ok(true) => {
-                yield sse("log", format!("Migrated {} to {}", hermes_runtime, assistant_mcp_dest), Some(95));
-            }
-            Ok(false) => {}
-            Err(error) => {
-                rollback_deployed_binary(&install_dest, &main_backup, &main_rollback).await;
-                for (rollback_dest, rollback_backup, rollback) in &companion_rollbacks {
-                    rollback_deployed_binary(rollback_dest, rollback_backup, rollback).await;
-                }
-                yield sse("error", format!("Hermes MCP command migration failed: {}", error), None);
-                let _ = Command::new("systemctl").args(["start", &service_name]).output().await;
-                return;
-            }
-        }
+        yield sse("log", "Unified MCP installed; migrate Hermes with its scoped credential before restarting Hermes", Some(95));
 
         // The generation is now complete. Retain the same bounded rollback
         // history as the regular deploy endpoint; self-update used to leave a
@@ -3816,8 +3736,7 @@ fn stream_deploy(
         // rename it on install (e.g. `sandboxed-sh-prod` or `sandboxed-sh-dev`).
         // Same for MCP binaries.
         const MAIN_CARGO_BIN: &str = "sandboxed-sh";
-        const MCP_CARGO_BIN: &str = "orchestrator-mcp";
-        const ASSISTANT_MCP_CARGO_BIN: &str = "assistant-mcp";
+        const MCP_CARGO_BIN: &str = "sandboxed-mcp";
         const PALOMA_CARGO_BIN: &str = "palomactl";
         const CHATGPT_UI_DRIVER: &str = "chatgpt_ui_driver.py";
         let install_dest_main = current_exe.to_string_lossy().to_string();
@@ -3827,10 +3746,6 @@ fn stream_deploy(
         let install_dest_mcp = service_companion_binary_path(&current_exe, MCP_CARGO_BIN)
             .to_string_lossy()
             .to_string();
-        let install_dest_assistant_mcp =
-            service_companion_binary_path(&current_exe, ASSISTANT_MCP_CARGO_BIN)
-                .to_string_lossy()
-                .to_string();
         let scoped_paloma = service_companion_binary_path(&current_exe, PALOMA_CARGO_BIN);
         let install_dest_paloma = if scoped_paloma.file_name().and_then(|v| v.to_str())
             != Some(PALOMA_CARGO_BIN)
@@ -3879,10 +3794,10 @@ fn stream_deploy(
             install_dest_chatgpt_ui_driver.to_string_lossy().to_string();
 
         if !req.skip_build {
-            yield sse("log", format!("Building {} + {} + {} + {} (cargo build, debug)", MAIN_CARGO_BIN, MCP_CARGO_BIN, ASSISTANT_MCP_CARGO_BIN, PALOMA_CARGO_BIN), Some(25));
+            yield sse("log", format!("Building {} + {} + {} (cargo build, debug)", MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN), Some(25));
             let build_cmd = format!(
-                "source /root/.cargo/env 2>/dev/null; cargo build --bin {} --bin {} --bin {} --bin {}",
-                MAIN_CARGO_BIN, MCP_CARGO_BIN, ASSISTANT_MCP_CARGO_BIN, PALOMA_CARGO_BIN
+                "source /root/.cargo/env 2>/dev/null; cargo build --bin {} --bin {} --bin {}",
+                MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN
             );
             match Command::new("bash")
                 .args(["-c", &build_cmd])
@@ -3914,10 +3829,6 @@ fn stream_deploy(
         // clean refusal instead of a half-applied deploy.
         let src_main = repo_path.join("target").join("debug").join(MAIN_CARGO_BIN);
         let src_mcp = repo_path.join("target").join("debug").join(MCP_CARGO_BIN);
-        let src_assistant_mcp = repo_path
-            .join("target")
-            .join("debug")
-            .join(ASSISTANT_MCP_CARGO_BIN);
         let src_paloma = repo_path.join("target").join("debug").join(PALOMA_CARGO_BIN);
         let src_chatgpt_ui_driver = repo_path.join("scripts").join(CHATGPT_UI_DRIVER);
         if !src_main.exists() {
@@ -3926,10 +3837,6 @@ fn stream_deploy(
         }
         if !src_mcp.exists() {
             yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_mcp.display()), None);
-            return;
-        }
-        if !src_assistant_mcp.exists() {
-            yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_assistant_mcp.display()), None);
             return;
         }
         if !src_paloma.exists() {
@@ -4039,7 +3946,7 @@ fn stream_deploy(
                 // worst possible half-applied state.
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Install of orchestrator-mcp failed (main binary rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
+                yield sse("error", format!("Install of sandboxed-mcp failed (main binary rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
                 return;
             }
             Err(e) => {
@@ -4050,51 +3957,12 @@ fn stream_deploy(
             }
         }
 
-        yield sse("log", format!("Installing {} → {}", src_assistant_mcp.display(), install_dest_assistant_mcp), Some(85));
-        let bkp_assistant_mcp = format!("{}.pre-deploy-{}", install_dest_assistant_mcp, sha);
-        let rollback_assistant_mcp =
-            match prepare_deploy_backup(&install_dest_assistant_mcp, &bkp_assistant_mcp).await {
-                Ok(rollback) => rollback,
-                Err(error) => {
-                    rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                    rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                    yield sse("error", error, None);
-                    return;
-                }
-            };
-        let install_assistant_mcp = Command::new("install")
-            .args([
-                "-m", "0755",
-                src_assistant_mcp.to_string_lossy().as_ref(),
-                &install_dest_assistant_mcp,
-            ])
-            .output()
-            .await;
-        match install_assistant_mcp {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Install of assistant-mcp failed (main/orchestrator binaries rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
-                return;
-            }
-            Err(e) => {
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("install command error for assistant-mcp (main/orchestrator rolled back): {}", e), None);
-                return;
-            }
-        }
-
         // The MCP binaries we just replaced are still being executed by the
         // Hermes agents that spawned them: those processes hold the old inode
         // and are NOT recycled by this service's restart, because they are not
         // in its cgroup. See `recycle_stale_companion_processes`.
         for (binary, destination) in [
-            ("assistant-mcp", &install_dest_assistant_mcp),
-            ("orchestrator-mcp", &install_dest_mcp),
+            ("sandboxed-mcp", &install_dest_mcp),
         ] {
             let recycled = recycle_stale_companion_processes(binary, destination).await;
             if recycled > 0 {
@@ -4107,7 +3975,6 @@ fn stream_deploy(
         let rollback_paloma = match prepare_deploy_backup(&install_dest_paloma, &bkp_paloma).await {
             Ok(rollback) => rollback,
             Err(error) => {
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse("error", error, None);
@@ -4126,7 +3993,6 @@ fn stream_deploy(
             Ok(o) if o.status.success() => {}
             Ok(o) => {
                 rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse("error", format!("Install of palomactl failed (service binaries rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
@@ -4134,7 +4000,6 @@ fn stream_deploy(
             }
             Err(e) => {
                 rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse("error", format!("install command error for palomactl (service binaries rolled back): {}", e), None);
@@ -4161,12 +4026,6 @@ fn stream_deploy(
                 Err(error) => {
                     rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
                         .await;
-                    rollback_deployed_binary(
-                        &install_dest_assistant_mcp,
-                        &bkp_assistant_mcp,
-                        &rollback_assistant_mcp,
-                    )
-                    .await;
                     rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                     rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                     yield sse("error", error, None);
@@ -4183,12 +4042,6 @@ fn stream_deploy(
                 .await;
                 rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
                     .await;
-                rollback_deployed_binary(
-                    &install_dest_assistant_mcp,
-                    &bkp_assistant_mcp,
-                    &rollback_assistant_mcp,
-                )
-                .await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse(
@@ -4223,12 +4076,6 @@ fn stream_deploy(
                 .await;
                 rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
                     .await;
-                rollback_deployed_binary(
-                    &install_dest_assistant_mcp,
-                    &bkp_assistant_mcp,
-                    &rollback_assistant_mcp,
-                )
-                .await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse(
@@ -4250,12 +4097,6 @@ fn stream_deploy(
                 .await;
                 rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
                     .await;
-                rollback_deployed_binary(
-                    &install_dest_assistant_mcp,
-                    &bkp_assistant_mcp,
-                    &rollback_assistant_mcp,
-                )
-                .await;
                 rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
                 rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
                 yield sse(
@@ -4270,34 +4111,16 @@ fn stream_deploy(
             }
         }
 
-        let hermes_runtime = assistant_runtime_name(&state.config);
-        match migrate_hermes_assistant_mcp_command(hermes_runtime, &install_dest_assistant_mcp).await {
-            Ok(true) => {
-                yield sse("log", format!("Migrated {} to {}", hermes_runtime, install_dest_assistant_mcp), Some(88));
-            }
-            Ok(false) => {}
-            Err(error) => {
-                rollback_deployed_binary(
-                    &install_dest_chatgpt_ui_driver,
-                    &bkp_chatgpt_ui_driver,
-                    &rollback_chatgpt_ui_driver,
-                )
-                .await;
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
-                rollback_deployed_binary(&install_dest_assistant_mcp, &bkp_assistant_mcp, &rollback_assistant_mcp).await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Hermes MCP command migration failed; service binaries rolled back: {}", error), None);
-                return;
-            }
-        }
+        // The first unified rollout must provision a scoped coordinator
+        // credential before changing Hermes's command. The operator cutover
+        // performs that exchange after this Core version is serving requests.
+        yield sse("log", "Unified MCP installed; provision the Hermes scoped session and migrate its configuration before restarting Hermes", Some(88));
         yield sse(
             "log",
             format!(
-                "Backups: {}, {}, {}, {}, {}",
+                "Backups: {}, {}, {}, {}",
                 bkp_main,
                 bkp_mcp,
-                bkp_assistant_mcp,
                 bkp_paloma,
                 bkp_chatgpt_ui_driver
             ),
@@ -4314,7 +4137,6 @@ fn stream_deploy(
         for dest in [
             &install_dest_main,
             &install_dest_mcp,
-            &install_dest_assistant_mcp,
             &install_dest_paloma,
             &install_dest_chatgpt_ui_driver,
         ] {
@@ -5728,12 +5550,12 @@ mod tests {
         hermes_uses_native_codex, install_versioned_binary_as, is_safe_repo_path,
         normalize_repo_path, prepare_deploy_backup, prune_deploy_backups, rollback_deployed_binary,
         sandboxed_service_name_from_path, select_repo_path, systemd_service_component_from_states,
-        upsert_hermes_mcp_command, ComponentStatus, DebounceDecision, DeployRefusal,
-        DeployRollback, DEPLOY_DEBOUNCE_SECS, HERMES_SERVICE_DRAIN_DROP_IN,
+        ComponentStatus, DebounceDecision, DeployRefusal, DeployRollback, DEPLOY_DEBOUNCE_SECS,
+        HERMES_SERVICE_DRAIN_DROP_IN,
     };
 
     #[test]
-    fn generated_hermes_config_allows_long_ask_turns_and_workspace_management() {
+    fn generated_hermes_config_uses_scoped_async_coordinator() {
         let yaml = hermes_config_yaml(
             "hermes-test",
             "model",
@@ -5746,27 +5568,19 @@ mod tests {
             "00000000-0000-0000-0000-000000000000",
         );
 
-        assert!(yaml.contains("    timeout: 600\n"));
+        assert!(yaml.contains("    timeout: 60\n"));
+        assert!(!yaml.contains("JWT_SECRET"));
+        assert!(yaml.contains("SANDBOXED_MCP_TOKEN_FILE"));
         assert!(!yaml.contains("    timeout: 120\n"));
         // The generated allowlist is the canonical one — every assistant-mcp
         // tool, including the ones that had drifted out of it
         // (get_chatgpt_ui_pool_status, acknowledge_mission, workspace jobs).
-        for tool in crate::hermes_tools::HERMES_ASSISTANT_TOOL_ALLOWLIST {
+        for tool in crate::hermes_tools::coordinator_tools() {
             assert!(
                 yaml.contains(&format!("        - {tool}\n")),
                 "generated Hermes config missing {tool}"
             );
         }
-    }
-
-    #[test]
-    fn hermes_mcp_command_migration_only_updates_sandboxed_assistant() {
-        let yaml = "mcp_servers:\n  other:\n    command: '/usr/bin/other'\n  sandboxed_assistant:\n    command: '/usr/local/bin/assistant-mcp'\n    timeout: 600\nmodel:\n  default: test\n";
-        let updated = upsert_hermes_mcp_command(yaml, "/usr/local/bin/assistant-mcp-dev");
-        assert!(updated.contains("other:\n    command: '/usr/bin/other'"));
-        assert!(updated
-            .contains("sandboxed_assistant:\n    command: '/usr/local/bin/assistant-mcp-dev'"));
-        assert!(!updated.contains("command: '/usr/local/bin/assistant-mcp'\n"));
     }
 
     #[test]

@@ -79,6 +79,7 @@ struct Settings {
     python_path: String,
     profile_dirs: Vec<PathBuf>,
     browser: String,
+    launch_mode: String,
     proxy_server: Option<String>,
     display: Option<String>,
     timeout: Duration,
@@ -348,6 +349,14 @@ fn validated_settings(app_working_dir: &Path) -> Result<Settings, String> {
     if !matches!(browser.as_str(), "chromium" | "firefox" | "webkit") {
         return Err("chatgpt_ui browser must be chromium, firefox, or webkit".to_string());
     }
+    let launch_mode = get_backend_string_setting("chatgpt_ui", "launch_mode")
+        .unwrap_or_else(|| "persistent".to_string());
+    if !matches!(launch_mode.as_str(), "persistent" | "direct") {
+        return Err("chatgpt_ui launch_mode must be persistent or direct".to_string());
+    }
+    if launch_mode == "direct" && browser != "chromium" {
+        return Err("chatgpt_ui direct launch requires chromium".to_string());
+    }
     let proxy_server = get_backend_string_setting("chatgpt_ui", "proxy_server")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -370,6 +379,7 @@ fn validated_settings(app_working_dir: &Path) -> Result<Settings, String> {
             .unwrap_or_else(|| "python3".to_string()),
         profile_dirs,
         browser,
+        launch_mode,
         proxy_server,
         display,
         timeout: Duration::from_secs(timeout_secs),
@@ -498,6 +508,8 @@ async fn run_recovery_probe(
         .arg(profile_dir)
         .arg("--browser")
         .arg(&settings.browser)
+        .arg("--launch-mode")
+        .arg(&settings.launch_mode)
         .arg("--headless")
         .arg(if settings.headless { "true" } else { "false" });
     if let Some(proxy_server) = settings.proxy_server.as_deref() {
@@ -931,6 +943,8 @@ async fn drive_once(
         .arg(profile_dir)
         .arg("--browser")
         .arg(&settings.browser)
+        .arg("--launch-mode")
+        .arg(&settings.launch_mode)
         .arg("--headless")
         .arg(if settings.headless { "true" } else { "false" });
     if let Some(proxy_server) = settings.proxy_server.as_deref() {

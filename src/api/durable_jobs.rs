@@ -29,6 +29,9 @@ use crate::workspace::WorkspaceType;
 use crate::workspace_exec::WorkspaceExec;
 
 const PIDLESS_START_GRACE_SECS: i64 = 30;
+#[path = "durable_jobs_remote.rs"]
+mod remote;
+pub use remote::Placement as RemoteJobPlacement;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +45,8 @@ pub enum DurableJobStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurableJob {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteJobPlacement>,
     pub id: Uuid,
     pub command: String,
     pub cwd: String,
@@ -262,6 +267,30 @@ async fn authorize_start(
             "workspace does not belong to the caller mission",
         ));
     }
+    crate::api::control::machine_transfer::guard(&control.mission_store, mission_id)
+        .await
+        .map_err(|message| err(StatusCode::CONFLICT, message))?;
+    if crate::api::control::client_placement::is_tagged(&mission.project.tags) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Desktop-owned workspace jobs require client execution; no Core process was started",
+        ));
+    }
+    if let Some(placement) = crate::api::control::remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        mission_id,
+    )
+    .await
+    .map_err(|message| err(StatusCode::CONFLICT, message))?
+    {
+        if state.config.remote_nodes.node(&placement.node_id).is_none() {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Remote workspace jobs require node execution; no Core process was started",
+            ));
+        }
+    }
     Ok((workspace_id, mission_id, mission.working_directory))
 }
 
@@ -447,7 +476,7 @@ fn resolve_cwd(base: &Path, raw: Option<&str>) -> Result<PathBuf, String> {
     Ok(cwd)
 }
 
-fn resolve_mission_job_cwd(
+pub(crate) fn resolve_mission_job_cwd(
     workspace: &crate::workspace::Workspace,
     mission_id: Uuid,
     mission_working_directory: Option<&str>,
@@ -587,8 +616,18 @@ async fn write_job(state: &AppState, job: &DurableJob) -> Result<DurableJob, Str
     let job = merge_job_for_write(current, job.clone());
     let bytes = serde_json::to_vec_pretty(&job)
         .map_err(|e| format!("failed to serialize job registry entry: {}", e))?;
-    std::fs::write(path, bytes)
-        .map_err(|e| format!("failed to write job registry entry: {}", e))?;
+    // Readers and crash recovery must see either complete receipt, never a
+    // truncated JSON file that could be mistaken for a missing submission.
+    use std::io::Write as _;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("failed to prepare job registry entry: {e}"))?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|e| format!("failed to write job registry entry: {e}"))?;
+    temporary
+        .persist(&path)
+        .map_err(|e| format!("failed to publish job registry entry: {e}"))?;
     Ok(job)
 }
 
@@ -598,7 +637,8 @@ pub(crate) async fn job_status_for_reconcile(
     state: &AppState,
     id: Uuid,
 ) -> Option<DurableJobStatus> {
-    read_job(state, id).await.ok().map(|job| job.status)
+    let job = read_job(state, id).await.ok()?;
+    Some(refresh_job(state, job).await.status)
 }
 
 async fn read_job(state: &AppState, id: Uuid) -> Result<DurableJob, String> {
@@ -970,6 +1010,9 @@ fn terminate_process_group(_pid: u32) {}
 fn force_kill_process_group(_pid: u32) {}
 
 async fn refresh_job(state: &AppState, mut job: DurableJob) -> DurableJob {
+    if job.remote.is_some() {
+        return remote::refresh(state, job).await;
+    }
     if matches!(
         job.status,
         DurableJobStatus::Running | DurableJobStatus::Unknown
@@ -1093,6 +1136,19 @@ pub async fn start_job(
     }
     let (workspace_id, started_by_mission_id, mission_working_directory) =
         authorize_start(&state, &user, req.workspace_id, req.started_by_mission_id).await?;
+    let control = control_for_user(&state, &user).await;
+    if let Some(placement) = crate::api::control::remote_grok::placement(
+        &state.config.working_dir,
+        &control.mission_store,
+        started_by_mission_id,
+    )
+    .await
+    .map_err(|message| err(StatusCode::CONFLICT, message))?
+    {
+        return remote::start(&state, &user, req, placement.node_id)
+            .await
+            .map(Json);
+    }
     let idempotency_key = validated_idempotency_key(req.idempotency_key.as_deref())
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let id = durable_job_id(&user.id, started_by_mission_id, idempotency_key.as_deref());
@@ -1259,6 +1315,7 @@ pub async fn start_job(
 
     let now = Utc::now();
     let mut job = DurableJob {
+        remote: None,
         id,
         command: command.to_string(),
         cwd: cwd.to_string_lossy().to_string(),
@@ -1419,6 +1476,48 @@ pub async fn list_jobs(
     Json(jobs)
 }
 
+pub(crate) async fn has_unsettled_mission_jobs(
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    mission_id: Uuid,
+) -> Result<bool, String> {
+    let mut entries = match tokio::fs::read_dir(jobs_root(state)).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("Cannot verify workspace job state".into()),
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| "Cannot enumerate workspace jobs")?
+    {
+        let path = entry.path().join("job.json");
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| "Cannot read workspace job receipt")?;
+        let job: DurableJob =
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid workspace job receipt")?;
+        if job.started_by_mission_id == Some(mission_id)
+            && authorize_job(state, user, &job).await.is_ok()
+        {
+            let job = refresh_job(state, job).await;
+            if matches!(
+                job.status,
+                DurableJobStatus::Running | DurableJobStatus::Unknown
+            ) || (job.remote.is_none()
+                && job.status == DurableJobStatus::Cancelled
+                && job_requires_force_clear(&job))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub async fn get_job(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -1461,7 +1560,11 @@ pub async fn job_logs(
         .await
         .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
     authorize_job(&state, &user, &job).await?;
-
+    let job = if job.remote.is_some() {
+        remote::refresh(&state, job).await
+    } else {
+        job
+    };
     let stdout = if query.stream.as_deref() == Some("stderr") {
         String::new()
     } else {
@@ -1489,6 +1592,9 @@ pub async fn cancel_job(
         .await
         .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
     authorize_job(&state, &user, &job).await?;
+    if job.remote.is_some() {
+        return remote::cancel(&state, job).await.map(Json);
+    }
     job = refresh_job(&state, job).await;
     if job_is_cancellable(&job.status) {
         job.status = DurableJobStatus::Cancelled;
@@ -1524,6 +1630,7 @@ mod tests {
     fn test_job(status: DurableJobStatus) -> DurableJob {
         let now = Utc::now();
         DurableJob {
+            remote: None,
             id: Uuid::new_v4(),
             command: "true".to_string(),
             cwd: "/tmp".to_string(),

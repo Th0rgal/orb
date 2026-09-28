@@ -40,6 +40,31 @@ class NativeGoalTests(unittest.TestCase):
         self.assertFalse(any(method=='turn/start' for method, params in calls))
         self.assertEqual(output.getvalue().count('turn.completed'), 1)
 
+    def test_ordinary_turn_ignores_goal_cleared_and_completes_once(self):
+        session = NativeSession.__new__(NativeSession)
+        session.config = {'model':'test-model', 'session':'same-thread', 'prompt':'plain task'}
+        session.inbound = queue.Queue()
+        session.deferred = []
+        session.goal_status = None
+        session.pending_hint = None
+        def rpc(method, params):
+            if method == 'thread/resume':
+                return {'thread':{'id':'same-thread','cwd':os.getcwd(),'turns':[]}}
+            if method == 'thread/goal/get': return {'goal':None}
+            if method == 'turn/start':
+                session.deferred += [
+                    {'method':'thread/goal/cleared','params':{'threadId':'same-thread'}},
+                    {'method':'turn/started','params':{'turn':{'id':'one'}}},
+                    {'method':'turn/completed','params':{'turn':{'id':'one','status':'completed'}}},
+                ]
+            return {}
+        session.rpc = rpc
+        session.send = lambda message: None
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            session.run()
+        self.assertNotIn('goal.status', output.getvalue())
+        self.assertEqual(output.getvalue().count('turn.completed'), 1)
+
     def test_resume_preserves_native_goal_and_budget(self):
         goal = {'status': 'active', 'objective': 'all roadmap criteria', 'tokenBudget': None, 'tokensUsed': 11314410}
         self.assertEqual(goal_action(goal, '/goal resume'), {'status': 'active'})
@@ -75,6 +100,7 @@ class NativeGoalTests(unittest.TestCase):
         session = NativeSession.__new__(NativeSession)
         session.thread_id = 'same-thread'
         session.goal_status = 'active'
+        session.goal = True
         with contextlib.redirect_stdout(io.StringIO()):
             session.event({'method': 'thread/goal/updated', 'params': {'threadId': 'other', 'goal': {'status': 'complete'}}})
             self.assertEqual(session.goal_status, 'active')

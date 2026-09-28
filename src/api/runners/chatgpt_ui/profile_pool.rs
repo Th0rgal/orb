@@ -109,11 +109,20 @@ enum DurableAuthState {
     Unknown,
 }
 
-fn durable_health_path() -> PathBuf {
+#[cfg(not(test))]
+fn durable_health_path(_profile_dir: &Path) -> PathBuf {
     std::env::var("CHATGPT_POOL_HEALTH_STATE")
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/lib/sandboxed-sh/chatgpt-pool-health.json"))
+}
+
+// Unit tests must neither consume nor overwrite the machine's real account
+// verdicts. Each temporary profile owns its own durable test state, so tests
+// also remain independent when the Rust harness executes them concurrently.
+#[cfg(test)]
+fn durable_health_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join(".test-pool-health.json")
 }
 
 fn profile_name(profile_dir: &Path) -> &str {
@@ -124,7 +133,7 @@ fn profile_name(profile_dir: &Path) -> &str {
 }
 
 fn durable_auth_state(profile_dir: &Path) -> DurableAuthState {
-    let path = durable_health_path();
+    let path = durable_health_path(profile_dir);
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return DurableAuthState::Unconfigured;
     };
@@ -161,7 +170,7 @@ fn durable_auth_state_from_value(
 /// sweep. Auth failure must survive backend restarts; a 30-minute in-memory
 /// cooldown is not evidence that a browser session became valid again.
 fn persist_durable_auth_state(profile_dir: &Path, state: &str) -> Result<(), String> {
-    let path = durable_health_path();
+    let path = durable_health_path(profile_dir);
     let parent = path
         .parent()
         .ok_or_else(|| "ChatGPT health path has no parent".to_string())?;
@@ -1262,7 +1271,9 @@ mod tests {
         assert_eq!(snapshot[0].slot, 1);
         assert_eq!(snapshot[0].profile_name, "busy-profile");
         assert_eq!(snapshot[0].state, ProfileSlotState::InUse);
-        assert_eq!(snapshot[1].state, ProfileSlotState::Quarantined);
+        // An auth failure is durable: expiry of the in-memory quarantine
+        // cannot turn a logged-out account into an available slot.
+        assert_eq!(snapshot[1].state, ProfileSlotState::RequiresLogin);
         assert_eq!(snapshot[1].last_failure, Some(SlotFailureKind::Auth));
         assert!(snapshot[1].quarantine_remaining_secs.is_some());
         assert_eq!(snapshot[2].state, ProfileSlotState::Available);

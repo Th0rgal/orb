@@ -8,6 +8,7 @@ authors = ["sandboxed.sh Contributors"]
 
 [dependencies]
 notify = "8"
+tempfile = "3"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -108,14 +109,6 @@ name = "automation-manager-mcp"
 path = "src/bin/automation_manager_mcp.rs"
 
 [[bin]]
-name = "orchestrator-mcp"
-path = "src/bin/orchestrator_mcp.rs"
-
-[[bin]]
-name = "assistant-mcp"
-path = "src/bin/assistant_mcp.rs"
-
-[[bin]]
 name = "fido-agent-proxy"
 path = "src/bin/fido_agent_proxy.rs"
 
@@ -129,4 +122,7 @@ path = "src/bin/sandboxed_node.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3"
+
+[[bin]]
+name = "sandboxed-mcp"
+path = "src/bin/sandboxed_mcp.rs"

@@ -35,7 +35,8 @@ git -C "${dev_repo}" checkout --detach "${source_revision}"
   .venv/bin/python -m py_compile hermes_state.py gateway/run.py cron/scheduler.py
   .venv/bin/python "${script_dir}/configure_hermes_reliability.py" \
     --home "${dev_home}" \
-    --assistant-mcp /usr/local/bin/assistant-mcp-dev
+    --mcp-binary /usr/local/bin/sandboxed-mcp-dev \
+    --credential-file "${dev_home}/mcp-credential"
 )
 
 install -d -m 0755 "${dropin_dir}"

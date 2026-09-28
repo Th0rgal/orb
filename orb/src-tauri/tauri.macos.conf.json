@@ -1,5 +1,7 @@
 {
-  "build": { "beforeBuildCommand": "node scripts/build-macos-icon.mjs && pnpm build" },
+  "build": {
+    "beforeBuildCommand": "python3 scripts/build-mcp.py && node scripts/build-macos-icon.mjs && pnpm build"
+  },
   "bundle": {
     "resources": {
       "gen/app-icon/Assets.car": "Assets.car",

@@ -37,16 +37,16 @@ pub(super) async fn save(
         if let Some(old) = old {
             let old: Execution = serde_json::from_str(&old).map_err(err)?;
             if expected.is_none() {
-                if old.request_signature != execution.request_signature || old.selection != execution.selection || old.turns.first().map(|t| &t.prompt) != execution.turns.first().map(|t| &t.prompt) { return Err("Idempotency key already used for another cloud launch".into()); }
+                if old.parent_mission_id != execution.parent_mission_id || old.request_signature != execution.request_signature || old.selection != execution.selection || old.turns.first().map(|t| &t.prompt) != execution.turns.first().map(|t| &t.prompt) { return Err("Idempotency key already used for another cloud launch".into()); }
                 return Ok(old);
             }
-            if expected != Some(old.revision) || execution.mission_id != old.mission_id || execution.selection != old.selection { return Err("Cloud execution revision changed".into()); }
+            if expected != Some(old.revision) || execution.mission_id != old.mission_id || execution.selection != old.selection || execution.parent_mission_id != old.parent_mission_id { return Err("Cloud execution revision changed".into()); }
             new_turn = execution.turns.iter().any(|turn| turn.phase == crate::api::cloud_agents::Phase::Queued && !old.turns.iter().any(|previous| previous.key == turn.key));
             execution.revision = old.revision + 1;
         } else {
             if expected.is_some() { return Err("Cloud execution not found".into()); }
             let now = now_string();
-            tx.execute("INSERT INTO missions(id,status,title,workspace_id,backend,created_at,updated_at,project,tags,requires_local_disk,resumable) VALUES(?1,'active',?2,?3,?4,?5,?5,?6,?7,0,1)", params![execution.mission_id.to_string(),title,Uuid::nil().to_string(),execution.selection.provider.backend(),now,project,serde_json::to_string(&tags).map_err(err)?]).map_err(err)?;
+            tx.execute("INSERT INTO missions(id,status,title,workspace_id,backend,created_at,updated_at,project,tags,requires_local_disk,resumable,parent_mission_id) VALUES(?1,'active',?2,?3,?4,?5,?5,?6,?7,0,1,?8)", params![execution.mission_id.to_string(),title,Uuid::nil().to_string(),execution.selection.provider.backend(),now,project,serde_json::to_string(&tags).map_err(err)?,execution.parent_mission_id.map(|id| id.to_string())]).map_err(err)?;
         }
         tx.execute("INSERT INTO cloud_executions(mission_id,request_key,revision,data) VALUES(?1,?2,?3,?4) ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,data=excluded.data",params![execution.mission_id.to_string(),execution.request_key,execution.revision,serde_json::to_string(&execution).map_err(err)?]).map_err(err)?;
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {
@@ -85,6 +85,7 @@ mod tests {
     use crate::api::cloud_agents::{Event, Phase, Provider, Selection, Turn};
     fn execution() -> Execution {
         Execution {
+            parent_mission_id: None,
             mission_id: Uuid::new_v4(),
             request_key: "launch-1".into(),
             request_signature: "same-project-and-prompt".into(),
@@ -250,5 +251,50 @@ mod tests {
         next.run_id = "run-2".into();
         store.append_cloud_event(e.mission_id, next).await.unwrap();
         assert_eq!(store.cloud_events(e.mission_id).await.unwrap().len(), 2);
+    }
+    #[tokio::test]
+    async fn cloud_parent_is_durable_and_cannot_change_on_retry_or_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "cloud-lineage")
+            .await
+            .unwrap();
+        let mut run = execution();
+        let parent = Uuid::new_v4();
+        run.parent_mission_id = Some(parent);
+        let saved = store
+            .save_cloud_execution(run.clone(), None, None, None, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_mission(saved.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .parent_mission_id,
+            Some(parent)
+        );
+        run.parent_mission_id = Some(Uuid::new_v4());
+        assert!(store
+            .save_cloud_execution(run.clone(), None, None, None, vec![])
+            .await
+            .is_err());
+        assert!(store
+            .save_cloud_execution(run, Some(saved.revision), None, None, vec![])
+            .await
+            .is_err());
+        drop(store);
+        let reopened = SqliteMissionStore::new(dir.path().into(), "cloud-lineage")
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get_mission(saved.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .parent_mission_id,
+            Some(parent)
+        );
     }
 }

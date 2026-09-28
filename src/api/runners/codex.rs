@@ -54,6 +54,38 @@ struct NativeTurnInput<'a> {
     enabled: bool,
 }
 
+/// The default credential writer also supports an existing CLI login. Bind to
+/// the exact staged login the child will read, never a different host candidate
+/// or an access/refresh token whose value changes during renewal.
+fn staged_codex_account_identity(mission_work_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(mission_work_dir.join(".codex/auth.json")).ok()?;
+    let auth: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    match auth.get("auth_mode").and_then(|v| v.as_str()) {
+        Some("chatgpt") => {
+            let tokens = auth.get("tokens")?;
+            let access = tokens.get("access_token")?.as_str()?;
+            let account = crate::api::codex_usage::account_id_from_token(access)?;
+            if account.trim().is_empty()
+                || tokens
+                    .get("account_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|stored| stored != account)
+            {
+                return None;
+            }
+            Some(continuity::account_fingerprint("oauth", &account))
+        }
+        Some("apikey") => auth
+            .get("OPENAI_API_KEY")
+            .or_else(|| auth.get("api_key"))
+            .or_else(|| auth.pointer("/tokens/api_key"))
+            .and_then(|v| v.as_str())
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| continuity::account_fingerprint("apikey", key)),
+        _ => None,
+    }
+}
+
 /// Stable Codex transport failures emitted by the app-server/ChatGPT stream.
 /// Keep this narrow so ordinary model or tool failures never become retryable.
 fn codex_transport_failure_stage(message: &str, tool_events_seen: usize) -> Option<&'static str> {
@@ -1204,19 +1236,21 @@ async fn run_codex_turn(
 
     let mut codex_work_dir = crate::workspace::configured_project_dir(workspace, mission_work_dir);
     let continuity = if native_input.enabled {
-        let account = match workspace_override {
-            Some(credential) => credential_identity(credential),
-            None => match crate::api::ai_providers::get_openai_api_key_for_codex_default(
-                app_working_dir,
-            ) {
-                Some(key) => continuity::account_fingerprint("apikey", &key),
-                None => {
-                    return continuity_failure(
-                        "native account identity is unavailable; refusing an unbound launch",
-                    )
-                }
-            },
-        };
+        let account =
+            match workspace_override {
+                Some(credential) => credential_identity(credential),
+                None => match crate::api::ai_providers::get_openai_api_key_for_codex_default(
+                    app_working_dir,
+                ) {
+                    Some(key) => continuity::account_fingerprint("apikey", &key),
+                    None => match staged_codex_account_identity(mission_work_dir) {
+                        Some(account) => account,
+                        None => return continuity_failure(
+                            "native account identity is unavailable; refusing an unbound launch",
+                        ),
+                    },
+                },
+            };
         let identity = match continuity::Identity::new(
             mission_id,
             workspace.id,
@@ -1925,6 +1959,43 @@ mod tests {
                 Some(result.output.as_str())
             );
         }
+    }
+
+    #[test]
+    fn staged_cli_login_identity_survives_refresh_and_rejects_account_mismatch() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".codex")).unwrap();
+        let write = |account: &str, expiry: u64, stored: &str| {
+            let claims =
+                json!({"https://api.openai.com/auth":{"chatgpt_account_id":account},"exp":expiry});
+            let access = format!(
+                "fixture.{}.fixture",
+                URL_SAFE_NO_PAD.encode(claims.to_string())
+            );
+            std::fs::write(
+                dir.path().join(".codex/auth.json"),
+                json!({"auth_mode":"chatgpt","tokens":{"access_token":access,"account_id":stored}})
+                    .to_string(),
+            )
+            .unwrap();
+        };
+        assert!(super::staged_codex_account_identity(dir.path()).is_none());
+        write("account-a", 100, "account-a");
+        let first = super::staged_codex_account_identity(dir.path()).unwrap();
+        write("account-a", 200, "account-a");
+        assert_eq!(
+            super::staged_codex_account_identity(dir.path()),
+            Some(first.clone())
+        );
+        write("account-b", 200, "account-b");
+        assert_ne!(
+            super::staged_codex_account_identity(dir.path()),
+            Some(first)
+        );
+        write("account-a", 200, "account-b");
+        assert!(super::staged_codex_account_identity(dir.path()).is_none());
     }
 
     #[test]

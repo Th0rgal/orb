@@ -1,19 +1,12 @@
-//! MCP Server for orchestrating parallel agent missions.
-//!
-//! Provides boss agents with tools to create, monitor, and manage worker missions.
-//! Communicates over stdio using JSON-RPC 2.0.
+//! Core-side planning and review handlers shared by the unified catalogue.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
-use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use chrono::Utc;
-use jsonwebtoken::{EncodingKey, Header};
-use sandboxed_sh::ai_providers::ProviderType;
-use sandboxed_sh::api::ai_providers::{
+use crate::ai_providers::ProviderType;
+use crate::api::ai_providers::{
     default_backends_for_provider, get_all_openai_oauth_accounts,
     get_openai_api_key_for_codex_default, provider_targets_backend, read_oauth_token_entry,
 };
@@ -21,80 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-// =============================================================================
-// JSON-RPC Types (same pattern as automation-manager-mcp)
-// =============================================================================
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[serde(rename = "jsonrpc")]
-    _jsonrpc: String,
-    #[serde(default)]
-    id: Value,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
-}
-
-impl JsonRpcResponse {
-    fn success(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn error(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-                data: None,
-            }),
-        }
-    }
-}
-
-// =============================================================================
-// MCP Types
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-struct ToolDefinition {
-    name: String,
-    description: String,
-    #[serde(rename = "inputSchema")]
-    input_schema: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct ServerInfo {
-    name: String,
-    version: String,
-}
+use super::ToolDefinition;
 
 // =============================================================================
 // Tool Params
@@ -419,54 +339,9 @@ struct DeploySandboxedShParams {
     repo_path: Option<String>,
 }
 
-// =============================================================================
-// JWT helpers (lightweight – mirrors auth.rs Claims)
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-struct JwtClaims {
-    sub: String,
-    usr: String,
-    iat: i64,
-    exp: i64,
-}
-
-/// Mint a short-lived service JWT using the shared secret.
-///
-/// When `BOSS_USER_ID` is set (forwarded by workspace prep), the token is
-/// minted as that user so worker missions created via this MCP land in the
-/// boss's per-user mission store. Without it, the SingleTenant auth path
-/// would create a synthetic `orchestrator-mcp` user and shard workers into
-/// `missions-orchestrator-mcp.db`, where the dashboard can't see them.
-fn mint_service_jwt(secret: &str) -> Option<String> {
-    let now = Utc::now();
-    let exp = now + chrono::Duration::hours(24);
-    let (sub, usr) = match std::env::var("BOSS_USER_ID") {
-        Ok(id) if !id.trim().is_empty() => (id.clone(), id),
-        _ => (
-            "orchestrator-mcp".to_string(),
-            "orchestrator-mcp".to_string(),
-        ),
-    };
-    let claims = JwtClaims {
-        sub,
-        usr,
-        iat: now.timestamp(),
-        exp: exp.timestamp(),
-    };
-    jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .ok()
-}
-
-// =============================================================================
-// Orchestrator MCP Server
-// =============================================================================
-
-struct OrchestratorMcp {
+pub(super) struct OrchestratorMcp {
+    core: std::sync::Arc<crate::api::routes::AppState>,
+    principal: super::gateway::Principal,
     mission_id: Uuid,
     api_url: String,
     api_token: Option<String>,
@@ -511,8 +386,16 @@ fn resolve_deploy_target(target_environment: Option<&str>) -> Result<DeployTarge
 }
 
 impl OrchestratorMcp {
-    fn new(mission_id: Uuid, api_url: String, api_token: Option<String>) -> Self {
+    pub(super) fn new(
+        mission_id: Uuid,
+        api_url: String,
+        api_token: Option<String>,
+        core: std::sync::Arc<crate::api::routes::AppState>,
+        principal: super::gateway::Principal,
+    ) -> Self {
         Self {
+            core,
+            principal,
             mission_id,
             api_url,
             api_token,
@@ -551,7 +434,7 @@ impl OrchestratorMcp {
             .map(|t| ("Authorization".to_string(), format!("Bearer {}", t)))
     }
 
-    fn get_tools() -> Vec<ToolDefinition> {
+    pub(super) fn get_tools() -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
                 name: "get_workspace_layout".to_string(),
@@ -1740,10 +1623,11 @@ impl OrchestratorMcp {
                 }),
                 "grok" => json!({
                     "backend": "grok",
-                    "ready": true,
+                    "ready": null,
+                    "auth_status": "unknown",
                     "provider": "xAI",
                     "provider_targeted": provider_targets_backend(&workspace_root, ProviderType::Xai, "grok"),
-                    "reason": "Grok Build can use a targeted xAI provider API key or the CLI's own X login cache.",
+                    "reason": "Grok Build can use a targeted xAI provider API key or the CLI's own X login cache. Only an authenticated harness turn proves that login is usable.",
                     "default_backends": default_backends_for_provider(ProviderType::Xai),
                 }),
                 "chatgpt_ui" => json!({
@@ -1862,75 +1746,28 @@ impl OrchestratorMcp {
             .map_err(|e| format!("Failed to parse durable job cancellation: {}", e))
     }
 
-    fn create_worktree(&self, params: CreateWorktreeParams) -> Result<Value, String> {
-        let path = &params.path;
-        let branch = &params.branch;
-        let repo_dir = resolve_repo_path(params.repo_path.as_deref());
-
-        // Fail fast if the worktree path is outside the workspace mount: a
-        // worker container assigned this worktree as its working_directory
-        // would not be able to see it.
-        validate_working_directory_visible_to_worker(path)?;
-
-        // Check if branch exists
-        let branch_exists = Command::new("git")
-            .current_dir(&repo_dir)
-            .args(["rev-parse", "--verify", branch])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        let output = if branch_exists {
-            // Branch exists, just create worktree on it
-            Command::new("git")
-                .current_dir(&repo_dir)
-                .args(["worktree", "add", path, branch])
-                .output()
-                .map_err(|e| format!("Failed to run git worktree add: {}", e))?
-        } else {
-            // Create new branch from base
-            let base = params.base.as_deref().unwrap_or("HEAD");
-            Command::new("git")
-                .current_dir(&repo_dir)
-                .args(["worktree", "add", "-b", branch, path, base])
-                .output()
-                .map_err(|e| format!("Failed to run git worktree add: {}", e))?
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git worktree add failed: {}", stderr));
+    async fn create_worktree(&self, params: CreateWorktreeParams) -> Result<Value, String> {
+        let result = super::workspace_ops::execute(&self.core, &self.principal, "create_worktree", json!({
+            "mission_id":self.mission_id,"path":params.path,"branch":params.branch,"base":params.base,"repo_path":params.repo_path
+        })).await?;
+        if result["success"] != true {
+            return Err(
+                "Workspace worktree creation failed; inspect its target before retrying".into(),
+            );
         }
-
-        Ok(json!({
-            "success": true,
-            "path": path,
-            "branch": branch,
-            "repo_path": repo_dir,
-            "message": format!("Worktree created at {} on branch {} (repo: {})", path, branch, repo_dir),
-        }))
+        Ok(result)
     }
 
-    fn remove_worktree(&self, params: RemoveWorktreeParams) -> Result<Value, String> {
-        let repo_dir = resolve_repo_path(params.repo_path.as_deref());
-
-        let output = Command::new("git")
-            .current_dir(&repo_dir)
-            .args(["worktree", "remove", "--force", &params.path])
-            .output()
-            .map_err(|e| format!("Failed to run git worktree remove: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git worktree remove failed: {}", stderr));
-        }
-
-        Ok(json!({
-            "success": true,
-            "path": params.path,
-            "repo_path": repo_dir,
-            "message": format!("Worktree removed at {}", params.path),
-        }))
+    async fn remove_worktree(&self, params: RemoveWorktreeParams) -> Result<Value, String> {
+        super::workspace_ops::execute(
+            &self.core,
+            &self.principal,
+            "remove_worktree",
+            json!({
+                "mission_id":self.mission_id,"path":params.path,"repo_path":params.repo_path
+            }),
+        )
+        .await
     }
 
     // ---- Task board -------------------------------------------------------
@@ -1945,20 +1782,6 @@ impl OrchestratorMcp {
         let claude_allowed = std::env::var("SANDBOXED_SH_ALLOW_CLAUDE_WORKERS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-
-        // Auto-detect once for the whole batch. Creating the first worktree
-        // adds another `.git` entry under the workspace, so resolving again
-        // for a later task would make an originally unambiguous checkout look
-        // ambiguous and fall back to the workspace root.
-        let implicit_worktree_repo = params
-            .tasks
-            .iter()
-            .any(|spec| {
-                spec.worktree
-                    .as_ref()
-                    .is_some_and(|worktree| worktree.repo_path.is_none())
-            })
-            .then(|| resolve_repo_path(None));
 
         let mut registered = Vec::with_capacity(params.tasks.len());
         let mut worktrees_created = Vec::new();
@@ -1979,46 +1802,29 @@ impl OrchestratorMcp {
                 ));
             }
 
-            // Resolve an implicit repository before adding the worktree. Once the
-            // worktree exists, auto-detection may see both checkouts and fall back
-            // to the workspace root, which is not useful to the host scheduler.
-            let resolved_worktree_repo = spec.worktree.as_ref().map(|wt| {
-                wt.repo_path.clone().unwrap_or_else(|| {
-                    implicit_worktree_repo
-                        .clone()
-                        .expect("implicit worktree repository was resolved before the batch")
-                })
-            });
-            let working_directory = if let Some(wt) = &spec.worktree {
-                self.create_worktree(CreateWorktreeParams {
-                    path: wt.path.clone(),
-                    branch: wt.branch.clone(),
-                    base: wt.base.clone(),
-                    repo_path: resolved_worktree_repo.clone(),
-                })
-                .map_err(|e| format!("task `{}`: worktree failed: {}", spec.task_key, e))?;
-                worktrees_created.push(json!({
-                    "task_key": spec.task_key,
-                    "path": wt.path,
-                    "branch": wt.branch,
-                }));
-                Some(wt.path.clone())
+            let (working_directory, repository, branch) = if let Some(wt) = &spec.worktree {
+                let result = self
+                    .create_worktree(CreateWorktreeParams {
+                        path: wt.path.clone(),
+                        branch: wt.branch.clone(),
+                        base: wt.base.clone(),
+                        repo_path: wt.repo_path.clone(),
+                    })
+                    .await?;
+                let path = result["path"]
+                    .as_str()
+                    .ok_or("Missing worktree path receipt")?
+                    .to_string();
+                worktrees_created
+                    .push(json!({"task_key":spec.task_key,"path":path,"branch":wt.branch}));
+                (
+                    Some(path),
+                    result["repository"].as_str().map(str::to_string),
+                    Some(wt.branch.clone()),
+                )
             } else {
-                spec.working_directory.clone()
+                (spec.working_directory.clone(), None, None)
             };
-            let (repository, branch) = spec
-                .worktree
-                .as_ref()
-                .map(|wt| {
-                    let repo_path = resolved_worktree_repo
-                        .as_deref()
-                        .expect("worktree repository was resolved before creation");
-                    (
-                        Some(repository_identity_for_scheduler(repo_path)),
-                        Some(wt.branch.clone()),
-                    )
-                })
-                .unwrap_or((None, None));
             if let Some(wd) = working_directory.as_deref() {
                 validate_working_directory_visible_to_worker(wd)?;
             }
@@ -2216,152 +2022,11 @@ impl OrchestratorMcp {
             .map_err(|e| format!("Failed to parse verdict response: {}", e))
     }
 
-    /// Merge a worker branch into a target branch. On conflict the merge is
-    /// aborted and a resolver task is registered on the board automatically.
     async fn merge_branch(&self, params: MergeBranchParams) -> Result<Value, String> {
-        let repo_dir = resolve_repo_path(params.repo_path.as_deref());
-        let source = params.source_branch.trim();
-        let target = params.target_branch.trim();
-        if source.is_empty() || target.is_empty() {
-            return Err("source_branch and target_branch are required".to_string());
-        }
-
-        let run = |args: &[&str]| -> Result<(bool, String), String> {
-            let output = Command::new("git")
-                .current_dir(&repo_dir)
-                .args(args)
-                .output()
-                .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Ok((output.status.success(), text))
-        };
-
-        // The main checkout must be on the target branch; checking it out
-        // under a running worker would yank files out from under it.
-        let (ok, head) = run(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-        if !ok {
-            return Err(format!("git rev-parse failed in {}: {}", repo_dir, head));
-        }
-        let head = head.trim().to_string();
-        if head != target {
-            let (ok, out) = run(&["checkout", target])?;
-            if !ok {
-                return Err(format!(
-                    "Cannot checkout target branch `{}` (HEAD is `{}`): {}",
-                    target, head, out
-                ));
-            }
-        }
-
-        let (merged, merge_out) = run(&["merge", "--no-edit", source])?;
-        if merged {
-            let mut result = json!({
-                "merged": true,
-                "source_branch": source,
-                "target_branch": target,
-                "repo_path": repo_dir,
-                "output": merge_out.trim(),
-            });
-            if params.push {
-                let (pushed, push_out) = run(&["push", "origin", target])?;
-                result["pushed"] = json!(pushed);
-                if !pushed {
-                    result["push_error"] = json!(push_out.trim());
-                }
-            }
-            if params.delete_source {
-                let (deleted, del_out) = run(&["branch", "-D", source])?;
-                result["source_deleted"] = json!(deleted);
-                if !deleted {
-                    result["delete_error"] = json!(del_out.trim());
-                }
-            }
-            return Ok(result);
-        }
-
-        // Conflict (or other merge failure): collect conflicted files, abort,
-        // and register a resolver task.
-        let (_, conflicted) = run(&["diff", "--name-only", "--diff-filter=U"])?;
-        let conflicted_files: Vec<String> = conflicted
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-        let _ = run(&["merge", "--abort"]);
-
-        if conflicted_files.is_empty() {
-            // Not a content conflict — surface the raw error instead of
-            // spawning a resolver that can't do anything.
-            return Err(format!(
-                "git merge failed (no conflicted files detected): {}",
-                merge_out.trim()
-            ));
-        }
-
-        let stamp = chrono::Utc::now().format("%H%M%S");
-        let resolver_key = format!("merge-{}-{}", source.replace('/', "_"), stamp);
-        let resolver_prompt = format!(
-            "Merge conflict resolution in {repo}.\n\
-             Run: `git checkout {target}` then `git merge --no-edit {source}`.\n\
-             Conflicted files:\n{files}\n\
-             Resolve every conflict so BOTH changes' intent is preserved (read both branch \
-             histories with `git log {target} -5 --oneline` and `git log {source} -5 --oneline` \
-             for context). After resolving: build/verify, `git add -A`, `git commit --no-edit`. \
-             Do NOT push. Success condition: merge commit exists on `{target}` and verification \
-             passes.",
-            repo = repo_dir,
-            target = target,
-            source = source,
-            files = conflicted_files.join("\n"),
-        );
-        let resolver = self
-            .plan_tasks(PlanTasksParams {
-                tasks: vec![PlanTaskSpec {
-                    task_key: resolver_key.clone(),
-                    title: format!("Resolve merge conflict {} → {}", source, target),
-                    prompt: resolver_prompt,
-                    backend: params
-                        .resolver_backend
-                        .unwrap_or_else(|| "codex".to_string()),
-                    model_override: Some(
-                        params
-                            .resolver_model
-                            .unwrap_or_else(|| "gpt-6-astra".to_string()),
-                    ),
-                    model_effort: Some("high".to_string()),
-                    working_directory: Some(repo_dir.clone()),
-                    acceptance_criteria: vec![
-                        format!("a merge commit of `{source}` exists on `{target}`"),
-                        "no conflict markers remain in the tree".to_string(),
-                        "both branches' intent is preserved in the resolution".to_string(),
-                    ],
-                    verification_command: Some(format!(
-                        "git -C {repo_dir} merge-base --is-ancestor {source} {target}"
-                    )),
-                    risk_class: None,
-                    depends_on: vec![],
-                    worktree: None,
-                }],
-            })
-            .await;
-
-        Ok(json!({
-            "merged": false,
-            "conflict": true,
-            "source_branch": source,
-            "target_branch": target,
-            "repo_path": repo_dir,
-            "conflicted_files": conflicted_files,
-            "resolver_task": resolver_key,
-            "resolver_registered": resolver.is_ok(),
-            "resolver_error": resolver.err(),
-            "hint": "Merge aborted cleanly. A resolver task was registered on the board; \
-                     you'll get a digest when it settles. End your turn.",
-        }))
+        super::workspace_ops::execute(&self.core, &self.principal, "merge_branch", json!({
+            "mission_id":self.mission_id,"source_branch":params.source_branch,"target_branch":params.target_branch,
+            "repo_path":params.repo_path,"push":params.push,"delete_source":params.delete_source
+        })).await
     }
 
     async fn batch_create_workers(
@@ -2754,7 +2419,7 @@ impl OrchestratorMcp {
         }))
     }
 
-    async fn handle_call(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub(super) async fn handle_call(&self, method: &str, params: Value) -> Result<Value, String> {
         match method {
             "get_workspace_layout" => Ok(self.get_workspace_layout()),
             "get_backend_auth_status" => {
@@ -2872,12 +2537,12 @@ impl OrchestratorMcp {
             "create_worktree" => {
                 let params: CreateWorktreeParams =
                     serde_json::from_value(params).map_err(|e| format!("Invalid params: {}", e))?;
-                self.create_worktree(params)
+                self.create_worktree(params).await
             }
             "remove_worktree" => {
                 let params: RemoveWorktreeParams =
                     serde_json::from_value(params).map_err(|e| format!("Invalid params: {}", e))?;
-                self.remove_worktree(params)
+                self.remove_worktree(params).await
             }
             "wait_for_worker" => {
                 let params: WaitForWorkerParams =
@@ -2897,150 +2562,11 @@ impl OrchestratorMcp {
             _ => Err(format!("Unknown method: {}", method)),
         }
     }
-
-    async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
-        match req.method.as_str() {
-            "initialize" => {
-                let info = ServerInfo {
-                    name: "orchestrator".to_string(),
-                    version: "0.1.0".to_string(),
-                };
-                JsonRpcResponse::success(
-                    req.id,
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "serverInfo": info,
-                        "capabilities": {
-                            "tools": {}
-                        }
-                    }),
-                )
-            }
-            "tools/list" => {
-                let tools = Self::get_tools();
-                JsonRpcResponse::success(req.id, json!({ "tools": tools }))
-            }
-            "tools/call" => {
-                let params = match req.params.as_object() {
-                    Some(p) => p,
-                    None => {
-                        return JsonRpcResponse::error(req.id, -32602, "Invalid params");
-                    }
-                };
-                let method = match params.get("name").and_then(|n| n.as_str()) {
-                    Some(m) => m,
-                    None => {
-                        return JsonRpcResponse::error(req.id, -32602, "Missing tool name");
-                    }
-                };
-                let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-
-                match self.handle_call(method, arguments).await {
-                    Ok(result) => JsonRpcResponse::success(
-                        req.id,
-                        json!({
-                            "content": [{
-                                "type": "text",
-                                "text": serde_json::to_string_pretty(&result).unwrap()
-                            }]
-                        }),
-                    ),
-                    Err(e) => JsonRpcResponse::error(req.id, -32000, e),
-                }
-            }
-            "notifications/initialized" => {
-                // Notification, no response needed but we return empty for safety
-                JsonRpcResponse::success(req.id, json!(null))
-            }
-            _ => JsonRpcResponse::error(req.id, -32601, format!("Unknown method: {}", req.method)),
-        }
-    }
 }
 
 /// Hard cap on how long any wait_for_* poll loop may run, to stay well under
 /// Codex CLI's 120-second MCP tool-call timeout.
 const MAX_INTERNAL_TIMEOUT_SECS: u64 = 90;
-
-/// Try to locate the git repository root that worktree commands should target.
-///
-/// Resolution order:
-/// 1. If `explicit` is `Some`, use it directly.
-/// 2. Walk the workspace root looking for `.git` entries up to 2 levels deep.
-///    If exactly one repo is found, use it.
-/// 3. Fall back to the workspace root (original behaviour).
-fn resolve_repo_path(explicit: Option<&str>) -> String {
-    if let Some(p) = explicit {
-        return p.to_string();
-    }
-
-    let workspace_root = std::env::var("WORKING_DIR")
-        .or_else(|_| std::env::var("SANDBOXED_SH_WORKSPACE_ROOT"))
-        .unwrap_or_else(|_| ".".to_string());
-
-    // Search up to 2 levels deep for .git dirs/files
-    let mut repos: Vec<String> = Vec::new();
-
-    // Level 0: workspace root itself
-    let root_path = std::path::Path::new(&workspace_root);
-    if root_path.join(".git").exists() {
-        return workspace_root;
-    }
-
-    // Level 1
-    if let Ok(entries) = std::fs::read_dir(root_path) {
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if !child.is_dir() {
-                continue;
-            }
-            if child.join(".git").exists() {
-                if let Some(s) = child.to_str() {
-                    repos.push(s.to_string());
-                }
-                continue;
-            }
-            // Level 2
-            if let Ok(sub_entries) = std::fs::read_dir(&child) {
-                for sub_entry in sub_entries.flatten() {
-                    let grandchild = sub_entry.path();
-                    if grandchild.is_dir() && grandchild.join(".git").exists() {
-                        if let Some(s) = grandchild.to_str() {
-                            repos.push(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if repos.len() == 1 {
-        return repos.into_iter().next().unwrap();
-    }
-
-    // Multiple or zero repos found – fall back to workspace root
-    workspace_root
-}
-
-/// Persist a repository identifier the API/control process can use after this
-/// container-scoped MCP exits. Container guest paths are not necessarily
-/// visible on the host, while an OWNER/REPO identity works with `gh --repo`.
-fn repository_identity_for_scheduler(repo_path: &str) -> String {
-    if !std::path::Path::new(repo_path).exists() {
-        return repo_path.to_string();
-    }
-    let remote = Command::new("git")
-        .current_dir(repo_path)
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
-
-    remote
-        .as_deref()
-        .and_then(github_repository_identity)
-        .unwrap_or_else(|| repo_path.to_string())
-}
 
 fn github_repository_identity(remote: &str) -> Option<String> {
     let trimmed = remote.trim().trim_end_matches(".git");
@@ -3746,69 +3272,6 @@ fn backend_auth_entry(
 // =============================================================================
 // Main
 // =============================================================================
-
-#[tokio::main]
-async fn main() {
-    let mission_id = std::env::var("MISSION_ID")
-        .or_else(|_| std::env::var("SANDBOXED_SH_MISSION_ID"))
-        .ok()
-        .and_then(|id| Uuid::parse_str(&id).ok())
-        .expect("MISSION_ID environment variable not set or invalid");
-
-    let api_url = std::env::var("API_URL")
-        .or_else(|_| std::env::var("SANDBOXED_SH_API_URL"))
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let api_token = std::env::var("API_TOKEN")
-        .or_else(|_| std::env::var("SANDBOXED_SH_API_TOKEN"))
-        .ok()
-        .or_else(|| {
-            // Mint a service JWT from the shared secret when no explicit token is set.
-            std::env::var("JWT_SECRET")
-                .ok()
-                .and_then(|s| mint_service_jwt(&s))
-        });
-
-    let server = Arc::new(OrchestratorMcp::new(mission_id, api_url, api_token));
-
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let reader = BufReader::new(stdin);
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(req) => req,
-            Err(e) => {
-                let error_resp =
-                    JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {}", e));
-                if let Ok(json) = serde_json::to_string(&error_resp) {
-                    writeln!(stdout, "{}", json).ok();
-                }
-                stdout.flush().ok();
-                continue;
-            }
-        };
-
-        // Skip notifications (id is null)
-        if request.id.is_null() && request.method.starts_with("notifications/") {
-            continue;
-        }
-
-        let response = server.handle_request(request).await;
-        if let Ok(json) = serde_json::to_string(&response) {
-            writeln!(stdout, "{}", json).ok();
-        }
-        stdout.flush().ok();
-    }
-}
 
 #[cfg(test)]
 mod working_directory_tests {
