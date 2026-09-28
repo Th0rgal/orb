@@ -42,7 +42,40 @@ struct OrbConversation: View {
     private var pendingKey: String { draftKey + ":pending" }
     private var turns: [OrbJSON] { execution["turns"].items }
     private var isCloud: Bool { execution != .null || !mission["cloud"]["provider"].text.isEmpty || (id == nil && selection.cloud) }
-    private var working: Bool { isCloud ? turns.contains { ["queued", "submitting", "running", "cancel_requested"].contains($0["phase"].text) } : ["active", "pending"].contains(mission["status"].text) }
+    static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
+    private var working: Bool { isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : ["active", "pending"].contains(mission["status"].text) }
+    /// Same wording as the desktop: the step, then how long Orb has seen it working.
+    private func progress(at now: Date) -> String {
+        let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
+        let key = turn?["key"].text ?? id ?? ""
+        let started = OrbWorkClock.start(key)
+        let seconds = max(0, Int(now.timeIntervalSince(started)))
+        let provider = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot"][execution["selection"]["provider"].text] ?? "the service"
+        let label: String
+        if let turn {
+            switch turn["phase"].text {
+            case "cancel_requested": label = "Stopping…"
+            case "queued": label = "Queued…"
+            case "submitting": label = turn["detail"].text.isEmpty ? "Opening \(provider)…" : turn["detail"].text
+            default: label = !turn["result"].text.isEmpty ? "Writing…" : (turn["detail"].text.isEmpty ? "Thinking…" : turn["detail"].text)
+            }
+        } else { label = "Working…" }
+        return "\(label) · \(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+    /// Only the latest ChatGPT answer becomes an interactive quiz, like the desktop.
+    private func quiz(for item: (String, String, String)) -> OrbQuizData? {
+        guard isCloud, execution["selection"]["provider"].text == "chatgpt", let last = turns.last, item.0 == last["key"].text + ":a", !Self.workingPhases.contains(last["phase"].text) else { return nil }
+        return OrbQuizData.parse(item.2)
+    }
+    /// Sends quiz answers through the normal, idempotent send path; the typed draft is restored after.
+    private func sendReply(_ reply: String) async -> Bool {
+        guard OrbDisk.read(pendingKey, as: OrbPending.self) == nil else { error = "Another message is still being confirmed. Send it before answering the quiz."; return false }
+        let draft = text; text = reply
+        await send()
+        guard text.isEmpty && error.isEmpty else { return false }
+        text = draft
+        return true
+    }
     private var cloudBlocked: Bool { isCloud && turns.contains { ["submission_uncertain", "incompatible", "reconnect_required"].contains($0["phase"].text) } }
     private var status: String { (turns.last?["phase"].text ?? mission["status"].text).replacingOccurrences(of: "_", with: " ") }
     private var history: [(String, String, String)] {
@@ -70,12 +103,22 @@ struct OrbConversation: View {
                     }
                     ForEach(Array(history.suffix(visibleCount)), id: \.0) { item in
                         if item.1 == "user" {
-                            HStack { Spacer(minLength: 42); Text(item.2).textSelection(.enabled).padding(18).background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 26)) }.id(item.0)
+                            let images = OrbMessageImages.parse(item.2)
+                            HStack { Spacer(minLength: 42); VStack(alignment: .leading, spacing: 10) {
+                                if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
+                                if !images.text.isEmpty { Text(images.text).textSelection(.enabled) }
+                            }.padding(18).background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 26)) }.id(item.0)
+                        } else if let quiz = quiz(for: item) {
+                            VStack(alignment: .leading, spacing: 16) {
+                                if !quiz.before.isEmpty { OrbRichText(source: quiz.before) }
+                                OrbQuiz(quiz: quiz, disabled: busy || cloudBlocked || working) { reply in await sendReply(reply) }
+                                if !quiz.after.isEmpty { OrbRichText(source: quiz.after) }
+                            }.frame(maxWidth: .infinity, alignment: .leading).id(item.0)
                         } else { OrbRichText(source: item.2, onArtifact: { path in Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) } }).frame(maxWidth: .infinity, alignment: .leading).id(item.0) }
                     }
                     ForEach(turns.indices, id: \.self) { index in
                         let turn = turns[index]
-                        if !turn["detail"].text.isEmpty { Text(turn["detail"].text).font(.footnote).foregroundStyle(.secondary) }
+                        if !turn["detail"].text.isEmpty && !Self.workingPhases.contains(turn["phase"].text) { Text(turn["detail"].text).font(.footnote).foregroundStyle(.secondary) }
                         ForEach(turn["branches"].items.indices, id: \.self) { branchIndex in
                             if let url = safeURL(turn["branches"].items[branchIndex]["prUrl"].text) { Link("View pull request", destination: url) }
                         }
@@ -109,7 +152,7 @@ struct OrbConversation: View {
                     if !working && ["failed", "blocked", "interrupted", "cancelled", "reconnect required", "submission uncertain", "incompatible", "waiting user"].contains(status), turns.last?["detail"].text.isEmpty != false {
                         Label(status == "waiting user" ? "Waiting for your reply" : status.capitalized, systemImage: "exclamationmark.circle").foregroundStyle(.orange).font(.subheadline)
                     }
-                    if working { HStack { ProgressView(); Text(status.isEmpty ? "Working" : status).foregroundStyle(.secondary) }.accessibilityIdentifier("agent-working") }
+                    if working { TimelineView(.periodic(from: .now, by: 1)) { context in HStack { ProgressView(); Text(progress(at: context.date)).foregroundStyle(.secondary).monospacedDigit() } }.accessibilityIdentifier("agent-working") }
                 }
                 if !error.isEmpty { OrbNotice(message: error) }
                 Color.clear.frame(height: 1).id("conversation-bottom").accessibilityIdentifier("conversation-bottom")
@@ -496,4 +539,10 @@ struct OrbAgentPicker: View {
             }
         } catch { self.error = error.localizedDescription }
     }
+}
+
+/// Cloud turns carry no timestamps; time each from when this device first saw it working.
+@MainActor enum OrbWorkClock {
+    private static var starts: [String: Date] = [:]
+    static func start(_ key: String) -> Date { if let date = starts[key] { return date }; let now = Date(); starts[key] = now; return now }
 }
