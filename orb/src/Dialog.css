@@ -80,3 +80,6 @@
 .lightbox-nav:hover:not(:disabled) { background: var(--bg-hover); }
 .lightbox-nav.prev { left: 8px; }
 .lightbox-nav.next { right: 8px; }
+.error-dialog p { margin: 0; color: var(--fg-2); line-height: 1.5; overflow-wrap: anywhere; }
+.error-dialog details { margin-top: 10px; color: var(--fg-3); font-size: 12px; }
+.error-dialog pre { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -533,3 +533,21 @@ test('folder deletion requires confirmation and agent badges overlap their icon'
   await expect(folder).toHaveCount(0);
   expect(deleted).toBe(true);
 });
+
+test('a refused sidebar action explains itself in a dialog, not inside the project list', async ({page}) => {
+  await setup(page);
+  await page.evaluate(() => {
+    let text = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { text = value; }, readText: async () => text } });
+  });
+  await page.route('**/api/projects/test/file/transfer', route => route.fulfill({status:400,body:'This folder contains files that are not part of the project context; move or delete them first'}));
+  await expandProject(page);
+  const shortcut = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await page.locator('.row.folder .row-main').filter({hasText:'reference'}).focus(); await page.keyboard.press(`${shortcut}+x`);
+  await page.getByRole('button',{name:'Test',exact:true}).focus(); await page.keyboard.press(`${shortcut}+v`);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('alert')).toContainText('Choose a different name or folder');
+  await expect(page.locator('.sidebar .error-notice, nav .error-notice')).toHaveCount(0);
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog).toHaveCount(0);
+});

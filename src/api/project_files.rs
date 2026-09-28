@@ -349,6 +349,17 @@ async fn transfer_to_project(
     if slug == project {
         return Err(bad_request("choose another project"));
     }
+    // Every project route trusts the authenticated operator; a transfer must
+    // still never create the context of a project that does not exist.
+    let known = state
+        .projects
+        .list_projects()
+        .map_err(super::projects_overview::store_err)?
+        .into_iter()
+        .any(|p| p.slug == project);
+    if !known {
+        return Err(bad_request("destination project not found"));
+    }
     let store = context_store(&state, &slug)?;
     let target = context_store(&state, &project)?;
     tokio::task::spawn_blocking(move || {

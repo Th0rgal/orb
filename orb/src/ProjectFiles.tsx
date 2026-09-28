@@ -13,7 +13,7 @@ import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
 import { cutMission, readCutMission, moveMission } from "./missionMove";
 import { ForkMission } from "./ForkMission";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
@@ -1178,7 +1178,7 @@ export function LiveProjectsSection(p: {
         <div class="row note">{error()} <button class="text-btn" onClick={refresh}>Retry</button></div>
       </Show>
       <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
-      <Show when={actionError()}><ErrorNotice error={actionError()!} /></Show>
+      <Show when={actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
       <div ref={dropTree} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectionActive() ? selectedAgents().map(id => `m:${id}`) : undefined} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
