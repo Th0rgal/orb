@@ -41,11 +41,14 @@ it("allows a document folder but blocks a nested cron", async () => {
 });
 
 it("moves a file to another project through its own route", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('{}', {status:200}));
+  const roster = () => new Response(JSON.stringify({projects:[{slug:"test"},{slug:"other"},{slug:"gone",status:"archived"}]}));
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => String(input).endsWith("/api/projects") ? roster() : new Response('{}', {status:200}));
   await transferProjectFile("test", "notes/context.md", "context.md", false, "other");
-  expect(String(fetch.mock.calls[0][0])).toContain("/api/projects/test/file/transfer/other");
-  expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({path:"notes/context.md",destination:"context.md",copy:false});
-  fetch.mockResolvedValue(new Response('Not found', {status:404}));
+  expect(String(fetch.mock.calls[1][0])).toContain("/api/projects/test/file/transfer/other");
+  expect(JSON.parse(String(fetch.mock.calls[1][1]?.body))).toEqual({path:"notes/context.md",destination:"context.md",copy:false});
+  await expect(transferProjectFile("test", "context.md", "context.md", false, "gone")).rejects.toThrow("no longer exists");
+  expect(fetch.mock.calls.filter(call => String(call[0]).includes("/transfer/")).length).toBe(1);
+  fetch.mockImplementation(async input => String(input).endsWith("/api/projects") ? roster() : new Response('Not found', {status:404}));
   await expect(transferProjectFile("test", "context.md", "context.md", false, "other")).rejects.toThrow("between projects");
 });
 it("keeps the folder flag on the clipboard and rejects a malformed one", async () => {
