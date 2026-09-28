@@ -10,3 +10,12 @@
 .row.done-toggle .history-chevron { width: 12px; height: 12px; flex: none; color: var(--fg-3); }
 .history-chevron.open { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .mission-status-spin { animation: none; } }
+
+.folder-activity-icon { position: relative; overflow: visible; }
+.folder-activity-mark { position: absolute; right: -4px; bottom: -3px; display: flex; align-items: center; justify-content: center; width: 12px; height: 12px; border-radius: 50%; background: var(--bg, #141414); color: var(--blue); }
+.folder-activity-mark svg { display: block; }
+
+/* Animate only newly mounted rows, never height/layout or every poll. */
+.sidebar-tree .tree-entry { animation: sidebar-row-arrive 100ms ease-out; }
+@keyframes sidebar-row-arrive { from { opacity: .55; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sidebar-tree .tree-entry { animation: none; } }

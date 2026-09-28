@@ -1,6 +1,7 @@
 use serde::Serialize;
-use std::sync::{Mutex, OnceLock};
-use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use sysinfo::{Disks, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Clone, Serialize)]
 pub struct Consumer {
@@ -50,6 +51,7 @@ pub struct CachedSnapshot {
     #[serde(flatten)]
     snapshot: Snapshot,
     history: Vec<Sample>,
+    sampled_at: u64,
 }
 static DETAILS_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn seconds() -> u64 {
@@ -60,11 +62,29 @@ fn seconds() -> u64 {
 }
 static CACHE: OnceLock<Mutex<Option<CachedSnapshot>>> = OnceLock::new();
 
-/// The native process owns sampling, not the lifetime of a webview/page.
+static DEMAND: OnceLock<(Mutex<Option<Instant>>, Condvar)> = OnceLock::new();
+fn demand() -> &'static (Mutex<Option<Instant>>, Condvar) {
+    DEMAND.get_or_init(|| (Mutex::new(None), Condvar::new()))
+}
+fn lease_active(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(10))
+}
+/// Reads renew a lease; a closed/hidden/crashed webview cannot leave sampling active.
 pub fn start(voice: crate::voice::VoiceState) {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         std::thread::spawn(move || loop {
+            let (lock, wake) = demand();
+            let Ok(mut last) = lock.lock() else {
+                return;
+            };
+            while !lease_active(*last, Instant::now()) {
+                let Ok(next) = wake.wait(last) else {
+                    return;
+                };
+                last = next;
+            }
+            drop(last);
             if let Ok(snapshot) = collect(
                 voice.worker_pid(),
                 voice.worker_shared(),
@@ -88,7 +108,11 @@ pub fn start(voice: crate::voice::VoiceState) {
                             snapshot.memory_used as f64 / snapshot.memory_total as f64 * 100.0
                         }),
                     });
-                    *cache = Some(CachedSnapshot { snapshot, history });
+                    *cache = Some(CachedSnapshot {
+                        snapshot,
+                        history,
+                        sampled_at: now,
+                    });
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -99,6 +123,11 @@ pub fn start(voice: crate::voice::VoiceState) {
 pub fn local_machine_metrics(details: Option<bool>) -> Result<CachedSnapshot, String> {
     if details == Some(true) {
         DETAILS_UNTIL.store(seconds() + 6, std::sync::atomic::Ordering::Relaxed);
+    }
+    let (lock, wake) = demand();
+    if let Ok(mut last) = lock.lock() {
+        *last = Some(Instant::now());
+        wake.notify_one();
     }
     CACHE
         .get_or_init(|| Mutex::new(None))
@@ -126,30 +155,17 @@ fn collect(
     let process_start = std::time::Instant::now();
     let details = seconds() < DETAILS_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
     if details {
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::new().with_memory(),
+        );
     }
     let processes_ms = process_start.elapsed().as_secs_f64() * 1000.0;
     let disks_start = std::time::Instant::now();
     let cpu_percent = initialized.then(|| system.global_cpu_usage());
     *initialized = true;
-    static DISKS: OnceLock<Mutex<(Disks, u64)>> = OnceLock::new();
-    let mut disk_cache = DISKS
-        .get_or_init(|| Mutex::new((Disks::new_with_refreshed_list(), seconds())))
-        .lock()
-        .map_err(|e| e.to_string())?;
-    if seconds().saturating_sub(disk_cache.1) >= 60 {
-        *disk_cache = (Disks::new_with_refreshed_list(), seconds());
-    }
-    let disks = &disk_cache.0;
-    // macOS root and Data share an APFS container; count only the Data mount.
-    let disk = disks
-        .iter()
-        .find(|d| d.mount_point() == std::path::Path::new("/System/Volumes/Data"))
-        .or_else(|| {
-            disks
-                .iter()
-                .find(|d| d.mount_point() == std::path::Path::new("/"))
-        });
+    let (disk_used, disk_total) = disk_usage();
     let disks_ms = disks_start.elapsed().as_secs_f64() * 1000.0;
     let classify_start = std::time::Instant::now();
     let mut consumers = vec![
@@ -188,13 +204,42 @@ fn collect(
         gpu_percent,
         memory_used: system.used_memory(),
         memory_total: system.total_memory(),
-        disk_used: disk
-            .map(|d| d.total_space().saturating_sub(d.available_space()))
-            .unwrap_or(0),
-        disk_total: disk.map(|d| d.total_space()).unwrap_or(0),
+        disk_used,
+        disk_total,
         consumers,
         timings_ms: serde_json::json!({"aggregates":aggregates_ms,"processes":processes_ms,"disks":disks_ms,"classification":classification_ms,"gpu":gpu_ms,"total":started.elapsed().as_secs_f64()*1000.0,"details":details}),
     })
+}
+
+fn disk_usage() -> (u64, u64) {
+    static DISKS: OnceLock<Mutex<Option<(Instant, u64, u64)>>> = OnceLock::new();
+    let Ok(mut cached) = DISKS.get_or_init(|| Mutex::new(None)).lock() else {
+        return (0, 0);
+    };
+    if let Some((time, used, total)) = *cached {
+        if time.elapsed() < Duration::from_secs(60) {
+            return (used, total);
+        }
+    }
+    let disks = Disks::new_with_refreshed_list();
+    let disk = disks
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/System/Volumes/Data"))
+        .or_else(|| {
+            disks
+                .iter()
+                .find(|d| d.mount_point() == std::path::Path::new("/"))
+        });
+    let result = disk
+        .map(|d| {
+            (
+                d.total_space().saturating_sub(d.available_space()),
+                d.total_space(),
+            )
+        })
+        .unwrap_or_default();
+    *cached = Some((Instant::now(), result.0, result.1));
+    result
 }
 
 fn apple_gpu_usage() -> Option<f32> {
@@ -221,6 +266,13 @@ fn apple_gpu_usage() -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sampling_lease_expires_without_a_reader() {
+        let now = Instant::now();
+        assert!(!lease_active(None, now));
+        assert!(lease_active(Some(now), now + Duration::from_secs(9)));
+        assert!(!lease_active(Some(now), now + Duration::from_secs(10)));
+    }
     #[test]
     fn native_collector_reads_host_resources() {
         let sample = collect(None, false, Vec::new()).expect("native system collector");

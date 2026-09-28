@@ -15,3 +15,19 @@ it('restores multiple generations exactly once without a launch receipt',()=>{
 it('leaves ordinary messages and malformed envelopes untouched',()=>{
  for(const text of ['hello',wrap([{role:'system',content:'invalid'}],'next'),wrap([], 'next').replace('"history":[]','"history":null')])expect(remoteContinuation(text)).toBeNull();
 });
+
+it('restores the infrastructure recovery envelope without inventing another user request',()=>{
+ const history=[{role:'user',content:wrap([{role:'user',content:'Original request'},{role:'assistant',content:'Earlier answer'}],'Latest request')}];
+ const prefix='Continue the existing mission after infrastructure interruption before the previous remote job acquired a slot. Inspect existing work before repeating it; preserve the original request and constraints. Historical context:\n';
+ const text=prefix+JSON.stringify(history);
+ expect(remoteContinuation(text)?.map(m=>m.content)).toEqual(['Original request','Earlier answer','Latest request']);
+ expect(withInitialPrompt([], {id:'recovered',history:[{role:'user',content:text}]} as Mission).map(m=>'text' in m?m.text:'')).toEqual(['Original request','Earlier answer','Latest request']);
+ expect(remoteContinuation(prefix+'[invalid')).toBeNull();
+ expect(remoteContinuation(prefix+JSON.stringify([{role:'system',content:'invalid'}]))).toBeNull();
+});
+
+it('keeps stale cancellation diagnostics in their source attempt, not the successor transcript',()=>{
+ const diagnostic="Remote node 'dgx-spark' job 0508c4ef-4619-4762-85ca-48c4c3b8dc29 reached state 'failed' (exit None) after the mission left Active (interrupted); the mission status is preserved.\nerror: cancelled while waiting for a slot\n\nlog tail:\n(empty)";
+ expect(remoteContinuation(wrap([{role:'user',content:'Previous request'},{role:'assistant',content:diagnostic}],'Latest request'))?.map(m=>m.content)).toEqual(['Previous request','Latest request']);
+ expect(remoteContinuation(diagnostic)).toBeNull();
+});

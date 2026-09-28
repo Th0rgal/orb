@@ -36,7 +36,7 @@ describe("pageCache", () => {
   });
 
   it("bounds retained payload bytes as well as entry count", () => {
-    const value="x".repeat(17*1024*1024);
+    const value="x".repeat(9*1024*1024);
     cachePut("first",value);cachePut("second",value);
     expect(cachePeek("first")).toBeUndefined();
     expect(cachePeek("second")).toBe(value);
@@ -46,7 +46,7 @@ describe("pageCache", () => {
     let finish!:(value:string)=>void;
     const old=cacheLoad("key",()=>new Promise<string>(resolve=>finish=resolve));
     cacheReset();cachePut("key","new");finish("old");
-    await old;
+    await expect(old).rejects.toThrow("Connection changed");
     expect(cachePeek("key")).toBe("new");
   });
 

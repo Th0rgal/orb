@@ -316,6 +316,30 @@ async fn write_file(
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct TransferFileRequest {
+    path: String,
+    destination: String,
+    #[serde(default)]
+    copy: bool,
+}
+
+async fn transfer_file(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<TransferFileRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = context_store(&state, &slug)?;
+    tokio::task::spawn_blocking(move || {
+        store
+            .transfer_file(&req.path, &req.destination, req.copy)
+            .map_err(bad_request)?;
+        Ok(Json(serde_json::json!({"path":req.destination})))
+    })
+    .await
+    .map_err(internal)?
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct MkdirRequest {
     path: String,
 }
@@ -544,6 +568,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:slug/file", put(write_file))
         .route("/:slug/file", delete(delete_file))
         .route("/:slug/file/mkdir", post(mkdir))
+        .route("/:slug/file/transfer", post(transfer_file))
 }
 
 #[cfg(test)]

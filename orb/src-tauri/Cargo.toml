@@ -9,7 +9,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 notify = "8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync", "macros"] }
 sha2 = "0.10"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }

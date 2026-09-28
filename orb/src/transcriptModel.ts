@@ -266,13 +266,19 @@ export function buildTranscript(events: StreamEvent[]): StreamItem[] {
 }
 
 export function applyStreamEvent(items: StreamItem[], event: StreamEvent): StreamItem[] {
+  return applyStreamEvents(items, [event]);
+}
+
+/** One copy per transport batch; reducer ordering and deduplication are unchanged. */
+export function applyStreamEvents(items: StreamItem[], events: StreamEvent[]): StreamItem[] {
+  if (!events.length) return items;
   let reducer=states.get(items);
   if(!reducer){
     if(items.length)throw new Error("Transcript must originate from buildTranscript");
     reducer=new TranscriptReducer();
   }
   reducer.items=items.slice();
-  reducer.apply(event);
+  for (const event of events) reducer.apply(event);
   states.set(reducer.items,reducer);
   return reducer.items;
 }

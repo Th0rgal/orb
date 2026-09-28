@@ -165,7 +165,7 @@ test("reference subfolder: hover reveals +, whose menu creates agents, crons and
 
   await plus.click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "New cron", "New file", "New folder"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "Cloud agent", "New cron", "New file", "New folder", "Rename"]);
 
   await menu.getByRole("menuitem", { name: "New file" }).click();
   await page.getByLabel("File name").fill("spec");
@@ -384,4 +384,102 @@ test("Concurrency limits expand inside client settings and preserve the draft", 
   await expect(global).toHaveValue("7");
   await expect(page.locator(".settings-body h2")).toHaveText("Client");
   await page.screenshot({ path: "artifacts/orb-execution-settings.png" });
+});
+
+
+test("folder display rename persists, supports cancellation, and retains file paths", async ({ page }) => {
+  const { writes } = await setup(page);
+  await expandProject(page);
+  await page.getByRole("button", { name: "Folder actions for reference" }).click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await expect(page.getByLabel("Folder name", { exact: true })).toHaveValue("reference");
+  await page.getByLabel("Folder name", { exact: true }).fill("Research");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Folder actions for Research" })).toBeVisible();
+  await page.reload();
+  await expandProject(page);
+  const folder = page.locator(".row.folder", { hasText: "Research" });
+  await folder.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page.getByLabel("Folder name", { exact: true }).fill("Discard this");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Folder actions for Research" })).toBeVisible();
+  await folder.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "New file", exact: true }).click();
+  await page.getByLabel("File name", { exact: true }).fill("spec");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]).toEqual({ path: "reference/spec.md", content: "" });
+});
+
+test("file actions rename, cut/paste, copy/paste, move and delete actual paths", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    let text = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (value: string) => { text = value; }, readText: async () => text,
+    } });
+  });
+  const files = new Map([['context.md', 'Important content']]);
+  const transfers: any[] = [];
+  await page.route('**/api/projects/test/**', async route => {
+    const url = new URL(route.request().url()), path = url.searchParams.get('path') ?? '';
+    if (url.pathname.endsWith('/files')) {
+      const entries = [...files.keys()].filter(key => (key.includes('/') ? key.slice(0, key.lastIndexOf('/')) : '') === path)
+        .map(key => ({name:key.split('/').at(-1),kind:'file'}));
+      if (!path) entries.push({name:'archive',kind:'dir'});
+      return route.fulfill({json:{entries}});
+    }
+    if (url.pathname.endsWith('/file/transfer')) {
+      const body = route.request().postDataJSON(); transfers.push(body);
+      if (files.has(body.destination)) return route.fulfill({status:400,body:'Destination already exists'});
+      files.set(body.destination, files.get(body.path)!);
+      if (!body.copy) files.delete(body.path);
+      return route.fulfill({json:{path:body.destination}});
+    }
+    if (url.pathname.endsWith('/file')) {
+      if (route.request().method() === 'DELETE') { files.delete(path); return route.fulfill({json:{}}); }
+      return route.fulfill({json:{content:files.get(path) ?? ''}});
+    }
+    await route.fallback();
+  });
+  await expandProject(page);
+  const file = (name: string) => page.locator('.row.file').filter({hasText:name});
+  await file('context.md').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+  await page.getByLabel('File name',{exact:true}).fill('renamed.md');
+  await page.getByRole('button',{name:'Rename',exact:true}).click();
+  await expect.poll(() => transfers).toEqual([{path:'context.md',destination:'renamed.md',copy:false}]);
+  await expect(file('renamed.md')).toBeVisible();
+  const shortcut = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await file('renamed.md').focus(); await page.keyboard.press(`${shortcut}+x`);
+  const archive = page.locator('.row.folder .row-main').filter({hasText:'archive'});
+  await archive.focus(); await page.keyboard.press(`${shortcut}+v`);
+  await expect.poll(() => files.has('archive/renamed.md')).toBe(true);
+  await expect(file('renamed.md')).toBeVisible();
+  await expect(page.locator('[data-tree-id="pf:test:archive/renamed.md"]')).toBeVisible();
+  await file('renamed.md').focus(); await page.keyboard.press(`${shortcut}+c`);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('"copy":true');
+  await page.getByRole('button',{name:'Test',exact:true}).focus(); await page.keyboard.press(`${shortcut}+v`);
+  await expect.poll(() => files.has('renamed.md')).toBe(true);
+  expect(files.get('renamed.md')).toBe('Important content');
+  expect(files.get('archive/renamed.md')).toBe('Important content');
+  await page.locator('[data-tree-id="pf:test:renamed.md"] .row.file').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move…',exact:true}).click();
+  await page.getByLabel('Destination folder',{exact:true}).fill('archive');
+  await page.getByRole('button',{name:'Move',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('already exists');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-tree-id="pf:test:renamed.md"] .row.file').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  await page.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect.poll(() => files.has('renamed.md')).toBe(false);
+  expect(files.has('archive/renamed.md')).toBe(true);
+  await page.locator('[data-tree-id="pf:test:archive/renamed.md"] .row.file').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move…',exact:true}).click();
+  await page.getByLabel('Destination folder',{exact:true}).fill('');
+  await page.getByRole('button',{name:'Move',exact:true}).click();
+  await expect.poll(() => files.has('archive/renamed.md')).toBe(false);
+  expect(files.get('renamed.md')).toBe('Important content');
+  expect(transfers[0]).toEqual({path:'context.md',destination:'renamed.md',copy:false});
 });

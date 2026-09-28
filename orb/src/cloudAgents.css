@@ -17,3 +17,8 @@
 .cloud-experimental{display:inline-flex;align-items:center;color:var(--fg-3)}
 
 .cloud-choice-list{max-height:320px;overflow:auto}.model-menu:has(.cloud-choice-list){max-width:min(420px,90vw)}
+/* Visible while a cloud turn runs: the step and how long it has been going. */
+.cloud-working { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; color: var(--fg-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.cloud-working-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-2); animation: cloud-working-pulse 1.2s ease-in-out infinite; }
+@keyframes cloud-working-pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .cloud-working-dot { animation: none; } }

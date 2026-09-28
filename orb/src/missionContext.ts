@@ -14,8 +14,19 @@ export function contextWindow(backend?: string | null): number {
   }
 }
 
-function clip(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n);
+// Stream payloads are immutable snapshots. A token delta replaces only the live
+// item; do not serialize every historical tool output again for the context ring.
+// Weak keys let evicted conversations (and their potentially large results) go.
+const payloadLengths = new WeakMap<object, number>();
+function payloadLength(value: unknown): number {
+  if (value == null) return 0;
+  if (typeof value === "string") return Math.min(value.length, 400);
+  if (typeof value !== "object") return Math.min(JSON.stringify(value)?.length ?? 0, 400);
+  const cached = payloadLengths.get(value);
+  if (cached !== undefined) return cached;
+  const length = Math.min(JSON.stringify(value)?.length ?? 0, 400);
+  payloadLengths.set(value, length);
+  return length;
 }
 
 /** Rough token count from visible conversation (~4 chars/token).
@@ -26,9 +37,7 @@ export function estimateTokens(items: StreamItem[]): number {
     if (item.kind === "user" || item.kind === "text") chars += item.text.length;
     else if (item.kind === "think") chars += Math.min(item.text.length, 8_000);
     else if (item.kind === "tool") {
-      const args = item.args == null ? "" : typeof item.args === "string" ? item.args : JSON.stringify(item.args);
-      const result = item.result == null ? "" : typeof item.result === "string" ? item.result : JSON.stringify(item.result);
-      chars += item.name.length + clip(args, 400).length + clip(result, 400).length;
+      chars += item.name.length + payloadLength(item.args) + payloadLength(item.result);
     } else if (item.kind === "error") chars += item.text.length;
   }
   return Math.max(0, Math.ceil(chars / 4));

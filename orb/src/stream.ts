@@ -1,5 +1,5 @@
 import {batch} from "solid-js";
-import { clearConnection, getApiUrl, getJwt } from "./api";
+import { clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
 
 export interface StoredEvent {
   id: number;
@@ -32,10 +32,13 @@ export interface StreamEvent {
 }
 
 async function apiRaw(path: string): Promise<Response> {
+  const version = connectionVersion();
   const jwt = getJwt();
   const res = await fetch(`${getApiUrl()}${path}`, {
     headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+    signal: AbortSignal.timeout(30_000),
   });
+  if (connectionVersion() !== version) throw new Error("Connection changed");
   if (res.status === 401) {
     clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");

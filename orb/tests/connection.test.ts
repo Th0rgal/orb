@@ -186,3 +186,23 @@ it("rejects an invalid project catalog without caching it and recovers on retry"
   await expect(listProjects()).rejects.toThrow("Couldn’t load projects");
   await expect(listProjects()).resolves.toEqual([{slug:"verity",title:"Verity"}]);
 });
+it('never creates an ordinary replacement for a refused btw continuation',async()=>{
+ setConnection('http://btw-refusal.test','token');
+ const fetcher=vi.fn(async(url:string)=>{
+  if(url.endsWith('/side'))return Response.json({id:'side',remote_node_id:'old-agent',tags:['btw-parent:main'],history:[{role:'user',content:'x'.repeat(250000)}]});
+  if(url.endsWith('/message'))return new Response('REMOTE_RESUME_REQUIRES_REPLACEMENT: no session',{status:409});
+  throw new Error('Unexpected create');
+ });vi.stubGlobal('fetch',fetcher);
+ await expect(sendMissionMessage('side','Status?',undefined,'btw-attempt')).rejects.toThrow('REMOTE_RESUME_REQUIRES_REPLACEMENT');
+ expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each(['active', 'pending', 'waiting_background'])('never replaces a %s mission on a stale replacement hint', async status => {
+ const fetcher=vi.fn(async (_url:string,init?:RequestInit)=>init?.method==='POST'
+  ?new Response('REMOTE_RESUME_REQUIRES_REPLACEMENT: explicit track',{status:409})
+  :new Response(JSON.stringify({id:'live',status,remote_job:{node_id:'dgx-spark',node_state:'running'}})));
+ vi.stubGlobal('fetch',fetcher);
+ await expect(sendMissionMessage('live','Keep this follow-up')).rejects.toThrow('Your draft is kept');
+ expect(fetcher).toHaveBeenCalledTimes(2);
+ expect(fetcher.mock.calls.some(([url])=>url.endsWith('/missions'))).toBe(false);
+});

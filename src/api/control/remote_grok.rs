@@ -606,7 +606,7 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex"
+                    GROK_BACKEND | "opencode" | "codex" | "claudecode"
                 ) =>
             {
                 mission
@@ -1122,7 +1122,7 @@ pub(crate) async fn reject_local_followup(
 pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacement) -> String {
     if matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex"
+        GROK_BACKEND | "opencode" | "codex" | "claudecode"
     ) {
         format!(
             "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {} runs natively on remote node '{}'; \
@@ -1237,7 +1237,7 @@ pub(crate) async fn continue_on_node(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex"
+        GROK_BACKEND | "opencode" | "codex" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1366,6 +1366,15 @@ pub(crate) async fn continue_on_node(
                     "Codex remote session has no recorded model".to_string(),
                 )
             })?,
+            prompt: prompt.clone(),
+            resume_session_id: session_id.clone(),
+        }
+    } else if mission.backend == "claudecode" {
+        RemoteHarnessPlan::ClaudeCode {
+            model: mission
+                .model_override
+                .as_deref()
+                .map(|m| m.strip_prefix("anthropic/").unwrap_or(m).to_string()),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
         }
@@ -1983,7 +1992,6 @@ mod tests {
         assert!(local_resume_refusal(&mission, &placement).contains("/resume"));
         mission.backend = "claudecode".into();
         let other = local_resume_refusal(&mission, &placement);
-        assert!(other.contains("supersedes_mission_id"), "{other}");
-        assert!(other.contains("'claudecode'"), "{other}");
+        assert!(other.contains("/resume"), "{other}");
     }
 }

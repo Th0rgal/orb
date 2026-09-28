@@ -8,7 +8,7 @@ test('full-width meters, separate account actions and API key add/edit',async({p
  await page.route('**/api/**',route=>{
   const req=route.request(),path=new URL(req.url()).pathname;
   if(['POST','PUT'].includes(req.method())) {writes.push({method:req.method(),body:req.postDataJSON()});return route.fulfill({json:{}});}
-  return route.fulfill({json:path==='/api/ai/providers'?accounts:path==='/api/ai/providers/usage'?{entries:{quota:usage}}:path.endsWith('/quota/usage')?usage:path==='/api/projects'?{projects:[]}:[]});
+  return route.fulfill({json:path==='/api/cloud/accounts'?[{id:'cursor-default',provider:'cursor_cloud',label:'Cursor Cloud',available:true,experimental:false}]:path==='/api/ai/providers'?accounts:path==='/api/ai/providers/usage'?{entries:{quota:usage}}:path.endsWith('/quota/usage')?usage:path==='/api/projects'?{projects:[]}:[]});
  });
  await page.goto('/');await page.getByRole('button',{name:'Providers',exact:true}).click();
  const account=page.locator('.p-acc-wrap').filter({hasText:'person@example.com'});
@@ -27,6 +27,10 @@ test('full-width meters, separate account actions and API key add/edit',async({p
  await expect(dialog.locator('input[type=password]')).toHaveValue('');await dialog.locator('input[type=password]').fill('replacement-test-key');await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);
  expect(writes[1]).toEqual({method:'PUT',body:{name:'Work key',api_key:'replacement-test-key'}});
  await account.locator('.p-acc-btn').click();
- await expect(account.locator('.p-meter-caption')).toContainText('Weekly');
- await page.screenshot({path:'test-results/provider-layout.png'});
+ await expect(account.locator('.provider-usage-heading')).toContainText('Weekly');
+ const cloud=page.getByRole('region',{name:'Cloud agents'});
+ await cloud.getByRole('button',{name:/Cursor Cloud/}).click();
+ await expect(cloud.getByRole('button',{name:/View usage in Cursor/})).toBeVisible();
+ await expect(cloud.getByRole('progressbar')).toHaveCount(0);
+ expect(await cloud.evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
 });

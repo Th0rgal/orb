@@ -45,10 +45,13 @@ impl Replica {
         }
     }
     fn save(&self, state: &ReplicaState) -> Result<()> {
-        super::project_context::atomic(
-            &self.state_path(),
-            &serde_json::to_vec(state).map_err(|e| e.to_string())?,
-        )
+        let bytes = serde_json::to_vec(state).map_err(|e| e.to_string())?;
+        let path = self.state_path();
+        // Called under the sync lock: unchanged durable state needs no fsync.
+        if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
+            return Ok(());
+        }
+        super::project_context::atomic(&path, &bytes)
     }
     fn url(&self, suffix: &str) -> Result<String> {
         let mut url = reqwest::Url::parse(&self.endpoint).map_err(|e| e.to_string())?;
@@ -364,5 +367,41 @@ impl Replica {
         state.ready = true;
         state.error = None;
         self.save(state)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod persistence_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    #[test]
+    fn identical_state_does_not_rewrite_but_mutations_remain_durable() {
+        let directory = tempfile::tempdir().unwrap();
+        let replica = Replica {
+            store: Store::new(
+                directory.path().join("files"),
+                directory.path().join("state"),
+            ),
+            endpoint: "https://example.test".into(),
+            token: "test".into(),
+            project: "test".into(),
+            source: "test".into(),
+        };
+        std::fs::create_dir_all(&replica.store.metadata).unwrap();
+        let mut state = ReplicaState::default();
+        replica.save(&state).unwrap();
+        let inode = std::fs::metadata(replica.state_path()).unwrap().ino();
+        replica.save(&state).unwrap();
+        assert_eq!(
+            std::fs::metadata(replica.state_path()).unwrap().ino(),
+            inode
+        );
+        state.ready = true;
+        replica.save(&state).unwrap();
+        assert!(replica.status().unwrap().ready);
+        assert_ne!(
+            std::fs::metadata(replica.state_path()).unwrap().ino(),
+            inode
+        );
     }
 }

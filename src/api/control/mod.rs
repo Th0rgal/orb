@@ -11997,6 +11997,7 @@ pub(crate) enum RemoteHarnessPlan {
     Raw { command: String },
     /// Claude Code CLI on the node, model routed through this core's proxy.
     ClaudeCode {
+        resume_session_id: Option<String>,
         model: Option<String>,
         prompt: String,
     },
@@ -12076,6 +12077,7 @@ pub(crate) fn plan_remote_harness(
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             // Claude Code expects bare model ids.
             model: model.map(|m| {
                 m.strip_prefix("anthropic/")
@@ -12265,7 +12267,11 @@ pub(crate) fn remote_execution_for_plan(
             env: None,
             label,
         },
-        RemoteHarnessPlan::ClaudeCode { model, prompt } => {
+        RemoteHarnessPlan::ClaudeCode {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
             let mut command = String::from(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
                  claude -p --dangerously-skip-permissions",
@@ -12273,6 +12279,10 @@ pub(crate) fn remote_execution_for_plan(
             if let Some(model) = model {
                 command.push_str(" --model ");
                 command.push_str(&shell_single_quote(model));
+            }
+            if let Some(session) = resume_session_id {
+                command.push_str(" --resume ");
+                command.push_str(&shell_single_quote(session));
             }
             command.push(' ');
             command.push_str(&shell_single_quote(&positional_prompt(prompt)));
@@ -13300,6 +13310,19 @@ async fn dispatch_remote_job(
 
 /// The submit half of `dispatch_remote_job`; `job_id` already owns the
 /// mission's run lease.
+// The persisted identity must be passed to the initial CLI invocation. Otherwise
+// Claude creates a different UUID and the next --resume can never find it.
+fn bind_remote_claude_session(execution: &mut RemoteExecution, session_id: &str) {
+    execution.command = execution.command.replacen(
+        "claude -p ",
+        &format!(
+            "claude -p --session-id {} ",
+            shell_single_quote(&session_id)
+        ),
+        1,
+    );
+}
+
 async fn submit_leased_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -13347,6 +13370,30 @@ async fn submit_leased_remote_job(
             r#"btw_upload_root="$(dirname -- "$PWD")/uploads"; {workspace_prefix}{context_prefix}"#
         );
     }
+    let claude_session = if let RemoteHarnessPlan::ClaudeCode {
+        resume_session_id: None,
+        ..
+    } = plan
+    {
+        let session_id = Uuid::new_v4().to_string();
+        let run = control
+            .mission_store
+            .get_active_mission_run(mission.id)
+            .await?
+            .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+            .ok_or("native Claude session allocation lost its run lease")?;
+        let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+        if !control
+            .mission_store
+            .update_mission_session_id(mission.id, &session_id, "claudecode", Some(&fence))
+            .await?
+        {
+            return Err("native Claude session allocation rejected by run generation fence".into());
+        }
+        Some(session_id)
+    } else {
+        None
+    };
     if let RemoteHarnessPlan::Grok {
         new_session_id: Some(session_id),
         resume_session_id: None,
@@ -13391,7 +13438,7 @@ async fn submit_leased_remote_job(
     // never in the logged command line. Raw commands carry their own auth.
     // Minted last, after every other fallible pre-submit step, so each path
     // below that can fail after this point retires it explicitly.
-    let (execution, proxy_key_id) = if plan.uses_core_proxy() {
+    let (mut execution, proxy_key_id) = if plan.uses_core_proxy() {
         let api_base_url = super::mission_runner::public_api_base_url_from_env()
             .ok_or_else(|| {
                 "SANDBOXED_PUBLIC_URL is not configured; a remote harness launch needs a core URL the node can reach".to_string()
@@ -13408,6 +13455,9 @@ async fn submit_leased_remote_job(
     } else {
         (remote_execution_for_plan(plan, "", ""), None)
     };
+    if let Some(session_id) = claude_session {
+        bind_remote_claude_session(&mut execution, &session_id);
+    }
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
         mission_id: mission.id,
@@ -36947,8 +36997,33 @@ Investigate <service/> failures.
     }
 
     #[test]
+    fn remote_claude_initial_identity_and_continuation_use_the_same_session() {
+        let id = "c84bf30f-0d21-417e-82b7-48bda29ab007";
+        let fresh = RemoteHarnessPlan::ClaudeCode {
+            model: Some("claude-opus-5-5".into()),
+            prompt: "Remember a marker".into(),
+            resume_session_id: None,
+        };
+        let mut execution = remote_execution_for_plan(&fresh, "https://core.example", "test");
+        bind_remote_claude_session(&mut execution, id);
+        assert!(execution
+            .command
+            .contains(&format!("claude -p --session-id '{id}' ")));
+        assert!(!execution.command.contains("--resume"));
+        let resumed = RemoteHarnessPlan::ClaudeCode {
+            model: Some("claude-opus-5-5".into()),
+            prompt: "Recall it".into(),
+            resume_session_id: Some(id.into()),
+        };
+        let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
+        assert!(execution.command.contains(&format!("--resume '{id}'")));
+        assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
     fn remote_execution_routes_selected_model_through_core_proxy_env() {
         let plan = RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             model: Some("claude-opus-5".into()),
             prompt: "say 'hi'".into(),
         };
@@ -37018,6 +37093,7 @@ Investigate <service/> failures.
             serde_json::from_str(&exec.env.unwrap()[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
         assert!(config["provider"]["builtin"]["models"]["xai/grok-4.6"].is_object());
         let plan = RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: None,
             model: None,
             prompt: "--help".into(),
         };
