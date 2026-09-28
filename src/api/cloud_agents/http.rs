@@ -358,13 +358,20 @@ pub async fn follow_up(
         .iter_mut()
         .find(|t| t.key == key.to_string())
     {
-        turn.model = model;
-        turn.model_params = model_params;
+        turn.model = model.clone();
+        turn.model_params = model_params.clone();
     }
-    store
-        .save_cloud_execution(execution, Some(revision), None, None, vec![])
-        .await
-        .map_err(bad)?;
+    commit_follow_up(
+        &store,
+        execution,
+        revision,
+        key,
+        &req.content,
+        &model,
+        &model_params,
+    )
+    .await
+    .map_err(bad)?;
     Ok(Some(Json(ControlMessageResponse {
         id: key,
         queued: true,
@@ -374,6 +381,46 @@ pub async fn follow_up(
         warnings: vec![],
     })))
 }
+async fn commit_follow_up(
+    store: &Arc<dyn MissionStore>,
+    execution: Execution,
+    revision: u64,
+    key: Uuid,
+    prompt: &str,
+    model: &Option<String>,
+    model_params: &[ModelParam],
+) -> Result<(), String> {
+    let mid = execution.mission_id;
+    if let Err(error) = store
+        .save_cloud_execution(execution, Some(revision), None, None, vec![])
+        .await
+    {
+        // A concurrent retry may already have committed this exact message.
+        // Never overwrite the winner or acknowledge a key with different content.
+        let accepted = if error == "Cloud execution revision changed" {
+            store
+                .cloud_executions()
+                .await?
+                .iter()
+                .find(|e| e.mission_id == mid)
+                .is_some_and(|e| {
+                    e.turns.iter().any(|t| {
+                        t.key == key.to_string()
+                            && t.prompt == prompt
+                            && &t.model == model
+                            && t.model_params == model_params
+                    })
+                })
+        } else {
+            false
+        };
+        if !accepted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 pub async fn cancel(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -512,5 +559,67 @@ fn chatgpt_account_label(profile: &str) -> String {
     match identity {
         Some(email) => format!("ChatGPT · {email} · {profile}"),
         None => format!("ChatGPT · {profile}"),
+    }
+}
+
+#[cfg(test)]
+mod follow_up_tests {
+    use super::*;
+    use crate::api::mission_store::SqliteMissionStore;
+    #[tokio::test]
+    async fn overlapping_retries_accept_the_same_turn_and_reject_changed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().into(), "retry")
+                .await
+                .unwrap(),
+        );
+        let e = Execution {
+            mission_id: Uuid::new_v4(),
+            request_key: "launch".into(),
+            request_signature: "launch".into(),
+            revision: 0,
+            selection: Selection {
+                provider: Provider::CursorCloud,
+                account: "cursor-default".into(),
+                repository: None,
+                git_ref: None,
+                model: None,
+                model_params: vec![],
+            },
+            external_id: None,
+            external_url: None,
+            turns: vec![Turn::new("first".into(), "hello".into())],
+        };
+        let mut e = store
+            .save_cloud_execution(e, None, None, None, vec![])
+            .await
+            .unwrap();
+        let revision = e.revision;
+        let key = Uuid::new_v4();
+        e.enqueue(key.to_string(), "continue".into()).unwrap();
+        let (a, b) = tokio::join!(
+            commit_follow_up(&store, e.clone(), revision, key, "continue", &None, &[]),
+            commit_follow_up(&store, e.clone(), revision, key, "continue", &None, &[]),
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(store.cloud_executions().await.unwrap()[0].turns.len(), 2);
+        assert!(
+            commit_follow_up(&store, e.clone(), revision, key, "changed", &None, &[])
+                .await
+                .is_err()
+        );
+        assert!(commit_follow_up(
+            &store,
+            e,
+            revision,
+            key,
+            "continue",
+            &Some("different".into()),
+            &[]
+        )
+        .await
+        .is_err());
     }
 }

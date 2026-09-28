@@ -499,6 +499,39 @@ impl Store {
                 return Err("The destination folder does not exist".into());
             }
         }
+        if !copy {
+            // Persist both sides together before touching the visible tree. Recovery
+            // materializes the destination before deleting the source, including
+            // after a crash. A rename consumes no additional quota.
+            self.blob(entry.hash.as_deref().ok_or("missing content hash")?)?;
+            state.manifest.revision += 1;
+            let mut moved = entry.clone();
+            moved.revision = state.manifest.revision;
+            let created = Change {
+                before: None,
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: destination.into(),
+                entry: Some(moved.clone()),
+                source: "Orb".into(),
+            };
+            state.manifest.revision += 1;
+            let deleted = Change {
+                before: Some(entry),
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: path.into(),
+                entry: None,
+                source: "Orb".into(),
+            };
+            state.manifest.entries.remove(path);
+            state.manifest.entries.insert(destination.into(), moved);
+            state.history.extend([created.clone(), deleted.clone()]);
+            state.pending.extend([created, deleted]);
+            self.save(&state)?;
+            self.recover(&mut state)?;
+            return Ok(());
+        }
         let receipt = self.apply_locked(
             Operation {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -514,24 +547,6 @@ impl Store {
         )?;
         if receipt.conflict {
             return Err("The destination changed. No file was moved".into());
-        }
-        if !copy {
-            let receipt = self.apply_locked(
-                Operation {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    path: path.into(),
-                    base: Some(entry.revision),
-                    hash: None,
-                    directory: false,
-                    delete: true,
-                    source: "Orb".into(),
-                },
-                self.load()?,
-                None,
-            )?;
-            if receipt.conflict {
-                return Err(format!("The source changed during the move. Both files were kept; the copy is at {destination}"));
-            }
         }
         Ok(())
     }
@@ -702,6 +717,21 @@ mod tests {
                 source: "test".into(),
             })
             .unwrap()
+    }
+    #[test]
+    fn rename_at_entry_limit_does_not_charge_for_the_source_twice() {
+        let (_dir, s) = setup();
+        for i in 0..ENTRY_LIMIT {
+            fs::write(s.root.join(format!("file-{i}")), b"").unwrap();
+        }
+        s.transfer_file("file-0", "renamed", false).unwrap();
+        assert!(!s.root.join("file-0").exists());
+        assert!(s.root.join("renamed").exists());
+        assert_eq!(s.manifest().unwrap().entries.len(), ENTRY_LIMIT);
+        assert!(s
+            .transfer_file("renamed", "copy", true)
+            .unwrap_err()
+            .contains("5000"));
     }
     #[test]
     fn transfer_preserves_bytes_and_refuses_overwrite() {

@@ -174,18 +174,20 @@ pub async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Result<(),
     }
     let result = advance(store, &mut e, i).await;
     if let Err(error) = result {
-        e.turns[i].phase = match error.as_str() {
-            "reconnect_required" => Phase::ReconnectRequired,
-            "incompatible_response" => Phase::Incompatible,
-            "quota_exhausted" => Phase::Failed,
-            _ => {
-                if e.turns[i].phase == Phase::Submitting {
-                    Phase::SubmissionUncertain
-                } else {
-                    e.turns[i].phase
+        if e.turns[i].phase != Phase::CancelRequested {
+            e.turns[i].phase = match error.as_str() {
+                "reconnect_required" => Phase::ReconnectRequired,
+                "incompatible_response" => Phase::Incompatible,
+                "quota_exhausted" => Phase::Failed,
+                _ => {
+                    if e.turns[i].phase == Phase::Submitting {
+                        Phase::SubmissionUncertain
+                    } else {
+                        e.turns[i].phase
+                    }
                 }
-            }
-        };
+            };
+        }
         e.turns[i].detail = Some(error);
     }
     super::worker::receipt(store, e, i).await

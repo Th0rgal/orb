@@ -57,7 +57,9 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
     let adapter = match cursor::Cursor::from_account(&e.selection.account) {
         Ok(a) => a,
         Err(_) => {
-            e.turns[i].phase = Phase::ReconnectRequired;
+            if e.turns[i].phase != Phase::CancelRequested {
+                e.turns[i].phase = Phase::ReconnectRequired;
+            }
             receipt(store, e, i).await?;
             return Ok(());
         }
@@ -176,7 +178,9 @@ pub(super) async fn tick(store: &Arc<dyn MissionStore>, mut e: Execution) -> Res
         }
         Err(error) => {
             if error == "reconnect_required" {
-                e.turns[i].phase = Phase::ReconnectRequired;
+                if e.turns[i].phase != Phase::CancelRequested {
+                    e.turns[i].phase = Phase::ReconnectRequired;
+                }
             }
             e.turns[i].detail = Some(error);
         }
@@ -239,6 +243,50 @@ pub(super) async fn receipt(
 mod tests {
     use super::*;
     use crate::api::mission_store::SqliteMissionStore;
+    #[tokio::test]
+    async fn cancellation_survives_missing_credentials_for_both_providers() {
+        for provider in [Provider::CursorCloud, Provider::GrokBot] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = Arc::new(
+                SqliteMissionStore::new(dir.path().into(), "cancel-auth")
+                    .await
+                    .unwrap(),
+            );
+            let mut turn = Turn::new("turn".into(), "hello".into());
+            turn.phase = Phase::CancelRequested;
+            turn.external_id = Some("run".into());
+            let e = Execution {
+                mission_id: Uuid::new_v4(),
+                request_key: "launch".into(),
+                request_signature: "launch".into(),
+                revision: 0,
+                selection: Selection {
+                    provider,
+                    account: "missing-account".into(),
+                    repository: None,
+                    git_ref: None,
+                    model: None,
+                    model_params: vec![],
+                },
+                external_id: Some("agent".into()),
+                external_url: None,
+                turns: vec![turn],
+            };
+            let e = store
+                .save_cloud_execution(e, None, None, None, vec![])
+                .await
+                .unwrap();
+            if provider == Provider::CursorCloud {
+                tick(&store, e).await.unwrap();
+            } else {
+                super::super::grok::tick(&store, e).await.unwrap();
+            }
+            assert_eq!(
+                store.cloud_executions().await.unwrap()[0].turns[0].phase,
+                Phase::CancelRequested
+            );
+        }
+    }
     #[tokio::test]
     async fn remote_receipt_preserves_concurrent_followup_and_does_not_regress_completion() {
         let dir = tempfile::tempdir().unwrap();
