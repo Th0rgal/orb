@@ -114,3 +114,18 @@ it('does not mistake a running status confirmed by Core for local work',async()=
  vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({...done,status:'interrupted'}))));
  expect((await getMission('done')).status).toBe('interrupted');
 });
+it('learns about an archive the default list leaves out, and keeps an emptied title',async()=>{
+ setConnection('http://core.test','token');journal([done,unsynced]);
+ const asked:string[]=[];
+ vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
+  const url=String(input);asked.push(url);
+  // The default list shows attention rows only: the archived mission is absent.
+  if(url.endsWith('/api/control/missions'))return new Response('[]');
+  if(url.endsWith('/missions/done'))return new Response(JSON.stringify({...done,status:'acknowledged',title:''}));
+  return new Response('Not found',{status:404});
+ }));
+ await listMissions();
+ expect(asked.some(url=>url.endsWith('/missions/unsynced'))).toBe(false);
+ vi.stubGlobal('fetch',offline());
+ expect((await listMissions()).find(m=>m.id==='done')).toMatchObject({status:'acknowledged',title:''});
+});

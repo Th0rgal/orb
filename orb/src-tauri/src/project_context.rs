@@ -400,27 +400,7 @@ pub async fn project_context_file(
         return Err("Unknown context operation".into());
     }
     if operation == "delete" {
-        let prefix = format!("{path}/");
-        let mut entries: Vec<_> = manifest
-            .entries
-            .iter()
-            .filter(|(p, _)| *p == &path || p.starts_with(&prefix))
-            .collect();
-        entries.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        for (p, e) in entries {
-            let result = store.apply(Operation {
-                id: uuid::Uuid::new_v4().to_string(),
-                path: p.clone(),
-                base: Some(e.revision),
-                hash: None,
-                directory: false,
-                delete: true,
-                source: "Orb".into(),
-            })?;
-            if result.conflict {
-                return Err("Context changed while deleting; refresh first".into());
-            }
-        }
+        store.delete_tree(&path)?;
         tokio::spawn(async move {
             let _ = replica.tick().await;
         });

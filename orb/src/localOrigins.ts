@@ -26,6 +26,14 @@ export function rememberCoreState(local:Mission[],remote:Mission[],observedAt:nu
  return confirmLocalOrigins(local.flatMap(mission=>{
   const core=known.get(mission.id);
   if(!core||localPending(mission)||(core.status===mission.status&&(core.title??"")===(mission.title??"")))return [];
-  return [{id:mission.id,status:core.status,...(core.title?{title:core.title}:{}),observed_at:observedAt}];
+  // An emptied title is a title: dropping it would bring the old name back offline.
+  return [{id:mission.id,status:core.status,...(typeof core.title==="string"?{title:core.title}:{}),observed_at:observedAt}];
  }));
+}
+/** Lists leave out archived rows. Ask Core about synchronized journal missions it did not list. */
+export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(id:string)=>Promise<Mission>):Promise<Mission[]>{
+ const seen=new Set(listed.map(mission=>mission.id));
+ const missing=local.filter(mission=>!seen.has(mission.id)&&!localPending(mission)).slice(0,20);
+ const found=await Promise.allSettled(missing.map(mission=>read(mission.id)));
+ return found.flatMap(result=>result.status==="fulfilled"&&result.value?.id?[result.value]:[]);
 }

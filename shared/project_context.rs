@@ -639,6 +639,45 @@ impl Store {
         self.save(&state)?;
         self.recover(&mut state)
     }
+    /// Delete a file, or a folder with everything the manifest tracks inside it.
+    /// A folder that also holds entries outside the context is left untouched:
+    /// its directory could not be removed, and the tracked files would be lost
+    /// for nothing.
+    pub fn delete_tree(&self, path: &str) -> Result<()> {
+        valid_path(path)?;
+        let manifest = self.manifest()?;
+        let prefix = format!("{path}/");
+        let entries: Vec<(String, Entry)> = manifest
+            .entries
+            .iter()
+            .filter(|(p, _)| p.as_str() == path || p.starts_with(&prefix))
+            .map(|(p, e)| (p.clone(), e.clone()))
+            .collect();
+        if manifest.entries.get(path).is_some_and(|e| e.directory)
+            && Self::disk_entries(&checked(&self.root, path)?)? != entries.len() - 1
+        {
+            return Err(
+                "This folder contains files that are not part of the project context; move or delete them first"
+                    .into(),
+            );
+        }
+        // Children sort after their parent: delete them first.
+        for (path, entry) in entries.into_iter().rev() {
+            let receipt = self.apply(Operation {
+                id: uuid::Uuid::new_v4().to_string(),
+                path,
+                base: Some(entry.revision),
+                hash: None,
+                directory: false,
+                delete: true,
+                source: "Orb".into(),
+            })?;
+            if receipt.conflict {
+                return Err("A file changed during deletion; the remaining files were kept".into());
+            }
+        }
+        Ok(())
+    }
     /// Copy a file or folder into another project's context, then remove the
     /// exact source revisions for a move. The copy always lands first, so an
     /// interruption can duplicate content but never lose it. The two stores are
@@ -991,6 +1030,24 @@ mod tests {
             "kept"
         );
         assert!(!s.root.join("moved").exists());
+    }
+    #[test]
+    fn folder_delete_removes_nothing_when_untracked_files_remain() {
+        let (_dir, s) = setup();
+        tree(&s);
+        fs::write(s.root.join("notes/deep/.gitkeep"), "").unwrap();
+        assert!(s
+            .delete_tree("notes")
+            .unwrap_err()
+            .contains("not part of the project context"));
+        assert_eq!(fs::read_to_string(s.root.join("notes/a.md")).unwrap(), "a");
+        assert!(s.root.join("notes/deep/b.bin").exists());
+        fs::remove_file(s.root.join("notes/deep/.gitkeep")).unwrap();
+        s.delete_tree("notes").unwrap();
+        assert!(!s.root.join("notes").exists());
+        s.delete_tree("archive").unwrap();
+        assert!(s.manifest().unwrap().entries.is_empty());
+        s.delete_tree("already-gone").unwrap();
     }
     #[test]
     fn transfer_between_projects_copies_before_it_deletes() {
