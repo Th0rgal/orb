@@ -5,12 +5,15 @@ import '../src/styles.css';
 document.documentElement.dataset.theme='dark';
 const question={id:'question-1',method:'questions',params:{questions:[{id:'storage',question:'Where should settings be saved?',options:[{label:'Locally',description:'Keep settings on this computer. Preserve the existing configuration and verify that reloading the application restores the selected settings.'},{label:'Account',description:'Synchronize across devices, while keeping a local copy available when the connection is unavailable.'}]}]}};
 let request=JSON.parse(sessionStorage.getItem('pending')??JSON.stringify(question));
+let channel:any;
+(window as any).__TAURI__={core:{Channel:class {onmessage=(_:any)=>{};}}};
 (window as any).__TAURI_INTERNALS__={invoke:async(cmd:string,args:any)=>{
- if(cmd==='local_interaction')return request;
+ if(cmd==='local_interaction_subscribe'){channel=args.onEvent;channel.onmessage(request);return 1;}
+ if(cmd==='local_interaction_unsubscribe')return;
  if(cmd==='local_interaction_answer') {
   if(args.requestId!==request.id)throw new Error('Expired request');
   request=request.method==='questions'?{id:'plan-1',method:'plan',params:{plan:'Store settings locally.\n\n- Add local persistence.\n- Verify reloading keeps settings.'}}:null;
-  sessionStorage.setItem('pending',JSON.stringify(request));
+  sessionStorage.setItem('pending',JSON.stringify(request));channel?.onmessage(request);
  }
 }};
 render(()=><main style={{padding:'30px','max-width':'820px',margin:'auto'}}><NativeInteraction mission="demo" active/><div class="composer tall"><div class="composer-field"><textarea placeholder="Plan before making changes…"/></div><div class="composer-tools"><ModeChip mode="plan" onClear={()=>{}}/></div></div></main>,document.getElementById('root')!);

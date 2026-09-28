@@ -216,7 +216,7 @@ test("the project root offers agents and crons first and never file creation", a
   await page.getByRole("button", { name: "Project actions for Test" }).click();
   const menu = page.getByRole("menu");
   await expect(menu.getByRole("menuitem")).toHaveText([
-    "New agent", "New cron", "New folder", "Project settings", "Rename", "Archive",
+    "New agent", "Cloud agent", "New cron", "New folder", "Project settings", "Rename", "Archive",
   ]);
   await expect(menu.getByRole("menuitem", { name: "New file" })).toHaveCount(0);
   expect(writes).toEqual([]);
@@ -317,7 +317,7 @@ test("right-click a project: Project settings opens a page in the main panel", a
   await expect(page.locator(".ps-page")).not.toContainText("parallel_missions");
   await expect(page.locator(".ps-page")).not.toContainText("autonomy grant");
   // The autonomy grant is shown but not editable here.
-  await expect(page.locator(".ps-readonly")).toContainText(["act_reversible", "owner"]);
+  await expect(page.locator(".ps-readonly")).toContainText(["Reversible actions", "owner"]);
   await expect(page.locator(".ps-readonly input, .ps-readonly button")).toHaveCount(0);
 
   await page.screenshot({ path: "artifacts/orb-project-settings.png" });

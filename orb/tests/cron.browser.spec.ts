@@ -149,6 +149,7 @@ for (const theme of ["light", "dark"]) {
 }
 
 test("cron outage retains cached rows; Retry restores availability without logging out", async ({ page }) => {
+  await page.clock.install();
   let fail = false;
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -163,7 +164,7 @@ test("cron outage retains cached rows; Retry restores availability without loggi
   const folder = page.getByRole("button", { name: "Project notes", exact: true });
   await folder.click();
   await expect(page.locator(".row.cron")).toHaveCount(1);
-  fail = true;
+  fail = true;await page.clock.fastForward(61000);
   await folder.click(); await folder.click();
   await expect(page.getByRole("status")).toContainText("Crons temporarily unavailable");
   await expect(page.getByRole("status")).toHaveAttribute("title", /Cached jobs are retained/);
@@ -198,7 +199,7 @@ for (const status of [404, 500]) test(`cron ${status}: compact status preserves 
  });
  await page.goto("/tests/browser.html?theme=dark");
  const project=page.getByRole("button",{name:"Project notes",exact:true});await project.click();await expect(page.locator(".row.cron")).toHaveCount(2);
- fail=true;await project.click();await project.click();
+ fail=true;await page.clock.fastForward(61000);await project.click();await project.click();
  const row=page.getByRole("status");await expect(row).toContainText(status===404?"Crons need backend update":"Crons temporarily unavailable");
  await expect(row).not.toContainText(String(status));expect((await row.boundingBox())!.height).toBeLessThanOrEqual(32);
  await expect(page.locator(".row.cron")).toHaveCount(2);

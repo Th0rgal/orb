@@ -2379,12 +2379,9 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     olderPending=(async()=>{
       const snap=await loadOlderTranscript(p.id);
       if(disposed)return;
-      const anchor=scroller?.querySelector<HTMLElement>('[data-turn-key]');
-      const key=anchor?.dataset.turnKey,top=anchor?.getBoundingClientRect().top;
       let next=heldAfterHistory(snap.stream,liveEvents).reduce((state,event)=>applyStreamEvent(state,event),snap.items);
       for(const item of items())if(item.kind==='user'&&item.queued&&item.messageId)next=applyStreamEvent(next,{type:'user_message',data:{id:item.messageId,content:item.text,queued:true}});
       setItems(next);
-      if(key&&top!==undefined)requestAnimationFrame(()=>{const element=Array.from(scroller?.querySelectorAll<HTMLElement>('[data-turn-key]')??[]).find(el=>el.dataset.turnKey===key);if(element&&scroller)scroller.scrollTop+=element.getBoundingClientRect().top-top;});
     })().finally(()=>olderPending=undefined);
     return olderPending;
   };

@@ -135,7 +135,7 @@ test("a remote track follow-up opens its admitted replacement instead of showing
     }
     if(path===`/api/control/missions/${MISSION}`)return route.fulfill({json:source});
     if(path===`/api/control/missions/${next}`)return route.fulfill({json:replacement});
-    if(path===`/api/control/missions/${next}/events`)return route.fulfill({json:[{...evUser,content:body?.prompt}]});
+    if(path===`/api/control/missions/${next}/events`)return route.fulfill(eventPage(route,[{...evUser,content:body?.prompt}]));
     if(path==='/api/control/missions')return route.fulfill({json:body?[source,replacement]:[source]});
     return route.fallback();
   });

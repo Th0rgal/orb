@@ -26,7 +26,10 @@ sidebar cache and activity indicators, provider usage, cloud conversations,
 optimistic idempotent resend, fork selection, queue recovery, image navigation
 and semantic ChatGPT rendering. Removed superseded paging helper implementations.
 Resend reference-loading failures now restore an actionable error instead of
-leaving the edited message stuck in a sending state.
+leaving the edited message stuck in a sending state. Native answer acknowledgments
+do not clear a newer question delivered on the event channel. The virtual list
+retains the visible turns when earlier history is prepended; the conversation
+view no longer applies a competing scroll correction.
 
 Cloud receipt storage and routes are included alongside the client; connecting
 a provider never launches work. Unknown quota values stay unknown. Controller
@@ -35,7 +38,7 @@ instructions document unsupported tracked/scheduled cloud admission.
 ## Validation
 
 - Client: 642 passed, 3 skipped; TypeScript and Vite build passed.
-- Backend: cloud 12 passed/1 ignored, remote stream 17 passed, context store 7 passed,
+- Backend: cloud 12 passed/1 ignored, remote stream 20 passed, context store 7 passed,
   Claude identity regression passed; assistant MCP compile check passed.
 
 - Native Orb: 89 passed, 6 ignored (serialized to avoid existing shared-state tests).
@@ -51,5 +54,7 @@ continues using its existing validated account gates.
 The running Core includes an independent unified-MCP migration not yet present
 on master. Its deployment must preserve that migration. The isolated production
 source overlay adds reviewed context-transfer routes, cloud usage and the event
-pagination protocol to that running source baseline. Guarded deployment waits
-for active harness turns; it must not force termination to install the UI fixes.
+pagination protocol to that running source baseline. The deployment status guard also counts durable remote waits. The only active
+run was verified as a healthy job on old-agent, with no Core harness processes;
+that status-only guard can be overridden after rechecking this evidence. The
+remote job must remain the same and healthy after Core restarts.

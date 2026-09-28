@@ -23,12 +23,15 @@ test('context sync status is compact, explains offline state, and retries',async
  await page.addInitScript(()=>{
   localStorage.setItem('orb.apiUrl','http://context.test');localStorage.setItem('orb.jwt','fixture');
   let offline=true;
+  (window as any).__TAURI__={core:{Channel:class {onmessage=(_:any)=>{};}}};
   (window as any).__TAURI_INTERNALS__={invoke:async(command:string)=>{
+   if(command==='project_context_subscribe')return 1;
+   if(command==='project_context_unsubscribe')return;
    if(command==='project_context_sync')offline=false;
    return {state:{initialized:true,pending:[],error:offline?'Context server unavailable':null}};
   }};
  });
- await page.route('http://context.test/**',route=>route.fulfill({json:{}}));
+ await page.route('http://context.test/**',route=>route.request().url().endsWith('/stream')?undefined:route.fulfill({json:{}}));
  await page.goto('/tests/context.html');
  const badge=page.getByRole('button',{name:'Context offline'});
  await expect(badge).toBeVisible();

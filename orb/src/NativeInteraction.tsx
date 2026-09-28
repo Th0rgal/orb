@@ -75,8 +75,11 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    if(current.method==='plan'&&action==='accept') {
     await rememberApprovedPlan(selectedMission,{requestId:current.id,text:current.params.plan??'Plan text unavailable',approvedAt:new Date().toISOString(),boundary}).catch(()=>setError('Plan accepted, but its local tracking could not be saved.'));
    }
-   answered.add(current.id);
-   setRequest(null);
+   if (selectedMission === p.mission) {
+    answered.add(current.id);
+    // A new request can arrive on the native channel before the answer resolves.
+    setRequest(next => next?.id === current.id ? null : next);
+   }
   }
   catch(e){setError(String(e));}finally{setSending(false);}
  };

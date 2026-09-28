@@ -2231,8 +2231,9 @@ select.orb-select-native:disabled { cursor: default; }
 .followup-queue header { display:flex; align-items:center; gap:8px; min-height:20px; }
 .queue-hint { color:var(--fg-4); font-size:12px; }
 .queue-options { position:relative; display:flex; align-items:center; gap:10px; margin-left:auto; }
-.queue-action { color:var(--fg-2); font:inherit; }
-.queue-action:hover { color:var(--fg); }
+.queue-action { padding:2px 8px; border:1px solid var(--stroke); border-radius:var(--radius-sm); background:var(--bg-btn); color:var(--fg-2); font:inherit; cursor:pointer; }
+.queue-action:hover:not(:disabled) { background:var(--hover); color:var(--fg); }
+.queue-action:disabled { opacity:.5; cursor:default; }
 .queue-menu-toggle { width:20px; height:20px; display:grid; place-items:center; border-radius:50%; background:var(--bg-btn); color:var(--fg-3); }
 .queue-menu-toggle svg { width:12px; height:12px; }
 .queue-menu { position:absolute; z-index:50; right:0; bottom:calc(100% + 8px); width:240px; padding:10px; border:1px solid var(--stroke); border-radius:var(--radius-md); background:var(--menu-bg); box-shadow:var(--shadow-lg); }

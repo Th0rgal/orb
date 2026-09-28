@@ -223,6 +223,9 @@ pub(crate) enum StreamUpdate {
 /// non-JSON (stderr) lines.
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
+    claude: bool,
+    claude_message_streamed: bool,
+    claude_boundary: bool,
     partial: String,
     dropping_line: bool,
     text_segment: String,
@@ -314,6 +317,10 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if self.claude {
+            self.feed_claude(&value, updates);
+            return;
+        }
         // Codex exec emits native thread/turn/item events. Keep the thread id
         // for continuation on the same node and preserve tool/text ordering.
         let kind = value["type"].as_str().unwrap_or_default();
@@ -628,8 +635,8 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex" | "claudecode"
-                ) =>
+                    GROK_BACKEND | "opencode" | "codex"
+                ) || (mission.backend == "claudecode" && mission.session_id.is_some()) =>
             {
                 mission
             }
@@ -640,11 +647,14 @@ impl NativeGrokObserver {
             job_id,
             owner: owner.clone(),
             session_persisted: mission.session_id.clone(),
+            stream: GrokStream {
+                claude: mission.backend == "claudecode",
+                ..Default::default()
+            },
             mission,
             log_offset: 0,
             log_len: 0,
             streaming: LogStreaming::Unknown,
-            stream: GrokStream::default(),
             thinking_open: false,
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
@@ -733,7 +743,10 @@ impl NativeGrokObserver {
             self.close_thinking();
             self.log_offset = 0;
             self.log_len = chunk.log_len;
-            self.stream = GrokStream::default();
+            self.stream = GrokStream {
+                claude: self.mission.backend == "claudecode",
+                ..Default::default()
+            };
             return;
         }
         self.log_len = chunk.log_len;
@@ -941,12 +954,26 @@ impl NativeGrokObserver {
             );
         let codex_goal = self.mission.backend == "codex"
             && (self.mission.goal_mode || self.stream.native_goal_status.is_some());
+        // Raw remote commands predate stream-json. Require a Claude result only
+        // after the native protocol has actually been observed.
+        let legacy_claude = self.stream.claude && self.stream.json_events == 0;
         let success = succeeded
+            && (!self.stream.claude || legacy_claude || self.stream.ended)
             && !auth_required
             && self.stream.error.is_none()
-            && (!self.mission.goal_mode || native_end)
+            && (!self.mission.goal_mode || legacy_claude || native_end)
             && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
         let mut content = self.stream.text.trim().to_string();
+        if legacy_claude && success {
+            content = format!(
+                "Remote job {} on node '{}' finished with state 'succeeded'",
+                self.job_id, node_id
+            );
+            let output = self.stream.diagnostics_text();
+            if !output.is_empty() {
+                content.push_str(&format!("\n\n{output}"));
+            }
+        }
         let status_reason: &'static str = if codex_goal && !success {
             "native_goal_stopped"
         } else if auth_required {
@@ -2066,3 +2093,6 @@ mod tests {
         assert!(other.contains("/resume"), "{other}");
     }
 }
+
+#[path = "remote_claude.rs"]
+mod claude;
