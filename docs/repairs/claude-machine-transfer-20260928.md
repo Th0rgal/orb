@@ -19,8 +19,8 @@ Changes:
 
 Validation:
 
-- 18 frontend transfer tests pass, including Claude selection for all six regular
-  node destinations and the administration entry.
+- 18 frontend transfer tests pass, including Claude selection for six
+  picker destinations, including the administration entry.
 - Node capability mapping regression passes; legacy inventory evidence and
   authoritative-version behavior pass.
 - Integration tests cover new remote Claude sessions and transferred sessions:
@@ -31,9 +31,10 @@ Validation:
 - Ashur's idle node service was upgraded after cordoning and checking its job
   store; its version 2 endpoint directly advertises Claude. Other nodes work via
   verified inventory without a node restart.
-- Two-turn live memory checks passed on Ashur, Babylon, Nippur and Sepolia:
-  the second prompt did not repeat the random marker, and each resumed session
-  returned it correctly. Additional Spark/old-agent results are recorded in
+- Two-turn live memory checks passed on Ashur, Babylon, Nippur, Sepolia,
+  DGX Spark and old-agent: the second prompt did not repeat the random marker,
+  and each resumed session returned it correctly. All six retained their native
+  session UUID and exited successfully. Results are recorded in
   `/root/.cache/claude-transfer-canaries.json` on Core.
 - Verity retained job `1e066c78-1d00-4b82-a349-b8c0d1b8a297` across the guarded
   production backend deployment.
