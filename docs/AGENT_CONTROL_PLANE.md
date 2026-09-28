@@ -1,7 +1,7 @@
 # The agent-native Paloma control plane
 
 Status: target architecture and design constitution. The implementation sequence
-is in [`archive/AGENT_NATIVE_ROADMAP.md`](archive/AGENT_NATIVE_ROADMAP.md).
+is in [`AGENT_NATIVE_ROADMAP.md`](AGENT_NATIVE_ROADMAP.md).
 
 Paloma should feel to a controlling agent like one coherent instrument, not a
 collection of databases, dashboards, skills, crons, and mission tools. The

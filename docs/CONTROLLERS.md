@@ -7,7 +7,7 @@ tracker, et te livre un rapport.
 
 Le modèle système canonique est
 [`AGENT_CONTROL_PLANE.md`](AGENT_CONTROL_PLANE.md), avec sa migration dans
-[`archive/AGENT_NATIVE_ROADMAP.md`](archive/AGENT_NATIVE_ROADMAP.md). En particulier : projet →
+[`AGENT_NATIVE_ROADMAP.md`](AGENT_NATIVE_ROADMAP.md). En particulier : projet →
 track → tentative/mission → action → reçu → preuve. Le contrôleur porte le
 jugement ; il ne doit pas reconstruire la réalité à partir de prose ni prendre
 la fin d'une mission pour la réussite d'un track.
