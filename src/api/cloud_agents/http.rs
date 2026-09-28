@@ -581,6 +581,7 @@ mod follow_up_tests {
                 .unwrap(),
         );
         let e = Execution {
+            parent_mission_id: None,
             mission_id: Uuid::new_v4(),
             request_key: "launch".into(),
             request_signature: "launch".into(),

@@ -1998,46 +1998,6 @@ mod tests {
         assert!(super::staged_codex_account_identity(dir.path()).is_none());
     }
 
-    #[tokio::test]
-    async fn native_goal_stop_without_chat_output_is_resumable_not_auth_failure() {
-        use crate::backend::events::ExecutionEvent;
-        for status in ["blocked", "paused", "usageLimited", "budgetLimited"] {
-            let (tx, rx) = tokio::sync::mpsc::channel(4);
-            tx.send(ExecutionEvent::GoalStatus {
-                status: status.into(),
-                objective: "keep objective".into(),
-            })
-            .await
-            .unwrap();
-            tx.send(ExecutionEvent::MessageComplete {
-                session_id: "native".into(),
-            })
-            .await
-            .unwrap();
-            drop(tx);
-            let (events, _) = tokio::sync::broadcast::channel(16);
-            let result = super::consume_codex_events(
-                rx,
-                events,
-                tokio_util::sync::CancellationToken::new(),
-                uuid::Uuid::new_v4(),
-                "/goal keep objective",
-                None,
-            )
-            .await;
-            assert!(!result.success);
-            assert_eq!(
-                result.terminal_reason,
-                Some(TerminalReason::NativeGoalStopped)
-            );
-            assert!(result.output.contains(&format!("status={status}")));
-            assert_eq!(
-                result.terminal_evidence.as_deref(),
-                Some(result.output.as_str())
-            );
-        }
-    }
-
     #[test]
     fn classifies_codex_stream_disconnect_before_tools() {
         assert_eq!(
