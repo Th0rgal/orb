@@ -1165,7 +1165,8 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .project-picker-label { padding: 6px 8px 3px; font-size: 11px; color: var(--fg-4); }
 .project-options { max-height: min(240px, 40vh); overflow-y: auto; overscroll-behavior: contain; }
 .project-option, .project-picker-actions button { display: flex; align-items: center; gap: 8px; text-align: left; width: 100%; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--fg-2); }
-.project-option > span:first-of-type { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-option-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-option .row-project-color { flex: none; display: grid; place-items: center; }
 .project-option svg, .project-picker-actions svg { flex: none; width: 14px; height: 14px; color: var(--fg-3); }
 .project-option.highlighted, .project-option:hover, .project-picker-actions button:hover { background: var(--bg-hover); color: var(--fg); }
 .project-option:focus:not(:focus-visible), .project-picker-actions button:focus:not(:focus-visible) { outline: 0; }
