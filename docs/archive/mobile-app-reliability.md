@@ -122,7 +122,7 @@ features SSE does not have:
 - explicit heartbeat payloads containing the latest sequence;
 - client-driven resume: `{"type":"resume","since_seq": N}`.
 
-iOS does not have the browser limitation called out in `backend/STREAMING.md`;
+iOS does not have the browser limitation called out in `docs/STREAMING.md`;
 `URLSessionWebSocketTask` can be created from a `URLRequest`, so the app can
 attach the same bearer token it uses for other requests. Apple documents
 `URLSessionWebSocketTask` as the Foundation WebSocket transport, and it supports
@@ -312,7 +312,7 @@ Use simulator tests for:
 
 ## Source Notes
 
-- `backend/STREAMING.md` is the repo's canonical stream contract.
+- `docs/STREAMING.md` is the repo's canonical stream contract.
 - `src/api/control/mod.rs` confirms SSE keepalives and WS heartbeat/resume support.
 - `dashboard/src/lib/api.ts` already has stream diagnostics and opt-in WS logic
   worth mirroring in iOS.

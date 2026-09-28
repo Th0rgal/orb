@@ -171,4 +171,4 @@ DOM budgets.
   chunk_size_p99 }, endpoints: { events_req_per_minute,
   running_req_per_minute }, broadcast: { events_total,
   mission_count_observed, events_avg_per_mission, top_missions } }`.
-- Streaming contract: `backend/STREAMING.md`.
+- Streaming contract: `docs/STREAMING.md`.

@@ -1,7 +1,7 @@
 # Agent-native Paloma roadmap
 
 This plan implements the architecture in
-[`AGENT_CONTROL_PLANE.md`](AGENT_CONTROL_PLANE.md). It is ordered by leverage:
+[`AGENT_CONTROL_PLANE.md`](../AGENT_CONTROL_PLANE.md). It is ordered by leverage:
 first make reality cheap and unambiguous to read, then make actions atomic,
 then automate verification and learning. Existing APIs remain compatible until
 their consumers have migrated.

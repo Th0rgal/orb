@@ -60,4 +60,4 @@ node binary completed, the update was installed, and Core→Babylon binary uploa
 passed byte-exact readback as the node service user. The diagnostic file was
 removed. Babylon is now uncordoned and a subsequent OpenCode mission completed.
 The previous node binary remains backed up. Intermittent network degradation
-was observed earlier; see `HARNESS_PERFORMANCE_AUDIT.md` for the evidence.
+was observed earlier; see `archive/HARNESS_PERFORMANCE_AUDIT.md` for the evidence.

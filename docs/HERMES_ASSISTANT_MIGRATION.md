@@ -12,7 +12,7 @@ it is not the current system design roadmap.
 > The target agent-native control-plane architecture and its implementation
 > sequence are
 > [`AGENT_CONTROL_PLANE.md`](AGENT_CONTROL_PLANE.md) and
-> [`AGENT_NATIVE_ROADMAP.md`](AGENT_NATIVE_ROADMAP.md).
+> [`archive/AGENT_NATIVE_ROADMAP.md`](archive/AGENT_NATIVE_ROADMAP.md).
 
 ## Pre-cutover Architecture
 

@@ -5,7 +5,7 @@ Scope: `sandboxed_sh` (backend, `assistant-mcp`, `palomactl`), the Hermes
 desktop `projects-board` plugin, `dgx-spark-arbiter`, and the Hermes skills
 that describe these tools.
 
-This plan applies phases 1 to 4 of `AGENT_NATIVE_ROADMAP.md` to two concrete
+This plan applies phases 1 to 4 of `../AGENT_NATIVE_ROADMAP.md` to two concrete
 defects. It deliberately adds the minimum durable state required by the two
 different lifecycles involved: immutable evidence and mutable/recoverable job
 execution. Deletion happens only after a compatibility window proves that the

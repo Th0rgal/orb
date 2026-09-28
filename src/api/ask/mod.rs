@@ -10,7 +10,7 @@
 //! - the in-process agentic [`run_ask_turn`] loop, and
 //! - the global [`ask_store`] accessor.
 //!
-//! See `ASK_ASSISTANT_DESIGN.md` for the full design.
+//! See `docs/archive/ASK_ASSISTANT_DESIGN.md` for the full design.
 
 pub mod btw;
 pub mod client;
