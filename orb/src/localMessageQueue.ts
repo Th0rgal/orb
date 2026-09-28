@@ -35,7 +35,9 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
   if(options.replace){
    // An edit keeps the message's place in the queue and releases its hold.
    if(!existing||existing.state!=='queued')throw Error('This message was already sent. Your edit is still in the composer.');
-   existing.text=text;existing.request=request;delete existing.heldAt;
+   // Images stay attached while their marker is still in the edited text.
+   const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
+   existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
   }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});
   await write(key,rows);
  });

@@ -35,6 +35,19 @@ test('editing keeps the message in place, marks it, and restores the draft after
  expect(JSON.stringify(stored)).not.toContain('et en voici un autre');
 });
 
+test('successive edits keep restoring the real draft',async({page})=>{
+ await page.goto('/tests/queued-messages.html');
+ const input=page.getByPlaceholder('Send follow-up');
+ await input.fill('my own draft');
+ await page.getByRole('button',{name:'Edit queued message: ceci est un message dans la queue',exact:true}).click();
+ await input.fill('premier corrigé');await input.press('Enter');
+ await expect(input).toHaveValue('my own draft');
+ await page.getByRole('button',{name:'Edit queued message: et en voici un autre',exact:true}).click();
+ await expect(input).toHaveValue('et en voici un autre');
+ await page.getByRole('button',{name:'Stop editing the queued message'}).click();
+ await expect(input).toHaveValue('my own draft');
+});
+
 test('cancelling an edit leaves the queue untouched',async({page})=>{
  await page.goto('/tests/queued-messages.html');
  const queue=page.getByRole('region',{name:'Queued messages'}),input=page.getByPlaceholder('Send follow-up');

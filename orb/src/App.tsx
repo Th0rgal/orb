@@ -520,20 +520,20 @@ export function Composer(p: {
 
   createEffect(() => { const revision = p.revision; if (revision) { setMode(null); setText(current => { const next = revision.append && current ? `${current}\n\n${revision.text}` : revision.text; ta.value = next; return next; }); queueMicrotask(() => { resize(); ta?.focus(); }); } });
   const draftOf = (visible: string, m = mode()) => modePrompt(m, visible);
-  const write = (visible: string, nextMode = mode()) => {
+  // Report every change, including restored drafts and revisions, not only typing.
+  createEffect(on([text, mode], ([visible, m]) => p.onDraft?.(draftOf(visible, m))));
+  const write = (visible: string) => {
     ta.value = visible;
     setText(visible);
-    p.onDraft?.(draftOf(visible, nextMode));
     resize();
   };
   const enterMode = (next: ComposerMode, visible: string) => {
     setMode(next);
-    write(visible, next);
+    write(visible);
     ta.focus();
   };
   const clearMode = () => {
     setMode(null);
-    p.onDraft?.(text());
     ta.focus();
   };
   const pickSlash = (item: { id: ComposerMode }) => enterMode(item.id, "");

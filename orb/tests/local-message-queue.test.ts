@@ -257,3 +257,13 @@ it('an abandoned hold expires instead of blocking the queue forever',async()=>{
  window.dispatchEvent(new Event('orb:queue-wake'));await vi.advanceTimersByTimeAsync(2500);
  expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
+it('an in-place edit keeps images whose marker is still in the text',async()=>{
+ const text='look [Image #1] [Uploaded: /work/.paloma/images/a.png]';
+ await enqueueLocalMessage({...request,prompt:text,imagePaths:['/work/.paloma/images/a.png']},text);
+ const [row]=queuedLocalMessages('mission');
+ const edited='look closer [Image #1] [Uploaded: /work/.paloma/images/a.png]';
+ await enqueueLocalMessage({...request,prompt:edited,imagePaths:[]},edited,{id:row.id,replace:true});
+ expect(queuedLocalMessages('mission')[0].request.imagePaths).toEqual(['/work/.paloma/images/a.png']);
+ await enqueueLocalMessage({...request,prompt:'no image',imagePaths:[]},'no image',{id:row.id,replace:true});
+ expect(queuedLocalMessages('mission')[0].request.imagePaths).toEqual([]);
+});
