@@ -15,18 +15,19 @@ test('queue matches the composer width and accepts and removes messages',async({
  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
 
-test('editing returns a queued message to the input without losing an existing draft',async({page})=>{
+test('editing keeps the message in place, marks it, and restores the draft afterwards',async({page})=>{
  await page.goto('/tests/queued-messages.html');
  const queue=page.getByRole('region',{name:'Queued messages'}),input=page.getByPlaceholder('Send follow-up');
  await input.fill('draft in progress');
  const edit=page.getByRole('button',{name:'Edit queued message: et en voici un autre',exact:true});
  await edit.focus();await edit.click();
- await expect(queue).toContainText('1 Queued');
- await expect(queue).not.toContainText('et en voici un autre');
- await expect(input).toHaveValue('draft in progress\n\net en voici un autre');
- await expect(input).toBeFocused();
+ await expect(queue).toContainText('2 Queued');await expect(queue).toContainText('Editing');
+ await expect(page.getByText('Edit Queued')).toBeVisible();
+ await expect(input).toHaveValue('et en voici un autre');
  await input.fill('message corrigé');await input.press('Enter');
- await expect(queue).toContainText('2 Queued');await expect(queue).toContainText('message corrigé');
+ await expect(queue).not.toContainText('Editing');await expect(page.getByText('Edit Queued')).toHaveCount(0);
+ await expect(queue.locator('.queue-text')).toHaveText(['ceci est un message dans la queue','message corrigé']);
+ await expect(input).toHaveValue('draft in progress');
  const stored=await page.evaluate(async()=>{
   const db=await new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('orb-composer-drafts',1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
   return await new Promise<unknown[]>((resolve,reject)=>{const r=db.transaction('drafts').objectStore('drafts').getAll();r.onsuccess=()=>{resolve(r.result);db.close();};r.onerror=()=>reject(r.error);});
@@ -34,29 +35,36 @@ test('editing returns a queued message to the input without losing an existing d
  expect(JSON.stringify(stored)).not.toContain('et en voici un autre');
 });
 
- test('queue arrow opens usable actions and Escape dismisses without sending', async ({page}) => {
-  await page.goto('/tests/queued-messages.html');
-  const arrow=page.getByRole('button',{name:'Queue options'});
-  await arrow.click();
-  await expect(arrow).toHaveAttribute('aria-expanded','true');
-  await expect(page.getByRole('menuitem',{name:'Edit next message'})).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(arrow).toHaveAttribute('aria-expanded','false');
-  await expect(arrow).toBeFocused();
-  await arrow.click();
-  await page.getByRole('menuitem',{name:'Edit next message'}).click();
-  await expect(page.getByPlaceholder('Send follow-up')).toHaveValue('ceci est un message dans la queue');
-  await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('1 Queued');
- });
+test('cancelling an edit leaves the queue untouched',async({page})=>{
+ await page.goto('/tests/queued-messages.html');
+ const queue=page.getByRole('region',{name:'Queued messages'}),input=page.getByPlaceholder('Send follow-up');
+ await page.getByRole('button',{name:'Edit queued message: ceci est un message dans la queue',exact:true}).click();
+ await expect(input).toHaveValue('ceci est un message dans la queue');
+ await page.getByRole('button',{name:'Stop editing the queued message'}).click();
+ await expect(input).toHaveValue('');await expect(queue).not.toContainText('Editing');
+ await expect(queue.locator('.queue-text')).toHaveText(['ceci est un message dans la queue','et en voici un autre']);
+});
 
-test('long queued prompts remain compact and can be expanded without sending',async({page})=>{
+test('send next reorders, the chevron collapses, and Enter on an empty draft sends the queue',async({page})=>{
+ await page.goto('/tests/queued-messages.html');
+ const queue=page.getByRole('region',{name:'Queued messages'});
+ await expect(queue).toContainText('to Send');
+ await page.getByRole('button',{name:'Send next: et en voici un autre'}).click();
+ await expect(queue.locator('.queue-text')).toHaveText(['et en voici un autre','ceci est un message dans la queue']);
+ await page.getByRole('button',{name:'Hide queued messages'}).click();
+ await expect(queue.locator('.queue-text')).toHaveCount(0);
+ await page.getByRole('button',{name:'Show queued messages'}).click();
+ await expect(queue.locator('.queue-text')).toHaveCount(2);
+ await page.getByPlaceholder('Send follow-up').press('Enter');
+ expect(await page.evaluate(()=>(window as unknown as {queueSent?:number}).queueSent)).toBe(1);
+});
+
+test('long queued prompts stay on one line with the full text available',async({page})=>{
  await page.goto('/tests/queued-messages.html');
  const text='A long repository review request. '.repeat(100);
  const input=page.getByPlaceholder('Send follow-up');await input.fill(text);await input.press('Enter');
- const preview=page.locator('.queue-message-preview').last();
- await expect(preview).toContainText(text.trim());
- expect((await preview.boundingBox())!.height).toBeLessThanOrEqual(44);
- await preview.locator('summary').click();await expect(preview).toHaveAttribute('open','');
- await expect(preview.locator('div')).toBeVisible();
+ const row=page.locator('.queue-text').last();
+ await expect(row).toHaveAttribute('title',text.trim());
+ expect((await row.boundingBox())!.height).toBeLessThanOrEqual(24);
  await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('3 Queued');
 });

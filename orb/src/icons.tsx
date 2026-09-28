@@ -209,6 +209,11 @@ export const ArrowUpIcon = (p: P) => (
     <path d="M8 13V3M3.500 7.500 8 3l4.500 4.500" />
   </I>
 );
+export const ReturnIcon = (p: P) => (
+  <I {...p}>
+    <path d="M12.8 3.6v4.8a1.6 1.6 0 0 1-1.6 1.6H3.6M6 7.4 3.4 10 6 12.6" />
+  </I>
+);
 export const CheckIcon = (p: P) => (
   <I {...p} sw={1.7}>
     <path d="M3.2 8.4 6.5 11.6 12.8 4.6" />

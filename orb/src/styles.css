@@ -1330,11 +1330,13 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 }
 .attach-chip button { color: var(--fg-4); }
 
-.queued-messages { margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: var(--radius-lg); max-height: 180px; overflow-y: auto; }
-.queued-label { font-size: 11px; color: var(--fg-3); margin-bottom: 6px; }
-.queued-messages ol { margin: 0; padding-left: 20px; }
-.queued-messages li { font-size: 12px; color: var(--fg-2); }
-.queued-messages .user { white-space: pre-wrap; margin: 4px 0; padding: 0; background: none; }
+/* Core-queued follow-ups (remote missions) share the local queue card. */
+.queued-messages { margin: 0 0 8px; padding: 10px 8px 6px; border: 1px solid var(--stroke); border-radius: var(--radius-xl); background: var(--bg-elev); max-height: 220px; overflow-y: auto; font: 14px/20px var(--sans); }
+.queued-label { padding: 0 8px; color: var(--fg-2); margin-bottom: 4px; }
+.queued-messages ol { list-style: none; margin: 0; padding: 0; }
+.queued-messages li { padding: 7px 8px; border-radius: var(--radius-md); color: var(--fg); }
+.queued-messages li:hover { background: var(--hover-1); }
+.queued-messages .user { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; padding: 0; background: none; }
 
 .mission-tasks { margin: 18px 0; padding: 14px; border: 1px solid var(--stroke); border-radius: var(--radius-lg); }
 .tasks-heading { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
@@ -2227,23 +2229,37 @@ select.orb-select-native:disabled { cursor: default; }
 .composer-image img { border-radius: inherit; }
 
 /* Follow-up queue: same width as the composer, quiet surface and compact header. */
-.followup-queue { margin:0 0 8px; padding:6px 10px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--bg-elev); color:var(--fg-2); font:13px/20px var(--sans); }
-.followup-queue header { display:flex; align-items:center; gap:8px; min-height:20px; }
-.queue-hint { color:var(--fg-4); font-size:12px; }
-.queue-options { position:relative; display:flex; align-items:center; gap:10px; margin-left:auto; }
-.queue-action { padding:2px 8px; border:1px solid var(--stroke); border-radius:var(--radius-sm); background:var(--bg-btn); color:var(--fg-2); font:inherit; cursor:pointer; }
-.queue-action:hover:not(:disabled) { background:var(--hover); color:var(--fg); }
-.queue-action:disabled { opacity:.5; cursor:default; }
-.queue-menu-toggle { width:20px; height:20px; display:grid; place-items:center; border-radius:50%; background:var(--bg-btn); color:var(--fg-3); }
-.queue-menu-toggle svg { width:12px; height:12px; }
-.queue-menu { position:absolute; z-index:50; right:0; bottom:calc(100% + 8px); width:240px; padding:10px; border:1px solid var(--stroke); border-radius:var(--radius-md); background:var(--menu-bg); box-shadow:var(--shadow-lg); }
-.followup-queue ol { list-style:none; margin:2px 0 0; padding:0; max-height:180px; overflow-y:auto; }
-.followup-queue li { position:relative; padding:3px 24px 3px 0; color:var(--fg); white-space:pre-wrap; overflow-wrap:anywhere; }
-.followup-queue li small { display:block; color:var(--fg-3); font-size:11px; }
-.queue-remove { position:absolute; right:0; top:6px; width:18px; height:18px; display:grid; place-items:center; border-radius:var(--radius-xs); color:var(--fg-3); opacity:0; }
-.followup-queue li:hover .queue-remove, .queue-remove:focus-visible { opacity:1; }
-.queue-remove:hover { background:var(--hover); color:var(--fg); }
-@media (max-width:600px) { .queue-hint { display:none; } .queue-remove { opacity:1; } }
+/* Queued follow-ups: one card above the composer, one line per message (Cursor-like). */
+.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--bg-elev); color:var(--fg-2); font:14px/20px var(--sans); }
+.followup-queue.collapsed { padding-bottom:10px; }
+.followup-queue header { display:flex; align-items:center; gap:10px; min-height:24px; padding:0 4px 0 8px; }
+.queue-count { color:var(--fg-2); }
+.queue-hint { display:inline-flex; align-items:center; gap:4px; color:var(--fg-4); font-size:13px; }
+.queue-hint svg { width:13px; height:13px; }
+.queue-options { display:flex; align-items:center; gap:10px; margin-left:auto; }
+.queue-send-now { padding:2px 6px; border-radius:var(--radius-sm); background:transparent; color:var(--fg-2); font:inherit; cursor:pointer; }
+.queue-send-now:hover:not(:disabled) { color:var(--fg); background:var(--hover-1); }
+.queue-send-now:disabled { opacity:.5; cursor:default; }
+.queue-collapse { width:24px; height:24px; display:grid; place-items:center; border-radius:50%; background:var(--bg-btn); color:var(--fg-3); transition:transform .15s; }
+.queue-collapse:hover { color:var(--fg); }
+.followup-queue.collapsed .queue-collapse { transform:rotate(180deg); }
+.followup-queue ol { list-style:none; margin:4px 0 0; padding:0; max-height:220px; overflow-y:auto; }
+.queue-row { border:1px solid transparent; border-radius:var(--radius-md); }
+.queue-row:hover { background:var(--hover-1); }
+.queue-row.editing { background:var(--bg-active); border-color:var(--stroke-strong); }
+.queue-line { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 8px; }
+.queue-text { flex:1; min-width:0; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.queue-editing { flex:none; color:var(--fg-3); font-size:13px; }
+.queue-row-actions { flex:none; display:flex; align-items:center; gap:2px; opacity:0; }
+.queue-row:hover .queue-row-actions, .queue-row-actions:focus-within { opacity:1; }
+.queue-row-actions button { width:26px; height:26px; display:grid; place-items:center; border-radius:var(--radius-sm); color:var(--fg-3); }
+.queue-row-actions button:hover:not(:disabled) { background:var(--hover-2); color:var(--fg); }
+.queue-row-actions button:disabled { opacity:.35; }
+.queue-row small { display:block; padding:0 8px 6px; color:var(--fg-3); font-size:12px; }
+.queue-row small[role="alert"] { color:var(--red); }
+.queue-row > .queue-send-now { margin:0 0 6px 4px; font-size:13px; }
+.followup-queue > p[role="alert"] { margin:6px 8px 2px; color:var(--red); font-size:12px; }
+@media (max-width:600px) { .queue-hint { display:none; } .queue-row-actions { opacity:1; } }
 
 .file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; z-index:40; }
 .app.sb-hidden .file-panel.maximized { left:0; }
@@ -2441,9 +2457,6 @@ select.orb-select-native:disabled { cursor: default; }
 .user-origin { display: block; color: var(--fg-3); font-size: 11px; line-height: 1.4; margin-bottom: 7px; font-weight: 400; }
 
 /* Leave room for edit and remove without shifting the queued text on hover. */
-.followup-queue li { padding-right:48px; }
-.queue-edit { right:24px; }
-.followup-queue li:focus-within .queue-remove { opacity:1; }
 
 /* Cloud providers fit the same visual footprint as the mission glyph. */
 .mission-lead .provider-logo { width: 16px; height: 16px; }
@@ -2481,16 +2494,12 @@ select.orb-select-native:disabled { cursor: default; }
 
 @media (max-width: 600px) { .ps-page .s-row:has(.ps-cap-ctrl) { flex-wrap: wrap; } .ps-page .s-row:has(.ps-cap-ctrl) .s-row-text { flex-basis: 100%; } }
 
-.queue-menu-help { max-width: 240px; padding: 8px; font-size: 12px; line-height: 1.5; color: var(--fg-3); }
 .project-option .row-project-color svg { color: inherit; }
 
 .row.drop-active { background: var(--bg-hover); outline: 1px solid var(--fg-3); outline-offset: -1px; }
 .composer-image img { cursor: zoom-in; }
 
 /* A saved prompt must not turn the floating composer into a second transcript. */
-.queue-message-preview summary { cursor: pointer; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: pre-wrap; }
-.queue-message-preview[open] summary { display: block; white-space: nowrap; text-overflow: ellipsis; }
-.queue-message-preview[open] > div { margin-top: 6px; }
 .dock:has(.followup-queue)::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--bg) 18px); }
 .prompt-editor-actions .send { width: auto; padding: 0 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .resend-status { color: var(--fg-3); font-size: 12px; margin: -12px 10px 20px; }

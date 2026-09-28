@@ -5,7 +5,8 @@ import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {QueuedMessages} from "./QueuedMessages";
-import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages} from "./localMessageQueue";
+import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow} from "./localMessageQueue";
+import {createQueuedEdit} from "./queuedEdit";
 import {BtwSettings} from "./btwSettings";
 import {createPlanProgress, type PlanProgressData} from "./PlanProgress";
 import { nativeComposerDrop } from "./composerDrop";
@@ -304,6 +305,10 @@ export function Composer(p: {
   /** Reports what the draft currently mentions; the draft text is the source. */
   onAttachments?: (next: AttachChip[]) => void;
   uploadTarget?: string;
+  /** Editing a queued follow-up in place: shows the chip, × cancels. */
+  editingQueued?: { onCancel: () => void };
+  /** Enter on an empty draft (e.g. send the queued follow-ups now). */
+  onEmptySubmit?: () => void;
 }) {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
@@ -550,6 +555,7 @@ export function Composer(p: {
   const send = async () => {
     const original = text();
     let payload = draftOf(original);
+    if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sending() || uploading() || readingImages()) return;
     if (!p.textOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
@@ -892,7 +898,7 @@ export function Composer(p: {
   );
   return (<>
     <Show when={!p.onPending && pendingSend()}>{pending=><OptimisticMessage draft={pending()} />}</Show>
-    <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() ? "has-mode" : ""}`} data-mode={mode() ?? ""}
+    <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() || p.editingQueued ? "has-mode" : ""}`} data-mode={mode() ?? ""}
       onDragOver={e=>{if(Array.from(e.dataTransfer?.types??[]).includes("Files")){e.preventDefault();e.stopPropagation();if(e.dataTransfer)e.dataTransfer.dropEffect="copy";e.currentTarget.classList.add("drop-active");}}}
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
       onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sending()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
@@ -903,6 +909,10 @@ export function Composer(p: {
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
       <Show when={uploadError()}><div class="composer-upload-status error" role="alert">{uploadError()}</div></Show>
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
+      <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
+        <Ic.PencilIcon size={12} /><span class="mode-chip-label">Edit Queued</span>
+        <button type="button" class="mode-chip-x" tabIndex={-1} title="Stop editing" aria-label="Stop editing the queued message" onClick={e => { e.preventDefault(); e.stopPropagation(); editing().onCancel(); }}><Ic.CloseIcon size={10} /></button>
+      </span>}</Show>
       <div class="composer-field">
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show><Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
         <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
@@ -2288,6 +2298,12 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   });
   let sideQuestions: SideQuestionsHandle | undefined;
   const [sideRevision,setSideRevision] = createSignal<{text:string;append:boolean}>();
+  const queuedEdit = createQueuedEdit({setRevision:setSideRevision,onError:message=>setSendError(message)});
+  const editingQueued = queuedEdit.editing;
+  const sendQueueFromComposer = () => {
+    if (editingQueued() || !queuedLocalMessages(p.id).some(row => row.state === "queued" && row.waiting)) return;
+    void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+  };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   let scroller: HTMLDivElement | undefined;
   let nearBottom = true;
@@ -2529,7 +2545,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
-  const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>) => {
+  const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     setSendError(null);
     const attemptId=explicitId??sendingId??crypto.randomUUID();if(!explicitId)sendingId=undefined;
     if (clientPlaced()) {
@@ -2558,7 +2574,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
@@ -2697,7 +2713,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             </section>
           </Show>
           <SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/>
-          <QueuedMessages mission={p.id} onEdit={text=>setSideRevision({text,append:true})}/>
+          <QueuedMessages mission={p.id} editing={editingQueued()} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
@@ -2706,7 +2722,16 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             picker={false}
             busy={busy()}
             onPending={beginSend}
-            onSend={(text,images)=>sendMsg(text,images)}
+            onSend={async (text,images)=>{
+              const id=editingQueued();
+              if(!id)return sendMsg(text,images);
+              const saved=await sendMsg(text,images,followAttach(),id as ReturnType<typeof crypto.randomUUID>,true);
+              if(saved)queuedEdit.finish(false);
+              return saved;
+            }}
+            onDraft={queuedEdit.trackDraft}
+            editingQueued={editingQueued()?{onCancel:()=>queuedEdit.finish(true)}:undefined}
+            onEmptySubmit={clientPlaced()?sendQueueFromComposer:undefined}
             onStop={stopM}
             scope={`m:${p.id}`}
             uploadTarget={clientPlaced() ? "local" : mission()?.remote_node_id ?? mission()?.remote_job?.node_id ?? "core"}
