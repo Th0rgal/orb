@@ -72,9 +72,10 @@ struct OrbConversation: View {
         guard OrbDisk.read(pendingKey, as: OrbPending.self) == nil else { error = "Another message is still being confirmed. Send it before answering the quiz."; return false }
         let draft = text; text = reply
         await send()
-        guard text.isEmpty && error.isEmpty else { return false }
+        // The quiz keeps its own answers; what was being typed must survive a refused send too.
+        let sent = text.isEmpty && error.isEmpty
         text = draft
-        return true
+        return sent
     }
     private var cloudBlocked: Bool { isCloud && turns.contains { ["submission_uncertain", "incompatible", "reconnect_required"].contains($0["phase"].text) } }
     private var status: String { (turns.last?["phase"].text ?? mission["status"].text).replacingOccurrences(of: "_", with: " ") }

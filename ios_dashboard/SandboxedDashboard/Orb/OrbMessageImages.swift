@@ -38,6 +38,13 @@ struct OrbMessageImages: Equatable {
 /// Loads an uploaded image with the same authenticated, path-checked reader as the desktop.
 @MainActor enum OrbImageLoader {
     private static var cache: [String: UIImage] = [:]
+    /// Decoded images are large; keep the most recent ones only.
+    private static var order: [String] = []
+    private static func remember(_ path: String, _ image: UIImage) {
+        cache[path] = image
+        order.append(path)
+        while order.count > 24 { cache[order.removeFirst()] = nil }
+    }
     static func load(_ path: String, missionID: String?) async -> UIImage? {
         if let hit = cache[path] { return hit }
         var candidates: [[URLQueryItem]] = []
@@ -53,7 +60,7 @@ struct OrbMessageImages: Equatable {
             guard let (data, response) = try? await URLSession.shared.data(for: request),
                   (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 20 * 1024 * 1024,
                   let image = UIImage(data: data) else { continue }
-            cache[path] = image
+            remember(path, image)
             return image
         }
         return nil
