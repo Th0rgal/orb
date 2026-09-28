@@ -678,8 +678,9 @@ export function isBtwMission(mission: Pick<Mission, "tags">): boolean {
 
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string): Promise<Mission[]> {
-  const local=(await import("./localOrigins").then(m=>m.localOrigins())).filter(m=>m.project===slug && !isBtwMission(m));
-  try{const remote=await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`);const pending=local.filter(m=>m.local_sync_pending||m.status==="active");return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
+  const origins=await import("./localOrigins"),observedAt=origins.observe();
+  const local=(await origins.localOrigins()).filter(m=>m.project===slug && !isBtwMission(m));
+  try{const remote=await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending);return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
@@ -723,15 +724,17 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
 }
 
 export async function listMissions(): Promise<Mission[]> {
-  const local = (await import("./localOrigins").then(m=>m.localOrigins())).filter(m=>!isBtwMission(m));
-  try { const remote = await api<Mission[]>("/api/control/missions", {signal:AbortSignal.timeout(3000)}); const pending=local.filter(row=>row.local_sync_pending||row.status==="active"); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  const origins = await import("./localOrigins"), observedAt = origins.observe();
+  const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
+  try { const remote = await api<Mission[]>("/api/control/missions", {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,remote,observedAt); const pending=local.filter(origins.localPending); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return local;throw error;}
 }
 
 export async function getMission(id: string): Promise<Mission> {
-  const local = (await import("./localOrigins").then(m=>m.localOrigins())).find(row=>row.id===id);
-  if(local?.local_sync_pending || local?.status==="active")return local;
-  try{return await api(`/api/control/missions/${id}`);}catch(error){if(local)return local;throw error;}
+  const origins = await import("./localOrigins"), observedAt = origins.observe();
+  const local = (await origins.localOrigins()).find(row=>row.id===id);
+  if(local && origins.localPending(local))return local;
+  try{const remote=await api<Mission>(`/api/control/missions/${id}`);if(local)await origins.rememberCoreState([local],[remote],observedAt);return remote;}catch(error){if(local)return local;throw error;}
 }
 
 export async function createMission(body: CreateMissionBody): Promise<Mission> {
@@ -917,6 +920,7 @@ export async function archiveMission(id: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "acknowledged" }),
   });
+  await confirmCoreChange({ id, status: "acknowledged" });
 }
 
 /** Reopen for manual follow-up without dispatching a runner or autoresuming work. */
@@ -930,6 +934,7 @@ export async function reopenMission(id: string): Promise<void> {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "paused" }),
   });
+  await confirmCoreChange({ id, status: "paused" });
 }
 
 /** Rename the conversation without changing its execution settings. */
@@ -939,6 +944,11 @@ export async function renameMission(id: string, title: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
   });
+  await confirmCoreChange({ id, title });
+}
+/** Core accepted the change just now: any list requested earlier is older than this. */
+async function confirmCoreChange(change: { id: string; status?: string; title?: string }): Promise<void> {
+  await import("./localOrigins").then(m => m.confirmLocalOrigins([{ ...change, observed_at: m.observe() }]));
 }
 
 export async function cancelMission(id: string): Promise<void> {
