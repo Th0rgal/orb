@@ -1565,6 +1565,27 @@ mod campaign_guard_tests {
         );
     }
 
+    #[test]
+    fn one_directory_written_differently_is_the_same_directory() {
+        use std::path::Path;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo, root.path().join("alias")).unwrap();
+        assert!(same_directory(&repo, &root.path().join("repo/../repo/.")));
+        #[cfg(unix)]
+        assert!(same_directory(&repo, &root.path().join("alias")));
+        assert!(same_directory(Path::new("repo"), &repo));
+        assert!(same_directory(
+            Path::new("/gone/work/./a/../repo"),
+            Path::new("/gone/work/repo")
+        ));
+        assert!(!same_directory(&repo, &root.path().join("other")));
+        assert!(!same_directory(Path::new("po"), &repo));
+        assert!(!same_directory(Path::new(""), &repo));
+    }
+
     #[tokio::test]
     async fn recent_codex_oauth_invalidation_detects_chatgpt_refresh_death() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -10283,9 +10304,40 @@ async fn live_mission_on_workspace(
         })
 }
 
+/// The directory as the runner reaches it: symlinks resolved when it exists,
+/// `.` and `..` folded otherwise.
+fn normalized_directory(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let mut out = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Two spellings of one directory must compare equal. A relative path is
+/// matched against the end of an absolute one: when in doubt the directory is
+/// occupied, because two harnesses writing the same files is the worse error.
+fn same_directory(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (a, b) = (normalized_directory(a), normalized_directory(b));
+    a == b
+        || (a.is_relative() && !a.as_os_str().is_empty() && b.ends_with(&a))
+        || (b.is_relative() && !b.as_os_str().is_empty() && a.ends_with(&b))
+}
+
 fn mission_uses_directory(mission: &Mission, dir: &std::path::Path) -> bool {
     match mission.working_directory.as_deref() {
-        Some(own) => std::path::Path::new(own) == dir,
+        Some(own) => same_directory(std::path::Path::new(own), dir),
         None => dir
             .file_name()
             .is_some_and(|name| *name == *format!("mission-{}", &mission.id.to_string()[..8])),
