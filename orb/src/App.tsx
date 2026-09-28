@@ -506,6 +506,12 @@ export function Composer(p: {
   const resize = () => {
     const composer = ta.closest<HTMLElement>(".composer");
     if (!composer) return;
+    // Measuring collapses the textarea: hold the composer's box so the
+    // transcript above is not resized (and its scroll clamped), and keep the
+    // caret line in view afterwards.
+    const follow = document.activeElement === ta && ta.selectionEnd === ta.value.length;
+    const top = ta.scrollTop;
+    composer.style.minHeight = `${composer.offsetHeight}px`;
     // Always decide from the compact width. Measuring the current layout makes
     // wrapped text alternate between narrow/compact and wide/tall on each key.
     composer.classList.remove("tall");
@@ -516,6 +522,8 @@ export function Composer(p: {
     composer.classList.toggle("tall", Boolean(p.tall || images().length || wrapped));
     ta.style.height = Math.min(ta.scrollHeight, 220) + "px";
     ta.style.minHeight = "";
+    composer.style.minHeight = "";
+    ta.scrollTop = follow ? ta.scrollHeight : top;
   };
 
   createEffect(() => { const revision = p.revision; if (revision) { setMode(null); setText(current => { const next = revision.append && current ? `${current}\n\n${revision.text}` : revision.text; ta.value = next; return next; }); queueMicrotask(() => { resize(); ta?.focus(); }); } });
