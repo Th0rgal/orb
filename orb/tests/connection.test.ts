@@ -164,3 +164,13 @@ it("preserves a dedicated remote worktree so real occupancy protection still app
   await expect(sendMissionMessage('source','Continue',undefined,'dedicated')).rejects.toThrow('workspace_occupied');
   expect(JSON.parse(fetcher.mock.calls[2][1]!.body as string).workspace_id).toBe('dedicated-workspace');
 });
+
+it.each(['active', 'pending', 'waiting_background'])('never replaces a %s mission on a stale replacement hint', async status => {
+ const fetcher=vi.fn(async (_url:string,init?:RequestInit)=>init?.method==='POST'
+  ?new Response('REMOTE_RESUME_REQUIRES_REPLACEMENT: explicit track',{status:409})
+  :new Response(JSON.stringify({id:'live',status,remote_job:{node_id:'dgx-spark',node_state:'running'}})));
+ vi.stubGlobal('fetch',fetcher);
+ await expect(sendMissionMessage('live','Keep this follow-up')).rejects.toThrow('Your draft is kept');
+ expect(fetcher).toHaveBeenCalledTimes(2);
+ expect(fetcher.mock.calls.some(([url])=>url.endsWith('/missions'))).toBe(false);
+});

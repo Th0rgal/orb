@@ -1174,6 +1174,22 @@ pub(crate) async fn continue_on_node(
                 format!("Mission {mission_id} not found"),
             )
         })?;
+    // A live job must never produce a replacement hint, even for a harness
+    // or track that cannot resume. Clients act on that hint by creating a job.
+    if placement.live
+        || matches!(
+            mission.status,
+            MissionStatus::Active | MissionStatus::Pending
+        )
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{REMOTE_JOB_STILL_RUNNING}: mission {} still owns job {} on remote node '{}'; wait for it to finish or cancel the mission first",
+                mission.id, placement.job_id, placement.node_id
+            ),
+        ));
+    }
     // Create absorbs project missions under a generated track, including Orb
     // requests with no writer flag. Re-admit that same identity and capability;
     // PR bindings and explicit tracks still require full create admission.
@@ -1242,20 +1258,6 @@ pub(crate) async fn continue_on_node(
         return Err((
             StatusCode::CONFLICT,
             local_resume_refusal(&mission, &placement),
-        ));
-    }
-    if placement.live
-        || matches!(
-            mission.status,
-            MissionStatus::Active | MissionStatus::Pending
-        )
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "{REMOTE_JOB_STILL_RUNNING}: mission {} still owns job {} on remote node '{}'; wait for it to finish or cancel the mission first",
-                mission.id, placement.job_id, placement.node_id
-            ),
         ));
     }
     let _node = state

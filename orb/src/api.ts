@@ -824,6 +824,10 @@ export async function sendMissionMessage(
   });
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
+    if (["active", "pending", "waiting_background"].includes(mission.status) ||
+        ["queued", "running"].includes(mission.remote_job?.node_state ?? "")) {
+      throw new Error("This mission still has a remote job. Wait for it to finish or stop it before retrying. Your draft is kept.");
+    }
     const body = remoteReplacementBody(mission, text, attachments, clientMessageId);
     remoteReplacements.set(replacementKey, body);
     return createReplacement(body);

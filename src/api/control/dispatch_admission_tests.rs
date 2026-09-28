@@ -6702,6 +6702,36 @@ async fn native_grok_auto_track_continuation(
     let duplicate = h.request(true, id, json!({})).await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    // A live job on an explicit track must refuse without suggesting a
+    // replacement: Orb treats that suggestion as authorization to dispatch.
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                track: Some(Some("explicit-track".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let live_followup = h
+        .request(false, id, json!({"content":"latest request"}))
+        .await;
+    assert_eq!(live_followup.status(), StatusCode::CONFLICT);
+    let refusal = live_followup.text().await.unwrap();
+    assert!(refusal.contains("REMOTE_JOB_STILL_RUNNING"), "{refusal}");
+    assert!(!refusal.contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                track: Some(Some(auto_track.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     fixture.log.lock().unwrap().push_str(&format!(
         "{{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"{session_id}\"}}\n"
     ));
