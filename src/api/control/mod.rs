@@ -10314,25 +10314,38 @@ async fn live_mission_on_workspace(
         })
 }
 
-/// The directory as the runner reaches it: symlinks resolved when it exists,
-/// `.` and `..` folded otherwise.
+/// The directory as the runner reaches it: `.` and `..` folded, and symlinks
+/// resolved for the part of the path that exists.
 fn normalized_directory(path: &std::path::Path) -> std::path::PathBuf {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
-    }
-    let mut out = std::path::PathBuf::new();
+    let mut folded = std::path::PathBuf::new();
     for part in path.components() {
         match part {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+                if !folded.pop() {
+                    folded.push("..");
                 }
             }
-            other => out.push(other),
+            other => folded.push(other),
         }
     }
-    out
+    let mut missing = Vec::new();
+    let mut existing = folded.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            return missing
+                .iter()
+                .rev()
+                .fold(real, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return folded,
+        }
+    }
 }
 
 /// Two spellings of one directory must compare equal, and a directory inside
