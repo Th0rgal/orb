@@ -1,0 +1,21 @@
+.provider-usage-meter { display:flex;flex-direction:column;gap:9px;padding:12px 0;min-width:0; }
+.provider-usage-heading { display:flex;align-items:baseline;justify-content:space-between;gap:16px;color:var(--fg-2);font-size:13px; }
+.provider-usage-heading > :last-child { font-variant-numeric:tabular-nums; }
+.provider-usage-meter .p-bar { flex:none;height:7px;width:100%;border-radius:5px; }
+.provider-usage-meter .p-bar-fill { border-radius:5px;background:var(--blue); }
+.provider-usage-meter .p-bar-fill.warm { background:var(--amber); }
+.provider-usage-meter .p-bar-fill.hot { background:var(--red); }
+.provider-usage-reset { color:var(--fg-3);font-size:12px; }
+.cloud-provider-note { color:var(--fg-3);font-size:12px;line-height:1.6;margin:0; }
+.cloud-provider-profiles { display:flex;flex-direction:column;gap:10px;margin-bottom:16px; }
+.cloud-provider-profile { display:flex;align-items:baseline;justify-content:space-between;gap:16px;font-size:12px; }
+.cloud-provider-profile > span:first-child { min-width:0;overflow-wrap:anywhere; }
+.cloud-provider-profile .p-st { flex-shrink:0; }
+.cloud-provider-error { display:flex;align-items:center;justify-content:space-between;gap:16px; }
+
+.cloud-provider-title { display:flex;align-items:center;gap:7px; }
+.cloud-experimental-icon { display:inline-flex;align-items:center;justify-content:center;flex:none;width:16px;height:16px;color:var(--fg-3); }
+.cloud-experimental-icon svg { display:block;width:13px;height:13px; }
+
+.cloud-usage-breakdown { margin:8px 0;padding:12px 16px;background:var(--stroke-soft);border-radius:10px; }
+.cloud-usage-breakdown summary { cursor:pointer;color:var(--fg-3);font-size:12px; }

@@ -3631,6 +3631,12 @@ async fn run_mission_turn(
     boss_user_id: Option<String>,
     pr_readonly: bool,
 ) -> AgentResult {
+    if backend_id.starts_with("cloud_") {
+        return AgentResult::failure(
+            "Hosted execution is owned by the cloud observer; use a cloud follow-up",
+            0,
+        );
+    }
     let _software_execution =
         match crate::agent_software::begin(&mission_id.to_string(), &backend_id, None) {
             Ok(guard) => guard,

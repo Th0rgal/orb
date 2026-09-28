@@ -151,6 +151,12 @@ def normalized_prompt(text: str) -> str:
 def model_selection(requested: str) -> tuple[str, str]:
     """Return the exact visible picker label and canonical model identifier."""
     normalized = " ".join(requested.strip().lower().split())
+    if normalized.startswith("gpt-6-"):
+        labels = {"instant": "Instant", "medium": "Medium", "high": "High", "extra-high": "Extra High", "pro": "Pro"}
+        suffix = normalized.removeprefix("gpt-6-")
+        if suffix not in labels:
+            raise RuntimeError("unsupported GPT-6 mode")
+        return labels[suffix], normalized
     if normalized in PRO_MODEL_ALIASES:
         return "Pro", "gpt-5.6-pro"
     return requested.strip(), requested.strip()
@@ -166,12 +172,18 @@ async def assistant_markdown(locator):
         if (node.nodeType !== Node.ELEMENT_NODE) return '';
         const tag = node.tagName.toLowerCase();
         if (['script','style','button','svg'].includes(tag)) return '';
+        if (node.matches('[data-markdown-copy="exclude"]')) return '';
         const math = node.matches('.katex-display, .katex') && node.querySelector('annotation[encoding="application/x-tex"]');
         if (math) return node.matches('.katex-display') ? '\n\n$$\n'+math.textContent+'\n$$\n\n' : '\\('+math.textContent+'\\)';
-        if (tag === 'pre') {
-          const code = node.querySelector('code') || node;
-          const language = (code.className || '').match(/language-([\w+-]+)/)?.[1] || '';
-          const content = code.textContent || '';
+        if (tag === 'pre' || node.matches('[data-markdown-copy="code-block"]')) {
+          const header = node.querySelector('[data-markdown-copy="exclude"]');
+          const headerLabel = header?.innerText?.trim().split('\n')[0] || '';
+          const code = node.querySelector('pre code, pre, .cm-content, code');
+          const body = node.cloneNode(true);
+          body.querySelectorAll('[data-markdown-copy="exclude"], button, svg, [aria-hidden="true"]').forEach(e => e.remove());
+          const language = (code?.className || '').match(/language-([\w+-]+)/)?.[1]
+            || (/^[\w+#.-]+$/.test(headerLabel) ? headerLabel.toLowerCase() : '');
+          const content = code?.textContent || body.textContent || '';
           const fence = '`'.repeat(Math.max(3, ...Array.from(content.matchAll(/`+/g), m => m[0].length + 1)));
           return '\n\n'+fence+language+'\n'+content+'\n'+fence+'\n\n';
         }
@@ -350,15 +362,17 @@ async def select_intelligence_slider(page, overlay, slider, pill, label: str) ->
             except Exception:
                 if (await pill.inner_text()).strip() != label:
                     return False
+            await page.wait_for_timeout(1000)
             return True
         if now < 0:
             return False
-        await slider.press("ArrowRight" if now < target else "ArrowLeft")
+        control = overlay.get_by_role("menuitem", name="Power", exact=True) if await slider.get_attribute("aria-hidden") == "true" else slider
+        await control.press("ArrowRight" if now < target else "ArrowLeft")
         await page.wait_for_timeout(250)
     return False
 
 
-async def choose_intelligence_model(page, label: str) -> bool:
+async def choose_intelligence_model(page, label: str, family: str | None = None) -> bool:
     """Select a current composer intelligence option without touching the sidebar."""
     # The current ChatGPT shell hydrates the composer in two phases: the
     # textbox can be ready several seconds before the model pill is attached.
@@ -384,11 +398,14 @@ async def choose_intelligence_model(page, label: str) -> bool:
                 continue
             current = (await button.inner_text()).strip()
             if current not in INTELLIGENCE_LABELS:
+                current = next((candidate for candidate in INTELLIGENCE_LABELS if re.search(r"(?:^|\s)"+re.escape(candidate)+r"$", current)), "")
+            if current not in INTELLIGENCE_LABELS and not (family and "Thinking effort" in (await button.inner_text())):
                 continue
-            if current == label:
+            if current == label and family is None:
                 emit("diagnostic", message="stage=model_already_selected")
                 return True
             await button.click()
+            await page.wait_for_timeout(800)
             # New rollouts keep the semantic menu/slider but drop the test id.
             # Require a unique visible picker after clicking the composer pill;
             # never fall back to arbitrary page text or sidebar controls.
@@ -397,6 +414,25 @@ async def choose_intelligence_model(page, label: str) -> bool:
                 '[role="menu"]:visible:has([role="slider"])'
             )
             await overlay.wait_for(state="visible", timeout=3_000)
+            if family is not None:
+                toggle = overlay.get_by_role("menuitem", name="Select model", exact=True)
+                if not re.match(r"^"+re.escape(family)+r"(?:\s|$)", (await toggle.inner_text()).strip()):
+                    latest = overlay.locator('[role="menuitemradio"][aria-checked="true"]').filter(has_text=re.compile(r"^Latest$"))
+                    if not await latest.count():
+                        await toggle.click()
+                        await overlay.get_by_role("menuitemradio", name="Latest", exact=True).click()
+                        if not await overlay.is_visible():
+                            await button.click()
+                    # The UI hides the generation label at intermediate power levels.
+                    # Pro exposes it. Verify that label before choosing the requested power.
+                    slider = overlay.locator('[role="slider"]').first
+                    if not await select_intelligence_slider(page, overlay, slider, button, "Pro"):
+                        raise RuntimeError("cannot verify model generation")
+                    await button.click()
+                    await page.wait_for_timeout(800)
+                    toggle = overlay.get_by_role("menuitem", name="Select model", exact=True)
+                    if not re.match(r"^"+re.escape(family)+r"(?:\s|$)", (await toggle.inner_text()).strip()):
+                        raise RuntimeError("requested model generation is not selected")
             slider = overlay.locator('[role="slider"]')
             if await slider.count() and await slider.first.is_visible():
                 if await select_intelligence_slider(
@@ -423,7 +459,7 @@ async def choose_model(page, requested: str) -> str:
         return ""
     visible_label, canonical_model = model_selection(requested)
     if visible_label in INTELLIGENCE_LABELS and await choose_intelligence_model(
-        page, visible_label
+        page, visible_label, "6" if canonical_model.startswith("gpt-6-") else None
     ):
         return canonical_model
 
@@ -1050,6 +1086,7 @@ async def run(args, request) -> None:
             stable = 0
             stop_fallback_reported = False
             submitted_emitted = resume_path is not None
+            final_history_loaded = resume_path is not None
             deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
             while asyncio.get_running_loop().time() < deadline:
                 await raise_if_rate_limited(page)
@@ -1081,7 +1118,19 @@ async def run(args, request) -> None:
                     stop_fallback_reported = True
                     emit("diagnostic", message="stage=stop_button_fallback")
                 stop_visible = stop is not None
-                if last and count > baseline and not stop_visible and stable >= 2:
+                if last and count > baseline and not stop_visible and stable >= 4:
+                    # Streaming code cards can still expose plain text after
+                    # generation stops. Read the persisted conversation once
+                    # before finalizing, verifying its latest prompt again.
+                    # This path never sends a message or creates a new chat.
+                    route = conversation_path_from_url(page.url)
+                    if route is not None and not final_history_loaded:
+                        stage = "final_history"
+                        baseline = await establish_resumed_chat(page, route, message)
+                        final_history_loaded = True
+                        last, stable = "", 0
+                        stage = "response"
+                        continue
                     if durability and not submitted_emitted:
                         emit(
                             "diagnostic",

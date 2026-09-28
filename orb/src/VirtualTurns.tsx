@@ -16,7 +16,20 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const sizes=new Map<string,number>(),nodes=new Map<string,HTMLElement>();
  const [revision,setRevision]=createSignal(0),[viewport,setViewport]=createSignal({top:0,height:800});
  const [pinned,setPinned]=createSignal(new Set<string>());
- const layout=createMemo(()=>{revision();let top=0;return p.items.map(item=>{const row={item,top,height:sizes.get(item.key)??300};top+=row.height;return row;});});
+ let firstKey:string|undefined;
+ const layout=createMemo(()=>{
+  revision();let top=0;
+  const rows=p.items.map(item=>{const row={item,top,height:sizes.get(item.key)??300};top+=row.height;return row;});
+  const previousIndex=firstKey?rows.findIndex(row=>row.item.key===firstKey):-1;
+  firstKey=rows[0]?.item.key;
+  if(previousIndex>0&&scroller){
+   // Retain the visible turns before virtualization can unmount the old anchor.
+   const delta=rows[previousIndex].top,target=scroller,scrollTop=target.scrollTop;
+   setViewport(value=>({...value,top:value.top+delta}));
+   queueMicrotask(()=>{if(target.isConnected){target.scrollTop=scrollTop+delta;schedule();}});
+  }
+  return rows;
+ });
  const total=()=>{const rows=layout(),last=rows.at(-1);return last?last.top+last.height:0;};
  const update=()=>{
   const rect=root.getBoundingClientRect(),box=scroller?.getBoundingClientRect();

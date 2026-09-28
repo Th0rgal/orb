@@ -461,6 +461,95 @@ impl Store {
         let _lock = self.lock()?;
         self.apply_locked(operation, self.load()?, None)
     }
+    /// Copy by immutable blob identity, then remove only the exact source revision.
+    /// A concurrent filesystem edit is retained, never deleted as part of a move.
+    pub fn transfer_file(&self, path: &str, destination: &str, copy: bool) -> Result<()> {
+        valid_path(path)?;
+        valid_path(destination)?;
+        if path == destination {
+            return Err("Choose a different destination".into());
+        }
+        let _lock = self.lock()?;
+        let mut state = self.load()?;
+        self.reconcile(&mut state)?;
+        let entry = state
+            .manifest
+            .entries
+            .get(path)
+            .cloned()
+            .ok_or("File not found")?;
+        if entry.directory {
+            return Err("Select a file, not a folder".into());
+        }
+        if state
+            .manifest
+            .entries
+            .keys()
+            .any(|p| p.to_lowercase() == destination.to_lowercase())
+        {
+            return Err("A file or folder already exists at the destination".into());
+        }
+        if let Some((parent, _)) = destination.rsplit_once('/') {
+            if !state
+                .manifest
+                .entries
+                .get(parent)
+                .is_some_and(|e| e.directory)
+            {
+                return Err("The destination folder does not exist".into());
+            }
+        }
+        if !copy {
+            // Persist both sides together before touching the visible tree. Recovery
+            // materializes the destination before deleting the source, including
+            // after a crash. A rename consumes no additional quota.
+            self.blob(entry.hash.as_deref().ok_or("missing content hash")?)?;
+            state.manifest.revision += 1;
+            let mut moved = entry.clone();
+            moved.revision = state.manifest.revision;
+            let created = Change {
+                before: None,
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: destination.into(),
+                entry: Some(moved.clone()),
+                source: "Orb".into(),
+            };
+            state.manifest.revision += 1;
+            let deleted = Change {
+                before: Some(entry),
+                timestamp: timestamp(),
+                revision: state.manifest.revision,
+                path: path.into(),
+                entry: None,
+                source: "Orb".into(),
+            };
+            state.manifest.entries.remove(path);
+            state.manifest.entries.insert(destination.into(), moved);
+            state.history.extend([created.clone(), deleted.clone()]);
+            state.pending.extend([created, deleted]);
+            self.save(&state)?;
+            self.recover(&mut state)?;
+            return Ok(());
+        }
+        let receipt = self.apply_locked(
+            Operation {
+                id: uuid::Uuid::new_v4().to_string(),
+                path: destination.into(),
+                base: None,
+                hash: entry.hash,
+                directory: false,
+                delete: false,
+                source: "Orb".into(),
+            },
+            state,
+            None,
+        )?;
+        if receipt.conflict {
+            return Err("The destination changed. No file was moved".into());
+        }
+        Ok(())
+    }
     fn apply_locked(
         &self,
         operation: Operation,
@@ -628,6 +717,51 @@ mod tests {
                 source: "test".into(),
             })
             .unwrap()
+    }
+    #[test]
+    fn rename_at_entry_limit_does_not_charge_for_the_source_twice() {
+        let (_dir, s) = setup();
+        for i in 0..ENTRY_LIMIT {
+            fs::write(s.root.join(format!("file-{i}")), b"").unwrap();
+        }
+        s.transfer_file("file-0", "renamed", false).unwrap();
+        assert!(!s.root.join("file-0").exists());
+        assert!(s.root.join("renamed").exists());
+        assert_eq!(s.manifest().unwrap().entries.len(), ENTRY_LIMIT);
+        assert!(s
+            .transfer_file("renamed", "copy", true)
+            .unwrap_err()
+            .contains("5000"));
+    }
+    #[test]
+    fn transfer_preserves_bytes_and_refuses_overwrite() {
+        let (_dir, s) = setup();
+        let bytes = vec![0, 255, 128, 42];
+        fs::create_dir_all(s.root.join("notes")).unwrap();
+        fs::write(s.root.join("notes/source.bin"), &bytes).unwrap();
+        s.transfer_file("notes/source.bin", "renamed.bin", false)
+            .unwrap();
+        assert!(!s.root.join("notes/source.bin").exists());
+        assert_eq!(fs::read(s.root.join("renamed.bin")).unwrap(), bytes);
+        s.transfer_file("renamed.bin", "notes/copy.bin", true)
+            .unwrap();
+        assert!(s.root.join("renamed.bin").exists());
+        assert_eq!(fs::read(s.root.join("notes/copy.bin")).unwrap(), bytes);
+        assert!(s
+            .transfer_file("renamed.bin", "notes/copy.bin", false)
+            .is_err());
+        assert!(s
+            .transfer_file("renamed.bin", "missing/copy.bin", false)
+            .is_err());
+        assert!(s.transfer_file("renamed.bin", "../escape", false).is_err());
+        assert!(s.transfer_file("notes", "folder", false).is_err());
+        assert_eq!(fs::read(s.root.join("renamed.bin")).unwrap(), bytes);
+        let manifest = s.manifest().unwrap();
+        assert!(!manifest.entries.contains_key("notes/source.bin"));
+        assert_eq!(
+            manifest.entries["renamed.bin"].hash,
+            manifest.entries["notes/copy.bin"].hash
+        );
     }
     #[test]
     fn identical_write_keeps_file_revision_and_rejects_ambiguous_paths() {

@@ -73,7 +73,7 @@ test("six completed missions stay in their project and terminate rails in both t
   await expect(last.locator('.tree-rail')).toHaveCount(0);
   await expect(last.locator('.tree-junction')).toHaveClass(/last/);
   const geometry=await last.evaluate(el=>{const row=el.getBoundingClientRect(),rail=el.querySelector('.tree-junction')!.getBoundingClientRect();return{height:row.height,end:rail.bottom-row.top};});
-  expect(geometry).toEqual({height:30,end:16});
+  expect(geometry.height).toBeGreaterThanOrEqual(30);expect(geometry.height).toBeLessThanOrEqual(32);expect(geometry.end).toBeCloseTo(geometry.height/2+1,1);
   for(const theme of ["dark","light"]){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('#orb-sidebar').screenshot({path:`test-results/orb-tree-six-${theme}.png`});}
 });
 

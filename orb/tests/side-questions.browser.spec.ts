@@ -94,10 +94,10 @@ async function mockAgent(page:import('@playwright/test').Page,answer:string){
  const mission=(id:string)=>({id,status:id==='browser-fixture'?'active':'awaiting_user',title:'Fixture',history:[],tags:[],created_at:'',updated_at:''});
  await page.route('**/api/**',async route=>{
   const path=new URL(route.request().url()).pathname;
-  if(path==='/api/uploads'){const b=route.request().postDataJSON();return route.fulfill({json:{path:'/uploads/'+b.name,name:b.name,size:11}});}
+  if(path==='/api/uploads'){const b=route.request().postDataJSON();return route.fulfill({json:{path:'/uploads/11111111-2222-4333-8444-555555555555/'+b.name,name:b.name,size:11}});}
   if(path.endsWith('/btw/agent')){requests.push(route.request().postDataJSON().side_question);events.push({id:events.length+1,sequence:events.length+1,event_type:'assistant_message',content:answer,timestamp:''});return route.fulfill({json:mission('side-child')});}
   if(path==='/api/control/message'){const b=route.request().postDataJSON();expect(b.mission_id).toBe('side-child');requests.push(b.content);events.push({id:events.length+1,sequence:events.length+1,event_type:'assistant_message',content:answer,timestamp:''});return route.fulfill({json:{id:'msg',queued:false}});}
-  if(path.endsWith('/events'))return route.fulfill({json:events});
+  if(path.endsWith('/events'))return route.fulfill(eventPage(route,events));
   if(path.includes('/missions/'))return route.fulfill({json:mission(path.split('/').at(-1)!)});
   return route.fulfill({json:[]});
  });

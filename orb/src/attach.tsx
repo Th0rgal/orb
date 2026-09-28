@@ -64,6 +64,26 @@ export function mentionText(item: { kind: AttachKind; path?: string }): string {
   return /[\s"]/.test(written) ? `@"${written.replace(/"/g, '\\"')}"` : `@${written}`;
 }
 
+/**
+ * Rewrite `@context/X` to `@context/context/X` when only a real `context/`
+ * folder holds X, so drafts written before the picker qualified them resolve.
+ */
+export function qualifyContextMentions(text: string, items: AttachItem[]): string {
+  const known = new Set(items.filter(i => i.kind === "context" && i.path).map(i => i.path!.replace(/\/$/, "")));
+  if (!known.size) return text;
+  let out = "", last = 0;
+  for (const m of scanMentions(text)) {
+    const quoted = m.raw.startsWith('@"');
+    const value = quoted ? m.value : trimBare(m.value);
+    const bare = value.replace(/\/$/, "");
+    if (!/^context(\/|$)/.test(bare) || known.has(bare) || !known.has(`context/${bare}`)) continue;
+    const tail = quoted ? "" : m.value.slice(value.length);
+    out += text.slice(last, m.index) + mentionText({ kind: "context", path: `context/${value}` }) + tail;
+    last = m.index + m.raw.length;
+  }
+  return out + text.slice(last);
+}
+
 /** Every mention written in a draft, in the order they appear. */
 export function scanMentions(text: string): Array<{ raw: string; value: string; index: number }> {
   const out: Array<{ raw: string; value: string; index: number }> = [];
@@ -130,7 +150,10 @@ export function insertMention(
 ): { text: string; caret: number } {
   const q = atQuery(text, caret);
   const start = q.open && q.start >= 0 ? q.start : caret;
-  const token = `${mentionText(item)} `;
+  // Project files live in the context store, so a picked file under a real
+  // `context/` folder would otherwise read as the `@context/` namespace itself.
+  const picked = (item.kind === "file" || item.kind === "folder") && /^context(\/|$)/.test(item.path ?? "") ? { ...item, path: `context/${item.path}` } : item;
+  const token = `${mentionText(picked)} `;
   return {
     text: `${text.slice(0, start)}${token}${text.slice(caret)}`,
     caret: start + token.length,

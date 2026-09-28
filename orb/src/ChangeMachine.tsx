@@ -149,9 +149,9 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
         <Show when={!action()}>
           <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
             <Show when={!compatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
-            <For each={availableHarnesses()}>{c => <option value={c.backend.id}>{c.backend.name}</option>}</For>
+            <For each={availableHarnesses()}>{c => <option value={c.backend.id} selected={c.backend.id === backend()}>{c.backend.name}</option>}</For>
           </Select></label>
-          <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value}>{m.label}</option>}</For></Select></label>
+          <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value} selected={m.value === model()}>{m.label}</option>}</For></Select></label>
           <Show when={!compatible()}><p>Choose a harness available on this machine.</p></Show>
         </Show>
         <Show when={action()?.manifest}>{m => <details><summary>{m().files.length} files · {(m().bytes / 1024 / 1024).toFixed(1)} MiB</summary><ul><For each={m().files}>{f => <li>{f.path}</li>}</For></ul><Show when={m().excluded.length}><p>Excluded credentials, generated configuration and caches:</p><ul><For each={m().excluded}>{f => <li>{f}</li>}</For></ul></Show></details>}</Show>

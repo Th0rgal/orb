@@ -102,6 +102,9 @@ pub(crate) async fn recover_server_shutdown_missions(
             #[cfg(test)]
             let scanned: Vec<_> = active_missions.iter().map(|mission| mission.id).collect();
             for mission in active_missions {
+                if mission.backend.starts_with("cloud_") {
+                    continue;
+                }
                 if super::control::client_placement::is_tagged(&mission.project.tags)
                     || excluded.contains(&mission.id)
                 {
@@ -326,6 +329,9 @@ pub(crate) async fn cleanup_stale_active_missions_once(
     match mission_store.get_stale_active_missions(stale_hours).await {
         Ok(stale_missions) => {
             for mission in stale_missions {
+                if mission.backend.starts_with("cloud_") {
+                    continue;
+                }
                 // Sqlite `get_stale_active_missions` used to project a stub
                 // Mission with empty `origin` / tags. The skip below then
                 // saw a bare worker and marked Grok 08306fdb / cert 203a49d5
@@ -708,6 +714,9 @@ pub(crate) async fn repair_orphaned_active_missions(
     now: chrono::DateTime<chrono::Utc>,
 ) {
     for mission in active_missions {
+        if mission.backend.starts_with("cloud_") {
+            continue;
+        }
         if running_ids.contains(&mission.id) {
             continue;
         }

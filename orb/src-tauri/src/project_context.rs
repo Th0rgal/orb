@@ -369,6 +369,14 @@ pub async fn project_context_file(
         let content = String::from_utf8(bytes).map_err(|_| "This is a binary file")?;
         return Ok(serde_json::json!({"content":content,"revision":entry.revision}));
     }
+    if matches!(operation.as_str(), "move" | "copy") {
+        let destination = content.ok_or("Destination is required")?;
+        store.transfer_file(&path, &destination, operation == "copy")?;
+        tokio::spawn(async move {
+            let _ = replica.tick().await;
+        });
+        return Ok(serde_json::json!({"path":destination}));
+    }
     if !matches!(operation.as_str(), "write" | "mkdir" | "delete") {
         return Err("Unknown context operation".into());
     }

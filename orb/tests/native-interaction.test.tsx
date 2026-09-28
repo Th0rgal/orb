@@ -160,3 +160,18 @@ it('shows a subscription failure even without a pending request and allows retry
   expect(screen.queryByRole('alert')).toBeNull();
  } finally {cleanup();host.__TAURI_INTERNALS__=previous;host.__TAURI__=previousTauri;}
 });
+
+it('keeps a new native request that arrives before the previous answer resolves',async()=>{
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ host.__TAURI_INTERNALS__={invoke:transport(async(command:string)=>{
+  if(command==='local_interaction')return {id:'first',method:'questions',params:{questions:[{id:'q',question:'Choose storage',options:[{label:'Local'}]}]}};
+  if(command==='local_interaction_answer')emitted.onmessage({id:'second',method:'plan',params:{plan:'Save locally'}});
+ })};
+ try{
+  render(()=><NativeInteraction mission="consecutive-requests" active/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Local'}));
+  fireEvent.click(screen.getByRole('button',{name:'Continue'}));
+  await screen.findByRole('button',{name:'Implement plan'});
+  expect(screen.getByText('Save locally')).toBeTruthy();
+ }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
+});

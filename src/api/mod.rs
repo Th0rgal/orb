@@ -23,6 +23,7 @@ pub mod backends;
 pub mod capabilities;
 pub mod claudecode;
 pub mod cli_proxy_login;
+pub mod cloud_agents;
 pub mod codex_usage;
 mod console;
 pub mod control;

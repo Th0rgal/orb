@@ -2,6 +2,10 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import type {UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
+import { copyFileReference, readFileReference, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { FolderActivityIcon, folderActivity } from "./FolderActivity";
+import { createSidebarRequests } from "./sidebarRequests";
+import { folderLabel, setFolderLabel } from "./folderLabels";
 import { projectColor } from "./projectAppearance";
 import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
@@ -10,9 +14,9 @@ import { readProjectFileVersion } from "./projectContext";
 import { cutMission, readCutMission, moveMission } from "./missionMove";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 import * as Ic from "./icons";
 import * as SidebarIcon from "./sidebarIcons";
 import { pendingMissionInteraction } from "./missionAttention";
@@ -41,6 +45,7 @@ import {
   listProjectCrons,
   getProjectCronDefaults,
   mkdirProjectFile,
+  deleteProjectFile,
   readProjectFile,
   writeProjectFile,
   type Mission,
@@ -53,7 +58,7 @@ import {
   type ControllerView as ControllerData,
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
-import { Dialog, DialogButton, PromptSheet } from "./Dialog";
+import { ConfirmDialog, Dialog, DialogButton, PromptSheet } from "./Dialog";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { copyText } from "./clipboard";
 import { CronForm } from "./ControllerSettings";
@@ -216,6 +221,7 @@ function useRowTip() {
 }
 
 export function LiveProjectsSection(p: {
+  activityMissions?: Mission[];
   harnessChoices: HarnessChoice[];
   onFork: (mission: Mission) => void;
   selected: () => string | null;
@@ -227,6 +233,7 @@ export function LiveProjectsSection(p: {
   /** "+" on the section header: create a project (opens the picker flow). */
   onNewProject: (anchor: HTMLButtonElement) => void;
 }) {
+  const activity = createMemo(() => folderActivity(p.activityMissions ?? []));
   const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
@@ -346,6 +353,7 @@ export function LiveProjectsSection(p: {
   };
   const selectedFor = (id: string) => selectedAgents().includes(id) ? selectedAgents() : [id];
   const startMoveSelection = (id: string) => {
+    setFileClipboard("");
     const ids = [...selectedFor(id)];
     if (ids.length === 1) { setPendingMoves([]); beginMove(id); }
     else { setPendingMoves(ids); setCutId(ids[0]); setActionError(null); }
@@ -356,21 +364,81 @@ export function LiveProjectsSection(p: {
   const [cronFolder, setCronFolder] = createSignal("");
   const [newCron, setNewCron] = createSignal<string | null>(null);
   const [actionFocus, setActionFocus] = createSignal(true);
-  const [rename, setRename] = createSignal<({ slug: string; title: string } | { missionId: string; title: string }) | null>(null);
+  const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
+  const [fileAction, setFileAction] = createSignal<{ slug: string; path: string; kind: "rename" | "move" | "delete" } | null>(null);
+  const [fileActionValue, setFileActionValue] = createSignal("");
+  const [fileActionError, setFileActionError] = createSignal<string | null>(null);
+  const [fileBusy, setFileBusy] = createSignal(false);
+  const [fileClipboard, setFileClipboard] = createSignal("");
+  let consumedFileClipboard = "";
+  const cutFile = createMemo(() => { const item = readFileReference(fileClipboard()); return item && !item.copy ? item : null; });
+  const beginFileAction = (slug: string, path: string, kind: "rename" | "move" | "delete") => {
+    setFileMenu(null);
+    setFileAction({ slug, path, kind });
+    setFileActionValue(kind === "rename" ? fileBaseName(path) : fileParent(path));
+    setFileActionError(null);
+  };
+  const refreshFileParents = async (slug: string, path: string, destination?: string) => {
+    await loadDir(slug, fileParent(path), true);
+    if (destination && fileParent(destination) !== fileParent(path)) await loadDir(slug, fileParent(destination), true);
+  };
+  const saveFileAction = async () => {
+    const target = fileAction(), version = connectionVersion();
+    if (!target || fileBusy()) return;
+    setFileBusy(true); setFileActionError(null);
+    try {
+      const destination = target.kind === "delete" ? undefined : fileDestination(target.path, fileActionValue(), target.kind === "rename");
+      if (destination) await transferProjectFile(target.slug, target.path, destination);
+      else await deleteProjectFile(target.slug, target.path);
+      if (version !== connectionVersion()) return;
+      if (p.selected() === `pf:${target.slug}:${target.path}`) p.open(destination ? `pf:${target.slug}:${destination}` : null);
+      setFileAction(null);
+      await refreshFileParents(target.slug, target.path, destination);
+    } catch (e) { if (version === connectionVersion()) setFileActionError(String(e)); }
+    finally { setFileBusy(false); }
+  };
+  const copyFile = async (slug: string, path: string, copy: boolean) => {
+    const version = connectionVersion(); setFileMenu(null);
+    try {
+      const text = await copyFileReference(slug, path, copy);
+      if (version !== connectionVersion()) return;
+      setFileClipboard(text); setCutId(null); setPendingMoves([]); setActionError(null);
+    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+  };
+  const pasteFile = async (slug: string, path: string, text: string) => {
+    const item = readFileReference(text), version = connectionVersion();
+    if (!item || fileBusy() || text === consumedFileClipboard) return;
+    setFileBusy(true); setActionMenu(null); setActionError(null);
+    try {
+      if (item.slug !== slug) throw new Error("Paste into a folder in the same project.");
+      const destination = fileDestination(item.path, path, false);
+      await transferProjectFile(slug, item.path, destination, item.copy);
+      if (version !== connectionVersion()) return;
+      if (!item.copy) {
+        consumedFileClipboard = text; setFileClipboard("");
+        if (p.selected() === `pf:${slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
+      }
+      await refreshFileParents(slug, item.path, destination);
+      setExpanded(path ? `${slug}:${path}` : slug, true);
+    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    finally { setFileBusy(false); }
+  };
+  const [rename, setRename] = createSignal<({ slug: string; title: string; path?: string } | { missionId: string; title: string }) | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
   const [renameError, setRenameError] = createSignal<string | null>(null);
   const [renaming, setRenaming] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const rowTip = useRowTip();
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
+  const requests = createSidebarRequests();
   const warmed = new Set<string>();
   const warmupQueue: string[] = [];
   let warmupActive = 0;
-  const loadController = (slug: string) => {
+  const loadController = (slug: string, force = true) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
-    return getProjectController(slug, 3)
-      .then((view) => { if (currentConnection(version)) setControllers(slug, view); })
+    return requests.read(`controller:${version}:${slug}`, () => getProjectController(slug, 3), force)
+      .then((view) => { if (currentConnection(version)) setControllers(slug, reconcile(view)); })
       .catch(() => {});
   };
   const missingCronApi = (error: unknown) => error instanceof ApiError && [404, 405].includes(error.status) && !/project not found/i.test(error.detail);
@@ -387,9 +455,9 @@ export function LiveProjectsSection(p: {
     if (pending) return pending;
     const request = (async () => {
       try {
-        const jobs = await listProjectCrons(slug);
+        const jobs = await requests.read(`crons:${version}:${slug}`, () => listProjectCrons(slug), force);
         if (!currentConnection(version)) return;
-        setCrons(slug, jobs); setCronErrors(slug, null); setCronUnsupported(false);
+        setCrons(slug, reconcile(jobs, {key: "id"})); setCronErrors(slug, null); setCronUnsupported(false);
       } catch (error) { if (currentConnection(version)) cronFailure(slug, error); }
       finally { cronLoads.delete(key); }
     })();
@@ -397,14 +465,21 @@ export function LiveProjectsSection(p: {
     return request;
   };
   createEffect(on(connectionVersion, () => {
+    setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard("");
     setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null; setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
     setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0;
     setCronUnsupported(false);
     setCronChecking(false);
     setCronInfo(null);
+    requests.clear();
+    cancelIntent(); setError(null);
+    setProjects([]); setMissions(reconcile({})); setDirs(reconcile({}));
+    setControllers(reconcile({})); setCrons(reconcile({}));
+    setDirErrors(reconcile({})); setCronErrors(reconcile({}));
     warmed.clear();
     warmupQueue.length = 0;
     if (!isConnected()) return;
+    refresh();
     for (const slug of Object.keys(expanded)) if (expanded[slug] && !slug.includes(":")) void loadCrons(slug);
   }, { defer: true }));
   const beginCron = async (slug: string, path = "") => {
@@ -473,11 +548,11 @@ export function LiveProjectsSection(p: {
 
   let missionRevision = 0;
   const archiving = new Map<string, string>();
-  const loadMissions = (slug: string, opts?: { transcripts?: boolean }) => {
+  const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const revision = missionRevision;
-    return listProjectMissions(slug)
+    return requests.read(`missions:${version}:${revision}:${slug}`, () => listProjectMissions(slug), !opts?.cached)
       .then((list) => {
         if (!currentConnection(version)) return;
         if (revision !== missionRevision) return;
@@ -496,18 +571,17 @@ export function LiveProjectsSection(p: {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
     const key = `${slug}:${path}`;
-    if (dirs[key] && !force) return Promise.resolve();
     setDirErrors(key, null);
-    return listProjectFiles(slug, path)
-      .then((entries) => { if (currentConnection(version)) setDirs(key, entries); })
+    return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path), force)
+      .then((entries) => { if (currentConnection(version)) setDirs(key, reconcile(entries, {key: "name"})); })
       .catch((e) => { if (currentConnection(version)) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
   const warmupOne = async (slug: string) => {
     await Promise.all([
-      loadMissions(slug, { transcripts: false }),
+      loadMissions(slug, { transcripts: false, cached: true }),
       loadDir(slug, ""),
-      loadController(slug),
+      loadController(slug, false),
       loadCrons(slug),
     ]);
   };
@@ -523,9 +597,11 @@ export function LiveProjectsSection(p: {
     }
   };
   const warmupProjects = (list: ProjectSummary[]) => {
-    const limit = prefetchProjectLimit();
+    const limit = Math.min(4, prefetchProjectLimit());
     if (!limit) return;
-    for (const p of list.slice(0, limit)) {
+    const active = new Set((p.activityMissions ?? []).filter(m => ["active", "running", "starting", "resuming"].includes(m.status)).map(m => m.project));
+    const prioritized = [...list].sort((a, b) => Number(!!expanded[b.slug] || active.has(b.slug)) - Number(!!expanded[a.slug] || active.has(a.slug)));
+    for (const p of prioritized.slice(0, limit)) {
       if (warmed.has(p.slug)) continue;
       warmed.add(p.slug);
       warmupQueue.push(p.slug);
@@ -622,6 +698,13 @@ export function LiveProjectsSection(p: {
     setRenameValue(title);
     setRenameError(null);
   };
+  const beginFolderRename = (slug: string, path: string) => {
+    setActionMenu(null);
+    const title = folderLabel(slug, path);
+    setRename({ slug, path, title });
+    setRenameValue(title);
+    setRenameError(null);
+  };
   const beginMissionRename = (mission: Mission) => {
     setMissionMenu(null);
     setForkTarget(null);
@@ -642,6 +725,10 @@ export function LiveProjectsSection(p: {
         for (const slug of Object.keys(missions)) {
           setMissions(slug, m => m.id === target.missionId, "title", title);
         }
+      } else if (target.path) {
+        setFolderLabel(target.slug, target.path, title);
+        setRename(null);
+        return;
       } else {
         await updateProject({ slug: target.slug, title });
       }
@@ -675,9 +762,17 @@ export function LiveProjectsSection(p: {
       ...(path ? [{ kind: "item" as const, label: "New file", icon: Ic.FileIcon, onClick: () => beginFile(slug, path) }] : []),
       { kind: "item", label: "New folder", icon: Ic.FolderIcon, onClick: () => beginFolder(slug, path) },
     ];
+    if (fileClipboard()) items.push(
+      { kind: "sep" },
+      { kind: "item", label: "Paste file", icon: Ic.PasteIcon, onClick: () => void pasteFile(slug, path, fileClipboard()) },
+    );
     if (cutId()) items.push(
       { kind: "sep" },
       { kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => pasteMission(slug, path, true) },
+    );
+    if (path) items.push(
+      { kind: "sep" },
+      { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFolderRename(slug, path) },
     );
     if (!path) items.push(
       { kind: "sep" },
@@ -693,7 +788,7 @@ export function LiveProjectsSection(p: {
     try {
       const view = await controllerAction(slug, archived ? "restore" : "archive");
       if (version !== connectionVersion()) return;
-      setControllers(slug, view);
+      setControllers(slug, reconcile(view));
       if (archived) {
         setExpanded(slug, true);
         void loadMissions(slug);
@@ -767,13 +862,24 @@ export function LiveProjectsSection(p: {
     if (!selectedAgents().includes(mission.id)) { setSelectedAgents([mission.id]); selectionAnchor = mission.id; }
     setMissionMenu({ x: e.clientX, y: e.clientY, mission });
   };
+  let intentTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelIntent = () => clearTimeout(intentTimer);
+  const warmIntent = (slug: string, path?: string) => {
+    cancelIntent();
+    if (!cacheCanPrefetch()) return;
+    intentTimer = setTimeout(() => {
+      if (path === undefined) void warmupOne(slug);
+      else void loadDir(slug, path);
+    }, 100);
+  };
+  onCleanup(cancelIntent);
   const toggleProject = (slug: string) => {
     const next = !expanded[slug];
     setExpanded(slug, next);
     if (next) {
-      loadMissions(slug);
+      loadMissions(slug, { cached: true });
       loadDir(slug, "");
-      loadController(slug);
+      loadController(slug, false);
       loadCrons(slug);
     }
   };
@@ -844,7 +950,7 @@ export function LiveProjectsSection(p: {
     })().catch(e => setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
   };
   const moveKey = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { setSelectedAgents([]); setPendingMoves([]); setCutId(null); selectionAnchor = null; return; }
+    if (event.key === "Escape") { if (cutFile()) consumedFileClipboard = fileClipboard(); setFileClipboard(""); setSelectedAgents([]); setPendingMoves([]); setCutId(null); selectionAnchor = null; return; }
     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
     const target = event.target as HTMLElement;
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
@@ -855,12 +961,21 @@ export function LiveProjectsSection(p: {
     };
     const row = find([...tree(), ...(archivesOpen() ? archiveNodes() : [])]);
     if (!row) return;
-    if (event.key.toLowerCase() === 'x' && row.mission) {
+    if (row.kind === "file" && ['x', 'c'].includes(event.key.toLowerCase())) {
+      event.preventDefault(); event.stopPropagation();
+      void copyFile(row.slug, row.path!, event.key.toLowerCase() === 'c');
+    } else if (event.key.toLowerCase() === 'x' && row.mission) {
+      setFileClipboard("");
       event.preventDefault(); event.stopPropagation();
       startMoveSelection(row.mission.id);
     } else if (event.key.toLowerCase() === 'v' && (row.kind === 'project' || row.kind === 'folder')) {
       event.preventDefault(); event.stopPropagation();
-      pasteMission(row.slug, row.path ?? '');
+      const version = connectionVersion();
+      void navigator.clipboard.readText().then(text => {
+        if (version !== connectionVersion()) return;
+        if (readFileReference(text)) void pasteFile(row.slug, row.path ?? '', text);
+        else pasteMission(row.slug, row.path ?? '');
+      }).catch(e => setActionError(String(e)));
     } else if (event.key.toLowerCase() === 'c') { setCutId(null); setPendingMoves([]); }
   };
   const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
@@ -872,7 +987,7 @@ export function LiveProjectsSection(p: {
   const fileNodes = (slug: string, path: string): Node[] => {
     const key = `${slug}:${path}`;
     const work = path ? workNodes(slug, path) : [];
-    if (dirErrors[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
+    if (dirErrors[key] && !dirs[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
     if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
     const entries = [...dirs[key]];
     // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
@@ -882,11 +997,11 @@ export function LiveProjectsSection(p: {
       const name = relative.split("/")[0];
       if (name && !entries.some(e => e.name === name)) entries.push({ name, kind: "dir" });
     }
-    if (!entries.length && !work.length) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
-    return [...work, ...entries.map((entry): Node => {
+    if (!entries.length && !work.length && !dirErrors[key]) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
+    return [...work, ...(dirErrors[key] ? [{ id: `error:${key}`, data: { kind: "note" as const, slug, path, label: "Couldn’t refresh files. Showing saved list." } }] : []), ...entries.map((entry): Node => {
       const childPath = path ? `${path}/${entry.name}` : entry.name;
       const open = !!expanded[`${slug}:${childPath}`];
-      return { id: `pf:${slug}:${childPath}`, data: { kind: entry.kind === "dir" ? "folder" : "file", slug, path: childPath, label: entry.name },
+      return { id: `pf:${slug}:${childPath}`, data: { kind: entry.kind === "dir" ? "folder" : "file", slug, path: childPath, label: entry.kind === "dir" ? folderLabel(slug, childPath) : entry.name },
         ...(entry.kind === "dir" ? { expanded: open, children: open ? fileNodes(slug, childPath) : [] } : {}) };
     })];
   };
@@ -961,6 +1076,21 @@ export function LiveProjectsSection(p: {
    }catch(error){setImportStatus('');setActionError(String(error));}finally{setImporting(false);}
   };
   nativeComposerDrop(()=>dropTree,importFiles,dropAt);
+  // Navigation (fork, search, history) owns the current selection. An old
+  // range selection must not keep highlighting a different conversation.
+  createEffect(on(p.selected, selected => {
+    setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null;
+    if (!selected?.startsWith("m:")) return;
+    selectionAnchor = selected.slice(2); setSelectedAgents([selectionAnchor]);
+    const mission = p.activityMissions?.find(m => m.id === selected.slice(2));
+    if (!mission?.project) return;
+    const slug = mission.project;
+    setExpanded(slug, true);
+    const parts = missionFolder(mission).split("/").filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) setExpanded(`${slug}:${parts.slice(0, i).join("/")}`, true);
+    void loadMissions(slug);
+    void loadDir(slug, "");
+  }, {defer:true}));
   const renderRow = (row: TreeRow<RowData>) => {
     const d = row.data;
     const contextMenu = (e: MouseEvent) => {
@@ -972,9 +1102,9 @@ export function LiveProjectsSection(p: {
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
-    if (d.kind === "project") return <div class="row project" data-drop-project={d.slug} data-drop-folder="" onContextMenu={contextMenu}>
-      <button class="row-main" aria-expanded={row.expanded} onClick={() => toggleProject(d.slug)}>
-        <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
+    if (d.kind === "project") return <div class="row project" data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
+      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={() => toggleProject(d.slug)}>
+        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} />
         <span class="row-label">{d.label}</span>
       </button>
       <Show when={row.expanded}><ContextBadge slug={d.slug}/></Show>
@@ -988,9 +1118,9 @@ export function LiveProjectsSection(p: {
       <Ic.BellIcon size={12} /><button class="cron-status-label" onClick={() => setCronInfo(d.slug)}>{cronUnsupported() ? "Crons need backend update" : cronRetryable[d.slug] ? "Crons temporarily unavailable" : "Crons unavailable"}</button>
       <Show when={!cronUnsupported() && cronRetryable[d.slug]}><button class="cron-retry" aria-label="Retry crons" title="Retry crons" onClick={() => void loadCrons(d.slug, true)}>↻</button></Show>
     </div>;
-    if (d.kind === "folder") return <div class="row folder" data-drop-project={d.slug} data-drop-folder={d.path} onContextMenu={contextMenu}>
-      <button class="row-main" aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onClick={() => toggleDir(d.slug, d.path!)}>
-        <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span><span class="row-label">{d.label}</span>
+    if (d.kind === "folder") return <div class="row folder" data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
+      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={() => toggleDir(d.slug, d.path!)}>
+        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
       </button>
       <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
         onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
@@ -1012,8 +1142,11 @@ export function LiveProjectsSection(p: {
       </button>;
     }
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined]));
-    return <button aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
-      onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
+    return <button aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.kind === "file" && cutFile()?.slug === d.slug && cutFile()?.path === d.path ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
+      onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); else {
+        e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null);
+        setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
+      } }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<Show when={m().backend?.startsWith("cloud_")} fallback={<MissionGlyph missionId={m().id} status={m().status} />}><ProviderLogo type={m().backend!} /></Show>}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} />
     </button>;
@@ -1058,6 +1191,21 @@ export function LiveProjectsSection(p: {
       <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
         {kind:"item",label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)}
       ]} onClose={()=>setControllerMenu(null)} />}</Show>
+      <Show when={fileMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
+        { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
+        { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },
+        { kind: "sep" },
+        { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(menu.slug, menu.path, false) },
+        { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(menu.slug, menu.path, true) },
+        { kind: "sep" },
+        { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
+      ]} />}</Show>
+      <Show when={fileAction()} keyed>{target => <Show when={target.kind === "delete"} fallback={
+        <PromptSheet title={target.kind === "rename" ? "Rename file" : "Move file"} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.path}
+          label={target.kind === "rename" ? "File name" : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
+          action={target.kind === "rename" ? "Rename" : "Move"} busy={fileBusy()} error={fileActionError()}
+          disabled={target.kind === "rename" && !fileActionValue().trim()} onAction={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} />
+      }><ConfirmDialog title="Delete file?" description={`Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
       <Show when={actionMenu()}>
         {(menu) => <PopupMenu {...menu()} focus={actionFocus()} items={menuItems(menu().slug, menu().path)} onClose={() => setActionMenu(null)} />}
       </Show>
@@ -1082,9 +1230,9 @@ export function LiveProjectsSection(p: {
         {(target) => (
           <PromptSheet
             title="Rename"
-            hint={"slug" in target() ? (target() as { slug: string }).slug : undefined}
-            label={"missionId" in target() ? "Mission name" : "Project name"}
-            placeholder={"missionId" in target() ? "Mission name" : "Project name"}
+            hint={"path" in target() ? "Display name saved on this device. Files and agent paths stay the same." : "slug" in target() ? (target() as { slug: string }).slug : undefined}
+            label={"missionId" in target() ? "Mission name" : "path" in target() ? "Folder name" : "Project name"}
+            placeholder={"missionId" in target() ? "Mission name" : "path" in target() ? "Folder name" : "Project name"}
             value={renameValue()}
             onInput={setRenameValue}
             action="Save"
@@ -1146,7 +1294,7 @@ export function LiveProjectsSection(p: {
               loadDir(slug(), "", true);
               loadMissions(slug());
               loadController(slug());
-              loadCrons(slug());
+              loadCrons(slug(), true);
               p.open(`pc:${slug()}:${view.job!.id}`);
               setNewCron(null);
             }} />

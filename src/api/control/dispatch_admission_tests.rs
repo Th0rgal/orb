@@ -7719,3 +7719,42 @@ fn http_restored_scheduler_batch_retry_preserves_pending_and_consumed_state() {
         });
     }
 }
+
+#[tokio::test]
+async fn claude_preflight_failure_does_not_publish_uncreated_native_session() {
+    let fixture = spawn_fixture_node(
+        "claude-preflight",
+        "CLAUDE_PREFLIGHT_FIXTURE_TOKEN",
+        "queued",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    std::env::remove_var("CLAUDE_PREFLIGHT_FIXTURE_TOKEN");
+    let response = h.state.http_client.post(format!("{}/missions",h.url)).json(&json!({
+        "prompt":"Continue after fixing the node", "backend":"claudecode", "remote_node_id":"claude-preflight"
+    })).send().await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        response.text().await.unwrap()
+    );
+    assert!(fixture.submissions.lock().unwrap().is_empty());
+    let rows = h
+        .control
+        .mission_store
+        .list_missions_filtered(&crate::api::mission_store::MissionFilter::default(), 10, 0)
+        .await
+        .unwrap();
+    let mission = rows
+        .iter()
+        .find(|m| m.status == MissionStatus::Failed)
+        .expect("failed preflight");
+    assert!(
+        mission.session_id.is_none(),
+        "preflight cannot create a resumable Claude session"
+    );
+}

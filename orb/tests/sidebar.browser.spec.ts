@@ -217,7 +217,7 @@ test("project folders contain agents and crons and offer scoped creation", async
   await expect(page.getByRole("button",{name:/Audit cron/})).toBeVisible();
   await page.getByRole("button",{name:"Folder actions for audit"}).click();
   const labels=await page.getByRole("menuitem").allTextContents();
-  expect(labels.slice(0,2)).toEqual(["New agent","New cron"]);
+  expect(labels.slice(0,3)).toEqual(["New agent","Cloud agent","New cron"]);
   await expect(page.getByRole("menuitem",{name:"New file",exact:true})).toBeVisible();
   await page.getByRole("menuitem",{name:"New agent",exact:true}).click();
   await expect(page.getByRole("button",{name:"Choose project"})).toContainText("/ audit");

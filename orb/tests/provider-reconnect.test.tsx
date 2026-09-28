@@ -15,7 +15,7 @@ it("reconnects a revoked sandboxed-owned Anthropic account using its existing id
       connected = true;
       return new Response(JSON.stringify({ status: { type: "connected" } }));
     }
-    const data = url.endsWith("/providers") ? [{ id: "expired-account", provider_type: "anthropic", name: "Claude account", uses_oauth: true, credential_owner: "sandboxed_sh", account_email: "account@example.test", status: { type: connected ? "connected" : "needs_reauth", reason: connected ? undefined : "Refresh token revoked" } }]
+    const data = url.endsWith("/cloud/accounts") ? [] : url.endsWith("/providers") ? [{ id: "expired-account", provider_type: "anthropic", name: "Claude account", uses_oauth: true, credential_owner: "sandboxed_sh", account_email: "account@example.test", status: { type: connected ? "connected" : "needs_reauth", reason: connected ? undefined : "Refresh token revoked" } }]
       : url.endsWith("/oauth/authorize") ? { url: "https://example.test/authorize", method: "code", instructions: "Paste the authorization code." }
       : {};
     return new Response(JSON.stringify(data));
@@ -34,7 +34,7 @@ it("reconnects a revoked sandboxed-owned Anthropic account using its existing id
 });
 it("exposes API key editing and keeps real error details", async () => {
   setConnection("http://core.test", "test-token");
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers")
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/cloud/accounts") ? [] : url.endsWith("/zai/usage") ? {provider_type:"zai",error:"Account unavailable"} : url.endsWith("/minimax/usage") ? {provider_type:"minimax",model_usage:[]} : url.endsWith("/providers")
     ? ["muse", "custom", "minimax", "zai"].map(id => ({ id, name: id, provider_type: id, uses_oauth: false, status: { type: "connected" } }))
     : url.endsWith("/zai/usage") ? {provider_type:"zai",error:"Account unavailable"} : url.endsWith("/minimax/usage") ? {provider_type:"minimax",model_usage:[]} : { entries: { muse: { provider_type: "muse" }, custom: { provider_type: "custom" }, minimax: { provider_type: "minimax", model_usage: [] }, zai: { provider_type: "zai", error: "Account unavailable" } } }))));
   const { container } = render(() => <Providers />);

@@ -197,6 +197,11 @@ pub(crate) fn heartbeat_supports_grok(
 /// What one fed chunk changed, for the observer to broadcast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamUpdate {
+    GoalStatus {
+        status: String,
+        objective: String,
+    },
+    GoalIteration(u64),
     Text,
     Thinking,
     TextSnapshot(String),
@@ -218,6 +223,9 @@ pub(crate) enum StreamUpdate {
 /// non-JSON (stderr) lines.
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
+    claude: bool,
+    claude_message_streamed: bool,
+    claude_boundary: bool,
     partial: String,
     dropping_line: bool,
     text_segment: String,
@@ -228,6 +236,7 @@ pub(crate) struct GrokStream {
     pub(crate) model: Option<String>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) ended: bool,
+    pub(crate) native_goal_status: Option<String>,
     pub(crate) auth_required: bool,
     pub(crate) error: Option<String>,
     pub(crate) json_events: u64,
@@ -308,9 +317,29 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if self.claude {
+            self.feed_claude(&value, updates);
+            return;
+        }
         // Codex exec emits native thread/turn/item events. Keep the thread id
         // for continuation on the same node and preserve tool/text ordering.
         let kind = value["type"].as_str().unwrap_or_default();
+        if kind == "goal.status" {
+            if let Some(status) = value["status"].as_str() {
+                self.native_goal_status = Some(status.to_string());
+                updates.push(StreamUpdate::GoalStatus {
+                    status: status.to_string(),
+                    objective: value["objective"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+            return;
+        }
+        if kind == "goal.iteration" {
+            if let Some(iteration) = value["iteration"].as_u64() {
+                updates.push(StreamUpdate::GoalIteration(iteration));
+            }
+            return;
+        }
         if matches!(
             kind,
             "thread.started"
@@ -607,7 +636,7 @@ impl NativeGrokObserver {
                 if matches!(
                     mission.backend.as_str(),
                     GROK_BACKEND | "opencode" | "codex"
-                ) =>
+                ) || (mission.backend == "claudecode" && mission.session_id.is_some()) =>
             {
                 mission
             }
@@ -618,11 +647,14 @@ impl NativeGrokObserver {
             job_id,
             owner: owner.clone(),
             session_persisted: mission.session_id.clone(),
+            stream: GrokStream {
+                claude: mission.backend == "claudecode",
+                ..Default::default()
+            },
             mission,
             log_offset: 0,
             log_len: 0,
             streaming: LogStreaming::Unknown,
-            stream: GrokStream::default(),
             thinking_open: false,
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
@@ -711,7 +743,10 @@ impl NativeGrokObserver {
             self.close_thinking();
             self.log_offset = 0;
             self.log_len = chunk.log_len;
-            self.stream = GrokStream::default();
+            self.stream = GrokStream {
+                claude: self.mission.backend == "claudecode",
+                ..Default::default()
+            };
             return;
         }
         self.log_len = chunk.log_len;
@@ -732,6 +767,24 @@ impl NativeGrokObserver {
     async fn broadcast(&mut self, updates: Vec<StreamUpdate>) {
         for update in updates {
             match update {
+                StreamUpdate::GoalStatus { status, objective } => {
+                    self.owner
+                        .publish_native(AgentEvent::GoalStatus {
+                            status,
+                            objective,
+                            mission_id: Some(self.mission_id),
+                        })
+                        .await;
+                }
+                StreamUpdate::GoalIteration(iteration) => {
+                    self.owner
+                        .publish_native(AgentEvent::GoalIteration {
+                            iteration: iteration as u32,
+                            objective: goal_objective(&self.mission).unwrap_or_default(),
+                            mission_id: Some(self.mission_id),
+                        })
+                        .await;
+                }
                 StreamUpdate::Tool { update, completed } => {
                     self.close_thinking();
                     let id = update
@@ -899,19 +952,43 @@ impl NativeGrokObserver {
                 self.stream.stop_reason.as_deref(),
                 Some("end_turn" | "EndTurn")
             );
+        let codex_goal = self.mission.backend == "codex"
+            && (self.mission.goal_mode || self.stream.native_goal_status.is_some());
+        // Raw remote commands predate stream-json. Require a Claude result only
+        // after the native protocol has actually been observed.
+        let legacy_claude = self.stream.claude && self.stream.json_events == 0;
         let success = succeeded
+            && (!self.stream.claude || legacy_claude || self.stream.ended)
             && !auth_required
             && self.stream.error.is_none()
-            && (!self.mission.goal_mode || native_end);
+            && (!self.mission.goal_mode || legacy_claude || native_end)
+            && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
         let mut content = self.stream.text.trim().to_string();
-        let status_reason: &'static str = if auth_required {
+        if legacy_claude && success {
+            content = format!(
+                "Remote job {} on node '{}' finished with state 'succeeded'",
+                self.job_id, node_id
+            );
+            let output = self.stream.diagnostics_text();
+            if !output.is_empty() {
+                content.push_str(&format!("\n\n{output}"));
+            }
+        }
+        let status_reason: &'static str = if codex_goal && !success {
+            "native_goal_stopped"
+        } else if auth_required {
             "remote_grok_auth_required"
         } else {
             "remote_node_job"
         };
         if !success {
             let mut report = String::new();
-            if auth_required {
+            if codex_goal && succeeded && self.stream.error.is_none() {
+                report.push_str(&format!(
+                    "Native Codex goal stopped with status '{}'; the objective and counters are preserved. Resume after resolving that stop.",
+                    self.stream.native_goal_status.as_deref().unwrap_or("unconfirmed")
+                ));
+            } else if auth_required {
                 report.push_str(
                     "The grok CLI on the node could not authenticate non-interactively: managed auth is not usable there. \
                      On the node, set SANDBOXED_NODE_GROK_HOME for the sandboxed-node service and run \
@@ -961,7 +1038,9 @@ impl NativeGrokObserver {
             );
         }
 
-        if let Some(objective) = goal_objective(&self.mission) {
+        if let Some(objective) =
+            goal_objective(&self.mission).filter(|_| self.mission.backend != "codex")
+        {
             let event = AgentEvent::GoalStatus {
                 status: if success { "complete" } else { "paused" }.to_string(),
                 objective,
@@ -1122,7 +1201,7 @@ pub(crate) async fn reject_local_followup(
 pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacement) -> String {
     if matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex"
+        GROK_BACKEND | "opencode" | "codex" | "claudecode"
     ) {
         format!(
             "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {} runs natively on remote node '{}'; \
@@ -1237,7 +1316,7 @@ pub(crate) async fn continue_on_node(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex"
+        GROK_BACKEND | "opencode" | "codex" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1366,6 +1445,15 @@ pub(crate) async fn continue_on_node(
                     "Codex remote session has no recorded model".to_string(),
                 )
             })?,
+            prompt: prompt.clone(),
+            resume_session_id: session_id.clone(),
+        }
+    } else if mission.backend == "claudecode" {
+        RemoteHarnessPlan::ClaudeCode {
+            model: mission
+                .model_override
+                .as_deref()
+                .map(|m| m.strip_prefix("anthropic/").unwrap_or(m).to_string()),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
         }
@@ -1931,6 +2019,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_turn_end_never_fabricates_goal_completion() {
+        let mut stream = GrokStream::default();
+        stream.feed("{\"type\":\"turn.completed\"}\n");
+        assert_eq!(stream.native_goal_status, None);
+        stream.feed(
+            "{\"type\":\"goal.status\",\"status\":\"active\",\"objective\":\"full roadmap\"}\n",
+        );
+        stream.feed("{\"type\":\"turn.completed\"}\n");
+        assert_eq!(stream.native_goal_status.as_deref(), Some("active"));
+        let updates = stream.feed(
+            "{\"type\":\"goal.status\",\"status\":\"blocked\",\"objective\":\"full roadmap\"}\n",
+        );
+        assert_eq!(stream.native_goal_status.as_deref(), Some("blocked"));
+        assert!(
+            matches!(&updates[0], StreamUpdate::GoalStatus { status, .. } if status == "blocked")
+        );
+    }
+
+    #[test]
     fn stream_flags_interactive_login_and_errors() {
         let mut stream = GrokStream::default();
         let updates = stream.feed("\nSigning in with Grok...\nOpen this URL to sign in:\n  https://auth.x.ai/oauth2/authorize?x=y\n");
@@ -1983,7 +2090,9 @@ mod tests {
         assert!(local_resume_refusal(&mission, &placement).contains("/resume"));
         mission.backend = "claudecode".into();
         let other = local_resume_refusal(&mission, &placement);
-        assert!(other.contains("supersedes_mission_id"), "{other}");
-        assert!(other.contains("'claudecode'"), "{other}");
+        assert!(other.contains("/resume"), "{other}");
     }
 }
+
+#[path = "remote_claude.rs"]
+mod claude;

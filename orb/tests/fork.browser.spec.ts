@@ -38,10 +38,11 @@ test("fork dialog opens a new page without mutating the source", async ({ page }
   await menu.getByRole("menuitem", { name: "OpenCode" }).click();
   const models = page.getByRole("menu", { name: "Choose a model" });
   await expect(models.getByRole("menuitem", { name: "Smart (Default)" })).toBeVisible();
-  await page.screenshot({ path: "test-results/fork-dialog.png" });
   await models.getByRole("menuitem", { name: "Smart (Default)" }).click();
   await expect(menu).toHaveCount(0);
   await expect(page.locator(".under-harness")).toHaveText("OpenCode");
+  await expect(page.locator(".row.agent.active")).toHaveCount(1);
+  await expect(page.locator(".row.agent.active")).toContainText("Original work · fork");
   expect(mutations).toHaveLength(1);
   expect(mutations[0]).toMatchObject({ path: "/api/control/missions/original/fork", body: { backend: "opencode", model_override: "builtin/smart" } });
   await expect(page.locator(".row.agent", { hasText: "Original work" }).first()).toBeVisible();

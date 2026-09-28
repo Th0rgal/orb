@@ -50,3 +50,18 @@ it("shows only the administration entry when both DGX services exist",async()=>{
   await waitFor(()=>expect(ui.getByRole("menuitem",{name:/DGX Spark · Administration/})).toBeTruthy());
   expect(ui.queryByRole("menuitem",{name:/^dgx-spark /})).toBeNull();
 });
+
+it.each(['ashur','babylon','nippur','old-agent','dgx-spark-admin','sepolia'])('keeps Claude Code and its model selectable on %s',async id=>{
+  vi.spyOn(transfers,'inspectTransfer').mockResolvedValue({version:1,actions:[],destinations:[{machine:{kind:'node',id},label:id,available:true,harnesses:['codex','claudecode']}]});
+  const claude={...mission,backend:'claudecode',model_override:'claude-opus-5-5'};
+  const all=[...choices,{backend:{id:'claudecode',name:'Claude Code'},models:[{value:'claude-opus-5-5',label:'Opus 5.5'}]}];
+  const ui=render(()=><ChangeMachine mission={claude} choices={all} onClose={()=>{}} onMoved={()=>{}}/>);
+  const label=id==='dgx-spark-admin'?'DGX Spark · Administration':id;
+  await waitFor(()=>expect(ui.getByRole('menuitem',{name:new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'))})).toBeTruthy());
+  fireEvent.click(ui.getByRole('menuitem',{name:new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'))}));
+  const harness=ui.container.querySelector('select[aria-label="Transfer harness"]') as HTMLSelectElement;
+  expect(harness.value).toBe('claudecode');
+  expect([...harness.options].some(o=>o.value==='claudecode'&&!o.disabled)).toBe(true);
+  expect((ui.container.querySelector('select[aria-label="Transfer model"]') as HTMLSelectElement).value).toBe('claude-opus-5-5');
+  expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});

@@ -4,7 +4,10 @@ test("sent images resolve from the local workspace, render numbered thumbnails a
  await page.addInitScript(()=>{
   localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');
   localStorage.setItem('orb.localBindings',JSON.stringify({images:{cwd:'/workspace',harness:'codex',bin:'codex'}}));
-  (window as any).__TAURI__={core:{invoke:async (_:string,{request}:any)=>{
+  (window as any).__TAURI__={core:{Channel:class {onmessage=(_:any)=>{};},invoke:async (command:string,args:any)=>{
+   if(command==='local_bindings_subscribe'){args.onEvent.onmessage({revision:1,bindings:{images:{cwd:'/workspace',harness:'codex',bin:'codex'}}});return 1;}
+   if(command==='local_bindings_unsubscribe')return;
+   const {request}=args;
    if(request.action==='resolve')return {results:request.paths.map((reference:string)=>({reference,matches:[{name:reference.split('/').pop(),path:reference.replace('/workspace/',''),kind:'file'}]}))};
    if(request.action==='download'){
     const canvas=document.createElement('canvas');canvas.width=240;canvas.height=300;

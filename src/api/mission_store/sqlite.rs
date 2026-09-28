@@ -1,4 +1,6 @@
 //! SQLite-based mission store with full event logging.
+#[path = "sqlite_cloud.rs"]
+mod cloud;
 #[path = "sqlite_transfer.rs"]
 mod machine_transfer;
 #[path = "sqlite_local_origin.rs"]
@@ -1061,6 +1063,8 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
 
             // Run schema
+            conn.execute_batch(cloud::SCHEMA)
+                .map_err(|e| e.to_string())?;
             conn.execute_batch(machine_transfer::SCHEMA)
                 .map_err(|e| e.to_string())?;
             conn.execute_batch(SCHEMA)
@@ -3446,6 +3450,18 @@ impl MissionStore for SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
 
                 m.history = history;
+                if m.backend.starts_with("cloud_") {
+                    let data: Option<String> = conn.query_row("SELECT data FROM cloud_executions WHERE mission_id=?1", [&id_str], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+                    if let Some(data) = data {
+                        let execution: crate::api::cloud_agents::Execution = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+                        m.history.clear();
+                        for turn in execution.turns.iter().rev().take(100).collect::<Vec<_>>().into_iter().rev() {
+                            m.history.push(MissionHistoryEntry {role:"user".into(),content:turn.prompt.clone()});
+                            if let Some(result) = &turn.result { m.history.push(MissionHistoryEntry{role:"assistant".into(),content:result.clone()}); }
+                        }
+                    }
+                }
+
                 // Guard evidence lives in its own side table (see
                 // run_migrations); the single-mission read is the one path
                 // that carries it — list projections stay lean.
@@ -3463,6 +3479,30 @@ impl MissionStore for SqliteMissionStore {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    async fn append_cloud_event(
+        &self,
+        id: Uuid,
+        event: crate::api::cloud_agents::Event,
+    ) -> Result<(), String> {
+        cloud::event(self, id, event).await
+    }
+    async fn cloud_events(&self, id: Uuid) -> Result<Vec<crate::api::cloud_agents::Event>, String> {
+        cloud::events(self, id).await
+    }
+    async fn cloud_executions(&self) -> Result<Vec<crate::api::cloud_agents::Execution>, String> {
+        cloud::list(self).await
+    }
+    async fn save_cloud_execution(
+        &self,
+        execution: crate::api::cloud_agents::Execution,
+        expected: Option<u64>,
+        title: Option<String>,
+        project: Option<String>,
+        tags: Vec<String>,
+    ) -> Result<crate::api::cloud_agents::Execution, String> {
+        cloud::save(self, execution, expected, title, project, tags).await
     }
 
     async fn machine_transfers(&self, id: Uuid) -> Result<Vec<super::transfer::Transfer>, String> {
@@ -4927,6 +4967,39 @@ impl MissionStore for SqliteMissionStore {
                     params![session_id, now, id.to_string()],
                 ).map_err(|e| e.to_string())?;
             }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn clear_unsubmitted_session_id(
+        &self,
+        id: Uuid,
+        session_id: &str,
+        backend: &str,
+        run: &super::SessionUpdateRun,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        let session_id = session_id.to_string();
+        let backend = backend.to_string();
+        let run = (run.run_id.to_string(), run.generation);
+        tokio::task::spawn_blocking(move || {
+            let mut c = conn.blocking_lock();
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let latest: Option<(String,u64)> = tx.query_row(
+                "SELECT run_id,generation FROM mission_runs WHERE mission_id=?1 ORDER BY generation DESC LIMIT 1",
+                [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional().map_err(|e| e.to_string())?;
+            if latest != Some(run) { return Ok(false); }
+            let removed = tx.execute("DELETE FROM mission_harness_sessions WHERE mission_id=?1 AND backend=?2 AND session_id=?3", params![id.to_string(),backend,session_id]).map_err(|e| e.to_string())?;
+            if removed == 0 {
+                // Without a recorded native session, only the mission's own
+                // never-submitted placeholder identity may be cleared.
+                let recorded: i64 = tx.query_row("SELECT COUNT(*) FROM mission_harness_sessions WHERE mission_id=?1 AND backend=?2", params![id.to_string(),backend], |row| row.get(0)).map_err(|e| e.to_string())?;
+                if recorded > 0 { return Ok(false); }
+            }
+            let cleared = tx.execute("UPDATE missions SET session_id=NULL,updated_at=?4 WHERE id=?1 AND backend=?2 AND session_id=?3",params![id.to_string(),backend,session_id,now_string()]).map_err(|e| e.to_string())?;
+            if removed == 0 && cleared == 0 { return Ok(false); }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(true)
         }).await.map_err(|e| e.to_string())?

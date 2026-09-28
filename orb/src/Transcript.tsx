@@ -1,9 +1,10 @@
 import {PromptEditor} from "./PromptEditor";
 import {VirtualTurns} from "./VirtualTurns";
+import type { JSX } from "solid-js";
 import {anchoredDisclosure} from "./anchoredDisclosure";
 import { messageImages } from "./messageImages";
 import { imagePrompt, type DraftImage } from "./imageAttachments";
-import { Dialog } from "./Dialog";
+import { Lightbox } from "./Lightbox";
 import { FileReferenceContext } from "./fileReferenceContext";
 import { copyText } from "./clipboard";
 import { remoteLog } from "./remoteLog";
@@ -91,10 +92,9 @@ function resultText(result: unknown): string {
  * text and no extra height, replacing the banner that used to sit above the
  * transcript announcing what the footer already says.
  */
-function MessageImage(p: {path:string; index:number}) {
+function MessageImage(p: {path:string; index:number; onUrl:(url:string|null)=>void; onOpen:()=>void}) {
   const resolver=useContext(FileReferenceContext);
   const [url,setUrl]=createSignal<string | null>(null);
-  const [expanded,setExpanded]=createSignal(false);
   const [attempt,setAttempt]=createSignal(0);
   const [loading,setLoading]=createSignal(false);
   createEffect(() => {
@@ -110,12 +110,12 @@ function MessageImage(p: {path:string; index:number}) {
     }).catch(() => {}).finally(() => {if(!cancelled)setLoading(false);});
     onCleanup(() => {cancelled=true;if(loaded?.startsWith("blob:"))URL.revokeObjectURL(loaded);});
   });
+  createEffect(() => p.onUrl(url()));
   return <>
-    <button class="message-image" aria-label={`Image #${p.index}`} title={url()?`Open image #${p.index}`:loading()?"Loading image…":"Preview unavailable — click to retry"} disabled={loading()} onDblClick={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();if(url())setExpanded(true);else setAttempt(n=>n+1);}}>
+    <button class="message-image" aria-label={`Image #${p.index}`} title={url()?`Open image #${p.index}`:loading()?"Loading image…":"Preview unavailable — click to retry"} disabled={loading()} onDblClick={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();if(url())p.onOpen();else setAttempt(n=>n+1);}}>
       <Show when={url()} fallback={<Ic.FileIcon size={22}/>}>{src=><img src={src()} alt={`Image #${p.index}`} onError={()=>setUrl(null)}/>}</Show>
       <span>{loading()?"Loading…":url()?`#${p.index}`:"Retry"}</span>
     </button>
-    <Show when={expanded() && url()}><Dialog title={`Image #${p.index}`} size="wide" onClose={()=>setExpanded(false)}><img class="message-image-preview" src={url()!} alt={`Image #${p.index}`}/></Dialog></Show>
   </>;
 }
 
@@ -130,6 +130,8 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
     : (p.images ?? []).map((image,index)=>({path:image.dataUrl,reference:image.reference ?? index+1})));
   const goal = createMemo(() => goalDraft(images().text));
   const plan = createMemo(() => planObjective(images().text));
+  const [imageUrls, setImageUrls] = createSignal<Record<string, string | null>>({});
+  const [viewing, setViewing] = createSignal<number | null>(null);
   let bubble!: HTMLDivElement;
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
@@ -138,18 +140,19 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
   const [sendError, setSendError] = createSignal("");
   const submit = async () => {
     if (sending() || !draft().trim() || !p.onSend) return;
-    setSending(true); setSendError("");
+    setSending(true); setSendError(""); setEditing(false);
     try {
       const accepted = await p.onSend(imagePrompt(draft(), images().paths, images().references.map(reference=>({reference}))));
       if (accepted) setEditing(false);
-      else setSendError("The message was not sent. Your draft is kept; try again.");
-    } catch (e) { setSendError(e instanceof Error ? e.message : String(e)); }
+      else { setEditing(true); setSendError("The message was not sent. Your draft is kept; try again."); }
+    } catch (e) { setEditing(true); setSendError(e instanceof Error ? e.message : String(e)); }
     finally { setSending(false); }
   };
-  const edit = () => { if (fork()) return; bubble.style.setProperty("--editing-width", `${bubble.getBoundingClientRect().width}px`); setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true); };
+  const edit = () => { if (fork() || sending()) return; bubble.style.setProperty("--editing-width", `${bubble.getBoundingClientRect().width}px`); setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true); };
   return (
     <div ref={bubble} onDblClick={() => { if (!editing()) edit(); }} class={`user ${editing() ? "editing" : ""} ${goal().kind === "goal" ? "goal" : ""} ${plan() !== null ? "plan" : ""} ${p.pending ? "pending" : ""}`}>
-      <Show when={thumbnails().length}><div class="message-images"><For each={thumbnails()}>{image=><MessageImage path={image.path} index={image.reference}/>}</For></div></Show>
+      <Show when={thumbnails().length}><div class="message-images"><For each={thumbnails()}>{(image,i)=><MessageImage path={image.path} index={image.reference} onUrl={url=>setImageUrls(prev=>({...prev,[image.path]:url}))} onOpen={()=>setViewing(i())}/>}</For></div></Show>
+      <Show when={viewing()!==null}><Lightbox items={thumbnails().map(image=>({src:imageUrls()[image.path]??null,label:`Image #${image.reference}`}))} index={viewing()!} onClose={()=>setViewing(null)}/></Show>
       <Show when={editing()} fallback={<>
       <Show when={p.source && AUTOMATIC_SOURCES.has(p.source)}><small class="user-origin" title="This message was generated by the agent coordinator">↻ Automatic follow-up</small></Show>
       <Show when={plan() !== null}><small class="user-plan"><Ic.PlanIcon size={12}/>Plan</small></Show>
@@ -167,7 +170,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
           <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={16} /></button>
           <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={15} /></button>
           <span role="status">{copyState()}</span>
-          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send follow-up"} title="Send as follow-up (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={16} /></button></Show>
+          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}>Send again</button></Show>
         </div>
         <Show when={sendError()}><ErrorNotice error={sendError()} /></Show>
       </Show>
@@ -258,7 +261,7 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
 }
 
 function WorkFold(p: { items: WorkItem[] }) {
-  const running = () => p.items.some((t) => (t.kind === "tool" ? !t.done : !t.done));
+  const running = createMemo(() => p.items.some((t) => (t.kind === "tool" ? !t.done : !t.done)));
   const [open, setOpen] = disclosure(`work:${p.items[0]?.key}`,false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
@@ -268,7 +271,7 @@ function WorkFold(p: { items: WorkItem[] }) {
     if (cur.kind === "think") return "Thinking";
     return `${cur.name} ${toolTarget(cur.name, cur.args) ?? ""}`.trim();
   };
-  const summary = () => workSummary(p.items);
+  const summary = createMemo(() => workSummary(p.items));
   return (
     <div class={`st-work ${open() ? "open" : ""}`}>
       <Show when={open()}>
@@ -291,7 +294,7 @@ function WorkFold(p: { items: WorkItem[] }) {
   );
 }
 
-export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
+export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -336,7 +339,7 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
             case "text":
               return (
                 <div class={`st-text ${item.live ? "live" : ""}`}>
-                  <AssistantText text={item.text} live={item.live} />
+                  {p.renderText ? p.renderText(item, <AssistantText text={item.text} live={item.live} />) : <AssistantText text={item.text} live={item.live} />}
                 </div>
               );
             case "tool":
