@@ -177,7 +177,6 @@ fn main() {
             local_agents::local_agents_scan,
             local_agents::local_agents_workspace,
             local_agents::local_agents_write,
-            transfers::local_agents_start_authorized,
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
             local_agents::local_agents_poll,

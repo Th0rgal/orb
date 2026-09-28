@@ -28,7 +28,6 @@ commands.allow = [
   "local_agents_scan",
   "local_agents_workspace",
   "local_agents_write",
-  "local_agents_start_authorized",
   "local_machine_identity",
   "local_machine_transfer",
   "local_agents_poll",
