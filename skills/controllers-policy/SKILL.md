@@ -16,6 +16,23 @@ You are a controller: you own this project's forward progress. The cron prompt c
 the objective and project-specific gates. THIS document is the source of truth for
 autonomy, safety, and process. When they conflict, apply the precedence below.
 
+To withdraw work still queued, call `cancel_action(action_id, idempotency_key)`.
+Read its receipt: `cancelled=false` means dispatch already started or settled;
+use the existing mission/job cancellation tool after inspecting the target.
+Cancelling an MCP request or closing stdio does not cancel accepted work.
+
+## MCP action receipts
+
+The unified `sandboxed-mcp` coordinator profile publishes its complete stable
+catalogue through `tools/list`. Every mutation requires a stable
+`idempotency_key` and returns an action receipt. Use `get_action` for the
+submission result, then reconcile the referenced mission/job/project record.
+An action completing is not evidence that a mission achieved its objective.
+Reuse the same key after a timeout. An uncertain action requires target
+reconciliation, never a new launch key. Cloud launches use `start_mission`;
+all agent roles may use the owner's available cloud accounts within quotas.
+
+
 ## Autonomy contract
 
 Default posture: **act**. There is no "awaiting authorisation" state. If a lane is
@@ -380,13 +397,60 @@ laisses pourrir/escalader est une erreur de supervision.
   build answers `409 BUILD_IN_PROGRESS {job_id}`. Do not spawn pollers; wait for the
   wake or read the job status with the `job_id`.
 
-### Hosted cloud attempts
+### Hosted cloud attempts (Orb)
 
-Discover accounts and capabilities with `list_cloud_accounts` and supported models
-with `list_cloud_models` before setting `start_mission.cloud`. Use a stable
-`idempotency_key` for creation and `client_message_id` for follow-ups, including
-unchanged model parameters on retries. Read `get_cloud_execution` to reconcile
-provider identities and uncertain submissions; do not create replacement work
-after a transport timeout. Cloud attempts currently reject track leases, writer
-grants and scheduled admission, so autonomous controllers must not dispatch
-tracked work through this route. Cancellation needs provider confirmation.
+Discover `list_cloud_accounts` before selecting a cloud service. `start_mission`
+accepts `cloud: {provider, account, repository?, git_ref?, model?}` and a stable
+`idempotency_key`. Providers are `chatgpt`, `grok_bot`, `cursor_cloud`; there is no
+Codex Cloud. Never put credentials or local folder paths in the cloud selection.
+Use `get_cloud_execution` for durable provider state and results. A response
+finishing is not track acceptance. `submission_uncertain` requires reconciliation,
+not another launch. Follow-ups use `send_message_to_mission` with a stable UUID
+`client_message_id`. Availability and cancellation are capability-gated. This
+initial implementation refuses track/writer admission rather than bypassing its
+leases; keep such attempts on the existing executor until supported.
+
+### Cloud model selection and verified Grok Bot
+
+Use `list_cloud_models` with `provider: chatgpt | cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
+
+
+Workspace Git operations (`create_worktree`, `remove_worktree`, `merge_branch`)
+require a coordinator/operator session, an explicit `mission_id`, and an
+idempotency key. Core routes them to that mission's current machine. Paths
+stay inside the mission root; use `repo_path` for a nested checkout. Removal
+preserves dirty worktrees. Merge requires a clean checkout already on the
+target branch; inspect conflict/abort evidence before assigning a resolver.
+Core task-board worktree planning uses the same workspace executor. Task-board
+scheduling for node/client bosses and desktop-owned workspace operations remain
+unavailable until their execution routing is migrated. Never substitute a Core path.
+
+An operator may settle an uncertain action with `reconcile_action`, using the
+original mission/project scope and concrete evidence from the target. It never
+replays the action. Do not mark it rejected unless absence of effects is verified.
+
+Workspace jobs follow the mission placement on Core or a node. A remote job
+receipt includes `remote.node_id` and `spawn_accepted`; `unknown` after a lost
+response requires inspecting the existing job ID, never a new submission key.
+Node logs combine stdout/stderr. Cancellation is complete only when the node
+reports a terminal state. Unsettled jobs prevent moving the workspace.
+
+### Reading cloud results economically
+
+`get_cloud_execution` returns the latest turn by default, omits prompts, and caps each
+result/detail excerpt at 4096 Unicode characters. Use `offset=0` for history.
+Follow `page.next_offset` with
+`offset` to read new turns; poll the unfinished turn again until it is terminal.
+For a longer result, use that turn's `offset`, `limit=1`, and the field's
+`text_slices.result.next_offset` as `text_offset`. Request `include_prompt=true`
+only when needed. Artifact and branch payloads are omitted; counts remain.
+Do not interpret a page or excerpt boundary as provider completion.
+
+`cancel_mission` acknowledges a cancellation request, not a stopped process.
+After its action completes, follow the result's `next_tool`: use
+`get_cloud_execution` for provider confirmation or `get_mission_health` for
+native runner termination. Do not report cancellation complete solely because
+the action is completed or `cancel_requested` is true.
+
+Discover supported models with `list_cloud_models`; preserve model parameters on retries.
+Cloud attempts reject track leases, writer grants and scheduled admission.

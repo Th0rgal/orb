@@ -1,80 +1,15 @@
-//! MCP server for a standalone Hermes assistant.
-//!
-//! This is intentionally narrower than `orchestrator-mcp`: it exposes the
-//! control-plane tools a personal assistant needs without deployment access.
-//! Long workspace commands are exposed as durable jobs so the gateway never
-//! has to hold a synchronous MCP request open for a build.
+//! Core-side mission, cloud, project and workspace tool handlers.
+//! Authentication and authorization are supplied by the unified gateway.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-use jsonwebtoken::{EncodingKey, Header};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-const SERVER_VERSION: &str = "0.1.0";
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[serde(rename = "jsonrpc")]
-    _jsonrpc: String,
-    #[serde(default)]
-    id: Value,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-impl JsonRpcResponse {
-    fn success(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn error(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ToolDefinition {
-    name: String,
-    description: String,
-    #[serde(rename = "inputSchema")]
-    input_schema: Value,
-}
+use super::ToolDefinition;
 
 #[derive(Debug, Deserialize)]
 struct MissionIdParams {
@@ -264,6 +199,8 @@ struct AdoptMissionParams {
 #[derive(Debug, Deserialize)]
 struct ListMissionsParams {
     #[serde(default)]
+    offset: usize,
+    #[serde(default)]
     status: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
@@ -317,11 +254,15 @@ struct DownloadSharedFileParams {
 #[derive(Debug, Deserialize)]
 struct StartMissionParams {
     #[serde(default)]
+    parent_mission_id: Option<Uuid>,
+    #[serde(default)]
     cloud: Option<serde_json::Value>,
     title: String,
     prompt: String,
     #[serde(default)]
     workspace_id: Option<String>,
+    #[serde(default)]
+    remote_node_id: Option<String>,
     #[serde(default)]
     backend: Option<String>,
     #[serde(default)]
@@ -566,7 +507,7 @@ fn canonical_github_pr_ref(value: &str) -> bool {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct DispatchIdentityParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    continue_identity: Option<sandboxed_sh::api::writer_recycle::WriterContinuation>,
+    continue_identity: Option<crate::api::writer_recycle::WriterContinuation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     github_pr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -606,7 +547,7 @@ struct SendMessageParams {
     #[serde(default)]
     cloud_model: Option<String>,
     #[serde(default)]
-    cloud_model_params: Option<Vec<sandboxed_sh::api::cloud_agents::ModelParam>>,
+    cloud_model_params: Option<Vec<crate::api::cloud_agents::ModelParam>>,
     #[serde(default)]
     client_message_id: Option<String>,
     #[serde(flatten)]
@@ -712,6 +653,8 @@ fn compact_workspace_job(job: Value) -> Value {
     json!({
         "id": job.get("id").cloned().unwrap_or(Value::Null),
         "status": job.get("status").cloned().unwrap_or(Value::Null),
+        "remote": job.get("remote").cloned().unwrap_or(Value::Null),
+        "spawn_accepted": job.get("spawn_accepted").cloned().unwrap_or(Value::Null),
         "heartbeat_at": job.get("heartbeat_at").cloned().unwrap_or(Value::Null),
         "deadline_at": job.get("deadline_at").cloned().unwrap_or(Value::Null),
         "scope_unit": job.get("scope_unit").cloned().unwrap_or(Value::Null),
@@ -956,14 +899,6 @@ fn diagnostic_result_snippet(content: &str) -> String {
 
 fn default_diagnostics_limit() -> usize {
     80
-}
-
-#[derive(Debug, Serialize)]
-struct JwtClaims {
-    sub: String,
-    usr: String,
-    iat: i64,
-    exp: i64,
 }
 
 fn default_limit() -> usize {
@@ -1248,39 +1183,9 @@ fn shared_file_download_path(url: &str) -> Result<String, String> {
     Ok(format!("{}{}", parsed.path(), query))
 }
 
-fn mint_service_jwt(secret: &str) -> Option<String> {
-    let now = Utc::now();
-    let exp = now + chrono::Duration::hours(24);
-    let user_id = std::env::var("HERMES_ASSISTANT_USER_ID")
-        .or_else(|_| std::env::var("SANDBOXED_ASSISTANT_USER_ID"))
-        .or_else(|_| std::env::var("SANDBOXED_SINGLE_TENANT_USER_ID"))
-        .or_else(|_| std::env::var("SINGLE_TENANT_USER_ID"))
-        .unwrap_or_else(|_| "default".to_string());
-    let user_id = user_id.trim();
-    let user_id = if user_id.is_empty() {
-        "default"
-    } else {
-        user_id
-    };
-
-    let claims = JwtClaims {
-        sub: user_id.to_string(),
-        usr: user_id.to_string(),
-        iat: now.timestamp(),
-        exp: exp.timestamp(),
-    };
-    jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .ok()
-}
-
-struct AssistantMcp {
+pub(super) struct AssistantMcp {
     api_url: String,
     api_token: Option<String>,
-    jwt_secret: Option<String>,
     /// Slugs this instance may MUTATE (`SANDBOXED_PROJECT_SCOPE`, comma-list).
     /// None = unrestricted (the owner's interactive Hermes). Reads are never
     /// scoped — cross-project awareness is a feature, not a leak.
@@ -1289,39 +1194,15 @@ struct AssistantMcp {
 }
 
 impl AssistantMcp {
-    fn new() -> Self {
-        let api_url = std::env::var("HERMES_SANDBOXED_API_URL")
-            .or_else(|_| std::env::var("SANDBOXED_API_URL"))
-            .or_else(|_| std::env::var("OPEN_AGENT_API_URL"))
-            .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string())
-            .trim_end_matches('/')
-            .to_string();
-        let api_token = std::env::var("HERMES_SANDBOXED_API_TOKEN")
-            .or_else(|_| std::env::var("SANDBOXED_API_TOKEN"))
-            .or_else(|_| std::env::var("OPEN_AGENT_API_TOKEN"))
-            .ok()
-            .filter(|token| !token.trim().is_empty());
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .ok()
-            .filter(|secret| !secret.trim().is_empty());
-        let project_scope = std::env::var("SANDBOXED_PROJECT_SCOPE")
-            .ok()
-            .map(|raw| {
-                raw.split(',')
-                    .map(|slug| slug.trim().to_string())
-                    .filter(|slug| !slug.is_empty())
-                    .collect::<std::collections::HashSet<_>>()
-            })
-            .filter(|scope| !scope.is_empty());
+    pub(super) fn connected(api_url: String, api_token: String) -> Self {
         Self {
             api_url,
-            api_token,
-            jwt_secret,
-            project_scope,
+            api_token: Some(api_token),
+            project_scope: None,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .expect("HTTP client"),
         }
     }
 
@@ -1370,11 +1251,9 @@ impl AssistantMcp {
     }
 
     fn auth_header(&self) -> Option<(String, String)> {
-        // Prefer an explicit static token; otherwise mint a fresh service JWT
-        // per request so long-running processes never send an expired token.
+        // Core supplies this short-lived internal credential after scope checks.
         self.api_token
             .clone()
-            .or_else(|| self.jwt_secret.as_deref().and_then(mint_service_jwt))
             .map(|token| ("Authorization".to_string(), format!("Bearer {token}")))
     }
 
@@ -1549,7 +1428,7 @@ impl AssistantMcp {
         }
     }
 
-    fn tools() -> Vec<ToolDefinition> {
+    pub(super) fn tools() -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
                 name: "list_active_missions".to_string(),
@@ -1648,7 +1527,7 @@ impl AssistantMcp {
             },
             ToolDefinition {name:"list_cloud_models".into(),description:"Discover actual hosted model IDs, labels and supported parameter combinations before creating or following up a cloud mission. Grok Bot has no model selector.".into(),input_schema:json!({"type":"object","required":["provider"],"properties":{"provider":{"type":"string","enum":["chatgpt","cursor_cloud"]}}})},
             ToolDefinition { name: "list_cloud_accounts".into(), description: "Discover hosted agent accounts and effective capabilities. Unavailable connectors cannot launch; connecting never starts work.".into(), input_schema: json!({"type":"object","properties":{}}) },
-            ToolDefinition { name: "get_cloud_execution".into(), description: "Read durable hosted execution, external identities, response state and results. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"}}}) },
+            ToolDefinition { name: "get_cloud_execution".into(), description: "Read a bounded page of durable hosted turns, external identities and results. Defaults to the latest turn and 4096 characters per result/detail; prompts are omitted. Pass offset=0 to read from the beginning. Follow page.next_offset for subsequent turns. To continue text, select that turn with offset and limit=1, then pass its text_slices field's next_offset as text_offset. Character offsets are Unicode scalar values. Poll the last unfinished turn again until terminal; revision changes as execution advances. Artifact/branch payloads are omitted; counts are included. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":5},"text_offset":{"type":"integer","minimum":0},"text_limit":{"type":"integer","minimum":1,"maximum":8192},"include_prompt":{"type":"boolean"}}}) },
             ToolDefinition {
                 name: "start_mission".to_string(),
                 description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. Use backend=chatgpt_ui with model_override=gpt-5.6-pro only for exceptionally difficult read-only synthesis, research, or design-conflict questions; keep writer=false, then retrieve any generated files with list_mission_shared_files and download_shared_file. For compatibility, a native agent name (codex/claudecode/gemini/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
@@ -1743,7 +1622,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "cancel_mission".to_string(),
-                description: "Cancel a running or pending mission.".to_string(),
+                description: "Request cancellation of a running or pending mission. Acceptance is not proof of termination. Follow the receipt's next_tool: get_cloud_execution for provider confirmation, or get_mission_health for native runner termination.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
@@ -2299,7 +2178,10 @@ impl AssistantMcp {
         // Forward filters to the API so it does the (paginated, scan-bounded)
         // matching server-side — filtering only the fetched page here would miss
         // matches outside the window on a larger fleet.
-        let mut path = format!("/api/control/missions?limit={limit}&offset=0");
+        let mut path = format!(
+            "/api/control/missions?limit={limit}&offset={}",
+            params.offset
+        );
         if let Some(status) = params.status.as_deref() {
             path.push_str(&format!("&status={}", urlencoding::encode(status)));
         }
@@ -2333,47 +2215,44 @@ impl AssistantMcp {
             .into_iter()
             .map(compact_mission_summary)
             .collect::<Vec<_>>();
-        Ok(json!({ "missions": missions }))
+        let next_offset =
+            (missions.len() == limit).then_some(params.offset.saturating_add(missions.len()));
+        Ok(json!({ "missions": missions, "next_offset": next_offset }))
     }
 
     /// Takes the whole filter set so an active-mission query can be narrowed
     /// exactly like a full listing (by conversation, family, track, …).
     async fn list_active_missions(&self, params: ListMissionsParams) -> Result<Value, String> {
-        let ListMissionsParams {
-            limit,
-            project,
-            project_prefix,
-            track,
-            tag,
-            origin_session_id,
-            ..
-        } = params;
-        let requested = limit.clamp(1, 100);
-        // The API returns the most recent missions regardless of status, so a
-        // narrow fetch limit can be fully consumed by recent completed missions
-        // and starve the active filter below. Fetch a wider window than the
-        // caller asked for, then filter and truncate to the requested count.
-        let fetch_limit = requested.saturating_mul(4).clamp(50, 100);
+        let requested = params.limit.clamp(1, 100);
+        let offset = params.offset;
         let mut result = self
             .list_missions(ListMissionsParams {
+                limit: 100,
                 status: None,
-                limit: fetch_limit,
-                project,
-                project_prefix,
-                track,
-                tag,
-                origin_session_id,
+                ..params
             })
             .await?;
-        if let Some(missions) = result["missions"].as_array_mut() {
-            missions.retain(|mission| {
-                matches!(
-                    mission["status"].as_str(),
-                    Some("active" | "pending" | "awaiting_user" | "blocked")
-                )
-            });
-            missions.truncate(requested);
+        let rows = result["missions"].as_array_mut().unwrap();
+        let raw = std::mem::take(rows);
+        let raw_len = raw.len();
+        let mut consumed = 0usize;
+        for mission in raw {
+            consumed += 1;
+            if matches!(
+                mission["status"].as_str(),
+                Some("active" | "pending" | "awaiting_user" | "blocked")
+            ) {
+                rows.push(mission);
+                if rows.len() == requested {
+                    break;
+                }
+            }
         }
+        result["next_offset"] = if consumed < raw_len || raw_len == 100 {
+            json!(offset.saturating_add(consumed))
+        } else {
+            Value::Null
+        };
         Ok(result)
     }
 
@@ -2536,7 +2415,7 @@ impl AssistantMcp {
         let writer = params.writer.unwrap_or(false);
         let prompt = writer_goal_prompt(params.prompt, writer);
         if backend.as_deref() == Some("codex") {
-            sandboxed_sh::backend::codex::validate_goal_message(&prompt)?;
+            crate::backend::codex::validate_goal_message(&prompt)?;
         }
         let tags = mission_start_tags(
             params.tags,
@@ -2561,7 +2440,9 @@ impl AssistantMcp {
         };
         let mut body = json!({
             "title": params.title,
+            "parent_mission_id": params.parent_mission_id,
             "workspace_id": workspace_id,
+            "remote_node_id": params.remote_node_id,
             "backend": backend,
             "model_override": params.model_override,
             "model_effort": params.model_effort,
@@ -2900,7 +2781,11 @@ impl AssistantMcp {
             let text = response.text().await.unwrap_or_default();
             return Err(format!("Failed to cancel mission: {text}"));
         }
-        Ok(json!({ "success": true, "cancelled": id.to_string() }))
+        let receipt: Value = response
+            .json()
+            .await
+            .map_err(|_| "Invalid cancellation receipt")?;
+        cancellation_receipt(id, receipt)
     }
 
     async fn adopt_mission(&self, params: AdoptMissionParams) -> Result<Value, String> {
@@ -3841,7 +3726,7 @@ impl AssistantMcp {
         }))
     }
 
-    async fn handle_call(&self, name: &str, arguments: Value) -> Result<Value, String> {
+    pub(super) async fn handle_call(&self, name: &str, arguments: Value) -> Result<Value, String> {
         match name {
             "list_cloud_accounts" => {
                 let response = self.api_get("/api/cloud/accounts").await?;
@@ -3866,7 +3751,7 @@ impl AssistantMcp {
                 response.json().await.map_err(|e| e.to_string())
             }
             "get_cloud_execution" => {
-                let params: MissionIdParams = parse_params(arguments)?;
+                let params: MissionIdParams = parse_params(arguments.clone())?;
                 let id = self.resolve_mission_id(&params.mission_id).await?;
                 self.assert_mission_scope(id).await?;
                 let response = self
@@ -3875,7 +3760,11 @@ impl AssistantMcp {
                 if !response.status().is_success() {
                     return Err(format!("Cloud receipt unavailable: {}", response.status()));
                 }
-                response.json().await.map_err(|e| e.to_string())
+                let mut execution: Value = response.json().await.map_err(|e| e.to_string())?;
+                // Redact complete values before slicing: a fragment of a token
+                // may no longer match the credential detector.
+                scrub_sensitive_json(&mut execution);
+                Ok(super::cloud_read::page(execution, &arguments))
             }
             "list_active_missions" => {
                 let params: ListMissionsParams = parse_params(arguments)?;
@@ -4075,48 +3964,6 @@ impl AssistantMcp {
                 self.resume_mission(params).await
             }
             other => Err(format!("Unknown tool: {other}")),
-        }
-    }
-
-    async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
-        match req.method.as_str() {
-            "initialize" => JsonRpcResponse::success(
-                req.id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "sandboxed-hermes-assistant", "version": SERVER_VERSION},
-                    "capabilities": {"tools": {}}
-                }),
-            ),
-            "tools/list" => JsonRpcResponse::success(req.id, json!({ "tools": Self::tools() })),
-            "tools/call" => {
-                let Some(params) = req.params.as_object() else {
-                    return JsonRpcResponse::error(req.id, -32602, "Invalid params");
-                };
-                let Some(name) = params.get("name").and_then(Value::as_str) else {
-                    return JsonRpcResponse::error(req.id, -32602, "Missing tool name");
-                };
-                let arguments = params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                match self.handle_call(name, arguments).await {
-                    Ok(mut value) => {
-                        scrub_sensitive_json(&mut value);
-                        JsonRpcResponse::success(
-                            req.id,
-                            json!({
-                                "content": [{
-                                    "type": "text",
-                                    "text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
-                                }]
-                            }),
-                        )
-                    }
-                    Err(error) => JsonRpcResponse::error(req.id, -32000, error),
-                }
-            }
-            _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
         }
     }
 }
@@ -4887,6 +4734,16 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 fn is_sensitive_value(value: &str) -> bool {
+    static CREDENTIAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)(?:gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,}|\bsk-[a-z0-9_-]{16,}|\btskey-[a-z0-9_-]+|mcp1\.[a-z0-9_.-]+|\bBearer\s+[^\s"']{8,}|eyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)"#).unwrap()
+    });
+    if CREDENTIAL.is_match(value)
+        || std::env::vars().any(|(key, secret)| {
+            is_sensitive_key(&key) && secret.len() >= 8 && value.contains(&secret)
+        })
+    {
+        return true;
+    }
     let trimmed = value.trim();
     trimmed.starts_with("ghp_")
         || trimmed.starts_with("github_pat_")
@@ -4897,7 +4754,30 @@ fn is_sensitive_value(value: &str) -> bool {
         || trimmed.contains("<encrypted")
 }
 
-fn scrub_sensitive_json(value: &mut Value) {
+fn cancellation_receipt(id: Uuid, receipt: Value) -> Result<Value, String> {
+    if receipt["cancel_requested"] == true {
+        return Ok(
+            json!({"mission_id":id,"cancel_requested":true,"termination_confirmed":false,"next_tool":"get_cloud_execution"}),
+        );
+    }
+    if receipt["ok"] == true && receipt["cancelled"] == id.to_string() {
+        // The native actor acknowledges its cancellation token before the
+        // runner exits; its historical `cancelled` key is not terminal proof.
+        return Ok(
+            json!({"mission_id":id,"cancel_requested":true,"termination_confirmed":false,"next_tool":"get_mission_health"}),
+        );
+    }
+    Err("Cancellation outcome is unknown: missing backend confirmation".into())
+}
+
+pub(super) fn safe_diagnostic(message: &str) -> String {
+    if is_sensitive_value(message) {
+        return "Backend diagnostic contained credentials and was withheld".into();
+    }
+    message.chars().take(2000).collect()
+}
+
+pub(super) fn scrub_sensitive_json(value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
@@ -4909,6 +4789,28 @@ fn scrub_sensitive_json(value: &mut Value) {
                     } else {
                         *child = Value::String("[redacted]".to_string());
                     }
+                } else if child.as_u64().is_some()
+                    && matches!(
+                        key.as_str(),
+                        "input_tokens"
+                            | "output_tokens"
+                            | "prompt_tokens"
+                            | "completion_tokens"
+                            | "total_tokens"
+                            | "cached_tokens"
+                            | "cache_read_input_tokens"
+                            | "cache_creation_input_tokens"
+                            | "reasoning_tokens"
+                            | "inputTokens"
+                            | "outputTokens"
+                            | "totalTokens"
+                            | "cacheReadTokens"
+                            | "cacheWriteTokens"
+                    )
+                {
+                    // Numeric usage counters are observability, not credentials.
+                    // Keep the exception narrow: strings and arbitrary token keys
+                    // must still be redacted, including numeric-looking secrets.
                 } else if is_sensitive_key(key) {
                     *child = Value::String("[redacted]".to_string());
                 } else {
@@ -4925,54 +4827,6 @@ fn scrub_sensitive_json(value: &mut Value) {
             *value = Value::String("[redacted]".to_string());
         }
         _ => {}
-    }
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
-        println!("assistant-mcp {SERVER_VERSION}");
-        return;
-    }
-
-    let server = AssistantMcp::new();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-
-    for line in BufReader::new(stdin.lock()).lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                let response =
-                    JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {error}"));
-                if let Ok(serialized) = serde_json::to_string(&response) {
-                    let _ = writeln!(stdout, "{serialized}");
-                    let _ = stdout.flush();
-                }
-                continue;
-            }
-        };
-
-        // Notifications (no id), e.g. the `notifications/initialized` the MCP
-        // client sends after `initialize`, expect no reply per JSON-RPC.
-        // Returning a "-32601 Method not found" error here breaks the handshake
-        // with stricter clients.
-        if request.id.is_null() && request.method.starts_with("notifications/") {
-            continue;
-        }
-
-        let response = server.handle_request(request).await;
-        if let Ok(serialized) = serde_json::to_string(&response) {
-            let _ = writeln!(stdout, "{serialized}");
-            let _ = stdout.flush();
-        }
     }
 }
 
@@ -5011,6 +4865,21 @@ fn mission_requires_acknowledgement(digest: &Value) -> Result<bool, String> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn cancellation_request_does_not_claim_provider_termination() {
+        let id = Uuid::new_v4();
+        let requested = cancellation_receipt(id, json!({"cancel_requested":true})).unwrap();
+        assert_eq!(requested["termination_confirmed"], false);
+        assert_eq!(requested["next_tool"], "get_cloud_execution");
+        assert!(requested.get("cancelled").is_none());
+        let native = cancellation_receipt(id, json!({"ok":true,"cancelled":id})).unwrap();
+        assert_eq!(native["termination_confirmed"], false);
+        assert_eq!(native["next_tool"], "get_mission_health");
+        assert!(native.get("cancelled").is_none());
+        assert!(cancellation_receipt(id, json!({})).is_err());
+        assert!(cancellation_receipt(id, json!({"ok":true,"cancelled":Uuid::new_v4()})).is_err());
+    }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -5072,7 +4941,6 @@ mod tests {
             AssistantMcp {
                 api_url: format!("http://{addr}"),
                 api_token: None,
-                jwt_secret: None,
                 project_scope: None,
                 client: reqwest::Client::new(),
             },
@@ -5189,6 +5057,52 @@ mod tests {
         assert_eq!(requests[0].1["content"], "Switch this writer to PR #90");
         assert!(requests[0].1.get("continue_identity").is_none());
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn active_pagination_advances_past_empty_pages_without_skipping_matches() {
+        async fn page(
+            axum::extract::Query(query): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >,
+        ) -> axum::Json<Value> {
+            let offset: usize = query["offset"].parse().unwrap();
+            let limit: usize = query["limit"].parse().unwrap();
+            axum::Json(json!((offset..103)
+                .take(limit)
+                .map(|i| json!({
+                    "id":format!("mission-{i}"), "status":if i < 100 {"completed"} else {"active"}
+                }))
+                .collect::<Vec<_>>()))
+        }
+        let app = axum::Router::new().route("/api/control/missions", axum::routing::get(page));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mcp = AssistantMcp::connected(url, "fixture".into());
+        let first = mcp
+            .list_active_missions(parse_params(json!({"limit":2})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first["missions"], json!([]));
+        assert_eq!(first["next_offset"], 100);
+        let second = mcp
+            .list_active_missions(
+                parse_params(json!({"limit":2,"offset":first["next_offset"]})).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second["missions"].as_array().unwrap().len(), 2);
+        assert_eq!(second["next_offset"], 102);
+        let third = mcp
+            .list_active_missions(
+                parse_params(json!({"limit":2,"offset":second["next_offset"]})).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third["missions"][0]["id"], "mission-102");
+        assert!(third["next_offset"].is_null());
+        server.abort();
     }
 
     #[tokio::test]
@@ -5456,7 +5370,7 @@ mod tests {
     async fn full_uuid_resolves_without_calling_the_server() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
-        let mcp = AssistantMcp::new();
+        let mcp = AssistantMcp::connected("http://127.0.0.1:1".into(), "fixture".into());
         let id = Uuid::new_v4();
         assert_eq!(
             mcp.resolve_mission_id(&id.to_string())
@@ -5554,7 +5468,6 @@ mod tests {
         let mcp = AssistantMcp {
             api_url,
             api_token: None,
-            jwt_secret: None,
             project_scope: None,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
@@ -5802,21 +5715,6 @@ mod tests {
         assert_eq!(params.tool_call_id.as_deref(), Some("q-1"));
     }
 
-    #[test]
-    fn tool_table_matches_canonical_allowlist() {
-        let names: Vec<String> = AssistantMcp::tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        assert_eq!(
-            names,
-            sandboxed_sh::hermes_tools::HERMES_ASSISTANT_TOOL_ALLOWLIST,
-            "assistant-mcp tool table diverged from \
-             src/hermes_tools.rs::HERMES_ASSISTANT_TOOL_ALLOWLIST — update both together"
-        );
-    }
-
     const ENV_KEYS: &[&str] = &[
         "HERMES_SANDBOXED_API_URL",
         "SANDBOXED_API_URL",
@@ -5905,37 +5803,42 @@ mod tests {
     }
 
     #[test]
-    fn hermes_connection_env_takes_precedence_over_legacy_names() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        std::env::set_var("OPEN_AGENT_API_URL", "https://open-agent.example");
-        std::env::set_var("SANDBOXED_API_URL", "https://sandboxed.example");
-        std::env::set_var("HERMES_SANDBOXED_API_URL", "https://hermes.example/");
-        std::env::set_var("OPEN_AGENT_API_TOKEN", "open-agent-token");
-        std::env::set_var("SANDBOXED_API_TOKEN", "sandboxed-token");
-        std::env::set_var("HERMES_SANDBOXED_API_TOKEN", "hermes-token");
-
-        let server = AssistantMcp::new();
-
-        assert_eq!(server.api_url, "https://hermes.example");
-        assert_eq!(server.api_token.as_deref(), Some("hermes-token"));
-        clear_env();
+    fn scrubbing_preserves_numeric_usage_without_exposing_token_credentials() {
+        let mut value = json!({
+            "usage": {"input_tokens": 100, "output_tokens": 12, "cached_tokens": 80, "cacheReadTokens": 70},
+            "token": 123456,
+            "access_token": 123456,
+            "prompt_tokens": "123456",
+            "env_vars": {"output_tokens": 123456}
+        });
+        scrub_sensitive_json(&mut value);
+        assert_eq!(
+            value["usage"],
+            json!({"input_tokens":100,"output_tokens":12,"cached_tokens":80,"cacheReadTokens":70})
+        );
+        for key in ["token", "access_token", "prompt_tokens"] {
+            assert_eq!(value[key], "[redacted]");
+        }
+        assert_eq!(value["env_vars"]["output_tokens"], "[redacted]");
     }
 
     #[test]
-    fn legacy_connection_envs_remain_supported_for_compatibility() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        std::env::set_var("OPEN_AGENT_API_URL", "https://open-agent.example");
-        std::env::set_var("SANDBOXED_API_URL", "https://sandboxed.example/");
-        std::env::set_var("OPEN_AGENT_API_TOKEN", "open-agent-token");
-        std::env::set_var("SANDBOXED_API_TOKEN", "sandboxed-token");
-
-        let server = AssistantMcp::new();
-
-        assert_eq!(server.api_url, "https://sandboxed.example");
-        assert_eq!(server.api_token.as_deref(), Some("sandboxed-token"));
-        clear_env();
+    fn diagnostics_redact_embedded_credentials_and_bound_error_text() {
+        for value in [
+            "remote rejected https://ghp_012345678901234567890123456789@example.invalid/repo",
+            "request failed: Bearer fixture-private-credential",
+            "failed session mcp1.header.payload.signature",
+        ] {
+            assert_eq!(
+                safe_diagnostic(value),
+                "Backend diagnostic contained credentials and was withheld"
+            );
+            let mut log = json!({"output":value});
+            scrub_sensitive_json(&mut log);
+            assert_eq!(log["output"], "[redacted]");
+        }
+        assert_eq!(safe_diagnostic("backend missing"), "backend missing");
+        assert_eq!(safe_diagnostic(&"é".repeat(3000)).chars().count(), 2000);
     }
 
     #[test]
@@ -6657,7 +6560,6 @@ mod tests {
         let scoped = AssistantMcp {
             api_url: "http://127.0.0.1:3000".to_string(),
             api_token: None,
-            jwt_secret: None,
             project_scope: Some(["verity".to_string()].into_iter().collect()),
             client: reqwest::Client::new(),
         };
@@ -6672,7 +6574,6 @@ mod tests {
         let open = AssistantMcp {
             api_url: "http://127.0.0.1:3000".to_string(),
             api_token: None,
-            jwt_secret: None,
             project_scope: None,
             client: reqwest::Client::new(),
         };

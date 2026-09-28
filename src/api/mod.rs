@@ -17,7 +17,7 @@
 
 pub mod ai_providers;
 pub mod ask;
-mod auth;
+pub(crate) mod auth;
 pub mod automation_variables;
 pub mod backends;
 pub mod capabilities;
@@ -73,7 +73,7 @@ mod proxy_keys;
 pub(crate) mod proxy_liveness;
 pub(crate) mod reconcile;
 pub(crate) mod remote_build;
-mod routes;
+pub(crate) mod routes;
 pub(crate) mod runners;
 pub mod scope_reaper;
 pub mod secrets;

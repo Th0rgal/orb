@@ -613,6 +613,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    crate::control_mcp::gateway::start_worker(state.clone()).map_err(anyhow::Error::msg)?;
+
     // Start background desktop session cleanup task
     {
         let state_clone = Arc::clone(&state);
@@ -829,6 +831,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(super::cloud_agents::http::artifact),
         )
         .route("/api/cloud/usage", get(super::cloud_agents::usage::get))
+        .route(
+            "/api/mcp/session",
+            post(crate::control_mcp::gateway::session),
+        )
+        .route("/api/mcp/renew", post(crate::control_mcp::gateway::renew))
+        .route(
+            "/api/mcp/sessions/:id",
+            axum::routing::delete(crate::control_mcp::gateway::revoke),
+        )
+        .route(
+            "/api/mcp/capabilities",
+            get(crate::control_mcp::gateway::capabilities),
+        )
+        .route("/api/mcp/call", post(crate::control_mcp::gateway::call))
         .route(
             "/api/cloud/accounts",
             get(super::cloud_agents::http::accounts),

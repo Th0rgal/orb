@@ -213,8 +213,13 @@ pub async fn create(
         return Err(bad("Choose an authorized GitHub repository URL"));
     }
     use sha2::{Digest, Sha256};
-    let request_signature = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({"selection": selection, "prompt": prompt, "title": req.title, "project": req.project, "tags": req.tags})).map_err(|e| bad(e.to_string()))?));
+    let request_signature = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({"selection": selection, "prompt": prompt, "title": req.title, "project": req.project, "tags": req.tags, "parent_mission_id": req.parent_mission_id})).map_err(|e| bad(e.to_string()))?));
     let store = state.control.get_or_spawn(&user).await.mission_store;
+    if let Some(parent) = req.parent_mission_id {
+        if store.get_mission(parent).await.map_err(bad)?.is_none() {
+            return Err(bad("Parent mission is not owned by this user"));
+        }
+    }
     // An exact replay is read-only even if the provider is temporarily unavailable.
     if let Some(old) = store
         .cloud_executions()
@@ -253,6 +258,7 @@ pub async fn create(
             .map_err(bad)?;
     }
     let execution = Execution {
+        parent_mission_id: req.parent_mission_id,
         mission_id: Uuid::new_v4(),
         request_key: key.clone(),
         request_signature,

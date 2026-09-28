@@ -95,3 +95,5 @@ pub mod local_origin;
 
 #[path = "../shared/agent_software.rs"]
 pub mod agent_software;
+
+pub mod control_mcp;

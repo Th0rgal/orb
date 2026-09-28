@@ -988,18 +988,20 @@ fn parse_direct_model_entry(model: &str) -> Option<crate::provider_health::Chain
     })
 }
 
-/// Native Claude Code sends bare Anthropic model IDs. Configured chains are
-/// resolved first; this fallback preserves the exact requested model.
+/// Native harnesses send bare model IDs. Configured chains are resolved first;
+/// these protocol-specific fallbacks preserve the exact requested model.
 fn parse_native_model_entry(
     model: &str,
     protocol: NativeProtocol,
 ) -> Option<crate::provider_health::ChainEntry> {
     parse_direct_model_entry(model).or_else(|| {
-        (protocol == NativeProtocol::AnthropicMessages
-            && model.starts_with("claude-")
-            && !model.contains('/'))
-        .then(|| crate::provider_health::ChainEntry {
-            provider_id: "anthropic".into(),
+        let provider = match protocol {
+            NativeProtocol::AnthropicMessages if model.starts_with("claude-") => "anthropic",
+            NativeProtocol::Responses if model.starts_with("gpt-") => "openai",
+            _ => return None,
+        };
+        (!model.contains('/')).then(|| crate::provider_health::ChainEntry {
+            provider_id: provider.into(),
             model_id: model.into(),
         })
     })
@@ -1198,7 +1200,29 @@ async fn native_protocol_proxy(
     let requested_model = req.model;
     let is_stream = req.stream.unwrap_or(false);
     super::ai_providers::reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
-    let standard_accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
+    let mut standard_accounts =
+        super::ai_providers::read_standard_accounts(&state.config.working_dir);
+    let legacy_codex = if matches!(protocol, NativeProtocol::Responses) {
+        super::ai_providers::read_legacy_native_codex_account(&state.config.working_dir)
+    } else {
+        None
+    };
+    if let Some(account) = &legacy_codex {
+        // Do not duplicate an explicitly configured subscription identity.
+        if !super::ai_providers::get_all_openai_oauth_accounts(&state.config.working_dir)
+            .iter()
+            .any(|configured| configured.chatgpt_account_id == account.chatgpt_account_id)
+        {
+            standard_accounts.push(crate::provider_health::StandardAccount {
+                account_id: account.provider_id,
+                provider_type: ProviderType::OpenAI,
+                api_key: None,
+                has_oauth: true,
+                base_url: None,
+                oauth_expires_at: Some(account.expires_at),
+            });
+        }
+    }
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
     let resolved_chain_id = if exact_chain_exists {
         Some(requested_model.clone())
@@ -1332,19 +1356,30 @@ async fn native_protocol_proxy(
                 return error_response(StatusCode::BAD_REQUEST,
                     "Core-owned Codex OAuth requires stream=true and replayed input; previous_response_id is unsupported".to_string(), "unsupported_parameter");
             }
-            let Some(account) =
-                super::ai_providers::get_all_openai_oauth_accounts(&state.config.working_dir)
-                    .into_iter()
-                    .find(|account| account.provider_id == entry.account_id)
-            else {
-                continue;
-            };
-            let account = match super::ai_providers::prepare_codex_oauth_account_for_launch(
-                &state.config.working_dir,
-                &account,
-            )
-            .await
+            let prepared = if legacy_codex
+                .as_ref()
+                .is_some_and(|account| account.provider_id == entry.account_id)
             {
+                super::ai_providers::prepare_legacy_native_codex_account(
+                    &state.config.working_dir,
+                    entry.account_id,
+                )
+                .await
+            } else {
+                let Some(account) =
+                    super::ai_providers::get_all_openai_oauth_accounts(&state.config.working_dir)
+                        .into_iter()
+                        .find(|account| account.provider_id == entry.account_id)
+                else {
+                    continue;
+                };
+                super::ai_providers::prepare_codex_oauth_account_for_launch(
+                    &state.config.working_dir,
+                    &account,
+                )
+                .await
+            };
+            let account = match prepared {
                 Ok(account) => account,
                 Err(_) => {
                     state
@@ -6501,7 +6536,11 @@ mod tests {
         assert!(!disconnected_codex.responses);
 
         let xai_oauth = protocol_capabilities(ProviderType::Xai, false, true);
-        assert!(!xai_oauth.responses && !xai_oauth.previous_response_id);
+        // Subscription Responses may be available on an authenticated build
+        // host, but never support server-side continuation. A disconnected
+        // provider must remain unavailable regardless of that host inventory.
+        assert!(!xai_oauth.previous_response_id);
+        assert!(!protocol_capabilities(ProviderType::Xai, false, false).responses);
 
         let anthropic_key = protocol_capabilities(ProviderType::Anthropic, true, false);
         assert!(anthropic_key.chat_completions && anthropic_key.anthropic_messages);
@@ -6982,6 +7021,21 @@ mod tests {
         );
         assert_eq!(native_anthropic_beta("context-1m", false), "context-1m");
         assert_eq!(native_anthropic_beta("", true), "oauth-2025-04-20");
+    }
+
+    #[test]
+    fn native_codex_models_route_bare_gpt_ids_only_on_responses() {
+        let entry =
+            super::parse_native_model_entry("gpt-6-astra", NativeProtocol::Responses).unwrap();
+        assert_eq!(entry.provider_id, "openai");
+        assert_eq!(entry.model_id, "gpt-6-astra");
+        for model in ["smart", "gpt-custom/model", "unknown-model"] {
+            assert!(super::parse_native_model_entry(model, NativeProtocol::Responses).is_none());
+        }
+        assert!(
+            super::parse_native_model_entry("gpt-6-astra", NativeProtocol::AnthropicMessages)
+                .is_none()
+        );
     }
 
     #[test]

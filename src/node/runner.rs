@@ -351,6 +351,7 @@ impl JobRunner {
         match &job.payload {
             JobPayload::RawCommand {
                 command,
+                long_running,
                 timeout_secs,
                 env,
                 managed_auth,
@@ -369,8 +370,12 @@ impl JobRunner {
                 // Applied last: the payload env cannot redirect a managed
                 // profile to a mission-controlled path.
                 cmd.envs(managed_env);
-                let limit_secs = clamp_timeout(*timeout_secs, self.max_job_secs);
-                let outcome = run_logged_command(
+                let limit_secs = if *long_running {
+                    timeout_secs.map(|seconds| seconds.max(1))
+                } else {
+                    Some(clamp_timeout(*timeout_secs, self.max_job_secs))
+                };
+                let outcome = run_logged_command_with_deadline(
                     cmd,
                     CommandEnvironment::Clear,
                     &log_path,
@@ -467,6 +472,16 @@ pub(crate) async fn run_logged_command(
     limit_secs: u64,
     token: &CancellationToken,
 ) -> anyhow::Result<RunOutcome> {
+    run_logged_command_with_deadline(cmd, environment, log_path, Some(limit_secs), token).await
+}
+
+async fn run_logged_command_with_deadline(
+    cmd: tokio::process::Command,
+    environment: CommandEnvironment,
+    log_path: &Path,
+    limit_secs: Option<u64>,
+    token: &CancellationToken,
+) -> anyhow::Result<RunOutcome> {
     if let Some(parent) = log_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -489,24 +504,18 @@ pub(crate) async fn run_logged_command(
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
             RunOutcome::Cancelled
         }
-        waited = tokio::time::timeout(Duration::from_secs(limit_secs.max(1)), child.wait()) => {
-            match waited {
-                Ok(Ok(status)) => {
-                    // The process-group leader may exit after daemonizing a
-                    // child. A terminal job must not leave those descendants
-                    // consuming node resources outside queue accounting.
-                    kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-                    RunOutcome::Exited(status.code())
-                }
-                Ok(Err(err)) => {
-                    kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-                    return Err(err.into());
-                },
-                Err(_) => {
-                    kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-                    RunOutcome::TimedOut { limit_secs }
-                }
+        _ = async {
+            match limit_secs {
+                Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.max(1))).await,
+                None => std::future::pending::<()>().await,
             }
+        } => {
+            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
+            RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled") }
+        }
+        waited = child.wait() => {
+            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
+            RunOutcome::Exited(waited?.code())
         }
     };
     Ok(outcome)
@@ -1077,6 +1086,7 @@ mod tests {
         );
         let job_id = Uuid::new_v4();
         runner.submit(job_id, Uuid::new_v4(), JobPayload::RawCommand {
+            long_running: false,
             command: format!("test \"$HOME\" = \"$PWD\" && test \"$GROK_HOME\" = '{}' && test -r \"$GROK_HOME/auth.json\" && printf managed-ok", auth_home.display()),
             timeout_secs: Some(30),
             env: Some(std::collections::HashMap::from([("GROK_HOME".into(), "/untrusted-payload-path".into())])),
@@ -1105,6 +1115,7 @@ mod tests {
                 job_id,
                 mission_id,
                 JobPayload::RawCommand {
+                    long_running: false,
                     command: "echo hello-from-job && pwd".to_string(),
                     timeout_secs: Some(30),
                     env: None,
@@ -1126,6 +1137,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_goal_outlives_node_ceiling_but_explicit_deadline_remains() {
+        for (long_running, timeout_secs, expected) in [
+            (false, None, JobState::Failed),
+            (true, None, JobState::Succeeded),
+            (true, Some(1), JobState::Failed),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = JobStore::open(dir.path()).await.unwrap();
+            let runner = JobRunner::spawn(store.clone(), dir.path().into(), 1, 1);
+            let id = Uuid::new_v4();
+            runner
+                .submit(
+                    id,
+                    Uuid::new_v4(),
+                    JobPayload::RawCommand {
+                        command: "sleep 2; printf finished".into(),
+                        long_running,
+                        timeout_secs,
+                        env: None,
+                        managed_auth: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            let record = wait_for_terminal(&store, id).await;
+            assert_eq!(record.state, expected);
+            if expected == JobState::Failed {
+                assert_eq!(record.error.as_deref(), Some("timed out after 1s"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn cancel_kills_a_running_job() {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(dir.path()).await.unwrap();
@@ -1141,6 +1185,7 @@ mod tests {
                 job_id,
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
+                    long_running: true,
                     command: "sleep 30".to_string(),
                     timeout_secs: None,
                     env: None,
@@ -1186,6 +1231,7 @@ mod tests {
                     id,
                     Uuid::new_v4(),
                     JobPayload::RawCommand {
+                        long_running: false,
                         command: "sleep 30".to_string(),
                         timeout_secs: None,
                         env: None,
@@ -1243,6 +1289,7 @@ mod tests {
                 job_id,
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
+                    long_running: false,
                     command: "sleep 20".to_string(),
                     timeout_secs: Some(600),
                     env: None,

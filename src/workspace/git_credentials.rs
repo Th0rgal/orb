@@ -544,6 +544,13 @@ fn github_connection_candidates(
         }
     }
 
+    // Unit fixtures supply their own workspace/application roots. Reading
+    // machine-wide fallbacks here can consume production credentials when
+    // the test suite is run on an authenticated build host.
+    if cfg!(test) {
+        return candidates;
+    }
+
     if let Ok(root) = std::env::var("WORKING_DIR") {
         let root = root.trim();
         if !root.is_empty() {
@@ -826,7 +833,10 @@ mod tests {
         let resolved =
             GitCredentialConfig::resolve_for_spawn(root.path(), None, &env, Some(&cached)).unwrap();
 
-        assert_eq!(resolved.token(), "dashboard-token");
+        assert!(
+            resolved.token() == "dashboard-token",
+            "cached dashboard credential was not preserved"
+        );
         assert_eq!(resolved.login.as_deref(), Some("dashboard-login"));
         assert_eq!(resolved.user_name(), Some("Dashboard User"));
     }

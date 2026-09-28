@@ -17,6 +17,7 @@ async fn live_cursor_restart_and_followup() {
     let mut rows = store.cloud_executions().await.unwrap();
     if rows.is_empty() {
         let execution = Execution {
+            parent_mission_id: None,
             mission_id: Uuid::new_v4(), request_key: "cursor-live-canary-v1".into(),
             request_signature: "cursor-live-canary-v1".into(), revision: 0,
             selection: Selection { provider: Provider::CursorCloud, account: "cursor-default".into(), repository: None, git_ref: None, model_params: vec![], model: None },

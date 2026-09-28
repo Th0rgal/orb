@@ -259,10 +259,14 @@ mod protocol_tests {
                             .strip_prefix("content-length: ")
                             .and_then(|v| v.parse::<usize>().ok())
                     })
-                    .unwrap();
+                    .unwrap_or(0);
                 let mut payload = vec![0; len];
                 socket.read_exact(&mut payload).unwrap();
-                requests.push(serde_json::from_slice(&payload).unwrap());
+                requests.push(if payload.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&payload).unwrap()
+                });
                 write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
             requests
@@ -333,7 +337,7 @@ mod protocol_tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("grok");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'grok 1.0.0'; exit 0; fi\ntouch ready\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let old = uuid::Uuid::new_v4().to_string();
@@ -346,6 +350,9 @@ mod protocol_tests {
                 json!({"run_id":new,"generation":6,"prompt":"hello"}).to_string(),
             ),
             (200, "{}".into()),
+            (200, json!({"contract_version":"1","token":"mcp1.fixture"}).to_string()),
+            (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
+            (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
         ]);
         let request = local_agents::StartRequest {
             id: id.clone(),
@@ -360,6 +367,15 @@ mod protocol_tests {
         let result =
             tauri::async_runtime::block_on(local_run_launch(request.clone(), connection.clone()))
                 .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !root.path().join("ready").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            root.path().join("ready").exists(),
+            "native harness did not pass MCP preflight: {:?}",
+            local_agents::local_agents_poll(id.clone())
+        );
         let second = tauri::async_runtime::block_on(local_run_launch(request, connection));
         local_agents::local_agents_stop(id).unwrap();
         assert_eq!(result["generation"], 6);

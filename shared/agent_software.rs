@@ -836,6 +836,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn durable_queue_waits_cancels_switches_and_rolls_back() {
+        // This fixture overrides process-wide PATH and the receipt directory.
+        // Run it alone so concurrently running native harness tests cannot
+        // acquire its execution lock or accidentally use its fake installers.
+        const ISOLATED: &str = "SANDBOXED_SOFTWARE_TEST_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent_software::tests::durable_queue_waits_cancels_switches_and_rolls_back",
+                    "--nocapture",
+                ])
+                .env(ISOLATED, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated software update fixture failed");
+            return;
+        }
         use std::os::unix::fs::{symlink, PermissionsExt};
         let temp = tempfile::tempdir().unwrap();
         let old_root = std::env::var_os("AGENT_SOFTWARE_STATE_DIR");

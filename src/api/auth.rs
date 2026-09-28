@@ -148,7 +148,7 @@ pub fn verify_password_hash(password: &str, stored: &str) -> bool {
     constant_time_eq(&hex::encode(&computed), &hex::encode(&expected_hash))
 }
 
-pub(super) fn issue_jwt(
+pub(crate) fn issue_jwt(
     secret: &str,
     ttl_days: i64,
     user: &AuthUser,
@@ -347,6 +347,28 @@ pub async fn require_auth(
         .or_else(|| auth_header.strip_prefix("bearer "))
         .unwrap_or("");
 
+    if token.starts_with("mcp1.") {
+        let allowed = matches!(
+            (req.method().as_str(), req.uri().path()),
+            ("GET", "/api/mcp/capabilities")
+                | ("POST", "/api/mcp/call")
+                | ("POST", "/api/mcp/renew")
+        );
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                "MCP sessions only authorize the MCP gateway",
+            )
+                .into_response();
+        }
+        return match crate::control_mcp::gateway::verify(&state, token) {
+            Ok(principal) => {
+                req.extensions_mut().insert(principal);
+                next.run(req).await
+            }
+            Err(_) => (StatusCode::UNAUTHORIZED, "Invalid or expired MCP session").into_response(),
+        };
+    }
     if token.starts_with("ctx1.") {
         return if super::context_auth::permits(&state.config, token, req.uri().path(), req.method())
         {

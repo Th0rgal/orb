@@ -4,9 +4,12 @@ mod agent_software;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 
+#[cfg(test)]
+mod live_mcp_tests;
 mod local_origin;
 #[path = "../../../shared/local_origin.rs"]
 mod local_origin_wire;
+mod mcp_launch;
 #[path = "../../../shared/project_context.rs"]
 mod project_context_store;
 mod run_recovery;

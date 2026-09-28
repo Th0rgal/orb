@@ -418,7 +418,7 @@ pub struct ProjectConversation {
 }
 
 pub struct ProjectsStore {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
 }
 
 impl ProjectsStore {

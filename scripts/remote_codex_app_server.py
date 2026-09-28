@@ -54,6 +54,8 @@ class NativeSession:
         self.text = {}
         self.pending_hint = None
         command = ['codex']
+        if os.environ.get('SANDBOXED_MCP_WRAPPER'):
+            command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
         for setting in config['settings']:
             command += ['-c', setting]
         command += ['app-server', '--enable', 'goals']
@@ -94,6 +96,8 @@ class NativeSession:
         if 'id' in message:
             # approvalPolicy=never: unexpected requests fail closed, never hang.
             self.send({'id': message['id'], 'error': {'code': -32601, 'message': 'Interactive request unavailable on remote node'}})
+            return
+        if method in ('thread/goal/updated', 'thread/goal/cleared') and not self.goal:
             return
         if method == 'thread/goal/updated':
             goal = params.get('goal', {})
@@ -154,7 +158,7 @@ class NativeSession:
         action = goal_action(goal, self.config['prompt'])
         self.goal = action is not None
         # Restored stop snapshots precede this explicit activation.
-        self.deferred = [m for m in self.deferred if m.get('method') != 'thread/goal/updated']
+        self.deferred = [m for m in self.deferred if m.get('method') not in ('thread/goal/updated', 'thread/goal/cleared')]
         if self.goal:
             if goal and not self.config['prompt'].startswith('/goal '):
                 self.pending_hint = self.config['prompt']
@@ -186,6 +190,8 @@ class NativeSession:
             if value is None:
                 raise RuntimeError('Codex disconnected before native completion')
             self.event(value)
+            if not self.goal and self.goal_status == 'complete':
+                return
 
     def close(self):
         self.child.terminate()

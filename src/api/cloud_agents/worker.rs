@@ -248,6 +248,7 @@ mod tests {
                 .unwrap(),
         );
         let initial = Execution {
+            parent_mission_id: None,
             mission_id: Uuid::new_v4(),
             request_key: "launch".into(),
             request_signature: "launch".into(),

@@ -3772,6 +3772,72 @@ pub fn read_openai_oauth_access_token() -> Option<String> {
     read_oauth_token_entry(ProviderType::OpenAI).map(|entry| entry.access_token)
 }
 
+/// Native Responses also supports the canonical legacy login used by local
+/// Codex launches. Keep it out of the chat-completions account pool: a ChatGPT
+/// bearer is not an OpenAI API key and must never reach that endpoint.
+pub(crate) fn read_legacy_native_codex_account(working_dir: &Path) -> Option<CodexOAuthAccount> {
+    if crate::api::oauth_owner::cli_proxy_owns(ProviderType::OpenAI) {
+        return None;
+    }
+    let config = read_opencode_config(&get_opencode_config_path(working_dir)).unwrap_or_default();
+    if get_provider_config_entry(&config, ProviderType::OpenAI)
+        .is_some_and(|entry| entry.enabled == Some(false))
+    {
+        return None;
+    }
+    legacy_native_codex_account(read_oauth_token_entry(ProviderType::OpenAI)?)
+}
+
+fn legacy_native_codex_account(entry: OAuthTokenEntry) -> Option<CodexOAuthAccount> {
+    let identity = extract_chatgpt_account_id(&entry.access_token)?;
+    if identity.trim().is_empty() || entry.refresh_token.trim().is_empty() {
+        return None;
+    }
+    Some(CodexOAuthAccount {
+        provider_id: crate::provider_health::stable_provider_uuid(&format!(
+            "native-codex-{identity}"
+        )),
+        chatgpt_account_id: identity,
+        access_token: entry.access_token,
+        refresh_token: entry.refresh_token,
+        expires_at: entry.expires_at,
+        account_email: None,
+        priority: u32::MAX,
+    })
+}
+
+pub(crate) async fn prepare_legacy_native_codex_account(
+    working_dir: &Path,
+    expected_id: uuid::Uuid,
+) -> Result<CodexOAuthAccount, String> {
+    // Reuse the canonical credential owner's cross-process refresh lock.
+    ensure_openai_oauth_token_valid().await?;
+    read_legacy_native_codex_account(working_dir)
+        .filter(|account| account.provider_id == expected_id)
+        .ok_or_else(|| "Canonical Codex login changed during request admission".into())
+}
+
+#[cfg(test)]
+mod legacy_native_codex_tests {
+    use super::*;
+    #[test]
+    fn identity_is_stable_across_token_rotation_and_rejects_missing_account() {
+        let entry = |identity: &str, refresh: &str| {
+            OAuthTokenEntry {
+            access_token: format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":identity}})).unwrap())),
+            refresh_token: refresh.into(), expires_at: 1,
+        }
+        };
+        let a = legacy_native_codex_account(entry("first", "old")).unwrap();
+        let b = legacy_native_codex_account(entry("first", "new")).unwrap();
+        let c = legacy_native_codex_account(entry("second", "new")).unwrap();
+        assert_eq!(a.provider_id, b.provider_id);
+        assert_ne!(a.provider_id, c.provider_id);
+        assert!(legacy_native_codex_account(entry("", "new")).is_none());
+        assert!(legacy_native_codex_account(entry("first", "")).is_none());
+    }
+}
+
 /// Read the Google OAuth access token from the credential store.
 ///
 /// Returns the access token string if found and non-empty.

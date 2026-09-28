@@ -72,6 +72,29 @@ fn context_block(a: &Transfer, operation: &Operation) -> Result<Option<Value>, E
 }
 
 type Error = (StatusCode, String);
+/// Serialize workspace mutations with movement of that workspace. Weak entries
+/// disappear when callers leave; this does not create another durable ledger.
+pub(crate) async fn workspace_mutation_lock(id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(&id).and_then(std::sync::Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(id, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
+}
 fn conflict(e: impl std::fmt::Display) -> Error {
     (StatusCode::CONFLICT, e.to_string())
 }
@@ -247,6 +270,68 @@ async fn node_request(
         .await
         .map_err(|_| conflict("Invalid machine transfer response"))
 }
+// Version 1 nodes omitted Claude from transfer discovery. Their authenticated
+// software inventory lets a rolling upgrade repair that omission without
+// restarting nodes that still own jobs. Version 2 is authoritative.
+fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
+    if capabilities["version"].as_u64() != Some(1) {
+        return;
+    }
+    let installed = inventory["components"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["id"] == "claudecode"
+                && item["installed"] == true
+                && item["version"]
+                    .as_str()
+                    .is_some_and(|v| !v.trim().is_empty())
+                && item["path"].as_str().is_some_and(|p| !p.is_empty())
+        })
+    });
+    if installed {
+        if let Some(harnesses) = capabilities["harnesses"].as_array_mut() {
+            if !harnesses.iter().any(|h| h == "claudecode") {
+                harnesses.push(json!("claudecode"));
+            }
+        }
+    }
+}
+async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
+    let mut capabilities = node_request(state, id, "/machine-transfer/capabilities", None).await?;
+    if capabilities["version"].as_u64() == Some(1)
+        && !capabilities["harnesses"]
+            .as_array()
+            .is_some_and(|h| h.iter().any(|h| h == "claudecode"))
+    {
+        if let Ok(inventory) = node_request(state, id, "/software", None).await {
+            supplement_legacy_claude(&mut capabilities, &inventory);
+        }
+    }
+    Ok(capabilities)
+}
+#[cfg(test)]
+mod claude_capability_tests {
+    use super::*;
+    #[test]
+    fn legacy_inventory_is_evidence_not_a_blanket_allowlist() {
+        let installed = json!({"components":[{"id":"claudecode","installed":true,"path":"/usr/local/bin/claude","version":"2.1.283"}]});
+        let mut old = json!({"version":1,"harnesses":["codex"]});
+        supplement_legacy_claude(&mut old, &installed);
+        supplement_legacy_claude(&mut old, &installed);
+        assert_eq!(old["harnesses"], json!(["codex", "claudecode"]));
+        for inventory in [
+            json!({}),
+            json!({"components":[{"id":"claudecode","installed":false,"path":"/usr/local/bin/claude"}]}),
+            json!({"components":[{"id":"claudecode","installed":true}]}),
+        ] {
+            let mut old = json!({"version":1,"harnesses":[]});
+            supplement_legacy_claude(&mut old, &inventory);
+            assert_eq!(old["harnesses"], json!([]));
+        }
+        let mut current = json!({"version":2,"harnesses":[]});
+        supplement_legacy_claude(&mut current, &installed);
+        assert_eq!(current["harnesses"], json!([]));
+    }
+}
 async fn capabilities(state: &AppState) -> Vec<Value> {
     let harnesses: Vec<_> = state
         .backend_registry
@@ -260,7 +345,7 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
     for node in &state.config.remote_nodes.nodes {
-        let result = node_request(state, &node.id, "/machine-transfer/capabilities", None).await;
+        let result = node_transfer_capabilities(state, &node.id).await;
         rows.push(match result {Ok(v)=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":v["harnesses"]}),Err((_,e))=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":e})});
     }
     rows
@@ -360,7 +445,7 @@ async fn validate_destination(
             if !state.config.remote_nodes.enabled {
                 return Err(conflict("Remote nodes are disabled"));
             }
-            let c = node_request(state, id, "/machine-transfer/capabilities", None).await?;
+            let c = node_transfer_capabilities(state, id).await?;
             if !c["harnesses"]
                 .as_array()
                 .is_some_and(|h| h.iter().any(|h| h.as_str() == Some(backend)))
@@ -385,6 +470,7 @@ pub async fn operate(
     Path(id): Path<Uuid>,
     Json(req): Json<Request>,
 ) -> Result<Json<Value>, Error> {
+    let _workspace_mutation = workspace_mutation_lock(id).await;
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
     if let Request::Prepare {
@@ -397,8 +483,28 @@ pub async fn operate(
         effort,
     } = req
     {
+        // A remote Git process can outlive a Core crash. Its uncertain action
+        // must be reconciled before snapshotting or deleting its source tree.
+        {
+            let conn = state.projects.connection.lock().map_err(internal_error)?;
+            let actions_exist: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')", [], |r| r.get(0)).map_err(internal_error)?;
+            if actions_exist {
+                let unsettled: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_actions_v1 WHERE owner=?1 AND tool IN ('create_worktree','remove_worktree','merge_branch') AND state IN ('dispatching','reconciliation_required') AND json_extract(arguments,'$.mission_id')=?2)", rusqlite::params![user.id,id.to_string()], |r| r.get(0)).map_err(internal_error)?;
+                if unsettled {
+                    return Err(conflict("A workspace Git action is still running or requires reconciliation before moving"));
+                }
+            }
+        }
         if idempotency_key.len() > 128 || idempotency_key.is_empty() {
             return Err(conflict("Invalid idempotency key"));
+        }
+        if crate::api::durable_jobs::has_unsettled_mission_jobs(&state, &user, id)
+            .await
+            .map_err(conflict)?
+        {
+            return Err(conflict(
+                "Workspace jobs are still running or uncertain; settle them before moving",
+            ));
         }
         if let Some(old) = control
             .mission_store

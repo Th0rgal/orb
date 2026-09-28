@@ -327,9 +327,42 @@ pub async fn local_origin_launch(
             json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model}),
         ),
     )?;
-    if let Err(error) =
+    // Core must know the durable identity before it can issue this mission's
+    // MCP grant. Registering the snapshot never dispatches a second harness.
+    let started = async {
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| "Cannot initialize Core registration".to_string())?
+            .post(format!(
+                "{}/api/control/local-origins",
+                connection.api_url.trim_end_matches('/')
+            ))
+            .bearer_auth(&connection.token)
+            .json(&record.snapshot)
+            .send()
+            .await
+            .map_err(|_| "Connect to Core before starting a mission with MCP access".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Core refused local mission registration ({})",
+                response.status()
+            ));
+        }
+        let receipt: Value = response
+            .json()
+            .await
+            .map_err(|_| "Invalid Core registration receipt".to_string())?;
+        if receipt["ok"] != true {
+            return Err("Core did not acknowledge the local mission".into());
+        }
+        record.acked = record.snapshot.sequence;
+        write(&path, &record)?;
         crate::routed_opencode::start(request, &connection.api_url, &connection.token).await
-    {
+    }
+    .await;
+    if let Err(error) = started {
         record.snapshot.status = "failed".into();
         record.snapshot.sequence += 1;
         record.snapshot.error = Some(error);

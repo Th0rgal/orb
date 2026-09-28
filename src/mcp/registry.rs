@@ -259,25 +259,25 @@ impl McpRegistry {
             let release = working_dir
                 .join("target")
                 .join("release")
-                .join("orchestrator-mcp");
+                .join("sandboxed-mcp");
             let debug = working_dir
                 .join("target")
                 .join("debug")
-                .join("orchestrator-mcp");
+                .join("sandboxed-mcp");
             if release.exists() {
                 release.to_string_lossy().to_string()
             } else if debug.exists() {
                 debug.to_string_lossy().to_string()
-            } else if let Some(scoped) = current_service_companion_binary_path("orchestrator-mcp")
-                .filter(|path| path.exists())
+            } else if let Some(scoped) =
+                current_service_companion_binary_path("sandboxed-mcp").filter(|path| path.exists())
             {
                 scoped.to_string_lossy().to_string()
             } else {
-                "orchestrator-mcp".to_string()
+                "sandboxed-mcp".to_string()
             }
         };
         let mut orchestrator = McpServerConfig::new_stdio(
-            "orchestrator".to_string(),
+            "sandboxed".to_string(),
             orchestrator_command,
             Vec::new(),
             HashMap::new(),
@@ -319,7 +319,7 @@ impl McpRegistry {
             automation_manager_env,
         );
         automation_manager.scope = McpScope::Workspace;
-        automation_manager.default_enabled = true;
+        automation_manager.default_enabled = false;
 
         let mut engram = McpServerConfig::new_stdio(
             "engram".to_string(),
@@ -360,6 +360,46 @@ impl McpRegistry {
                 return Some(scoped.to_string_lossy().to_string());
             }
             None
+        }
+
+        // Retire the built-in orchestrator descriptor in the same rollout.
+        // An unrelated user-configured executable with that name is preserved.
+        for config in &mut configs {
+            // The legacy automation control MCP requires a signing secret and
+            // bypasses the executor role boundary. Keep custom executables,
+            // but never revive the old built-in through persisted enablement.
+            let legacy_automation = config.name == "automation-manager"
+                && matches!(&config.transport, McpTransport::Stdio { command, .. }
+                    if Path::new(command).file_name().and_then(|s| s.to_str())
+                        .is_some_and(|s| matches!(s, "automation-manager-mcp" | "automation-manager-mcp-dev")));
+            if legacy_automation {
+                config.default_enabled = false;
+                if let McpTransport::Stdio { env, .. } = &mut config.transport {
+                    env.remove("JWT_SECRET");
+                }
+                let updated = config.clone();
+                let _ = config_store
+                    .update(config.id, move |entry| *entry = updated)
+                    .await;
+            }
+            let builtin = config.name == "orchestrator"
+                && matches!(&config.transport,
+                McpTransport::Stdio { command, .. } if Path::new(command).file_name().and_then(|s|s.to_str()).is_some_and(|s|matches!(s,"orchestrator-mcp"|"orchestrator-mcp-dev")));
+            if builtin {
+                config.name = "sandboxed".into();
+                if let McpTransport::Stdio { command, args, env } = &mut config.transport {
+                    *command = resolve_local_binary(working_dir, "sandboxed-mcp")
+                        .unwrap_or_else(|| "sandboxed-mcp".into());
+                    *args = vec!["--profile".into(), "executor".into()];
+                    for key in ["JWT_SECRET", "API_TOKEN", "SANDBOXED_API_TOKEN"] {
+                        env.remove(key);
+                    }
+                }
+                let updated = config.clone();
+                let _ = config_store
+                    .update(config.id, move |entry| *entry = updated)
+                    .await;
+            }
         }
 
         // Remove duplicate MCPs by name (keep the first one).
@@ -444,10 +484,7 @@ impl McpRegistry {
         // Ensure workspace/desktop/orchestrator MCPs have correct scope (migrate old configs).
         // This must run even if the binary doesn't exist locally.
         for config in configs.iter_mut() {
-            if !matches!(
-                config.name.as_str(),
-                "workspace" | "desktop" | "orchestrator"
-            ) {
+            if !matches!(config.name.as_str(), "workspace" | "desktop" | "sandboxed") {
                 continue;
             }
 
@@ -466,7 +503,7 @@ impl McpRegistry {
         for config in configs.iter_mut() {
             if !matches!(
                 config.name.as_str(),
-                "workspace" | "desktop" | "playwright" | "orchestrator"
+                "workspace" | "desktop" | "playwright" | "sandboxed"
             ) {
                 continue;
             }
@@ -506,7 +543,7 @@ impl McpRegistry {
             let binary_name = match config.name.as_str() {
                 "workspace" => Some("workspace-mcp"),
                 "desktop" => Some("desktop-mcp"),
-                "orchestrator" => Some("orchestrator-mcp"),
+                "sandboxed" => Some("sandboxed-mcp"),
                 _ => None,
             };
 
