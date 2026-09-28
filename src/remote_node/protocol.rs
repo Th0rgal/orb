@@ -15,7 +15,7 @@ use super::RemoteNodeError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Current node protocol version reported by heartbeats.
-pub const NODE_PROTOCOL_VERSION: u32 = 4;
+pub const NODE_PROTOCOL_VERSION: u32 = 5;
 /// First protocol that reports `active_jobs` and `queued_jobs` in heartbeats.
 pub const NODE_JOB_COUNTER_PROTOCOL_VERSION: u32 = 2;
 
@@ -276,6 +276,10 @@ pub enum JobPayload {
     /// same semantics as the synchronous `/execute` path.
     RawCommand {
         command: String,
+        /// Native goal owns its lifetime; cancellation and containment still apply.
+        /// Requires protocol 5. Ordinary jobs remain bounded by the node ceiling.
+        #[serde(default)]
+        long_running: bool,
         /// Client-requested timeout; clamped to the node's
         /// `SANDBOXED_NODE_MAX_JOB_SECS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,6 +643,7 @@ mod tests {
     #[test]
     fn job_payload_round_trips_with_kind_tag() {
         let payload = JobPayload::RawCommand {
+            long_running: false,
             managed_auth: Vec::new(),
             command: "cargo test".to_string(),
             timeout_secs: Some(600),
@@ -663,6 +668,7 @@ mod tests {
         assert_eq!(
             minimal,
             JobPayload::RawCommand {
+                long_running: false,
                 managed_auth: Vec::new(),
                 command: "true".to_string(),
                 timeout_secs: None,

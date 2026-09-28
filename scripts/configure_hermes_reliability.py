@@ -12,70 +12,18 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 
-# Canonical assistant-mcp allowlist. Mirrors
-# src/hermes_tools.rs::HERMES_ASSISTANT_TOOL_ALLOWLIST — a Rust test pins the
-# two lists together, so update both in the same change.
-ASSISTANT_TOOLS = [
-    "list_active_missions",
-    "list_missions",
-    "get_mission",
-    "get_mission_digest",
-    "get_mission_events",
-    "get_chatgpt_ui_pool_status",
-    "list_mission_shared_files",
-    "download_shared_file",
-    "list_cloud_models",
-    "list_cloud_accounts",
-    "get_cloud_execution",
-    "start_mission",
-    "send_message_to_mission",
-    "ask_mission",
-    "answer_mission_question",
-    "cancel_mission",
-    "acknowledge_mission",
-    "adopt_mission",
-    "get_compute_fleet",
-    "list_projects",
-    "get_project",
-    "get_situation",
-    "update_project_status",
-    "set_project_track",
-    "accept_project_track_evidence",
-    "reopen_project_track",
-    "accept_project_track",
-    "invalidate_project_track_evidence",
-    "get_project_grant",
-    "set_project_grant",
-    "add_project_steer",
-    "record_project_decision",
-    "answer_project_decision",
-    "get_project_tasks",
-    "plan_project_tasks",
-    "update_project_task",
-    "cancel_project_task",
-    "link_mission_to_project",
-    "list_workspaces",
-    "get_workspace",
-    "create_workspace",
-    "update_workspace",
-    "delete_workspace",
-    "list_workspace_templates",
-    "get_workspace_template",
-    "save_workspace_template",
-    "delete_workspace_template",
-    "rebuild_workspace_from_template",
-    "workspace_bash",
-    "start_workspace_job",
-    "get_workspace_job",
-    "cancel_workspace_job",
-    "get_mission_health",
-    "get_mission_diagnostics",
-    "update_mission_settings",
-    "resume_mission",
-]
+def coordinator_tools(binary: str) -> list[str]:
+    """The installed binary owns the catalogue, including its permission profile."""
+    import json
+    import subprocess
+    result = subprocess.run(
+        [binary, "--profile", "coordinator", "--print-catalog"],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    return [tool["name"] for tool in json.loads(result.stdout)]
 
 
-def configure(config: dict, assistant_mcp: str) -> None:
+def configure(config: dict, mcp_binary: str, credential_file: Path) -> None:
     config.setdefault("kanban", {}).update(
         {
             "dispatch_in_gateway": False,
@@ -84,13 +32,16 @@ def configure(config: dict, assistant_mcp: str) -> None:
         }
     )
     server = config.setdefault("mcp_servers", {}).setdefault("sandboxed_assistant", {})
-    server["command"] = assistant_mcp
-    # Ask turns (ask_mission) can make multiple sequential LLM/tool calls;
-    # match the 600s timeout contract of the generated config
-    # (hermes_config_yaml in src/api/system.rs) so they aren't cut off.
-    server["timeout"] = 600
+    server["command"] = mcp_binary
+    server_env = server.setdefault("env", {})
+    for key in ("JWT_SECRET", "HERMES_SANDBOXED_API_TOKEN", "SANDBOXED_API_TOKEN", "API_TOKEN"):
+        server_env.pop(key, None)
+    server_env["SANDBOXED_MCP_TOKEN_FILE"] = str(credential_file)
+    # Mutations return durable receipts; long work runs on Core.
+    server["timeout"] = 60
+    server["args"] = ["--profile", "coordinator"]
     tools = server.setdefault("tools", {})
-    tools["include"] = list(ASSISTANT_TOOLS)
+    tools["include"] = coordinator_tools(mcp_binary)
     tools["prompts"] = False
     tools["resources"] = False
 
@@ -109,9 +60,16 @@ def configure(config: dict, assistant_mcp: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--home", type=Path, required=True)
-    parser.add_argument("--assistant-mcp", required=True)
+    parser.add_argument("--mcp-binary", required=True)
+    parser.add_argument("--credential-file", type=Path, required=True)
     args = parser.parse_args()
 
+    if not args.credential_file.is_absolute() or not args.credential_file.is_file():
+        raise SystemExit("A provisioned absolute scoped credential file is required")
+    if not args.credential_file.read_text().strip().startswith("mcp1."):
+        raise SystemExit("Credential file must contain a scoped MCP session")
+    if args.credential_file.stat().st_mode & 0o077:
+        raise SystemExit("Scoped credential file must not be readable by other users")
     path = args.home / "config.yaml"
     if not path.is_file():
         raise SystemExit(f"Hermes config not found: {path}")
@@ -123,7 +81,7 @@ def main() -> None:
     yaml.preserve_quotes = True
     with path.open() as stream:
         config = yaml.load(stream) or {}
-    configure(config, args.assistant_mcp)
+    configure(config, args.mcp_binary, args.credential_file)
 
     mode = path.stat().st_mode
     with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as stream:
@@ -134,7 +92,7 @@ def main() -> None:
 
     print(
         f"Configured {path}: native Kanban disabled, "
-        f"assistant-MCP timeout=600s, tools={len(ASSISTANT_TOOLS)}, "
+        f"sandboxed-MCP timeout=60s, tools={len(coordinator_tools(args.mcp_binary))}, "
         "Proton disabled"
     )
 

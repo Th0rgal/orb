@@ -25,15 +25,33 @@ reusing the key returns the original launch instead of duplicating work.
 Mission completion alone does not satisfy the track. Accepted criterion
 evidence at the governed artifact version must be recorded separately.
 
-For long workspace commands, use `start_workspace_job`, or pass both
-`mission_id` and `idempotency_key` to `workspace_bash`. Both return a durable
-job ID immediately through the same admission path; retry the same submission
-with the same key. Without that pair, `workspace_bash` is a short diagnostic
-(60 seconds by default, maximum 120) that is killed at timeout. Shell command
-text is not used to infer durability. Consume the job completion callback;
-do not keep an agent polling or launch another build to inspect the first.
+For long workspace commands, use `start_workspace_job` with a stable
+`idempotency_key`. The unified MCP returns an action receipt first. Read
+`get_action(action_id)` to obtain the job ID, then inspect that existing job.
+`workspace_bash` and the duplicate worker launch aliases are retired.
+
+With `sandboxed-mcp`, every mutation (including ask, resume, cancel, task and
+project updates) requires an `idempotency_key` and returns a durable action
+receipt. Retry an interrupted submission with the same key and arguments.
+A `completed` action means its tool call completed; inspect the returned mission
+or job to determine whether the underlying work completed. For
+`reconciliation_required`, inspect that target before doing anything else;
+never create a fresh key to bypass uncertainty. Calls use a 60-second transport
+budget; the accepted work continues on Core after a disconnect.
+
+Every executor may launch a cloud mission using `start_mission` and its cloud
+selection. Discover available accounts/models through `list_cloud_accounts`
+and `list_cloud_models`; owner account quotas remain enforced. Credentials
+are supplied by the trusted launcher. Never request Core's signing secret or
+copy the operator's login token into a harness. Executor access covers its
+own mission and direct children; Core supplies the parent identity.
 
 This is **not** the same as delegating to a CLI coding agent (Claude Code, Codex, OpenCode) via the `terminal` tool. The MCP runs an entire conversation loop inside the container; the CLI agents are interactive programs you spawn in a single `terminal()` call. Use this skill for isolated multi-step research/coding, or work that needs a specific pre-baked workspace (e.g. `tailscale-ubuntu`, `minecraft`, `dgx-spark`).
+
+To withdraw work still queued, call `cancel_action(action_id, idempotency_key)`.
+Read its receipt: `cancelled=false` means dispatch already started or settled;
+use the existing mission/job cancellation tool after inspecting the target.
+Cancelling an MCP request or closing stdio does not cancel accepted work.
 
 ## When to use
 
@@ -797,13 +815,61 @@ and restart recovery record a blocked outcome even when final prose looks comple
 or is absent. Dependent tasks remain gated; the board does not automatically retry
 these stops. Native completion still requires the usual delivery evidence.
 
-### Hosted cloud attempts
+### Hosted cloud execution
 
-Discover accounts and capabilities with `list_cloud_accounts` and supported models
-with `list_cloud_models` before setting `start_mission.cloud`. Use a stable
-`idempotency_key` for creation and `client_message_id` for follow-ups, including
-unchanged model parameters on retries. Read `get_cloud_execution` to reconcile
-provider identities and uncertain submissions; do not create replacement work
-after a transport timeout. Cloud attempts currently reject track leases, writer
-grants and scheduled admission, so autonomous controllers must not dispatch
-tracked work through this route. Cancellation needs provider confirmation.
+Call `list_cloud_accounts` for accounts, availability and capabilities. To create
+an available hosted attempt, pass `cloud: {provider, account, repository?, git_ref?,
+model?}` and `idempotency_key` to `start_mission`. The supported provider names are
+`chatgpt`, `grok_bot`, and `cursor_cloud`. Unvalidated services reject creation.
+Read `get_cloud_execution` for persisted turns/results. Use the same mission and
+a stable `client_message_id` UUID with `send_message_to_mission` for follow-ups.
+Never repeat an ambiguous submission with a different key. Orb folders classify
+conversations; they do not grant cloud filesystem access. Do not pass a workspace,
+remote node, credentials, attachment, track lease or writer grant to this initial
+cloud path. Cancellation must be confirmed by the provider; response completion
+is distinct from archiving and acceptance. Accounts never launch work on connect.
+
+### Cloud model selection and verified Grok Bot
+
+Use `list_cloud_models` with `provider: chatgpt | cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
+
+
+Workspace Git operations (`create_worktree`, `remove_worktree`, `merge_branch`)
+require a coordinator/operator session, an explicit `mission_id`, and an
+idempotency key. Core routes them to that mission's current machine. Paths
+stay inside the mission root; use `repo_path` for a nested checkout. Removal
+preserves dirty worktrees. Merge requires a clean checkout already on the
+target branch; inspect conflict/abort evidence before assigning a resolver.
+Core task-board worktree planning uses the same workspace executor. Task-board
+scheduling for node/client bosses and desktop-owned workspace operations remain
+unavailable until their execution routing is migrated. Never substitute a Core path.
+
+An operator may settle an uncertain action with `reconcile_action`, using the
+original mission/project scope and concrete evidence from the target. It never
+replays the action. Do not mark it rejected unless absence of effects is verified.
+
+Workspace jobs follow the mission placement on Core or a node. A remote job
+receipt includes `remote.node_id` and `spawn_accepted`; `unknown` after a lost
+response requires inspecting the existing job ID, never a new submission key.
+Node logs combine stdout/stderr. Cancellation is complete only when the node
+reports a terminal state. Unsettled jobs prevent moving the workspace.
+
+### Reading cloud results economically
+
+`get_cloud_execution` returns the latest turn by default, omits prompts, and caps each
+result/detail excerpt at 4096 Unicode characters. Use `offset=0` for history.
+Follow `page.next_offset` with
+`offset` to read new turns; poll the unfinished turn again until it is terminal.
+For a longer result, use that turn's `offset`, `limit=1`, and the field's
+`text_slices.result.next_offset` as `text_offset`. Request `include_prompt=true`
+only when needed. Artifact and branch payloads are omitted; counts remain.
+Do not interpret a page or excerpt boundary as provider completion.
+
+`cancel_mission` acknowledges a cancellation request, not a stopped process.
+After its action completes, follow the result's `next_tool`: use
+`get_cloud_execution` for provider confirmation or `get_mission_health` for
+native runner termination. Do not report cancellation complete solely because
+the action is completed or `cancel_requested` is true.
+
+Discover supported models with `list_cloud_models`; preserve model parameters on retries.
+Cloud attempts reject track leases, writer grants and scheduled admission.

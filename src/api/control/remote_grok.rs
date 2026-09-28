@@ -148,9 +148,11 @@ pub(crate) async fn require_node_managed_auth(
     node_id: &str,
     plan: &RemoteHarnessPlan,
 ) -> Result<(), String> {
-    if !matches!(plan, RemoteHarnessPlan::Grok { .. }) {
-        return Ok(());
-    }
+    let profile = match plan {
+        RemoteHarnessPlan::Grok { .. } => "grok",
+        RemoteHarnessPlan::Gemini { .. } => "gemini",
+        _ => return Ok(()),
+    };
     let Some(node) = state.config.remote_nodes.node(node_id) else {
         return Ok(());
     };
@@ -170,7 +172,13 @@ pub(crate) async fn require_node_managed_auth(
     else {
         return Err(format!("{REMOTE_AUTH_REQUIRED}: remote node '{node_id}' has no verified managed-auth heartbeat; check node connectivity and upgrade/configure sandboxed-node"));
     };
-    heartbeat_supports_grok(&heartbeat.managed_auth, node_id)
+    if profile == "grok" {
+        heartbeat_supports_grok(&heartbeat.managed_auth, node_id)
+    } else if heartbeat.managed_auth.iter().any(|p| p == profile) {
+        Ok(())
+    } else {
+        Err(format!("{REMOTE_AUTH_REQUIRED}: remote node '{node_id}' has no managed Gemini login; install Gemini CLI and configure SANDBOXED_NODE_GEMINI_HOME with the service account's private file-based OAuth login"))
+    }
 }
 
 pub(crate) fn heartbeat_supports_grok(
@@ -974,7 +982,13 @@ impl NativeGrokObserver {
                 content.push_str(&format!("\n\n{output}"));
             }
         }
-        let status_reason: &'static str = if codex_goal && !success {
+        let status_reason: &'static str = if status
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("timed out after "))
+        {
+            "remote_node_timeout"
+        } else if codex_goal && !success {
             "native_goal_stopped"
         } else if auth_required {
             "remote_grok_auth_required"
@@ -1253,6 +1267,22 @@ pub(crate) async fn continue_on_node(
                 format!("Mission {mission_id} not found"),
             )
         })?;
+    // A live job must never produce a replacement hint, even for a harness
+    // or track that cannot resume. Clients act on that hint by creating a job.
+    if placement.live
+        || matches!(
+            mission.status,
+            MissionStatus::Active | MissionStatus::Pending
+        )
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{REMOTE_JOB_STILL_RUNNING}: mission {} still owns job {} on remote node '{}'; wait for it to finish or cancel the mission first",
+                mission.id, placement.job_id, placement.node_id
+            ),
+        ));
+    }
     // Create absorbs project missions under a generated track, including Orb
     // requests with no writer flag. Re-admit that same identity and capability;
     // PR bindings and explicit tracks still require full create admission.

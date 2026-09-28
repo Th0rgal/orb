@@ -11,6 +11,9 @@ import argparse
 import asyncio
 import json
 import mimetypes
+import os
+import socket
+from contextlib import AsyncExitStack
 import re
 import sys
 from pathlib import Path
@@ -722,6 +725,12 @@ async def wait_out_cloudflare(page, timeout_ms: int = 45_000) -> None:
             body = await page.inner_text("body")
         except Exception:
             body = ""
+        # DOMContentLoaded may precede both the challenge title and the app
+        # shell. An empty bootstrap document is not proof of a cleared gate.
+        # Keep waiting before classifying it as a logged-out account.
+        if not title.strip() and not body.strip():
+            await page.wait_for_timeout(500)
+            continue
         if not is_cloudflare_challenge_title(title) and not CLOUDFLARE_BODY.search(body or ""):
             if waited:
                 emit("diagnostic", message="stage=cloudflare_cleared")
@@ -730,7 +739,7 @@ async def wait_out_cloudflare(page, timeout_ms: int = 45_000) -> None:
             emit("diagnostic", message="stage=cloudflare_wait")
             waited = True
         await page.wait_for_timeout(500)
-    raise TransportUnavailable("Cloudflare interstitial did not clear")
+    raise TransportUnavailable("Browser page did not settle or its Cloudflare interstitial did not clear")
 
 
 async def account_picker_visible(page) -> bool:
@@ -946,6 +955,61 @@ async def establish_fresh_chat(page) -> int:
     return 0
 
 
+async def stop_owned_browser(process) -> None:
+    if process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+
+async def launch_direct_context(playwright, args, cleanup):
+    """Use the same ordinary Chromium launch as the operator/login helper.
+
+    Attach only to a loopback browser process owned by this invocation. This
+    does not import another session or change browser identity/security flags.
+    """
+    if args.browser != "chromium":
+        raise ValueError("Direct launch supports Chromium only")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = int(listener.getsockname()[1])
+    # Keep the deployable driver self-contained; no login/credential helpers
+    # are imported into mission execution.
+    command = [
+        playwright.chromium.executable_path,
+        "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run",
+        "--no-default-browser-check", "--window-size=1440,1000",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={Path(args.profile_dir).resolve()}",
+    ]
+    if args.proxy_server:
+        command.append(f"--proxy-server={args.proxy_server}")
+    command.append("about:blank")
+    if args.headless == "true":
+        command.insert(-1, "--headless=new")
+    process = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    cleanup.push_async_callback(stop_owned_browser, process)
+    browser = None
+    for _ in range(120):
+        if process.returncode is not None:
+            raise RuntimeError("Owned Chromium exited before its local endpoint was ready")
+        try:
+            browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=1_000)
+            break
+        except Exception:
+            await asyncio.sleep(0.25)
+    if browser is None or not browser.contexts:
+        raise RuntimeError("Owned Chromium did not expose its persistent context")
+    cleanup.push_async_callback(close_context_quietly, browser)
+    return browser.contexts[0]
+
+
 async def run(args, request) -> None:
     try:
         from playwright.async_api import async_playwright
@@ -1003,7 +1067,7 @@ async def run(args, request) -> None:
     context = None
     stage = "launch"
     try:
-        async with async_playwright() as playwright:
+        async with async_playwright() as playwright, AsyncExitStack() as cleanup:
             browser_type = getattr(playwright, args.browser, None)
             if browser_type is None:
                 fail("invalid_config", f"unsupported browser: {args.browser}")
@@ -1020,9 +1084,13 @@ async def run(args, request) -> None:
                     launch_options["downloads_path"] = str(download_dir)
                 if args.proxy_server:
                     launch_options["proxy"] = {"server": args.proxy_server}
-                context = await browser_type.launch_persistent_context(
-                    **launch_options,
-                )
+                if getattr(args, "launch_mode", "persistent") == "direct":
+                    context = await launch_direct_context(playwright, args, cleanup)
+                else:
+                    context = await browser_type.launch_persistent_context(**launch_options)
+                # Close while Playwright is still alive, including on early
+                # probe/error returns, so the profile flushes before unlock.
+                cleanup.push_async_callback(close_context_quietly, context)
             except Exception:
                 fail(
                     "browser_launch",
@@ -1179,9 +1247,6 @@ async def run(args, request) -> None:
             f"{COMPAT_VERSION}: UI check failed at {stage} ({type(exc).__name__}); verify selectors against a blank, non-private chat",
             stage=stage,
         )
-    finally:
-        if context is not None:
-            await close_context_quietly(context)
 
 
 def main() -> None:
@@ -1190,6 +1255,7 @@ def main() -> None:
     parser.add_argument("--browser", choices=("chromium", "firefox", "webkit"), default="chromium")
     parser.add_argument("--headless", choices=("true", "false"), default="true")
     parser.add_argument("--proxy-server")
+    parser.add_argument("--launch-mode", choices=("persistent", "direct"), default=os.environ.get("CHATGPT_UI_LAUNCH_MODE", "persistent"))
     args = parser.parse_args()
     try:
         request = json.loads(sys.stdin.readline())

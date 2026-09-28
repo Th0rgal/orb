@@ -39,6 +39,11 @@ fn directory(path: &Path, create: bool) -> Result<File, String> {
             .map_err(|e| e.to_string())?
             .join(path)
     };
+    // macOS exposes /var, /tmp and /etc as system aliases into /private.
+    // Resolve only these exact OS-owned aliases; canonicalizing the entire
+    // path would also follow agent-controlled symlinks below the workspace.
+    #[cfg(target_os = "macos")]
+    let absolute = macos_system_alias(&absolute);
     let mut dir = File::open("/").map_err(|e| e.to_string())?;
     for part in absolute.components() {
         match part {
@@ -62,6 +67,25 @@ fn directory(path: &Path, create: bool) -> Result<File, String> {
         }
     }
     Ok(dir)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_alias(path: &Path) -> PathBuf {
+    for name in ["var", "tmp", "etc"] {
+        let alias = PathBuf::from("/").join(name);
+        let destination = PathBuf::from("/private").join(name);
+        if let Ok(suffix) = path.strip_prefix(&alias) {
+            let root_owned = std::fs::symlink_metadata(&alias)
+                .is_ok_and(|metadata| metadata.uid() == 0 && metadata.file_type().is_symlink());
+            let expected_target = std::fs::read_link(&alias).is_ok_and(|target| {
+                target == destination || target == destination.strip_prefix("/").unwrap()
+            });
+            if root_owned && expected_target {
+                return destination.join(suffix);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>, String> {
@@ -490,9 +514,13 @@ fn collect_files(
         report.truncated = true;
         return;
     }
-    // Linux procfs exposes this already-open descriptor. Keep it alive while
-    // enumerating and open every child relative to it, never via a raced path.
-    let read = match std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())) {
+    // Enumerate the already-open directory, never reopen its original path.
+    #[cfg(target_os = "macos")]
+    let read = MacDirectoryEntries::open(dir);
+    #[cfg(not(target_os = "macos"))]
+    let read = std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+        .map(|entries| entries.map(|entry| entry.map(|entry| entry.file_name())));
+    let read = match read {
         Ok(read) => read,
         Err(error) => {
             report
@@ -513,12 +541,12 @@ fn collect_files(
                 .push(format!("{} (unreadable entry)", prefix.display()));
             continue;
         };
-        let rel = prefix.join(entry.file_name());
+        let rel = prefix.join(&entry);
         if is_secret_path(&rel.to_string_lossy()) {
             report.skipped.push(format!("{} (secret)", rel.display()));
             continue;
         }
-        let file = match open_child(dir, &entry.file_name(), libc::O_RDONLY | libc::O_NONBLOCK) {
+        let file = match open_child(dir, &entry, libc::O_RDONLY | libc::O_NONBLOCK) {
             Ok(file) => file,
             Err(error) => {
                 report.skipped.push(format!("{} ({error})", rel.display()));
@@ -534,6 +562,71 @@ fn collect_files(
             report
                 .skipped
                 .push(format!("{} (not a regular file)", rel.display()));
+        }
+    }
+}
+
+// macOS has no /proc/self/fd and cannot enumerate directories through /dev/fd.
+// fdopendir owns a separate descriptor, kept alive until traversal ends.
+#[cfg(target_os = "macos")]
+struct MacDirectoryEntries(*mut libc::DIR);
+
+#[cfg(target_os = "macos")]
+impl MacDirectoryEntries {
+    fn open(dir: &File) -> std::io::Result<Self> {
+        let descriptor = open_child(
+            dir,
+            std::ffi::OsStr::new("."),
+            libc::O_RDONLY | libc::O_DIRECTORY,
+        )
+        .map_err(std::io::Error::other)?;
+        let stream = unsafe { libc::fdopendir(descriptor.as_raw_fd()) };
+        if stream.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        std::mem::forget(descriptor); // closedir now owns it.
+        Ok(Self(stream))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Iterator for MacDirectoryEntries {
+    type Item = std::io::Result<std::ffi::OsString>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::os::unix::ffi::OsStringExt;
+        loop {
+            if self.0.is_null() {
+                return None;
+            }
+            // readdir's null result means EOF only when errno remains zero.
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let entry = unsafe { libc::readdir(self.0) };
+            if entry.is_null() {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::closedir(self.0);
+                }
+                self.0 = std::ptr::null_mut();
+                return (error.raw_os_error() != Some(0)).then_some(Err(error));
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                return Some(Ok(std::ffi::OsString::from_vec(name.to_vec())));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacDirectoryEntries {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                libc::closedir(self.0);
+            }
         }
     }
 }
@@ -830,6 +923,20 @@ mod tests {
                 serde_json::to_string(&root.join("context/AGENTS.md").to_string_lossy()).unwrap()
             )
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_tmp_alias_allows_writes_but_not_workspace_symlinks() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let target = temp.path().join("new/attachment.md");
+        safe_write(&target, b"context").unwrap();
+        assert_eq!(bounded_read(&target, 32).unwrap(), b"context");
+
+        let outside = tempfile::tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("redirect")).unwrap();
+        assert!(safe_write(&temp.path().join("redirect/escaped.md"), b"no").is_err());
+        assert!(!outside.path().join("escaped.md").exists());
     }
 
     #[test]

@@ -304,6 +304,7 @@ mod tests {
             mission_id: Uuid::new_v4(),
             lease_token: "unused".to_string(),
             payload: crate::remote_node::protocol::JobPayload::RawCommand {
+                long_running: false,
                 command: "true".to_string(),
                 timeout_secs: None,
                 env: None,

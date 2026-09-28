@@ -4,8 +4,7 @@
 //! Claude Code: `claude --print --output-format stream-json`.
 //! Codex: `codex app-server` (initialize, thread/start or thread/resume, turn/start).
 //! OpenCode: `opencode run --format json`, `--session ses_*` or `--continue`.
-//! Grok: `grok --prompt`. The repo has no resume flag for that CLI, so a follow-up
-//! starts a new local session and says so.
+//! Grok: `grok -p --output-format streaming-json`, with native `--resume`.
 
 use crate::local_stream::{Event as OutputEvent, Output};
 use base64::Engine;
@@ -25,6 +24,7 @@ const HARNESSES: &[(&str, &str)] = &[
     ("codex", "codex"),
     ("grok", "grok"),
     ("opencode", "opencode"),
+    ("gemini", "gemini"),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +95,7 @@ pub struct PollState {
 
 #[derive(Clone)]
 struct Run {
+    mcp_wrapped: bool,
     generation: String,
     cwd: PathBuf,
     child: Arc<Mutex<Child>>,
@@ -259,8 +260,7 @@ pub(crate) fn start_with_env(
     let exit_code = Arc::new(Mutex::new(None));
     let session_id = Arc::new(Mutex::new(request.session_id.clone()));
     let error = Arc::new(Mutex::new(None));
-    let resumed =
-        request.session_id.as_deref().is_some_and(|s| !s.is_empty()) && request.harness != "grok";
+    let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
     let interaction = crate::interactions::begin(&request.id);
     let child = match spawn_harness(&request, &text, &session_id, &error, &done, env) {
         Ok(child) => child,
@@ -271,6 +271,7 @@ pub(crate) fn start_with_env(
     };
     let child = Arc::new(Mutex::new(child));
     let run = Run {
+        mcp_wrapped: env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER"),
         generation: uuid::Uuid::new_v4().to_string(),
         cwd,
         child,
@@ -403,6 +404,20 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         }
         crate::interactions::cancel(id);
         let mut child = run.child.lock().map_err(|e| e.to_string())?;
+        // The trusted wrapper owns the CLI's child process group. Give it
+        // time to forward termination and reap that group before escalation.
+        #[cfg(unix)]
+        if run.mcp_wrapped && !run.done.load(Ordering::SeqCst) {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            let deadline = Instant::now() + Duration::from_secs(6);
+            while child.try_wait().map_err(|e| e.to_string())?.is_none()
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
         // Completed runs stay cached for their transcript. Their old process
         // group ID may have been reused, so never signal it after completion.
         #[cfg(unix)]
@@ -437,14 +452,14 @@ fn spawn_harness(
     env: &[(String, String)],
 ) -> Result<Child, String> {
     match request.harness.as_str() {
-        "claudecode" => spawn_claude(request, text, session_id, error),
-        "codex" => spawn_codex(request, text, session_id, error, done),
+        "claudecode" => spawn_claude(request, text, session_id, error, env),
+        "codex" => spawn_codex(request, text, session_id, error, done, env),
         "grok" => spawn_piped(
             request,
-            grok_args(&request.prompt),
+            grok_args(request),
             text,
             error,
-            false,
+            true,
             session_id,
             env,
         ),
@@ -457,16 +472,50 @@ fn spawn_harness(
             session_id,
             env,
         ),
+        "gemini" => spawn_piped(
+            request,
+            gemini_args(request),
+            text,
+            error,
+            true,
+            session_id,
+            env,
+        ),
         other => Err(format!("unknown local harness {other}")),
     }
 }
 
-fn grok_args(prompt: &str) -> Vec<String> {
-    vec![
+fn gemini_args(request: &StartRequest) -> Vec<String> {
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--yolo".into(),
+    ];
+    if let Some(model) = request.model.as_deref().filter(|s| !s.is_empty()) {
+        args.extend(["--model".into(), model.into()]);
+    }
+    if let Some(session) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+        args.extend(["--resume".into(), session.into()]);
+    }
+    args.extend(["--prompt".into(), request.prompt.clone()]);
+    args
+}
+
+fn grok_args(request: &StartRequest) -> Vec<String> {
+    let mut args = vec![
         "--always-approve".into(),
-        "--prompt".into(),
-        prompt.to_string(),
-    ]
+        "--no-plan".into(),
+        "--output-format".into(),
+        "streaming-json".into(),
+    ];
+    if let Some(model) = request.model.as_deref().filter(|s| !s.is_empty()) {
+        args.extend(["--model".into(), model.into()]);
+    }
+    if let Some(session) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+        args.extend(["--resume".into(), session.into()]);
+    }
+    args.extend(["-p".into(), request.prompt.clone()]);
+    args
 }
 
 fn opencode_args(request: &StartRequest) -> Vec<String> {
@@ -513,11 +562,28 @@ fn harness_command(bin: &str) -> Command {
     command
 }
 
+fn mission_command(request: &StartRequest, env: &[(String, String)]) -> Command {
+    let wrapper = env
+        .iter()
+        .find(|(key, _)| key == "SANDBOXED_MCP_WRAPPER")
+        .map(|(_, value)| value);
+    let mut command = if let Some(wrapper) = wrapper {
+        let mut command = harness_command(wrapper);
+        command.args(["launch", "--harness", &request.harness, "--", &request.bin]);
+        command
+    } else {
+        harness_command(&request.bin)
+    };
+    command.envs(env.iter().map(|(key, value)| (key, value)));
+    command
+}
+
 fn spawn_claude(
     request: &StartRequest,
     text: &Arc<Output>,
     session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
+    env: &[(String, String)],
 ) -> Result<Child, String> {
     let plan = request
         .prompt
@@ -525,7 +591,7 @@ fn spawn_claude(
         .strip_prefix("/plan")
         .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace))
         .map(str::trim);
-    let mut cmd = harness_command(&request.bin);
+    let mut cmd = mission_command(request, env);
     if plan.is_some() {
         cmd.args([
             "--allow-dangerously-skip-permissions",
@@ -713,7 +779,7 @@ fn spawn_piped(
     session_id: &Arc<Mutex<Option<String>>>,
     env: &[(String, String)],
 ) -> Result<Child, String> {
-    let mut command = harness_command(&request.bin);
+    let mut command = mission_command(request, env);
     // Share the user's provider credentials/config, but not a database whose
     // schema may belong to a different OpenCode build (e.g. the desktop app).
     if request.harness == "opencode" && std::env::var_os("OPENCODE_DB").is_none() {
@@ -841,6 +907,17 @@ fn pipe_output(
                             .get("sessionID")
                             .and_then(Value::as_str)
                             .filter(|id| id.starts_with("ses_"))
+                            .or_else(|| {
+                                (event["type"] == "init")
+                                    .then(|| event["session_id"].as_str())
+                                    .flatten()
+                                    .filter(|id| !id.is_empty())
+                            })
+                            .or_else(|| {
+                                event["sessionId"]
+                                    .as_str()
+                                    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                            })
                         {
                             if let Ok(mut slot) = slot.lock() {
                                 *slot = Some(id.to_string());
@@ -850,15 +927,19 @@ fn pipe_output(
                 }
                 if let Ok(value) = serde_json::from_str::<Value>(&line) {
                     text_out.native_activity(&value);
-                    if value["type"] == "tool_use" {
+                    if matches!(
+                        value["type"].as_str(),
+                        Some("tool_use" | "tool_call" | "tool_call_update")
+                    ) {
                         text_out.publish_activities();
                     }
                     if value["type"] == "error" {
                         let message = value
                             .pointer("/error/data/message")
                             .or_else(|| value.pointer("/error/message"))
+                            .or_else(|| value.get("message"))
                             .and_then(Value::as_str)
-                            .unwrap_or("OpenCode reported a protocol error");
+                            .unwrap_or("Harness reported a protocol error");
                         if let Ok(mut slot) = protocol_error.lock() {
                             *slot = Some(message.chars().take(1000).collect());
                         }
@@ -924,8 +1005,9 @@ fn spawn_codex(
     session_out: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
     done: &Arc<AtomicBool>,
+    env: &[(String, String)],
 ) -> Result<Child, String> {
-    let mut child = harness_command(&request.bin)
+    let mut child = mission_command(request, env)
         .current_dir(&request.cwd)
         .arg("app-server")
         .args(["--enable", "goals"])
@@ -1439,7 +1521,10 @@ fn extract_text(line: &str) -> Option<String> {
             "stream_event" if value.pointer("/event/delta/type")?.as_str()? == "text_delta" => {
                 value.pointer("/event/delta/text")?.as_str()
             }
-            "text" => value.pointer("/part/text")?.as_str(), // OpenCode
+            "text" => value
+                .pointer("/part/text")
+                .or_else(|| value.get("data"))?
+                .as_str(), // OpenCode or Grok
             "message" if value["role"] == "assistant" && value["delta"] == true => {
                 value["content"].as_str()
             } // Gemini streaming output
@@ -1587,6 +1672,52 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn gemini_stream_preserves_session_and_only_emits_assistant_deltas() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gemini-fixture");
+        std::fs::write(&bin, r#"#!/bin/sh
+printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message","role":"user","content":"private input"}' '{"type":"message","role":"assistant","delta":true,"content":"Ready"}' '{"type":"result","status":"success"}'
+"#).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let request = StartRequest {
+            id: "gemini-fixture".into(),
+            harness: "gemini".into(),
+            bin: bin.to_string_lossy().into_owned(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "hello".into(),
+            model: Some("selected-model".into()),
+            session_id: Some("previous-session".into()),
+            image_paths: vec![],
+        };
+        let args = gemini_args(&request);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--resume", "previous-session"]));
+        assert!(args.windows(2).any(|w| w == ["--model", "selected-model"]));
+        let output = Arc::new(Output::default());
+        let session = Arc::new(Mutex::new(None));
+        let error = Arc::new(Mutex::new(None));
+        let mut child = spawn_harness(
+            &request,
+            &output,
+            &session,
+            &error,
+            &Arc::new(AtomicBool::new(false)),
+            &[],
+        )
+        .unwrap();
+        assert!(child.wait().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while output.snapshot() != "Ready" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(output.snapshot(), "Ready");
+        assert_eq!(session.lock().unwrap().as_deref(), Some("gemini-session"));
+        assert!(error.lock().unwrap().is_none());
+    }
+    #[cfg(unix)]
+    #[test]
     fn unavailable_version_does_not_hide_installed_harness() {
         use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!("orb-version-probe-{}", uuid::Uuid::new_v4()));
@@ -1706,14 +1837,6 @@ mod tests {
 
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
-        assert_eq!(
-            grok_args("hello"),
-            vec![
-                "--always-approve".to_string(),
-                "--prompt".to_string(),
-                "hello".to_string()
-            ]
-        );
         let fresh = StartRequest {
             image_paths: vec![],
             id: "1".into(),
@@ -1724,6 +1847,37 @@ mod tests {
             model: Some("xai/grok".into()),
             session_id: None,
         };
+        let mut grok = fresh.clone();
+        grok.harness = "grok".into();
+        grok.model = None;
+        assert_eq!(
+            grok_args(&grok),
+            vec![
+                "--always-approve",
+                "--no-plan",
+                "--output-format",
+                "streaming-json",
+                "-p",
+                "hi"
+            ]
+        );
+        grok.model = Some("grok-4.7".into());
+        grok.session_id = Some("existing-session".into());
+        assert_eq!(
+            grok_args(&grok),
+            vec![
+                "--always-approve",
+                "--no-plan",
+                "--output-format",
+                "streaming-json",
+                "--model",
+                "grok-4.7",
+                "--resume",
+                "existing-session",
+                "-p",
+                "hi"
+            ]
+        );
         assert_eq!(
             opencode_args(&fresh),
             vec!["run", "--format", "json", "--dir", "/tmp", "--model", "xai/grok", "hi"]

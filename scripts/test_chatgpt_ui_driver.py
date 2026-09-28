@@ -406,6 +406,16 @@ class ChatGptUiDriverTests(unittest.TestCase):
         asyncio.run(wait_out_cloudflare(page, timeout_ms=2_000))
         self.assertGreaterEqual(page.index, 2)
 
+    def test_empty_bootstrap_waits_for_late_challenge(self) -> None:
+        class DelayedPage(CloudflareClearingPage):
+            async def title(self):
+                return "" if self.index == 0 else await super().title()
+            async def inner_text(self, selector):
+                return "" if self.index == 0 else await super().inner_text(selector)
+        page = DelayedPage()
+        asyncio.run(wait_out_cloudflare(page, timeout_ms=3_000))
+        self.assertGreaterEqual(page.index, 2)
+
     def test_cloudflare_wait_fails_closed_when_stuck(self) -> None:
         with self.assertRaises(TransportUnavailable):
             asyncio.run(wait_out_cloudflare(StuckCloudflarePage(), timeout_ms=1_000))

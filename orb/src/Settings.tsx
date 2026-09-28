@@ -91,6 +91,7 @@ function LocalAgentsCard() {
     claudecode: "Claude Code",
     codex: "Codex",
     grok: "Grok",
+    gemini: "Gemini",
     opencode: "OpenCode",
   };
   const save = (id: string) => {
@@ -104,7 +105,7 @@ function LocalAgentsCard() {
           {busy() ? "Scanning…" : "Scan"}
         </button>
       </Row>
-      <For each={["claudecode", "codex", "grok", "opencode"]}>
+      <For each={["claudecode", "codex", "grok", "opencode", "gemini"]}>
         {(id) => {
           const found = () => row(id);
           return (

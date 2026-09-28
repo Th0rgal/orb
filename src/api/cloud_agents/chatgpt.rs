@@ -7,6 +7,36 @@ use crate::api::{
 use std::{path::Path, sync::Arc};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+fn failure_detail(result: &crate::agents::AgentResult) -> String {
+    let stage = result
+        .data
+        .as_ref()
+        .and_then(|data| data.get("driver_failure_stage"))
+        .and_then(Value::as_str)
+        .filter(|stage| {
+            matches!(
+                *stage,
+                "launch"
+                    | "recovery_probe"
+                    | "model_selection"
+                    | "resume"
+                    | "continuation"
+                    | "composer"
+                    | "send"
+                    | "fresh_chat"
+                    | "blank_chat_check"
+                    | "response"
+                    | "final_history"
+                    | "artifacts"
+            )
+        })
+        .unwrap_or("unknown");
+    // Keep the typed reason and an allowlisted stage. Browser output may
+    // contain account/page content and must not be copied into this receipt.
+    format!("ChatGPT requires account or submission reconciliation; reason={:?}; stage={stage}; no replacement conversation was created", result.terminal_reason)
+}
+
 pub(super) async fn tick(
     store: &Arc<dyn MissionStore>,
     mut e: Execution,
@@ -154,8 +184,25 @@ pub(super) async fn tick(
         } else {
             Phase::SubmissionUncertain
         };
-        e.turns[i].detail = Some("ChatGPT requires account or submission reconciliation; no replacement conversation was created".into());
+        e.turns[i].detail = Some(failure_detail(&result));
     }
     worker::receipt(store, e, i).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failure_receipt_preserves_stage_without_copying_browser_content() {
+        let result = crate::agents::AgentResult::failure("private browser page content", 0)
+            .with_terminal_reason(crate::agents::TerminalReason::AuthError)
+            .with_data(serde_json::json!({"driver_failure_stage":"model_selection"}));
+        let detail = super::failure_detail(&result);
+        assert!(detail.contains("AuthError"));
+        assert!(detail.contains("stage=model_selection"));
+        assert!(!detail.contains("private browser"));
+        let result = result
+            .with_data(serde_json::json!({"driver_failure_stage":"private browser page content"}));
+        assert!(super::failure_detail(&result).contains("stage=unknown"));
+    }
 }

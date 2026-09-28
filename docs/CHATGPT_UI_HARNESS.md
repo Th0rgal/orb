@@ -199,3 +199,14 @@ The architecture was informed by CatGPT-Gateway at commit
 No source code was copied or vendored. This adapter is an original,
 smaller process protocol integrated with sandboxed.sh's lifecycle rather than
 an OpenAI-compatible proxy.
+
+### Browser launch mode
+
+`settings.launch_mode` defaults to `persistent` (Playwright's persistent
+context). `direct` starts ordinary Chromium with the selected service-owned
+profile and attaches through a loopback DevTools endpoint. It requires
+`browser: chromium`; both recovery probes and mission turns receive the same
+explicit setting. The driver is self-contained and closes its owned browser
+on exit. This mode does not import a desktop session or automate a browser
+challenge. An empty page during bootstrap is treated as transport readiness,
+not evidence that the account needs a new login.
