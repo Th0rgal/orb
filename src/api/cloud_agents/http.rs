@@ -314,6 +314,29 @@ pub async fn follow_up(
     if req.attachments.as_ref().is_some_and(|a| !a.is_empty()) {
         return Err(bad("Attachments are not supported by this connector"));
     }
+    // Hosted services only take a prompt and a model: refuse controls they
+    // would silently ignore instead of reporting acceptance.
+    let unsupported: Vec<&str> = [
+        ("agent", req.agent.is_some()),
+        ("github_pr", req.github_pr.is_some()),
+        ("track", req.track.is_some()),
+        ("title", req.title.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .chain(
+        req.extra
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !matches!(*key, "cloud_model" | "cloud_model_params")),
+    )
+    .collect();
+    if !unsupported.is_empty() {
+        return Err(bad(format!(
+            "Unsupported fields for a cloud follow-up: {}",
+            unsupported.join(", ")
+        )));
+    }
     let key = req
         .client_message_id
         .ok_or_else(|| bad("Cloud follow-ups require client_message_id"))?;
@@ -572,6 +595,49 @@ fn chatgpt_account_label(profile: &str) -> String {
 mod follow_up_tests {
     use super::*;
     use crate::api::mission_store::SqliteMissionStore;
+    #[tokio::test]
+    async fn follow_ups_reject_controls_a_hosted_service_would_ignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().into(), "fields")
+                .await
+                .unwrap(),
+        );
+        let mut first = Turn::new("first".into(), "hello".into());
+        first.phase = Phase::ResponseComplete;
+        let e = Execution {
+            parent_mission_id: None,
+            mission_id: Uuid::new_v4(),
+            request_key: "launch".into(),
+            request_signature: "launch".into(),
+            revision: 0,
+            selection: Selection {
+                provider: Provider::Chatgpt,
+                account: "chatgpt-profile".into(),
+                repository: None,
+                git_ref: None,
+                model: None,
+                model_params: vec![],
+            },
+            external_id: None,
+            external_url: None,
+            turns: vec![first],
+        };
+        let e = store
+            .save_cloud_execution(e, None, None, None, vec![])
+            .await
+            .unwrap();
+        for extra in [json!({"track": "t"}), json!({"cloud_modle": "gpt"})] {
+            let mut body = json!({"mission_id": e.mission_id, "content": "again", "client_message_id": Uuid::new_v4()});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let req: ControlMessageRequest = serde_json::from_value(body).unwrap();
+            assert!(follow_up(store.clone(), &req).await.is_err(), "{extra}");
+        }
+        assert_eq!(store.cloud_executions().await.unwrap()[0].turns.len(), 1);
+    }
+
     #[tokio::test]
     async fn overlapping_retries_accept_the_same_turn_and_reject_changed_content() {
         let dir = tempfile::tempdir().unwrap();

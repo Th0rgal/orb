@@ -33,9 +33,11 @@ pub(super) async fn save(
     tokio::task::spawn_blocking(move || {
         let mut c = conn.blocking_lock(); let tx = c.transaction().map_err(err)?;
         let mut new_turn = false;
+        let mut completed_before = std::collections::HashSet::new();
         let old: Option<String> = tx.query_row("SELECT data FROM cloud_executions WHERE request_key=?1", [&execution.request_key], |r| r.get(0)).optional().map_err(err)?;
         if let Some(old) = old {
             let old: Execution = serde_json::from_str(&old).map_err(err)?;
+            completed_before = old.turns.iter().filter(|t| t.phase == crate::api::cloud_agents::Phase::ResponseComplete).map(|t| t.key.clone()).collect();
             if expected.is_none() {
                 if old.parent_mission_id != execution.parent_mission_id || old.request_signature != execution.request_signature || old.selection != execution.selection || old.turns.first().map(|t| &t.prompt) != execution.turns.first().map(|t| &t.prompt) { return Err("Idempotency key already used for another cloud launch".into()); }
                 return Ok(old);
@@ -49,6 +51,15 @@ pub(super) async fn save(
             tx.execute("INSERT INTO missions(id,status,title,workspace_id,backend,created_at,updated_at,project,tags,requires_local_disk,resumable,parent_mission_id) VALUES(?1,'active',?2,?3,?4,?5,?5,?6,?7,0,1,?8)", params![execution.mission_id.to_string(),title,Uuid::nil().to_string(),execution.selection.provider.backend(),now,project,serde_json::to_string(&tags).map_err(err)?,execution.parent_mission_id.map(|id| id.to_string())]).map_err(err)?;
         }
         tx.execute("INSERT INTO cloud_executions(mission_id,request_key,revision,data) VALUES(?1,?2,?3,?4) ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,data=excluded.data",params![execution.mission_id.to_string(),execution.request_key,execution.revision,serde_json::to_string(&execution).map_err(err)?]).map_err(err)?;
+        // Completion callbacks and digests read the answer from mission_events.
+        for turn in execution.turns.iter().filter(|t| t.phase == crate::api::cloud_agents::Phase::ResponseComplete && !completed_before.contains(&t.key)) {
+            let Some(result) = turn.result.as_deref().filter(|r| !r.trim().is_empty()) else { continue };
+            let mid = execution.mission_id.to_string();
+            let logged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_id=?2 AND event_type='assistant_message')", params![mid, turn.key], |r| r.get(0)).map_err(err)?;
+            if !logged {
+                tx.execute("INSERT INTO mission_events(mission_id,sequence,event_type,timestamp,event_id,content) VALUES(?1,(SELECT COALESCE(MAX(sequence),0)+1 FROM mission_events WHERE mission_id=?1),'assistant_message',?2,?3,?4)", params![mid, now_string(), turn.key, result]).map_err(err)?;
+            }
+        }
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {
             tx.execute("UPDATE missions SET status=?2,updated_at=?3 WHERE id=?1 AND (status<>'acknowledged' OR ?4)",params![execution.mission_id.to_string(),turn.phase.mission_status(),now_string(),new_turn]).map_err(err)?;
         }
@@ -161,6 +172,45 @@ mod tests {
         assert!(!mission.requires_local_disk);
         assert_eq!(mission.history[0].content, "Say hello");
     }
+    #[tokio::test]
+    async fn completed_cloud_turns_publish_their_answer_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "cloud-answer")
+            .await
+            .unwrap();
+        let mut e = store
+            .save_cloud_execution(execution(), None, None, None, vec![])
+            .await
+            .unwrap();
+        e.turns[0].phase = Phase::ResponseComplete;
+        e.turns[0].result = Some("The hosted answer".into());
+        e = store
+            .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
+            .await
+            .unwrap();
+        e = store
+            .save_cloud_execution(e.clone(), Some(e.revision), None, None, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .latest_assistant_text(e.mission_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("The hosted answer")
+        );
+        let events = store
+            .get_events(e.mission_id, Some(&["assistant_message"]), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "a receipt re-save must not duplicate the answer"
+        );
+    }
+
     #[tokio::test]
     async fn new_followup_reopens_archive_but_receipts_and_retries_do_not() {
         let dir = tempfile::tempdir().unwrap();

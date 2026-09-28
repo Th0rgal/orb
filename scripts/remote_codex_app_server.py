@@ -18,6 +18,15 @@ def emit(kind, **fields):
     print(json.dumps(dict(type=kind, **fields)), flush=True)
 
 
+GOAL_CONTROLS = ('pause', 'status', 'clear')
+
+
+def goal_control(goal, prompt):
+    """`/goal pause|status|clear` control an existing native goal; they are not objectives."""
+    word = prompt[6:].strip() if prompt.startswith('/goal ') else None
+    return word if goal is not None and word in GOAL_CONTROLS else None
+
+
 def goal_action(goal, prompt):
     requested = prompt.startswith('/goal ')
     objective = prompt[6:].strip() if requested else None
@@ -155,6 +164,17 @@ class NativeSession:
         emit('thread.started', thread_id=self.thread_id)
         self.turns = {turn['id'] for turn in thread.get('turns', []) if turn.get('status') == 'inProgress'}
         goal = self.rpc('thread/goal/get', {'threadId': self.thread_id}).get('goal')
+        control = goal_control(goal, self.config['prompt'])
+        if control:
+            if control == 'pause':
+                self.rpc('thread/goal/set', {'threadId': self.thread_id, 'status': 'paused'})
+            elif control == 'clear':
+                self.rpc('thread/goal/clear', {'threadId': self.thread_id})
+            current = self.rpc('thread/goal/get', {'threadId': self.thread_id}).get('goal') or {}
+            status = 'cleared' if control == 'clear' else current.get('status', goal['status'])
+            emit('goal.status', status=status, objective=current.get('objective', ''))
+            emit('turn.completed')
+            return
         action = goal_action(goal, self.config['prompt'])
         self.goal = action is not None
         # Restored stop snapshots precede this explicit activation.

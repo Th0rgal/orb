@@ -45,4 +45,11 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertEqual(OrbMessageImages.parse("  ordinary\n\n\ntext  ").text, "  ordinary\n\n\ntext  ")
         for value in ["[Uploaded: https://example.com/a.png]", "[Uploaded: /tmp/a.pdf]"] { XCTAssertEqual(OrbMessageImages.parse(value).text, value) }
     }
+
+    func testLegacyInlineImageMarkersBecomeThumbnails() {
+        let data = "data:image/png;base64,aGVsbG8="
+        XCTAssertEqual(OrbMessageImages.parse("Look [Image #1]\n\n[Image #1] [Uploaded: \(data)]"),
+                       OrbMessageImages(text: "Look [Image #1]", paths: [data], references: [1]))
+        XCTAssertEqual(OrbMessageImages.parse("[Uploaded: data:text/html;base64,aGVsbG8=]").text, "[Uploaded: data:text/html;base64,aGVsbG8=]")
+    }
 }
