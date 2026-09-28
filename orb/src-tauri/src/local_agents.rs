@@ -2158,6 +2158,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("claude-fixture");
         std::fs::write(&bin, r#"#!/bin/sh
+[ "$1" = --version ] && { echo 'claude 1.0.0'; exit 0; }
 read -r init
 read -r prompt
 printf '%s\n' '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/outside/AGENTS.md"}}}'
@@ -2361,7 +2362,7 @@ printf '%s\n' '{"type":"result"}'
         for harness in ["codex", "claudecode"] {
             let dir = tempfile::tempdir().unwrap();
             let bin = dir.path().join("launcher");
-            std::fs::write(&bin, "#!/bin/sh\nsleep 30 &\necho $! > child.pid\nwait\n").unwrap();
+            std::fs::write(&bin, "#!/bin/sh\n[ \"$1\" = --version ] && { echo launcher 1.0.0; exit 0; }\nsleep 30 &\necho $! > child.pid\nwait\n").unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
             local_agents_start(StartRequest {
