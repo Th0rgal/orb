@@ -333,9 +333,17 @@ pub async fn project_context_file(
     path: String,
     content: Option<String>,
     revision: Option<u64>,
+    destination_project: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use crate::project_context_store::Operation;
     let replica = replica(&request)?;
+    let other = destination_project
+        .filter(|project| project != &request.project)
+        .map(|project| Request {
+            project,
+            paths: Vec::new(),
+            ..request.clone()
+        });
     if !replica.status()?.ready || !replica.store.metadata.join("connection.json").exists() {
         project_context_prepare(request).await?;
     }
@@ -371,7 +379,18 @@ pub async fn project_context_file(
     }
     if matches!(operation.as_str(), "move" | "copy") {
         let destination = content.ok_or("Destination is required")?;
-        store.transfer_file(&path, &destination, operation == "copy")?;
+        if let Some(other) = other {
+            let target = self::replica(&other)?;
+            if !target.status()?.ready || !target.store.metadata.join("connection.json").exists() {
+                project_context_prepare(other).await?;
+            }
+            store.transfer_to(&target.store, &path, &destination, operation == "copy")?;
+            tokio::spawn(async move {
+                let _ = target.tick().await;
+            });
+        } else {
+            store.transfer_file(&path, &destination, operation == "copy")?;
+        }
         tokio::spawn(async move {
             let _ = replica.tick().await;
         });

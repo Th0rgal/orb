@@ -1,6 +1,7 @@
 import { Show, createMemo, createSignal, createEffect, type JSX } from "solid-js";
 import { copyText } from "./clipboard";
 import { CloseIcon, CopyIcon, CheckIcon } from "./icons";
+import { Dialog, DialogButton } from "./Dialog";
 
 export function describeError(raw: string, fallback = "Something went wrong") {
   if (/\[claude-code:unrecognized_model\]/.test(raw)) return { title: "Claude Code does not recognize this model", message: "Update Claude Code on the machine running this conversation (claude update), then retry. If it persists, choose a model available to that Claude account." };
@@ -39,4 +40,20 @@ export function ErrorNotice(p: { error: string; title?: string; onDismiss?: () =
     <button type="button" class="icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={14} />}><CheckIcon size={14} /></Show></button>
     <Show when={p.onDismiss}><button type="button" class="icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={14} /></button></Show>
   </section>;
+}
+
+/** A refused action interrupts once, in front of the work, instead of displacing the list it came from. */
+export function ErrorDialog(p: { error: string; title?: string; onClose: () => void }) {
+  const [copied, setCopied] = createSignal(false);
+  const raw = () => p.error.replace(/^Error: /, "");
+  const info = createMemo(() => describeError(raw(), p.title ?? "This action couldn’t be completed"));
+  const copy = () => void copyText(p.error).then(() => setCopied(true)).catch(() => setCopied(false));
+  return <Dialog size="compact" title={info().title} onClose={p.onClose} footer={<>
+    <DialogButton onClick={copy}>{copied() ? "Copied" : "Copy error"}</DialogButton>
+    <DialogButton variant="primary" onClick={p.onClose}>OK</DialogButton>
+  </>}>
+    <div class="error-dialog" role="alert"><p>{info().message}</p>
+      <Show when={info().message !== raw()}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
+    </div>
+  </Dialog>;
 }
