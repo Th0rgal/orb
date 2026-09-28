@@ -22,7 +22,7 @@ function journal(rows:any[]){
  const confirmed=new Map<string,{status?:string;title?:string;observed_at:number}>();
  const pending=(row:any)=>!!row.local_sync_pending||row.status==='active';
  const invoke=vi.fn(async(command:string,args:any)=>{
-  if(command==='local_origin_list')return rows.map(row=>{const c=confirmed.get(row.id);return c&&!pending(row)?{...row,status:c.status??row.status,title:c.title??row.title}:row;});
+  if(command==='local_origin_list')return rows.map(row=>{const c=confirmed.get(row.id),shown=c&&!pending(row)?{...row,status:c.status??row.status,title:c.title??row.title}:row;return {...shown,local_run_active:row.status==='active'};});
   if(command==='local_origin_confirm'){for(const c of args.confirmations){const row=rows.find(r=>r.id===c.id),old=confirmed.get(c.id);if(!row||pending(row)||(old&&c.observed_at<=old.observed_at))continue;confirmed.set(c.id,{...old,...c});}return;}
   throw new Error(`unknown command ${command}`);
  });
@@ -98,4 +98,19 @@ it('works with a desktop build that cannot remember confirmations',async()=>{
  (window as any).__TAURI_INTERNALS__={invoke:vi.fn(async(command:string)=>{if(command==='local_origin_list')return [done];throw new Error('unknown command local_origin_confirm');})};
  vi.stubGlobal('fetch',core([{...done,status:'acknowledged'}]));
  expect(await listProjectMissions('test')).toMatchObject([{id:'done',status:'acknowledged'}]);
+});
+it('does not mistake a running status confirmed by Core for local work',async()=>{
+ setConnection('http://core.test','token');const {confirmed}=journal([done]);
+ // Core resumed the mission elsewhere, then it was interrupted.
+ vi.stubGlobal('fetch',core([{...done,status:'active'}]));
+ expect(await listProjectMissions('test')).toMatchObject([{id:'done',status:'active'}]);
+ expect(confirmed.get('done')?.status).toBe('active');
+ vi.stubGlobal('fetch',core([{...done,status:'interrupted',title:'From Core'}]));
+ const rows=await listProjectMissions('test');
+ expect(rows).toHaveLength(1);
+ expect(rows[0]).toMatchObject({status:'interrupted',title:'From Core'});
+ expect(rows[0].local_run_active).toBeUndefined();
+ expect(confirmed.get('done')?.status).toBe('interrupted');
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({...done,status:'interrupted'}))));
+ expect((await getMission('done')).status).toBe('interrupted');
 });

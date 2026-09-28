@@ -6,8 +6,10 @@ export async function localOrigins():Promise<Mission[]>{
  try{const rows=await invoke('local_origin_list',{connection:{api_url:getApiUrl(),token:getJwt()}});if(version!==connectionVersion())throw new Error("Connection changed while reading local missions");return Array.isArray(rows)?rows as Mission[]:[];}
  catch(error){if(/unknown command|not found/i.test(String(error)))return [];throw error;}
 }
-/** Local work that Core has not accepted yet. It overrides what Core lists. */
-export const localPending=(mission:Mission)=>!!mission.local_sync_pending||mission.status==="active";
+/** Local work that Core has not accepted yet. It overrides what Core lists.
+ * The shown status may be one Core confirmed, so only the journal's own run state counts;
+ * a desktop build without that field never shows confirmed statuses. */
+export const localPending=(mission:Mission)=>!!mission.local_sync_pending||(mission.local_run_active??mission.status==="active");
 let lastObservation=0;
 /** Orders requests and accepted changes made by this window, even within one millisecond. */
 export const observe=()=>lastObservation=Math.max(Date.now(),lastObservation+1);

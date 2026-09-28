@@ -185,6 +185,8 @@ export interface Mission {
   execution_kind?: "hosted";
   cloud?: import("./cloudAgentApi").CloudExecution;
   local_sync_pending?: boolean;
+  /** The desktop journal itself is still running this mission (not a status Core confirmed). */
+  local_run_active?: boolean;
   local_sync_error?: string | null;
   machine_transfer?: import("./machineTransfer").TransferAction;
   working_directory?: string | null;
