@@ -1,6 +1,6 @@
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
-import type { StreamEvent } from "./stream";
+import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean }
@@ -53,6 +53,8 @@ export class TranscriptReducer {
   apply(ev: StreamEvent) {
     this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
     const d = ev.data;
+    // Status notifications are not assistant completions: do not close live text/tools.
+    if (ev.type === "assistant_message" && d.success !== false && isGeneratedRemoteJobStatus({content: str(d.content), metadata: d})) return;
     // A message has one identity and a monotonic queued -> delivered lifecycle.
     // Process it before event dedupe and channel sequence checks: receipt, queue
     // snapshot, stored history and SSE may arrive in any order.
