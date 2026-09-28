@@ -4,7 +4,7 @@ on:
   push:
     branches: [master, main, "release/*"]
   pull_request:
-    branches: [master, main, feat/add-orb-client]
+    branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]
   # Run CI on a schedule to catch issues even without new commits
   schedule:
