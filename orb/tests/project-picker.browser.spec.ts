@@ -27,6 +27,9 @@ test("actual App project chooser searches, selects and creates with keyboard and
  await expect(search).toHaveCSS("border-radius","0px");
  await expect(page.getByRole("option").first()).toContainText("Default");
  await expect(page.getByRole("option",{name:"Default Current project"})).toHaveAttribute("aria-selected","true");
+ // Names sit next to their folder icon, not pushed to the right edge.
+ const option=await page.getByRole("option").nth(1).boundingBox(),name=await page.locator(".project-option-name").nth(1).boundingBox();
+ expect(name!.x-option!.x).toBeLessThan(40);
  expect(await page.locator(".project-options").evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
  await page.screenshot({path:"test-results/orb-project-picker.png"});
  await page.evaluate(()=>document.documentElement.dataset.theme="light");

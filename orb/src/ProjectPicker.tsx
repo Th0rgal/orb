@@ -42,7 +42,7 @@ export function ProjectPicker(p: {
     <div class="project-picker-label">Recents</div>
     <div class="project-options" id="project-options" role="listbox" aria-label="Projects">
       <For each={rows()}>{(row,index)=><button id={`project-option-${index()}`} role="option" aria-selected={row.id===p.selected} class={`project-option ${armed()&&index()===active()?"highlighted":""}`} onPointerEnter={()=>{setArmed(true);setActive(index());}} onClick={()=>p.onSelect(row.id)}>
-        <span class="row-project-color" style={{ color: projectColor(row.id) }}><Ic.FolderIcon size={15}/></span><span>{row.name}</span><Show when={row.id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
+        <span class="row-project-color" style={{ color: projectColor(row.id) }}><Ic.FolderIcon size={15}/></span><span class="project-option-name">{row.name}</span><Show when={row.id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
       </button>}</For>
       <Show when={!rows().length}><p class="project-empty">{p.projects.length?"No matching projects":"No projects yet"}</p></Show>
     </div>
