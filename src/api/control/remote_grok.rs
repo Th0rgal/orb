@@ -218,6 +218,9 @@ pub(crate) enum StreamUpdate {
 /// non-JSON (stderr) lines.
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
+    claude: bool,
+    claude_message_streamed: bool,
+    claude_boundary: bool,
     partial: String,
     dropping_line: bool,
     text_segment: String,
@@ -308,6 +311,10 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if self.claude {
+            self.feed_claude(&value, updates);
+            return;
+        }
         // Codex exec emits native thread/turn/item events. Keep the thread id
         // for continuation on the same node and preserve tool/text ordering.
         let kind = value["type"].as_str().unwrap_or_default();
@@ -606,7 +613,7 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex"
+                    GROK_BACKEND | "opencode" | "codex" | "claudecode"
                 ) =>
             {
                 mission
@@ -618,11 +625,14 @@ impl NativeGrokObserver {
             job_id,
             owner: owner.clone(),
             session_persisted: mission.session_id.clone(),
+            stream: GrokStream {
+                claude: mission.backend == "claudecode",
+                ..Default::default()
+            },
             mission,
             log_offset: 0,
             log_len: 0,
             streaming: LogStreaming::Unknown,
-            stream: GrokStream::default(),
             thinking_open: false,
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
@@ -711,7 +721,10 @@ impl NativeGrokObserver {
             self.close_thinking();
             self.log_offset = 0;
             self.log_len = chunk.log_len;
-            self.stream = GrokStream::default();
+            self.stream = GrokStream {
+                claude: self.mission.backend == "claudecode",
+                ..Default::default()
+            };
             return;
         }
         self.log_len = chunk.log_len;
@@ -900,6 +913,7 @@ impl NativeGrokObserver {
                 Some("end_turn" | "EndTurn")
             );
         let success = succeeded
+            && (!self.stream.claude || self.stream.ended)
             && !auth_required
             && self.stream.error.is_none()
             && (!self.mission.goal_mode || native_end);
@@ -1998,3 +2012,6 @@ mod tests {
         assert!(other.contains("'claudecode'"), "{other}");
     }
 }
+
+#[path = "remote_claude.rs"]
+mod claude;

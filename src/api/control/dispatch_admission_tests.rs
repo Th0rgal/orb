@@ -7800,6 +7800,8 @@ async fn remote_claude_allocates_and_resumes_native_session() {
         command.contains(&format!("--session-id '{}'", session)),
         "{command}"
     );
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
     fixture.set_state("succeeded");
     wait_until("Claude first turn completes", 20, || async {
         store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
@@ -7812,6 +7814,7 @@ async fn remote_claude_allocates_and_resumes_native_session() {
             .is_empty()
     })
     .await;
+    fixture.log.lock().unwrap().clear();
     fixture.set_state("running");
     let response = h.request(false, id, json!({"content":"second turn"})).await;
     assert_eq!(
@@ -7828,6 +7831,10 @@ async fn remote_claude_allocates_and_resumes_native_session() {
         "{command}"
     );
     assert!(!command.contains("--session-id"));
+    assert!(command.contains("--output-format stream-json"));
+    assert!(command.contains("--include-partial-messages"));
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
     fixture.set_state("succeeded");
 }
 
@@ -7936,6 +7943,8 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
     );
     assert!(command.contains("portable-context-sentinel"), "{command}");
     assert!(command.contains("/transferred-workspace"), "{command}");
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
     fixture.set_state("succeeded");
     wait_until("Claude first turn completes", 20, || async {
         store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
@@ -7948,6 +7957,7 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
             .is_empty()
     })
     .await;
+    fixture.log.lock().unwrap().clear();
     fixture.set_state("running");
     let response = h.request(false, id, json!({"content":"second turn"})).await;
     assert_eq!(
@@ -7964,10 +7974,14 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
         "{command}"
     );
     assert!(!command.contains("--session-id"));
+    assert!(command.contains("--output-format stream-json"));
+    assert!(command.contains("--include-partial-messages"));
     assert!(
         !command.contains("portable-context-sentinel"),
         "history must not be injected on native resume: {command}"
     );
     assert!(command.contains("/transferred-workspace"), "{command}");
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
     fixture.set_state("succeeded");
 }

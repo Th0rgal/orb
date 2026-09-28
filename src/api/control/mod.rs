@@ -12274,7 +12274,7 @@ pub(crate) fn remote_execution_for_plan(
         } => {
             let mut command = String::from(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
-                 claude -p --dangerously-skip-permissions",
+                 claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages",
             );
             if let Some(model) = model {
                 command.push_str(" --model ");
@@ -36931,7 +36931,7 @@ Investigate <service/> failures.
         let exec = remote_execution_for_plan(&plan, "https://core.example", "sk-proxy-abc");
         assert!(
             exec.command
-                .contains("claude -p --dangerously-skip-permissions --model 'claude-opus-5' "),
+                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model 'claude-opus-5' "),
             "{}",
             exec.command
         );
