@@ -6,7 +6,7 @@
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 type Entry = { at: string; kind: string } & Record<string, unknown>;
 
-const STALL_MS = 250, BEAT_MS = 500, FLUSH_MS = 5000, SUMMARY_MS = 30_000, SLOW_REQUEST_MS = 2000, SLOW_WORK_MS = 50;
+const STALL_MS = 250, HIDDEN_STALL_MS = 2500, BEAT_MS = 500, FLUSH_MS = 5000, SUMMARY_MS = 30_000, SLOW_REQUEST_MS = 2000, SLOW_WORK_MS = 50;
 const KEPT = 500;
 
 const pending: Entry[] = [];
@@ -78,8 +78,14 @@ async function checkWindow(): Promise<void> {
       if (Math.abs(expected.height - page.height) > 2 || Math.abs(expected.width - page.width) > 2) wrong = true;
     }
   } catch { /* outside the desktop app there is no window to compare with */ }
-  if (wrong) note("window-mismatch", shape);
+  // While the window is being resized the two sizes are read at different
+  // moments; only a difference that lasts is a fault.
+  const seen = JSON.stringify(shape);
+  if (wrong && lastMismatch === seen) note("window-mismatch", shape);
+  lastMismatch = wrong ? seen : "";
+  if (wrong) { clearTimeout(recheck); recheck = setTimeout(() => void checkWindow(), 1500); }
 }
+let lastMismatch = "", recheck: ReturnType<typeof setTimeout> | undefined;
 
 function summary(): void {
   const busiest = [...work].sort((a, b) => b[1].ms - a[1].ms).slice(0, 8).map(([name, row]) => ({ name, calls: row.calls, ms: round(row.ms), worst: round(row.worst) }));
@@ -117,7 +123,8 @@ export function startDiagnostics(): void {
   setInterval(() => {
     const now = performance.now(), late = now - expected;
     expected = now + BEAT_MS;
-    if (late < STALL_MS) return;
+    // A hidden page has its timers slowed to about one per second.
+    if (late < (document.hidden ? HIDDEN_STALL_MS : STALL_MS)) return;
     stalls.count++; stalls.ms += late; stalls.worst = Math.max(stalls.worst, late);
     note("stall", { ms: round(late), hidden: document.hidden });
     if (late >= 1000) void flush();
@@ -137,7 +144,8 @@ export function startDiagnostics(): void {
   setInterval(summary, SUMMARY_MS);
   setInterval(() => void flush(), FLUSH_MS);
   setInterval(() => void checkWindow(), 10_000);
-  window.addEventListener("resize", () => void checkWindow());
+  let resized: ReturnType<typeof setTimeout> | undefined;
+  window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(() => void checkWindow(), 1000); });
   window.addEventListener("error", event => note("error", { message: String(event.message).slice(0, 300), source: `${event.filename}:${event.lineno}` }));
   window.addEventListener("unhandledrejection", event => note("rejection", { message: String(event.reason).slice(0, 300) }));
   document.addEventListener("visibilitychange", () => note("visibility", { hidden: document.hidden }));
