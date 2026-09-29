@@ -9,7 +9,7 @@ test("moves from the footer with an inventory and no automatic execution", async
     else {
       calls.push(body.op === "files" ? body.operation.op : body.op);
       if (body.op === "prepare") result = action;
-      else if (body.operation?.op === "snapshot") { action.manifest = { files: [{ path: "notes.txt", bytes: 3, executable: false, sha256: "hash" }], bytes: 3, excluded: [".env", "node_modules"], links: [{ path: "bin/cargo", target: "rustup" }], skipped: [{ path: "context", reason: "link points outside the workspace" }] }; action.phase = "copying"; result = action; }
+      else if (body.operation?.op === "snapshot") { action.manifest = { files: [{ path: "notes.txt", bytes: 3, executable: false, sha256: "hash" }, ...Array.from({ length: 150 }, (_, i) => ({ path: `folder${i}/file`, bytes: 0, executable: false, sha256: "hash" }))], bytes: 3, excluded: [".env", "node_modules"], links: [{ path: "bin/cargo", target: "rustup" }], skipped: [{ path: "context", reason: "link points outside the workspace" }] }; action.phase = "copying"; result = action; }
       else if (body.operation?.op === "read") result = { data: "YWJj" };
       else if (body.operation?.op === "stage") result = { received: {}, sealed: false };
       else if (body.operation?.op === "verify") { action.phase = "verified"; result = action; }
@@ -26,6 +26,8 @@ test("moves from the footer with an inventory and no automatic execution", async
   await expect(page.getByRole("dialog", { name: "Change machine" })).toBeVisible();
   await page.getByRole("button", { name: "Prepare transfer" }).click();
   const inventory = page.getByRole("region", { name: "Workspace inventory" });
+  await expect(inventory.locator(".transfer-group")).toHaveCount(100);
+  await expect(inventory.getByText("and 51 smaller folders")).toBeVisible();
   await inventory.getByText("1 file · 3 B").click();
   await expect(inventory.getByText("notes.txt")).toBeVisible();
   await expect(inventory.getByText("context")).toBeVisible();
@@ -37,5 +39,5 @@ test("moves from the footer with an inventory and no automatic execution", async
   await page.screenshot({ path: "artifacts/machine-transfer-review.png" });
   await page.getByRole("button", { name: "Move to Spark" }).click();
   await expect(page.getByRole("button", { name: "Change machine: Spark" })).toBeVisible();
-  expect(calls).toEqual(["prepare", "snapshot", "stage", "read", "write", "verify", "activate"]);
+  expect([...new Set(calls)]).toEqual(["prepare", "snapshot", "stage", "read", "write", "verify", "activate"]);
 });

@@ -6,6 +6,8 @@ export const formatCount = (n: number, noun: string) => `${n.toLocaleString("en-
 const BUNDLE = ".transfer-git.bundle";
 /** Paths listed under an opened folder; a workspace may hold 50,000 of them. */
 const SHOWN = 50;
+/** Folders listed, largest first; a workspace may hold as many folders as files. */
+const GROUPS = 100;
 export interface InventoryGroup { name: string; files: number; bytes: number; history: number; paths: string[] }
 export const LOOSE = "Top-level files";
 /** The moved files by top-level folder, largest first. Files at the root share one group; Git bundles count as history, not as files. */
@@ -38,7 +40,7 @@ export function TransferInventory(p: { manifest: Manifest }) {
     <Show when={groups().length}>
       <h3>Moving</h3>
       <div class="transfer-groups">
-        <For each={groups()}>{g => <details class="transfer-group" classList={{ leaf: !g.paths.length }}>
+        <For each={groups().slice(0, GROUPS)}>{g => <details class="transfer-group" classList={{ leaf: !g.paths.length }}>
           <summary><span classList={{ "transfer-path": g.name !== LOOSE && g.name !== "Workspace" }}>{g.name}</span><span class="transfer-meta">{g.files ? formatCount(g.files, "file") : "Git history"} · {formatBytes(g.bytes)}</span><span class="transfer-bar" style={{ width: `${Math.max(2, g.bytes / largest() * 100)}%` }} /></summary>
           <Show when={g.paths.length}><ul>
             <For each={g.paths}>{path => <li class="transfer-path">{path}</li>}</For>
@@ -46,6 +48,7 @@ export function TransferInventory(p: { manifest: Manifest }) {
             <Show when={g.history}><li class="transfer-more">Git history · {formatBytes(g.history)}</li></Show>
           </ul></Show>
         </details>}</For>
+        <Show when={groups().length > GROUPS}><p class="transfer-more">and {formatCount(groups().length - GROUPS, "smaller folder")}</p></Show>
       </div>
     </Show>
     <Show when={skipped().length}><details class="transfer-section" open>
