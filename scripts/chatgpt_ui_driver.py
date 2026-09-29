@@ -166,16 +166,18 @@ def prompt_matches(rendered: str, message: str) -> bool:
     """Whether a rendered user message is the prompt this driver sent.
 
     Exact apart from whitespace and typographic quotes. A long prompt also
-    matches the collapsed form the page shows for it: its own beginning.
+    matches the collapsed form the page shows for it: its own beginning,
+    followed by the mark of the cut. Without that mark a beginning proves
+    nothing: an earlier prompt may start with the same words.
     """
-    shown = normalized_prompt(rendered.translate(_TYPOGRAPHY))
+    whole = normalized_prompt(rendered.translate(_TYPOGRAPHY))
     sent = normalized_prompt(message.translate(_TYPOGRAPHY))
-    if shown == sent:
+    if whole == sent:
         return True
-    shown = _COLLAPSE_TAIL.sub("", shown).rstrip()
-    if shown == sent:
-        return len(sent) >= COLLAPSED_PROMPT_MIN
-    return len(shown) >= COLLAPSED_PROMPT_MIN and sent.startswith(shown)
+    shown = _COLLAPSE_TAIL.sub("", whole).rstrip()
+    if shown == whole or len(shown) < COLLAPSED_PROMPT_MIN:
+        return False
+    return sent.startswith(shown)
 
 
 def model_selection(requested: str) -> tuple[str, str]:

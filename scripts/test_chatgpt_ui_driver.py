@@ -683,6 +683,9 @@ class ChatGptUiDriverTests(unittest.TestCase):
         self.assertFalse(prompt_matches(shown[:120] + "…", prompt))
         self.assertFalse(prompt_matches("Autre demande. " + shown, prompt))
         self.assertFalse(prompt_matches(shown + " et autre chose", prompt))
+        # A beginning without the mark of a cut may be an earlier prompt.
+        self.assertFalse(prompt_matches(shown, prompt))
+        self.assertFalse(prompt_matches(shown, shown + " Puis compare avec 2024."))
         self.assertFalse(prompt_matches("hello", "hello!"))
         self.assertFalse(prompt_matches("hello…", "hello world"))
 
