@@ -1716,6 +1716,8 @@ impl Recheck {
     /// New tasks start from the first delay.
     fn restart(&self) {
         self.0.lock().unwrap().asked = 0;
+        // The timer may already sleep for the longer delay of the old tasks.
+        self.1.notify_all();
     }
     fn close(&self) {
         self.0.lock().unwrap().closed = true;
