@@ -332,6 +332,51 @@ mod claude_capability_tests {
         assert_eq!(current["harnesses"], json!([]));
     }
 }
+/// How long a listing reuses what the nodes answered. Clients poll the
+/// destinations of every open mission; asking each node on every poll cost
+/// about a second per request.
+const NODE_CAPABILITIES_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+type NodeCapabilities = Vec<(String, Result<Value, Error>)>;
+
+/// What each configured node supports, for listings only: a transfer always
+/// asks its destination again. Availability and cordons are not cached.
+async fn listed_node_capabilities(state: &AppState) -> Vec<Result<Value, Error>> {
+    static CACHE: std::sync::OnceLock<
+        tokio::sync::Mutex<Option<(std::time::Instant, NodeCapabilities)>>,
+    > = std::sync::OnceLock::new();
+    let nodes = &state.config.remote_nodes.nodes;
+    let mut cache = CACHE.get_or_init(Default::default).lock().await;
+    let fresh = cache.as_ref().is_some_and(|(at, answers)| {
+        at.elapsed() < NODE_CAPABILITIES_TTL
+            && answers.len() == nodes.len()
+            && answers
+                .iter()
+                .zip(nodes)
+                .all(|((id, _), node)| *id == node.id)
+    });
+    if !fresh {
+        let answers = futures::future::join_all(
+            nodes
+                .iter()
+                .map(|node| node_transfer_capabilities(state, &node.id)),
+        )
+        .await;
+        *cache = Some((
+            std::time::Instant::now(),
+            nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .zip(answers)
+                .collect(),
+        ));
+    }
+    cache
+        .as_ref()
+        .map(|(_, answers)| answers.iter().map(|(_, answer)| answer.clone()).collect())
+        .unwrap_or_default()
+}
+
 async fn capabilities(state: &AppState) -> Vec<Value> {
     let harnesses: Vec<_> = state
         .backend_registry
@@ -344,8 +389,8 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
-    for node in &state.config.remote_nodes.nodes {
-        let result = node_transfer_capabilities(state, &node.id).await;
+    let answers = listed_node_capabilities(state).await;
+    for (node, result) in state.config.remote_nodes.nodes.iter().zip(answers) {
         rows.push(match result {Ok(v)=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":v["harnesses"]}),Err((_,e))=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":e})});
     }
     rows
