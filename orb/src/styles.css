@@ -1786,14 +1786,53 @@ button.fork-trigger:hover { color: var(--fg); }
 .machine-transfer-menu { position: absolute; bottom: 26px; left: 0; width: min(360px, calc(100vw - 40px)); max-height: min(560px, 70vh); overflow: auto; z-index: 90; }
 .machine-transfer-menu .menu-item { width: 100%; justify-content: space-between; text-align: left; }
 .machine-transfer-menu .menu-item small { display: block; font-size: 11px; opacity: .65; white-space: normal; }
-.transfer-body { padding: 0 12px 12px; font-size: 12px; white-space: normal; }
-.transfer-body p { margin: 8px 0 12px; opacity: .75; line-height: 1.5; }
-.transfer-body label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0; }
-.transfer-body select { max-width: 240px; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px; }
-.transfer-body details { margin: 12px 0; }
-.transfer-body ul { max-height: 130px; overflow: auto; padding-left: 18px; overflow-wrap: anywhere; }
-.transfer-body progress { width: 100%; margin: 8px 0; }
-.transfer-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.machine-transfer-menu.transfer-dialog { display: flex; flex-direction: column; width: min(400px, calc(100vw - 40px)); padding: 0; overflow: hidden; }
+.transfer-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; }
+.transfer-head strong { display: block; font-size: 13px; font-weight: 500; color: var(--fg-strong); }
+.transfer-head small { display: block; margin-top: 1px; font-size: 11.5px; color: var(--fg-3); }
+.transfer-steps { display: flex; gap: 4px; margin: 0; padding: 0 14px 10px; list-style: none; border-bottom: 1px solid var(--stroke); }
+.transfer-steps li { flex: 1; padding-top: 6px; border-top: 2px solid var(--stroke-strong); font-size: 10.5px; letter-spacing: .02em; color: var(--fg-4); }
+.transfer-steps li.done { border-color: var(--green); color: var(--fg-3); }
+.transfer-steps li.current { border-color: var(--fg-2); color: var(--fg); }
+.transfer-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px 12px; font-size: 12px; white-space: normal; }
+.transfer-body p { margin: 8px 0; color: var(--fg-3); line-height: 1.5; }
+.transfer-options { display: grid; gap: 6px; margin: 10px 0 2px; }
+.transfer-options label { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; color: var(--fg-2); }
+.transfer-options .orb-select { width: 100%; max-width: none; }
+.transfer-body .error-notice { margin-top: 12px; font-size: 12px; }
+.transfer-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 10px 0 0; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--stroke); overflow: hidden; }
+.transfer-stats div { padding: 8px 10px; background: var(--bg-inset); }
+.transfer-stats dt { font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--fg-4); }
+.transfer-stats dd { margin: 2px 0 0; font-size: 14px; color: var(--fg-strong); font-variant-numeric: tabular-nums; }
+.transfer-inventory h3 { margin: 14px 0 4px; font-size: 10.5px; font-weight: 400; letter-spacing: .04em; text-transform: uppercase; color: var(--fg-4); }
+.transfer-inventory summary { display: flex; align-items: center; gap: 8px; min-height: 26px; border-radius: var(--radius-sm); cursor: pointer; list-style: none; }
+.transfer-inventory summary::-webkit-details-marker { display: none; }
+.transfer-inventory summary::before { content: ""; flex: none; width: 5px; height: 5px; margin: 0 2px 0 3px; border: solid var(--fg-4); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--t) var(--ease); }
+.transfer-inventory details[open] > summary::before { transform: rotate(45deg); }
+.transfer-inventory summary:hover { background: var(--bg-hover); }
+.transfer-inventory summary:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: -1px; }
+.transfer-path { min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--fg); overflow-wrap: anywhere; }
+.transfer-meta { margin-left: auto; flex: none; padding-right: 4px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.transfer-group summary { position: relative; }
+.transfer-group.leaf summary { cursor: default; }
+.transfer-group.leaf summary::before { visibility: hidden; }
+.transfer-bar { position: absolute; left: 0; bottom: 0; height: 1px; background: var(--fg-4); opacity: .6; }
+.transfer-inventory ul { max-height: 132px; overflow: auto; margin: 2px 0 8px; padding: 0 0 0 18px; list-style: none; }
+.transfer-inventory li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 2px 0; }
+.transfer-inventory li small, .transfer-more { font-size: 11px; color: var(--fg-3); }
+.transfer-group li.transfer-path { color: var(--fg-2); }
+.transfer-section { margin-top: 6px; border-top: 1px solid var(--stroke); padding-top: 6px; }
+.transfer-section summary { color: var(--fg-2); }
+.transfer-section p { margin: 0 0 4px 18px; font-size: 11.5px; }
+.transfer-count { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--bg-active); color: var(--fg-2); font-size: 10.5px; line-height: 17px; text-align: center; font-variant-numeric: tabular-nums; }
+.transfer-count.warn { background: color-mix(in srgb, var(--amber) 18%, var(--bg)); color: var(--amber); }
+.transfer-foot { padding: 10px 14px 12px; border-top: 1px solid var(--stroke); }
+.transfer-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.transfer-status progress { flex-basis: 100%; width: 100%; height: 4px; appearance: none; border: 0; border-radius: 2px; background: var(--stroke); }
+.transfer-status progress::-webkit-progress-bar { background: var(--stroke); border-radius: 2px; }
+.transfer-status progress::-webkit-progress-value { background: var(--fg-2); border-radius: 2px; transition: width var(--t) linear; }
+.transfer-status progress::-moz-progress-bar { background: var(--fg-2); border-radius: 2px; }
+.transfer-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .transfer-marker { color: var(--muted); font-size: 11px; text-align: center; margin: 12px 0; }
 
 /* Settings share Cursor's compact, centered column and quiet navigation. */
@@ -1918,7 +1957,6 @@ select.orb-select-native:disabled { cursor: default; }
 .orb-option[data-active="true"], .orb-option:hover { background: var(--bg-hover); color: var(--fg); }
 .orb-option[aria-disabled="true"] { opacity: .4; cursor: default; }
 .routing-filters .orb-select { width: 100%; }
-.transfer-body .orb-select { max-width: 240px; }
 .menu { border-radius: var(--radius-sm); padding: 4px; box-shadow: 0 4px 12px #0002; }
 .menu-item { border-radius: 3px; }
 .routing-picker { position: relative; }

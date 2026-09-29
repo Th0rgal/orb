@@ -26,7 +26,18 @@ fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Err
     }
     use sha2::{Digest, Sha256};
     let path = context_path(a.id);
-    if manifest.files.iter().any(|f| f.path == path) {
+    // A link at the archive's path, or at one of its folders, would make the
+    // destination refuse the manifest after the transfer is recorded.
+    let beneath = |link: &str| {
+        path.strip_prefix(link)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    if manifest.files.iter().any(|f| f.path == path)
+        || manifest
+            .links
+            .iter()
+            .any(|l| l.path == path || beneath(&l.path))
+    {
         return Err(conflict(
             "Workspace contains the reserved transfer conversation path",
         ));
@@ -36,7 +47,7 @@ fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Err
         .checked_add(a.context.len() as u64)
         .ok_or_else(|| conflict("Transfer size overflow"))?;
     if manifest.bytes > crate::machine_transfer::MAX_BYTES
-        || manifest.files.len() >= crate::machine_transfer::MAX_FILES
+        || manifest.files.len() + manifest.links.len() >= crate::machine_transfer::MAX_FILES
     {
         return Err(conflict(
             "Workspace plus conversation exceeds checkpoint limits",
@@ -411,7 +422,7 @@ pub async fn inspect(
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"features":["links"],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
@@ -487,6 +498,18 @@ async fn adapter(
             tokio::task::spawn_blocking(move||crate::machine_transfer::operate(&area,source.as_deref(),operation)).await.map_err(internal_error)?.map_err(conflict)
         }
     }
+}
+/// An adapter that predates transferable links verifies the files and silently
+/// leaves the links out; its receipt does not count them.
+fn check_links(manifest: &Manifest, receipt: &Value, machine: &Machine) -> Result<(), Error> {
+    if !manifest.links.is_empty() && receipt["links"].as_u64() != Some(manifest.links.len() as u64)
+    {
+        return Err(conflict(format!(
+            "Update {} to receive a workspace containing links",
+            machine.label()
+        )));
+    }
+    Ok(())
 }
 async fn validate_destination(
     state: &AppState,
@@ -714,6 +737,7 @@ pub async fn operate(
             {
                 return Err(conflict("Destination inventory differs"));
             }
+            check_links(manifest, &receipt, &a.destination)?;
             a.destination_root = Some(
                 receipt["root"]
                     .as_str()
@@ -746,6 +770,18 @@ pub async fn operate(
                 if a.manifest.as_ref() != Some(manifest) {
                     return Err(conflict("Manifest differs from source snapshot"));
                 }
+                // Refuse before copying rather than at the receipt.
+                if let (false, Machine::Node { id }) = (manifest.links.is_empty(), &a.destination) {
+                    let capabilities = node_transfer_capabilities(&state, id).await?;
+                    if !capabilities["features"]
+                        .as_array()
+                        .is_some_and(|f| f.iter().any(|f| f == "links"))
+                    {
+                        return Err(conflict(format!(
+                            "Update {id} to receive a workspace containing links"
+                        )));
+                    }
+                }
             }
             let snapshot = matches!(operation, Operation::Snapshot);
             let verify = matches!(operation, Operation::Verify);
@@ -756,6 +792,9 @@ pub async fn operate(
                 a.manifest = Some(manifest);
                 a.phase = "copying".into();
             } else if verify {
+                if let Some(manifest) = &a.manifest {
+                    check_links(manifest, &value, &a.destination)?;
+                }
                 a.destination_root = Some(
                     value["root"]
                         .as_str()
@@ -1049,8 +1088,8 @@ mod portable_context_tests {
         let a = action("historical context\n".to_owned() + &"é🕊<>".repeat(300_000));
         let mut manifest = Manifest {
             files: vec![],
-            excluded: vec![],
             bytes: 0,
+            ..Default::default()
         };
         include_context_file(&a, &mut manifest).unwrap();
         assert_eq!(manifest.bytes, a.context.len() as u64);
@@ -1096,11 +1135,37 @@ mod portable_context_tests {
             &a,
             &mut Manifest {
                 files: vec![],
-                excluded: vec![],
-                bytes: crate::machine_transfer::MAX_BYTES
+                bytes: crate::machine_transfer::MAX_BYTES,
+                ..Default::default()
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn archive_refuses_a_link_in_its_way_and_counts_links() {
+        let a = action("historical context\n".repeat(20_000));
+        let link = |path: &str| crate::machine_transfer::Link {
+            path: path.into(),
+            target: "elsewhere".into(),
+        };
+        for path in [".paloma", ".paloma/transfers", &context_path(a.id)] {
+            let mut manifest = Manifest {
+                links: vec![link(path)],
+                ..Default::default()
+            };
+            assert!(include_context_file(&a, &mut manifest).is_err(), "{path}");
+        }
+        let mut beside = Manifest {
+            links: vec![link(".paloma-notes"), link("other")],
+            ..Default::default()
+        };
+        include_context_file(&a, &mut beside).unwrap();
+        let mut full = Manifest {
+            links: vec![link("l"); crate::machine_transfer::MAX_FILES],
+            ..Default::default()
+        };
+        assert!(include_context_file(&a, &mut full).is_err());
     }
 
     #[test]
@@ -1108,8 +1173,8 @@ mod portable_context_tests {
         let a = action("short history".into());
         let mut manifest = Manifest {
             files: vec![],
-            excluded: vec![],
             bytes: 0,
+            ..Default::default()
         };
         include_context_file(&a, &mut manifest).unwrap();
         assert!(manifest.files.is_empty());
