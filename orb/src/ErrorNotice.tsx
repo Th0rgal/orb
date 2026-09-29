@@ -21,6 +21,13 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   if (/REMOTE_JOB_STILL_RUNNING/.test(raw)) return { title: "A turn is still running", message: "Wait for it to finish before sending this follow-up. Your draft is kept." };
   if (/REMOTE_RESUME_REQUIRES_REPLACEMENT/.test(raw)) return { title: "Couldn’t resume this session", message: "Your draft is kept. Try again; if the problem persists, fork the conversation into a new mission." };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
+  if (/Workspace exceeds transfer limit/.test(raw)) {
+    const found = raw.match(/: (.+?) in (\d+) files\. Largest: (.+)$/);
+    const folders = found && [...found[3].matchAll(/(.+?) \(([\d.]+ [MG]iB), (\d+) files\)(?:, |$)/g)].map(f => `${f[1]}  ·  ${f[2]}, ${Number(f[3]).toLocaleString("en-US")} files`);
+    return { title: "Workspace too large to move", message: `${found ? `It holds ${found[1]} in ${Number(found[2]).toLocaleString("en-US")} files. ` : ""}A move carries at most 10 GiB and 50,000 files.${folders?.length ? `\n\nLargest folders\n${folders.join("\n")}` : ""}` };
+  }
+  const outdated = raw.match(/Update (.+) to receive a workspace containing links/);
+  if (outdated) return { title: `${outdated[1]} needs an update`, message: "This workspace contains links, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved." };
   const technical = raw.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(raw);
   return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : raw };
 }
