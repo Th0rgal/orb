@@ -872,6 +872,23 @@ mod tests {
     }
 
     #[test]
+    fn full_month_names_are_read() {
+        let now = utc("2026-09-29T14:00:00Z");
+        assert_eq!(
+            parse_limit_reset("resets October 3 (UTC)", now, Zone::UTC),
+            Some(utc("2026-10-03T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_limit_reset("try again at October 3rd, 2026 6:58 PM.", now, Zone::UTC),
+            Some(utc("2026-10-03T18:58:00Z"))
+        );
+        assert_eq!(
+            parse_limit_reset("resets Sept. 30, 9am (UTC)", now, Zone::UTC),
+            Some(utc("2026-09-30T09:00:00Z"))
+        );
+    }
+
+    #[test]
     fn a_date_without_year_rolls_over_new_year() {
         let now = utc("2026-12-30T10:00:00Z");
         assert_eq!(

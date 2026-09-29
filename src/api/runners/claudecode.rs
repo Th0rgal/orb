@@ -3627,7 +3627,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
             "Default Anthropic credential is parked on a usage limit; starting on another account"
         );
     }
-    let primary_limit_key = match &primary_override {
+    let mut primary_limit_key = match &primary_override {
         Some(auth) => Some(claude_auth_limit_key(app_working_dir, auth)),
         None => default_claude_limit_key(workspace, work_dir, app_working_dir),
     };
@@ -3938,6 +3938,11 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
             force_argv_prompt,
         )
         .await;
+        // That retry ran on the default credential, whatever the turn
+        // started on: its outcome belongs to that credential.
+        if primary_override.is_some() {
+            primary_limit_key = default_claude_limit_key(workspace, work_dir, app_working_dir);
+        }
     }
 
     note_claude_turn_for_limits(app_working_dir, primary_limit_key.as_deref(), &result);

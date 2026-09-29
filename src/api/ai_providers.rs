@@ -4743,9 +4743,20 @@ pub struct ProviderCooldownResponse {
     pub announced: bool,
 }
 
-fn provider_cooldown(id: uuid::Uuid) -> Option<ProviderCooldownResponse> {
-    crate::account_limits::shared()
-        .active(&crate::account_limits::account_key(id))
+/// The usage limit that keeps the account out of rotation: its own, or the
+/// one of the subscription it shares with a sibling record, as selection
+/// sees it.
+fn provider_cooldown(
+    provider: &crate::ai_providers::AIProvider,
+) -> Option<ProviderCooldownResponse> {
+    let limits = crate::account_limits::shared();
+    let subscription =
+        crate::provider_health::store_account_subscription_key(provider.provider_type, provider)
+            .map(|key| crate::account_limits::subscription_key(&key.0));
+    std::iter::once(crate::account_limits::account_key(provider.id))
+        .chain(subscription)
+        .filter_map(|key| limits.active(&key))
+        .max_by_key(|cooldown| cooldown.until)
         .map(|cooldown| ProviderCooldownResponse {
             until: cooldown.until,
             reason: "usage_limit",
@@ -4982,7 +4993,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         use_for_backends,
         credential_owner: credential_owner_for(pt, has_oauth),
         account_email: provider.account_email.clone(),
-        cooldown: provider_cooldown(provider.id),
+        cooldown: provider_cooldown(provider),
         created_at: provider.created_at,
         updated_at: provider.updated_at,
     }
