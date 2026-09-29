@@ -6,6 +6,9 @@ export interface TransferFile { path: string; bytes: number; sha256: string; exe
 export interface TransferLink { path: string; target: string }
 export interface SkippedPath { path: string; reason: string }
 export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number; links?: TransferLink[]; skipped?: SkippedPath[] }
+export interface InventoryRow { path: string; folder: boolean; state: "moved" | "omitted" | "ignored" | "rebuildable" | "protected"; bytes: number; files: number }
+/** `bytes` and `files` total everything moved by default, including rows a long listing left out. */
+export interface WorkspaceInventory { rows: InventoryRow[]; bytes: number; files: number; truncated: boolean; protected: number; limits: { bytes: number; files: number } }
 export interface TransferAction {
   id: string; mission_id: string; phase: string; source: Machine; destination: Machine;
   backend: string; model?: string | null; effort?: string | null;
@@ -60,6 +63,9 @@ export async function transferFiles<T>(action: TransferAction, side: "source" | 
   }
   return remoteTransferFiles<T>(action, side, operation);
 }
+/** What a snapshot would carry and leave behind. Sources that predate the choice refuse the operation. */
+export const inventoryTransfer = (action: TransferAction) => transferFiles<WorkspaceInventory>(action, "source", { op: "inventory" });
+export const selectTransfer = (action: TransferAction, selection: { omit: string[]; include: string[] }) => transferFiles(action, "source", { op: "select", ...selection });
 export async function snapshotTransfer(action: TransferAction): Promise<TransferAction> {
   if (action.manifest) return action;
   if (action.source.kind !== "client") return transferFiles(action, "source", { op: "snapshot" });

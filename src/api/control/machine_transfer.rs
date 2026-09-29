@@ -757,7 +757,11 @@ pub async fn operate(
                 (&*side, &operation),
                 (
                     "source",
-                    Operation::Snapshot | Operation::Read { .. } | Operation::CheckSource
+                    Operation::Inventory
+                        | Operation::Select { .. }
+                        | Operation::Snapshot
+                        | Operation::Read { .. }
+                        | Operation::CheckSource
                 ) | (
                     "destination",
                     Operation::Stage { .. } | Operation::Write { .. } | Operation::Verify
@@ -771,15 +775,30 @@ pub async fn operate(
                     return Err(conflict("Manifest differs from source snapshot"));
                 }
                 // Refuse before copying rather than at the receipt.
-                if let (false, Machine::Node { id }) = (manifest.links.is_empty(), &a.destination) {
-                    let capabilities = node_transfer_capabilities(&state, id).await?;
-                    if !capabilities["features"]
-                        .as_array()
-                        .is_some_and(|f| f.iter().any(|f| f == "links"))
-                    {
-                        return Err(conflict(format!(
-                            "Update {id} to receive a workspace containing links"
-                        )));
+                if let Machine::Node { id } = &a.destination {
+                    let needed: Vec<_> = [
+                        ("links", !manifest.links.is_empty(), "containing links"),
+                        (
+                            "selection",
+                            crate::machine_transfer::carries_rebuildable(manifest),
+                            "with selected build folders",
+                        ),
+                    ]
+                    .into_iter()
+                    .filter(|(_, needed, _)| *needed)
+                    .collect();
+                    if !needed.is_empty() {
+                        let capabilities = node_transfer_capabilities(&state, id).await?;
+                        for (feature, _, what) in needed {
+                            if !capabilities["features"]
+                                .as_array()
+                                .is_some_and(|f| f.iter().any(|f| f == feature))
+                            {
+                                return Err(conflict(format!(
+                                    "Update {id} to receive a workspace {what}"
+                                )));
+                            }
+                        }
                     }
                 }
             }

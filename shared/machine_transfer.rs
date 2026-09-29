@@ -50,6 +50,15 @@ pub struct Manifest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    /// What a snapshot would carry and leave behind, for the user to choose from.
+    Inventory,
+    /// Records the choice the following snapshot and source checks apply.
+    Select {
+        #[serde(default)]
+        omit: Vec<String>,
+        #[serde(default)]
+        include: Vec<String>,
+    },
     Snapshot,
     CheckSource,
     Read {
@@ -185,18 +194,15 @@ fn portable_target(roots: &[&Path], path: &str, target: &Path) -> Result<String,
         Err(UNUSUAL_LINK)
     }
 }
-fn excluded(name: &str) -> bool {
+/// Never moved, whatever is selected: credentials, generated harness
+/// configuration and this adapter's own files. Git history travels as a bundle.
+fn protected(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     matches!(
         n.as_str(),
         ".git"
             | ".transfers"
-            | "node_modules"
-            | "target"
-            | ".next"
-            | ".cache"
-            | "__pycache__"
-            | ".venv"
+            | ".transfer-git.bundle"
             | ".ssh"
             | ".aws"
             | ".codex"
@@ -227,6 +233,71 @@ fn excluded(name: &str) -> bool {
         || n.starts_with("id_ed25519")
         || n.contains("credentials")
 }
+/// Left behind unless selected: the destination can build or download it again.
+/// Toolchain homes only count at the workspace root, where a mission's HOME is.
+fn rebuildable(name: &str, top_level: bool) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "node_modules" | "target" | ".next" | ".cache" | "__pycache__" | ".venv" | ".lake"
+    ) || (top_level
+        && matches!(
+            n.as_str(),
+            ".rustup"
+                | ".cargo"
+                | ".elan"
+                | ".npm"
+                | ".nvm"
+                | ".bun"
+                | ".deno"
+                | ".pnpm-store"
+                | ".gradle"
+                | ".m2"
+                | ".pyenv"
+                | ".rbenv"
+        ))
+}
+/// Whether the manifest carries a path older adapters refuse as build output.
+pub fn carries_rebuildable(manifest: &Manifest) -> bool {
+    let paths = manifest.files.iter().map(|f| &f.path);
+    paths
+        .chain(manifest.links.iter().map(|l| &l.path))
+        .any(|path| {
+            path.split('/')
+                .enumerate()
+                .any(|(i, name)| rebuildable(name, i == 0))
+        })
+}
+/// What the user chose before the snapshot. `omit` leaves a path behind;
+/// `include` carries one that would stay behind by default.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Selection {
+    #[serde(default)]
+    pub omit: Vec<String>,
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Moved,
+    Omitted,
+    Ignored,
+    Rebuildable,
+    Protected,
+}
+/// One line of the inventory shown before a snapshot. A folder's totals cover
+/// what it would move, links included; its own left-behind paths are rows too.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Row {
+    pub path: String,
+    pub folder: bool,
+    pub state: State,
+    pub bytes: u64,
+    pub files: usize,
+}
+/// Most rows an inventory returns; the lightest are dropped first.
+pub const MAX_ROWS: usize = 2_000;
 fn digest(path: &Path) -> Result<String, String> {
     digest_beneath(path.parent().ok_or("Invalid file")?, path)
 }
@@ -254,35 +325,175 @@ fn size(bytes: u64) -> String {
         format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
-/// Counts what a snapshot would carry without reading file contents, so an
-/// oversized workspace is refused with its totals before anything is hashed.
-fn measure(root: &Path, max_bytes: u64, max_files: usize) -> Result<(), String> {
-    type Tally = std::collections::BTreeMap<String, (u64, usize)>;
-    fn walk(top: Option<&str>, dir: &Path, tally: &mut Tally) -> Result<(), String> {
-        for item in fs::read_dir(dir).map_err(err)? {
-            let item = item.map_err(err)?;
+type Ignored = std::collections::HashSet<String>;
+/// The untracked paths a repository's own rules ignore, as workspace paths.
+/// `None` when `dir` is not a repository root. An unreadable repository
+/// ignores nothing, so its files move.
+fn ignored_by_git(dir: &Path, rel: &str) -> Option<Ignored> {
+    fs::symlink_metadata(dir.join(".git")).ok()?;
+    let listed = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout)
+        .unwrap_or_default();
+    Some(
+        listed
+            .split(|b| *b == 0)
+            .filter_map(|path| std::str::from_utf8(path).ok())
+            .map(|path| path.trim_end_matches('/'))
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                if rel.is_empty() {
+                    path.to_owned()
+                } else {
+                    format!("{rel}/{path}")
+                }
+            })
+            .collect(),
+    )
+}
+enum Found<'a> {
+    File(&'a fs::Metadata),
+    /// A link, a socket, a pipe or a device.
+    Other(&'a fs::Metadata),
+    /// Not descended into. `carried` is false for a protected path.
+    Left(State, &'a fs::Metadata),
+}
+/// Visits what a snapshot with this selection meets, in a stable order.
+struct Walk<'a> {
+    root: &'a Path,
+    selection: &'a Selection,
+}
+impl Walk<'_> {
+    fn run(
+        &self,
+        visit: &mut dyn FnMut(&str, &Path, Found) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let ignored = ignored_by_git(self.root, "").unwrap_or_default();
+        self.dir(self.root, "", &ignored, false, visit)
+    }
+    /// `chosen` holds beneath an included path: only protected names stay behind.
+    fn dir(
+        &self,
+        dir: &Path,
+        rel: &str,
+        ignored: &Ignored,
+        chosen: bool,
+        visit: &mut dyn FnMut(&str, &Path, Found) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(dir)
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        entries.sort_by_key(|e| e.file_name());
+        for item in entries {
+            let path = item.path();
             let name = item.file_name();
             let name = name.to_str().ok_or("Non-UTF-8 filename")?;
-            if excluded(name) || name == ".transfer-git.bundle" {
-                continue;
+            if name.contains('\\') {
+                return Err("Invalid checkpoint path".into());
             }
-            let m = fs::symlink_metadata(item.path()).map_err(err)?;
-            let top = top.unwrap_or(name);
-            if m.is_dir() {
-                walk(Some(top), &item.path(), tally)?;
-            } else if m.is_file() || m.file_type().is_symlink() {
-                let row = tally.entry(top.to_owned()).or_default();
-                row.0 = row
-                    .0
-                    .checked_add(if m.is_file() { m.len() } else { 0 })
-                    .ok_or("Workspace size overflow")?;
-                row.1 += 1;
+            let rel = if rel.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{rel}/{name}")
+            };
+            let m = fs::symlink_metadata(&path).map_err(err)?;
+            let included = chosen || self.selection.include.contains(&rel);
+            let state = if protected(name) {
+                State::Protected
+            } else if self.selection.omit.contains(&rel) {
+                State::Omitted
+            } else if included {
+                State::Moved
+            } else if rebuildable(name, !rel.contains('/')) {
+                State::Rebuildable
+            } else if ignored.contains(&rel) {
+                State::Ignored
+            } else {
+                State::Moved
+            };
+            if state != State::Moved {
+                visit(&rel, &path, Found::Left(state, &m))?;
+            } else if m.is_dir() {
+                let own = ignored_by_git(&path, &rel);
+                self.dir(
+                    &path,
+                    &rel,
+                    own.as_ref().unwrap_or(ignored),
+                    included,
+                    visit,
+                )?;
+            } else if m.is_file() {
+                visit(&rel, &path, Found::File(&m))?;
+            } else {
+                visit(&rel, &path, Found::Other(&m))?;
             }
         }
         Ok(())
     }
-    let mut tally = Tally::new();
-    walk(None, root, &mut tally)?;
+}
+/// Bytes and entries beneath a left-behind path, were it carried.
+fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
+    if m.is_file() {
+        return (m.len(), 1);
+    }
+    if !m.is_dir() {
+        return (0, usize::from(m.file_type().is_symlink()));
+    }
+    let mut total = (0u64, 0usize);
+    for item in fs::read_dir(path).into_iter().flatten().flatten() {
+        if item.file_name().to_str().is_some_and(protected) {
+            continue;
+        }
+        if let Ok(m) = fs::symlink_metadata(item.path()) {
+            let (bytes, files) = weigh(&item.path(), &m);
+            total = (total.0.saturating_add(bytes), total.1 + files);
+        }
+    }
+    total
+}
+/// Counts what a snapshot would carry without reading file contents, so an
+/// oversized workspace is refused with its totals before anything is hashed.
+fn measure(
+    root: &Path,
+    selection: &Selection,
+    max_bytes: u64,
+    max_files: usize,
+) -> Result<(), String> {
+    let mut tally = std::collections::BTreeMap::<String, (u64, usize)>::new();
+    Walk { root, selection }.run(&mut |rel, _, found| {
+        let bytes = match found {
+            Found::File(m) => m.len(),
+            Found::Other(m) if m.file_type().is_symlink() => 0,
+            _ => return Ok(()),
+        };
+        let top = rel.split('/').next().unwrap_or(rel);
+        let row = tally.entry(top.to_owned()).or_default();
+        row.0 = row.0.checked_add(bytes).ok_or("Workspace size overflow")?;
+        row.1 += 1;
+        Ok(())
+    })?;
     let bytes = tally
         .values()
         .try_fold(0u64, |sum, row| sum.checked_add(row.0))
@@ -304,61 +515,142 @@ fn measure(root: &Path, max_bytes: u64, max_files: usize) -> Result<(), String> 
         largest.join(", ")
     ))
 }
+/// The rows offered for selection: top-level entries and the folders directly
+/// beneath them, plus every path left behind by default with what it weighs.
+fn survey(root: &Path) -> Result<serde_json::Value, String> {
+    let mut moved = std::collections::BTreeMap::<String, Row>::new();
+    let mut left = Vec::new();
+    let mut hidden = 0usize;
+    Walk {
+        root,
+        selection: &Selection::default(),
+    }
+    .run(&mut |rel, path, found| {
+        let bytes = match found {
+            Found::File(m) => m.len(),
+            // Only a link the snapshot would carry counts.
+            Found::Other(m)
+                if m.file_type().is_symlink()
+                    && fs::read_link(path)
+                        .is_ok_and(|to| portable_target(&[root], rel, &to).is_ok()) =>
+            {
+                0
+            }
+            Found::Other(_) => return Ok(()),
+            Found::Left(State::Protected, _) => {
+                hidden += 1;
+                return Ok(());
+            }
+            Found::Left(state, m) => {
+                let (bytes, files) = weigh(path, m);
+                left.push(Row {
+                    path: rel.into(),
+                    folder: m.is_dir(),
+                    state,
+                    bytes,
+                    files,
+                });
+                return Ok(());
+            }
+        };
+        let parts: Vec<_> = rel.splitn(3, '/').collect();
+        for depth in 1..=parts.len().min(2) {
+            // A file directly inside a top-level folder counts in that folder only.
+            let folder = depth < parts.len();
+            if depth == 2 && !folder {
+                break;
+            }
+            let row = moved
+                .entry(parts[..depth].join("/"))
+                .or_insert_with_key(|path| Row {
+                    path: path.clone(),
+                    folder,
+                    state: State::Moved,
+                    bytes: 0,
+                    files: 0,
+                });
+            row.bytes = row
+                .bytes
+                .checked_add(bytes)
+                .ok_or("Workspace size overflow")?;
+            row.files += 1;
+        }
+        Ok(())
+    })?;
+    // The totals cover every moved entry, listed or not.
+    let top = moved.values().filter(|row| !row.path.contains('/'));
+    let (bytes, files) = top.fold((0u64, 0usize), |sum, row| {
+        (sum.0.saturating_add(row.bytes), sum.1 + row.files)
+    });
+    let mut rows: Vec<_> = moved.into_values().chain(left).collect();
+    let truncated = rows.len() > MAX_ROWS;
+    if truncated {
+        rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+        rows.truncate(MAX_ROWS);
+    }
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(serde_json::json!({
+        "rows": rows,
+        "bytes": bytes,
+        "files": files,
+        "truncated": truncated,
+        "protected": hidden,
+        "limits": {"bytes": MAX_BYTES, "files": MAX_FILES},
+    }))
+}
+fn selection_path(area: &Path) -> PathBuf {
+    area.join("selection.json")
+}
+/// The selection recorded for this transfer; none means the defaults.
+fn selected(area: &Path) -> Result<Selection, String> {
+    match fs::read(selection_path(area)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(err),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Selection::default()),
+        Err(e) => Err(err(e)),
+    }
+}
 /// `roots` are the spellings of the workspace root an absolute link may use.
 fn inventory(
     roots: &[&Path],
     root: &Path,
-    dir: &Path,
+    selection: &Selection,
     manifest: &mut Manifest,
 ) -> Result<(), String> {
-    let mut entries = fs::read_dir(dir)
-        .map_err(err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?;
-    entries.sort_by_key(|e| e.file_name());
-    for item in entries {
-        let path = item.path();
-        let rel = path
-            .strip_prefix(root)
-            .map_err(err)?
-            .to_str()
-            .ok_or("Non-UTF-8 filename")?
-            .replace('\\', "/");
-        let name = item.file_name();
-        let name = name.to_str().ok_or("Non-UTF-8 filename")?;
-        if excluded(name) || name == ".transfer-git.bundle" {
-            manifest.excluded.push(rel);
-            if manifest.excluded.len() > MAX_FILES {
-                return Err("Too many excluded paths".into());
+    Walk { root, selection }.run(&mut |rel, path, found| {
+        let m = match found {
+            Found::Left(..) => {
+                manifest.excluded.push(rel.into());
+                if manifest.excluded.len() > MAX_FILES {
+                    return Err("Too many excluded paths".into());
+                }
+                return Ok(());
             }
-            continue;
-        }
-        let m = fs::symlink_metadata(&path).map_err(err)?;
-        if m.is_dir() {
-            inventory(roots, root, &path, manifest)?;
-            continue;
-        }
-        if !m.is_file() {
-            // Never followed: the link itself travels, or stays behind.
-            let kept = if m.file_type().is_symlink() {
-                portable_target(roots, &rel, &fs::read_link(&path).map_err(err)?)
-            } else {
-                Err(SPECIAL_FILE)
-            };
-            match kept {
-                Ok(target) => manifest.links.push(Link { path: rel, target }),
-                Err(reason) => manifest.skipped.push(Skipped {
-                    path: rel,
-                    reason: reason.into(),
-                }),
+            Found::Other(m) => {
+                // Never followed: the link itself travels, or stays behind.
+                let kept = if m.file_type().is_symlink() {
+                    portable_target(roots, rel, &fs::read_link(path).map_err(err)?)
+                } else {
+                    Err(SPECIAL_FILE)
+                };
+                match kept {
+                    Ok(target) => manifest.links.push(Link {
+                        path: rel.into(),
+                        target,
+                    }),
+                    Err(reason) => manifest.skipped.push(Skipped {
+                        path: rel.into(),
+                        reason: reason.into(),
+                    }),
+                }
+                if manifest.files.len() + manifest.links.len() > MAX_FILES
+                    || manifest.skipped.len() > MAX_FILES
+                {
+                    return Err("Workspace exceeds transfer limit (10 GiB / 50,000 files)".into());
+                }
+                return Ok(());
             }
-            if manifest.files.len() + manifest.links.len() > MAX_FILES
-                || manifest.skipped.len() > MAX_FILES
-            {
-                return Err("Workspace exceeds transfer limit (10 GiB / 50,000 files)".into());
-            }
-            continue;
-        }
+            Found::File(m) => m,
+        };
         manifest.bytes = manifest
             .bytes
             .checked_add(m.len())
@@ -373,19 +665,19 @@ fn inventory(
         };
         #[cfg(not(unix))]
         let executable = false;
-        let sha256 = digest_beneath(root, &path)?;
-        let after = fs::symlink_metadata(&path).map_err(err)?;
+        let sha256 = digest_beneath(root, path)?;
+        let after = fs::symlink_metadata(path).map_err(err)?;
         if m.len() != after.len() || m.modified().ok() != after.modified().ok() {
             return Err(format!("File changed during snapshot: {rel}"));
         }
         manifest.files.push(Entry {
-            path: rel,
+            path: rel.into(),
             bytes: m.len(),
             sha256,
             executable,
         });
-    }
-    Ok(())
+        Ok(())
+    })
 }
 /// Recreates the manifest's links once every file is in place. A retry after
 /// an interrupted verification finds the links it already made.
@@ -433,7 +725,12 @@ fn validate(m: &Manifest) -> Result<(), String> {
     }
     for f in &m.files {
         relative(&f.path)?;
-        if f.path.split('/').any(excluded) {
+        if f.path
+            .strip_suffix(".transfer-git.bundle")
+            .unwrap_or(&f.path)
+            .split('/')
+            .any(protected)
+        {
             return Err("Excluded path in manifest".into());
         }
         if !seen.insert(f.path.clone())
@@ -455,7 +752,7 @@ fn validate(m: &Manifest) -> Result<(), String> {
     }
     for l in &m.links {
         relative(&l.path)?;
-        if l.path.split('/').any(excluded) {
+        if l.path.split('/').any(protected) {
             return Err("Excluded path in manifest".into());
         }
         if !seen.insert(l.path.clone()) || !contained_target(&l.path, &l.target) {
@@ -560,6 +857,31 @@ pub fn operate(
         .map_err(err)?;
     fs2::FileExt::lock_exclusive(&lock).map_err(err)?;
     match op {
+        Operation::Inventory => survey(
+            &source
+                .ok_or("Source workspace unavailable")?
+                .canonicalize()
+                .map_err(err)?,
+        ),
+        Operation::Select { omit, include } => {
+            if manifest_path(area).exists() {
+                return Err("Workspace snapshot already taken; cancel to choose again".into());
+            }
+            if omit.len() + include.len() > MAX_ROWS {
+                return Err("Too many selected paths".into());
+            }
+            for path in omit.iter().chain(&include) {
+                relative(path)?;
+            }
+            if include.iter().any(|p| p.split('/').any(protected)) {
+                return Err("Credentials and generated configuration cannot be moved".into());
+            }
+            let bytes = serde_json::to_vec(&Selection { omit, include }).map_err(err)?;
+            let temporary = area.join("selection.pending");
+            fs::write(&temporary, bytes).map_err(err)?;
+            fs::rename(temporary, selection_path(area)).map_err(err)?;
+            Ok(serde_json::json!({"ok":true}))
+        }
         Operation::Snapshot => {
             if manifest_path(area).exists() {
                 return Ok(serde_json::json!(load(area)?));
@@ -574,9 +896,10 @@ pub fn operate(
                 fs::remove_dir_all(&root).map_err(err)?;
             }
             fs::create_dir_all(&root).map_err(err)?;
-            measure(&source, MAX_BYTES, MAX_FILES)?;
+            let selection = selected(area)?;
+            measure(&source, &selection, MAX_BYTES, MAX_FILES)?;
             let mut m = Manifest::default();
-            inventory(&roots, &source, &source, &mut m)?;
+            inventory(&roots, &source, &selection, &mut m)?;
             if fs2::available_space(area).map_err(err)? < m.bytes.saturating_add(BLOCK as u64) {
                 return Err("Insufficient snapshot disk space".into());
             }
@@ -600,7 +923,7 @@ pub fn operate(
                 }
             }
             let mut after = Manifest::default();
-            inventory(&roots, &source, &source, &mut after)?;
+            inventory(&roots, &source, &selection, &mut after)?;
             if after != m {
                 return Err("Workspace changed during snapshot; stop all writers and retry".into());
             }
@@ -653,7 +976,12 @@ pub fn operate(
             let source = given.canonicalize().map_err(err)?;
             let expected = load(area)?;
             let mut current = Manifest::default();
-            inventory(&[source.as_path(), given], &source, &source, &mut current)?;
+            inventory(
+                &[source.as_path(), given],
+                &source,
+                &selected(area)?,
+                &mut current,
+            )?;
             let files: Vec<_> = expected
                 .files
                 .iter()
@@ -1196,14 +1524,193 @@ mod integrity_tests {
         fs::write(temp.path().join("big/b"), "b").unwrap();
         fs::write(temp.path().join("small"), "s").unwrap();
         fs::write(temp.path().join("target/ignored"), vec![0; 4 * BLOCK]).unwrap();
-        measure(temp.path(), 3 * BLOCK as u64, 3).unwrap();
-        let bytes = measure(temp.path(), BLOCK as u64, 3).unwrap_err();
+        let none = Selection::default();
+        measure(temp.path(), &none, 3 * BLOCK as u64, 3).unwrap();
+        let bytes = measure(temp.path(), &none, BLOCK as u64, 3).unwrap_err();
         assert!(bytes.contains("2.0 MiB in 3 files"), "{bytes}");
         assert!(
             bytes.contains("Largest: big (2.0 MiB, 2 files), small"),
             "{bytes}"
         );
-        assert!(measure(temp.path(), 3 * BLOCK as u64, 2).is_err());
+        assert!(measure(temp.path(), &none, 3 * BLOCK as u64, 2).is_err());
+    }
+    /// A repository with ignored build output, caches and a toolchain home.
+    fn chosen_source(temp: &Path) -> PathBuf {
+        let src = temp.join("src");
+        for dir in [
+            "repo/src",
+            "repo/out/deep",
+            "repo/target/debug",
+            "repo/.lake/build",
+            "plain/.cargo",
+            "plain/data",
+            ".cargo/bin",
+            "notes",
+        ] {
+            fs::create_dir_all(src.join(dir)).unwrap();
+        }
+        git(&src.join("repo"), &["init"]).unwrap();
+        for (path, content) in [
+            ("repo/.gitignore", "out/\n*.log\n"),
+            ("repo/src/lib.rs", "code"),
+            ("repo/untracked.txt", "new"),
+            ("repo/run.log", "ignored file"),
+            ("repo/out/deep/artifact", "ignored folder"),
+            ("repo/out/.env", "secret"),
+            ("repo/target/debug/bin", "build"),
+            ("repo/.lake/build/olean", "lean"),
+            ("plain/.cargo/config.toml", "kept: not at the root"),
+            ("plain/data/set.bin", "data"),
+            ("plain/run.log", "no repository ignores this"),
+            (".cargo/bin/tool", "toolchain"),
+            ("notes/todo.md", "note"),
+            ("top.txt", "top"),
+        ] {
+            fs::write(src.join(path), content).unwrap();
+        }
+        src
+    }
+    fn paths(m: &Manifest) -> Vec<&str> {
+        m.files.iter().map(|f| f.path.as_str()).collect()
+    }
+    #[test]
+    fn ignored_and_rebuildable_paths_stay_behind_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = chosen_source(temp.path());
+        let a = temp.path().join("a");
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        assert_eq!(
+            paths(&m),
+            vec![
+                "notes/todo.md",
+                "plain/.cargo/config.toml",
+                "plain/data/set.bin",
+                "plain/run.log",
+                "repo/.gitignore",
+                "repo/src/lib.rs",
+                "repo/untracked.txt",
+                "top.txt",
+            ]
+        );
+        assert_eq!(
+            m.excluded,
+            vec![
+                ".cargo",
+                "repo/.git",
+                "repo/.lake",
+                "repo/out",
+                "repo/run.log",
+                "repo/target"
+            ]
+        );
+        operate(&a, Some(&src), Operation::CheckSource).unwrap();
+    }
+    #[test]
+    fn a_selection_omits_and_includes_paths_but_never_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = chosen_source(temp.path());
+        let a = temp.path().join("a");
+        let select = |omit: &[&str], include: &[&str]| Operation::Select {
+            omit: omit.iter().map(|p| p.to_string()).collect(),
+            include: include.iter().map(|p| p.to_string()).collect(),
+        };
+        for refused in [
+            select(&["../outside"], &[]),
+            select(&[], &["/etc"]),
+            select(&[], &["repo/out/.env"]),
+            select(&[], &["repo/.git"]),
+        ] {
+            assert!(operate(&a, Some(&src), refused).is_err());
+        }
+        operate(
+            &a,
+            Some(&src),
+            select(
+                &["plain/data", "top.txt", "notes"],
+                &["repo/out", "repo/target", ".cargo"],
+            ),
+        )
+        .unwrap();
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        assert_eq!(
+            paths(&m),
+            vec![
+                ".cargo/bin/tool",
+                "plain/.cargo/config.toml",
+                "plain/run.log",
+                "repo/.gitignore",
+                "repo/out/deep/artifact",
+                "repo/src/lib.rs",
+                "repo/target/debug/bin",
+                "repo/untracked.txt",
+            ]
+        );
+        assert_eq!(
+            m.excluded,
+            vec![
+                "notes",
+                "plain/data",
+                "repo/.git",
+                "repo/.lake",
+                "repo/out/.env",
+                "repo/run.log",
+                "top.txt"
+            ]
+        );
+        // The source check and the destination apply the same choice.
+        operate(&a, Some(&src), Operation::CheckSource).unwrap();
+        fs::write(src.join("notes/todo.md"), "edited, but left behind").unwrap();
+        operate(&a, Some(&src), Operation::CheckSource).unwrap();
+        fs::write(src.join("repo/out/deep/artifact"), "edited and carried").unwrap();
+        assert!(operate(&a, Some(&src), Operation::CheckSource).is_err());
+        assert!(operate(&a, Some(&src), select(&[], &[])).is_err());
+        let b = temp.path().join("b");
+        copy(&a, &b, &m);
+        operate(&b, None, Operation::Verify).unwrap();
+        assert!(b.join("workspace/repo/target/debug/bin").is_file());
+        assert!(!b.join("workspace/notes").exists());
+    }
+    #[test]
+    fn the_inventory_weighs_what_moves_and_what_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = chosen_source(temp.path());
+        let a = temp.path().join("a");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", src.join("notes/escape")).unwrap();
+        let found = operate(&a, Some(&src), Operation::Inventory).unwrap();
+        let rows: Vec<Row> = serde_json::from_value(found["rows"].clone()).unwrap();
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|r| (r.path.as_str(), r.folder, r.state, r.bytes, r.files))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (".cargo", true, State::Rebuildable, 9, 1),
+                ("notes", true, State::Moved, 4, 1),
+                ("plain", true, State::Moved, 51, 3),
+                ("plain/.cargo", true, State::Moved, 21, 1),
+                ("plain/data", true, State::Moved, 4, 1),
+                ("repo", true, State::Moved, 18, 3),
+                ("repo/.lake", true, State::Rebuildable, 4, 1),
+                // The credential inside is not counted: it could never move.
+                ("repo/out", true, State::Ignored, 14, 1),
+                ("repo/run.log", false, State::Ignored, 12, 1),
+                ("repo/src", true, State::Moved, 4, 1),
+                ("repo/target", true, State::Rebuildable, 5, 1),
+                ("top.txt", false, State::Moved, 3, 1),
+            ]
+        );
+        assert_eq!(
+            (found["bytes"].clone(), found["files"].clone()),
+            (76.into(), 8.into())
+        );
+        assert_eq!(found["truncated"], false);
+        assert_eq!(found["protected"], 1);
+        assert_eq!(found["limits"]["files"], MAX_FILES);
+        assert!(!manifest_path(&a).exists());
     }
     #[test]
     fn machine_transfer_preserves_git_history_and_uncommitted_work() {
