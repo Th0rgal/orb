@@ -541,7 +541,8 @@ pub(crate) async fn background_task_autoresume_loop(
                     agent: None,
                     target_mission_id: Some(mission_id),
                     strict: true,
-                    source: None,
+                    // Clients show this as an automatic wake, not the user's words.
+                    source: Some("background-task".to_string()),
                     respond: ack_tx,
                 })
                 .await;
