@@ -928,6 +928,51 @@ impl NativeGrokObserver {
         }
     }
 
+    /// The session id is published before submission, but Claude only creates
+    /// it once it starts. A launch that died first (fork 0a9943ec: "Argument
+    /// list too long") left every follow-up failing with "No conversation
+    /// found with session ID". Forget such a session so the next turn starts
+    /// fresh with the conversation replayed as context.
+    async fn forget_unstarted_claude_session(&mut self) {
+        let missing = self
+            .stream
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("No conversation found with session ID"));
+        if self.stream.json_events > 0 && !missing {
+            return;
+        }
+        let Some(session_id) = self.mission.session_id.clone() else {
+            return;
+        };
+        let run = match self
+            .owner
+            .mission_store
+            .get_latest_mission_run(self.mission_id)
+            .await
+        {
+            Ok(Some(run)) if run.owner_actor_id == super::remote_job_lease_owner(self.job_id) => {
+                SessionUpdateRun::from(&run)
+            }
+            _ => return,
+        };
+        match self
+            .owner
+            .mission_store
+            .clear_unsubmitted_session_id(self.mission_id, &session_id, "claudecode", &run)
+            .await
+        {
+            Ok(true) => {
+                self.mission.session_id = None;
+                self.session_persisted = None;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error, "unstarted Claude session could not be cleared");
+            }
+        }
+    }
+
     /// Terminal decision for the job. Flushes the parser, closes an open
     /// thinking block, and reports the native CLI outcome.
     pub(crate) async fn verdict(
@@ -971,6 +1016,9 @@ impl NativeGrokObserver {
             && self.stream.error.is_none()
             && (!self.mission.goal_mode || legacy_claude || native_end)
             && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
+        if self.stream.claude && !success {
+            self.forget_unstarted_claude_session().await;
+        }
         let mut content = self.stream.text.trim().to_string();
         if legacy_claude && success {
             content = format!(
