@@ -784,7 +784,6 @@ async fn codex_continuity_snapshot_drain_retains_errors_requests_and_nonmatching
     );
 }
 
-
 fn unused_binding(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("mission.json");
     let binding = continuity::Binding {

@@ -821,8 +821,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
             // A thread that did not exist before this turn and did nothing in
             // it holds no work: a usage limit may move the turn to another
             // account. A thread from an earlier turn stays on its account.
-            let bound_before_turn =
-                !matches!(continuity::read(&native_input.path), Ok(None));
+            let bound_before_turn = !matches!(continuity::read(&native_input.path), Ok(None));
             // Raw outputs of attempts that failed specifically on a usage cap,
             // so an exhausted pool can be summarized instead of echoing the
             // last account's bare "try again at …" message.
