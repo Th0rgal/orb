@@ -164,7 +164,7 @@ pub(super) async fn tick(
                     )
         })
     {
-        jobs::forget_unreachable_conversation(app_dir, e.mission_id);
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id)?;
         prior = None;
         phase = Phase::Queued;
     }
@@ -216,7 +216,7 @@ pub(super) async fn tick(
         // Saved as queued first: the pointer is dropped only once this is on
         // record, so an interruption in between is healed by the next tick.
         e = save_replacement(store, e, i, None).await?;
-        jobs::forget_unreachable_conversation(app_dir, e.mission_id);
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id)?;
     }
     e.turns[i].phase = Phase::Submitting;
     e = worker::save(store, e).await?;
@@ -320,7 +320,7 @@ pub(super) async fn tick(
             Some("The original ChatGPT conversation could not be opened; continuing in a new one"),
         )
         .await?;
-        jobs::forget_unreachable_conversation(app_dir, mission);
+        jobs::forget_unreachable_conversation(app_dir, mission)?;
         return Ok(());
     } else {
         e.turns[i].phase = if jobs::load_job(app_dir, e.mission_id)

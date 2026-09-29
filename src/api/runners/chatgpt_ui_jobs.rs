@@ -299,10 +299,23 @@ pub fn mark_completed(app_working_dir: &Path, mission_id: Uuid) {
 /// Drop the pointer to a conversation that can no longer be opened, so the
 /// mission's next message may start a replacement conversation. Only for a
 /// record that holds no pending submission.
-pub fn forget_unreachable_conversation(app_working_dir: &Path, mission_id: Uuid) {
+/// An error means the pointer is still there: the caller must not send yet.
+pub fn forget_unreachable_conversation(
+    app_working_dir: &Path,
+    mission_id: Uuid,
+) -> Result<(), String> {
     if load_job(app_working_dir, mission_id).is_some_and(|r| r.state != JobState::Submitted) {
-        let _ = std::fs::remove_file(job_path(app_working_dir, mission_id));
+        match std::fs::remove_file(job_path(app_working_dir, mission_id)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "The previous ChatGPT conversation record could not be removed: {}",
+                    error.kind()
+                ));
+            }
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 pub fn mark_abandoned(app_working_dir: &Path, mission_id: Uuid, code: &str) {
