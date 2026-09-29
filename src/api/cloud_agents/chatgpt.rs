@@ -54,15 +54,20 @@ fn outgoing(e: &Execution, i: usize) -> String {
     let mut kept = Vec::new();
     let mut budget = REPLACEMENT_HISTORY_LIMIT;
     for earlier in e.turns[..i].iter().rev() {
-        let exchange = format!(
-            "User:\n{}\n\nAssistant:\n{}",
-            earlier.prompt.trim(),
-            earlier.result.as_deref().unwrap_or_default().trim()
-        );
+        let question = earlier.prompt.trim();
+        let answer = earlier.result.as_deref().unwrap_or_default().trim();
+        let exchange = format!("User:\n{question}\n\nAssistant:\n{answer}");
         let size = exchange.chars().count();
         if size > budget {
+            // The latest exchange is always carried: its question in full when
+            // it fits, and as much of the beginning of its answer as remains.
             if kept.is_empty() {
-                kept.push(exchange.chars().skip(size - budget).collect::<String>());
+                let asked: String = question.chars().take(budget / 2).collect();
+                let room = budget.saturating_sub(asked.chars().count());
+                let said: String = answer.chars().take(room).collect();
+                kept.push(format!(
+                    "User:\n{asked}\n\nAssistant:\n{said}\n[The rest of this answer was left out for length.]"
+                ));
             }
             break;
         }
@@ -86,8 +91,9 @@ fn history_recorded(e: &Execution, i: usize) -> bool {
         })
 }
 
-fn replace_conversation(e: &mut Execution, i: usize, app_dir: &Path) {
-    jobs::forget_unreachable_conversation(app_dir, e.mission_id);
+/// Marks the turn only. The stale ledger pointer is dropped once this state
+/// is saved, and again at the start of any later tick that still finds it.
+fn replace_conversation(e: &mut Execution, i: usize) {
     e.turns[i].cursor = Some(REPLACEMENT.into());
     e.turns[i].phase = Phase::Queued;
     e.turns[i].external_id = None;
@@ -111,11 +117,29 @@ pub(super) async fn tick(
     let Some(i) = e.turns.iter().position(|t| !t.phase.terminal()) else {
         return Ok(());
     };
-    let phase = e.turns[i].phase;
+    let mut phase = e.turns[i].phase;
     if matches!(phase, Phase::Incompatible | Phase::SubmissionUncertain) {
         return Ok(());
     }
-    let prior = jobs::load_job(app_dir, e.mission_id);
+    let mut prior = jobs::load_job(app_dir, e.mission_id);
+    // A replacement turn whose ledger still describes another prompt was
+    // interrupted before anything was sent: a submission would have rewritten
+    // that record. Drop the pointer to the lost conversation and start over.
+    if e.turns[i].cursor.as_deref() == Some(REPLACEMENT)
+        && matches!(phase, Phase::Queued | Phase::Submitting)
+        && prior.as_ref().is_some_and(|r| {
+            r.state != jobs::JobState::Submitted
+                && r.prompt_sha256
+                    != jobs::prompt_fingerprint(
+                        &outgoing(&e, i),
+                        e.turns[i].model.as_deref().or(e.selection.model.as_deref()),
+                    )
+        })
+    {
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id);
+        prior = None;
+        phase = Phase::Queued;
+    }
     // Retry observation only, never submission, for transient hydration/transport
     // failures. Bound retries and preserve genuine authentication holds.
     if phase == Phase::ReconnectRequired
@@ -161,7 +185,11 @@ pub(super) async fn tick(
             worker::receipt(store, e, i).await?;
             return Ok(());
         }
-        replace_conversation(&mut e, i, app_dir);
+        replace_conversation(&mut e, i);
+        // Saved as queued first: the pointer is dropped only once this is on
+        // record, so an interruption in between is healed by the next tick.
+        e = worker::save(store, e).await?;
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id);
     }
     e.turns[i].phase = Phase::Submitting;
     e = worker::save(store, e).await?;
@@ -255,13 +283,15 @@ pub(super) async fn tick(
     {
         // Found out only now, in the browser. Nothing was sent: the next tick
         // sends this message to a replacement conversation.
-        replace_conversation(&mut e, i, app_dir);
+        replace_conversation(&mut e, i);
         e.turns[i].detail = Some(
             "The original ChatGPT conversation could not be opened; continuing in a new one".into(),
         );
         // A receipt keeps identifiers it is not given. Removing the pointer to
         // the lost conversation needs a full save.
+        let mission = e.mission_id;
         worker::save(store, e).await?;
+        jobs::forget_unreachable_conversation(app_dir, mission);
         return Ok(());
     } else {
         e.turns[i].phase = if jobs::load_job(app_dir, e.mission_id)
@@ -356,14 +386,13 @@ mod tests {
             1
         ));
         assert!(!history_recorded(&execution(vec![next]), 0));
-        let dir = tempfile::tempdir().unwrap();
         let mut e = execution(vec![
             answered("a", "b"),
             Turn::new("n".into(), "Next".into()),
         ]);
         e.external_id = Some("/c/old".into());
         e.turns[1].phase = Phase::Submitting;
-        replace_conversation(&mut e, 1, dir.path());
+        replace_conversation(&mut e, 1);
         assert_eq!(e.turns[1].phase, Phase::Queued);
         assert_eq!(e.turns[1].cursor.as_deref(), Some(REPLACEMENT));
         assert!(e.external_id.is_none());
@@ -382,6 +411,19 @@ mod tests {
         let sent = outgoing(&e, 2);
         assert!(sent.contains("Recent question") && sent.contains("Recent answer"));
         assert!(!sent.contains("Oldest question"));
+        assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
+        // One exchange larger than the budget keeps its question and the
+        // beginning of its answer.
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let answer = format!("BEGINNING {} END", "y".repeat(REPLACEMENT_HISTORY_LIMIT));
+        let sent = outgoing(
+            &execution(vec![answered("The only question", &answer), next]),
+            1,
+        );
+        assert!(sent.contains("User:\nThe only question\n\nAssistant:\nBEGINNING"));
+        assert!(!sent.contains(" END"));
+        assert!(sent.contains("left out for length"));
         assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
     }
 
