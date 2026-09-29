@@ -123,6 +123,8 @@
 
 * { box-sizing: border-box; }
 :root { --t: 90ms; --ease: cubic-bezier(.2, .7, .2, 1); }
+/* Queued messages sit a step below the composer, as in Cursor. */
+:root { --queue-bg: color-mix(in srgb, var(--bg-elev) 50%, var(--bg)); }
 html, body, #root, .app { height: 100%; margin: 0; background: transparent; }
 body {
   /* Transparent so the macOS vibrancy shows through the sidebar. */
@@ -1332,7 +1334,7 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .attach-chip button { color: var(--fg-4); }
 
 /* Core-queued follow-ups (remote missions) share the local queue card. */
-.queued-messages { margin: 0 0 8px; padding: 10px 8px 6px; border: 1px solid var(--stroke); border-radius: var(--radius-xl); background: var(--bg-elev); max-height: 220px; overflow-y: auto; font: 14px/20px var(--sans); }
+.queued-messages { margin: 0 0 8px; padding: 10px 8px 6px; border: 1px solid var(--stroke); border-radius: var(--radius-xl); background: var(--queue-bg); max-height: 220px; overflow-y: auto; font: 14px/20px var(--sans); }
 .queued-label { padding: 0 8px; color: var(--fg-2); margin-bottom: 4px; }
 .queued-messages ol { list-style: none; margin: 0; padding: 0; }
 .queued-messages li { padding: 7px 8px; border-radius: var(--radius-md); color: var(--fg); }
@@ -2236,7 +2238,7 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Follow-up queue: same width as the composer, quiet surface and compact header. */
 /* Queued follow-ups: one card above the composer, one line per message (Cursor-like). */
-.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--bg-elev); color:var(--fg-2); font:14px/20px var(--sans); }
+.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); }
 .followup-queue.collapsed { padding-bottom:10px; }
 .followup-queue header { display:flex; align-items:center; gap:10px; min-height:24px; padding:0 4px 0 8px; }
 .queue-count { color:var(--fg-2); }
