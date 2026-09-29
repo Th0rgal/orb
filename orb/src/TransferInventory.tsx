@@ -63,10 +63,10 @@ export function TransferInventory(p: { manifest: Manifest }) {
         <Show when={links().length > SHOWN}><li class="transfer-more">and {formatCount(links().length - SHOWN, "more link")}</li></Show></ul>
     </details></Show>
     <Show when={p.manifest.excluded.length}><details class="transfer-section">
-      <summary>Excluded<span class="transfer-count">{p.manifest.excluded.length}</span></summary>
+      <summary>Excluded<span class="transfer-count">{(p.manifest.excluded.length + (p.manifest.unlisted ?? 0)).toLocaleString("en-US")}</span></summary>
       <p>Credentials, generated configuration and caches are never moved.</p>
       <ul><For each={p.manifest.excluded.slice(0, SHOWN)}>{path => <li><span class="transfer-path">{path}</span></li>}</For>
-        <Show when={p.manifest.excluded.length > SHOWN}><li class="transfer-more">and {formatCount(p.manifest.excluded.length - SHOWN, "more path")}</li></Show></ul>
+        <Show when={p.manifest.excluded.length + (p.manifest.unlisted ?? 0) > SHOWN}><li class="transfer-more">and {formatCount(p.manifest.excluded.length + (p.manifest.unlisted ?? 0) - SHOWN, "more path")}</li></Show></ul>
     </details></Show>
   </section>;
 }

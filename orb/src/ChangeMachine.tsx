@@ -138,8 +138,8 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
       let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", destination: target.machine, client_id: client, client_root: localBinding(p.mission.id)?.cwd, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
       setAction(a);
       // A source that cannot list its folders yet snapshots everything, as before.
-      const found = await inventoryTransfer(a).catch(() => undefined);
-      if (found?.rows) { setChoice({}); setInventory(found); }
+      const found = await inventoryTransfer(a);
+      if (found) { setChoice({}); setInventory(found); }
       else { a = await snapshotTransfer(a); setAction(a); }
       setStage("");
     } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }

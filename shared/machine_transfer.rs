@@ -46,6 +46,18 @@ pub struct Manifest {
     pub links: Vec<Link>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
+    /// Left-behind paths beyond the `EXCLUDED_LISTED` that `excluded` names.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unlisted: usize,
+}
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+/// Left-behind paths a manifest names; repositories are always named, since
+/// their history is bundled from that list.
+pub const EXCLUDED_LISTED: usize = 5_000;
+fn repository(rel: &str) -> bool {
+    rel == ".git" || rel.ends_with("/.git")
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -453,7 +465,28 @@ impl Walk<'_> {
         Ok(())
     }
 }
-/// Bytes and entries beneath a left-behind path, were it carried.
+/// Where a repository keeps its objects. A linked worktree's `.git` is a file
+/// naming a directory inside the primary repository, which holds them.
+fn object_store(git: &Path) -> Option<PathBuf> {
+    if fs::symlink_metadata(git).ok()?.is_dir() {
+        return Some(git.join("objects"));
+    }
+    let named = fs::read_to_string(git).ok()?;
+    let own = git
+        .parent()?
+        .join(named.lines().next()?.strip_prefix("gitdir:")?.trim());
+    let common = fs::read_to_string(own.join("commondir")).ok()?;
+    Some(own.join(common.trim()).join("objects"))
+}
+/// About what a repository's bundle weighs: its stored objects. Objects
+/// borrowed through alternates are not counted.
+fn history(git: &Path) -> u64 {
+    object_store(git)
+        .and_then(|objects| Some(weigh_all(&objects, &fs::symlink_metadata(&objects).ok()?)))
+        .unwrap_or(0)
+}
+/// Bytes and entries beneath a left-behind path, were it carried, with the
+/// history of the repositories inside.
 fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
     if m.is_file() {
         return (m.len(), 1);
@@ -463,13 +496,15 @@ fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
     }
     let mut total = (0u64, 0usize);
     for item in fs::read_dir(path).into_iter().flatten().flatten() {
-        if item.file_name().to_str().is_some_and(protected) {
-            continue;
-        }
-        if let Ok(m) = fs::symlink_metadata(item.path()) {
-            let (bytes, files) = weigh(&item.path(), &m);
-            total = (total.0.saturating_add(bytes), total.1 + files);
-        }
+        let (bytes, files) = match item.file_name().to_str() {
+            Some(".git") => (history(&item.path()), 1),
+            Some(name) if protected(name) => continue,
+            _ => match fs::symlink_metadata(item.path()) {
+                Ok(m) => weigh(&item.path(), &m),
+                Err(_) => continue,
+            },
+        };
+        total = (total.0.saturating_add(bytes), total.1 + files);
     }
     total
 }
@@ -532,47 +567,9 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
     let mut moved = std::collections::BTreeMap::<String, Row>::new();
     let mut left = Vec::new();
     let mut hidden = 0usize;
-    // Git history travels as one bundle per repository, about the size of its
-    // object store. Reserved here so the choice is made against the real total.
-    let mut history = (0u64, 0usize);
-    Walk {
-        root,
-        selection: &Selection::default(),
-    }
-    .run(&mut |rel, path, found| {
-        let bytes = match found {
-            Found::File(m) => m.len(),
-            // Only a link the snapshot would carry counts.
-            Found::Other(m)
-                if m.file_type().is_symlink()
-                    && fs::read_link(path)
-                        .is_ok_and(|to| portable_target(&[root], rel, &to).is_ok()) =>
-            {
-                0
-            }
-            Found::Other(_) => return Ok(()),
-            Found::Left(State::Protected, _) => {
-                if rel == ".git" || rel.ends_with("/.git") {
-                    let objects = path.join("objects");
-                    let stored = fs::symlink_metadata(&objects).map(|m| weigh_all(&objects, &m));
-                    history = (history.0.saturating_add(stored.unwrap_or(0)), history.1 + 1);
-                } else {
-                    hidden += 1;
-                }
-                return Ok(());
-            }
-            Found::Left(state, m) => {
-                let (bytes, files) = weigh(path, m);
-                left.push(Row {
-                    path: rel.into(),
-                    folder: m.is_dir(),
-                    state,
-                    bytes,
-                    files,
-                });
-                return Ok(());
-            }
-        };
+    // The root repository's bundle travels whatever is chosen.
+    let mut reserved = (0u64, 0usize);
+    let mut count = |rel: &str, bytes: u64| -> Result<(), String> {
         let parts: Vec<_> = rel.splitn(3, '/').collect();
         for depth in 1..=parts.len().min(2) {
             // A file directly inside a top-level folder counts in that folder only.
@@ -596,6 +593,43 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
             row.files += 1;
         }
         Ok(())
+    };
+    Walk {
+        root,
+        selection: &Selection::default(),
+    }
+    .run(&mut |rel, path, found| match found {
+        Found::File(m) => count(rel, m.len()),
+        // Only a link the snapshot would carry counts.
+        Found::Other(m)
+            if m.file_type().is_symlink()
+                && fs::read_link(path)
+                    .is_ok_and(|to| portable_target(&[root], rel, &to).is_ok()) =>
+        {
+            count(rel, 0)
+        }
+        Found::Other(_) => Ok(()),
+        // A repository's history moves with its folder, as one more file.
+        Found::Left(State::Protected, _) if rel == ".git" => {
+            reserved = (history(path), 1);
+            Ok(())
+        }
+        Found::Left(State::Protected, _) if repository(rel) => count(rel, history(path)),
+        Found::Left(State::Protected, _) => {
+            hidden += 1;
+            Ok(())
+        }
+        Found::Left(state, m) => {
+            let (bytes, files) = weigh(path, m);
+            left.push(Row {
+                path: rel.into(),
+                folder: m.is_dir(),
+                state,
+                bytes,
+                files,
+            });
+            Ok(())
+        }
     })?;
     // The totals cover every moved entry, listed or not.
     let top = moved.values().filter(|row| !row.path.contains('/'));
@@ -605,7 +639,12 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
     let mut rows: Vec<_> = moved.into_values().chain(left).collect();
     let truncated = rows.len() > MAX_ROWS;
     if truncated {
-        rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+        // Keep what weighs most on either limit, so each stays within reach.
+        let share = |row: &Row| {
+            let bytes = row.bytes as f64 / MAX_BYTES as f64;
+            bytes.max(row.files as f64 / MAX_FILES as f64)
+        };
+        rows.sort_by(|a, b| share(b).total_cmp(&share(a)));
         rows.truncate(MAX_ROWS);
     }
     rows.sort_by(|a, b| a.path.cmp(&b.path));
@@ -613,7 +652,7 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
         "rows": rows,
         "bytes": bytes,
         "files": files,
-        "reserved": {"bytes": history.0, "files": history.1},
+        "reserved": {"bytes": reserved.0, "files": reserved.1},
         "truncated": truncated,
         "protected": hidden,
         "limits": {"bytes": MAX_BYTES, "files": MAX_FILES},
@@ -640,9 +679,13 @@ fn inventory(
     Walk { root, selection }.run(&mut |rel, path, found| {
         let m = match found {
             Found::Left(..) => {
-                manifest.excluded.push(rel.into());
+                if repository(rel) || manifest.excluded.len() < EXCLUDED_LISTED {
+                    manifest.excluded.push(rel.into());
+                } else {
+                    manifest.unlisted += 1;
+                }
                 if manifest.excluded.len() > MAX_FILES {
-                    return Err("Too many excluded paths".into());
+                    return Err("Too many repositories".into());
                 }
                 return Ok(());
             }
@@ -1717,21 +1760,28 @@ mod integrity_tests {
         let a = temp.path().join("a");
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/passwd", src.join("notes/escape")).unwrap();
+        fs::create_dir_all(src.join(".cargo/registry/crate")).unwrap();
+        git(&src.join(".cargo/registry/crate"), &["init"]).unwrap();
         let found = operate(&a, Some(&src), Operation::Inventory).unwrap();
         let rows: Vec<Row> = serde_json::from_value(found["rows"].clone()).unwrap();
         let rows: Vec<_> = rows
             .iter()
             .map(|r| (r.path.as_str(), r.folder, r.state, r.bytes, r.files))
             .collect();
+        // Neither repository has a commit yet: their stores are all but empty.
+        let stored = history(&src.join("repo/.git"));
+        let nested = history(&src.join(".cargo/registry/crate/.git"));
         assert_eq!(
             rows,
             vec![
-                (".cargo", true, State::Rebuildable, 9, 1),
+                // With the history of the repository inside, were it ticked.
+                (".cargo", true, State::Rebuildable, 9 + nested, 2),
                 ("notes", true, State::Moved, 4, 1),
                 ("plain", true, State::Moved, 51, 3),
                 ("plain/.cargo", true, State::Moved, 21, 1),
                 ("plain/data", true, State::Moved, 4, 1),
-                ("repo", true, State::Moved, 18, 3),
+                // Its history moves with it, as one more file.
+                ("repo", true, State::Moved, 18 + stored, 4),
                 ("repo/.lake", true, State::Rebuildable, 4, 1),
                 // The credential inside is not counted: it could never move.
                 ("repo/out", true, State::Ignored, 14, 1),
@@ -1743,19 +1793,94 @@ mod integrity_tests {
         );
         assert_eq!(
             (found["bytes"].clone(), found["files"].clone()),
-            (76.into(), 8.into())
+            ((76 + stored).into(), 9.into())
         );
         assert_eq!(found["truncated"], false);
-        // The repository's history is reserved, its `.git` is not a hidden path.
         assert_eq!(found["protected"], 0);
-        assert_eq!(found["reserved"]["files"], 1);
-        let objects = src.join("repo/.git/objects");
         assert_eq!(
-            found["reserved"]["bytes"],
-            weigh_all(&objects, &fs::metadata(&objects).unwrap())
+            found["reserved"],
+            serde_json::json!({"bytes": 0, "files": 0})
         );
-        assert_eq!(found["limits"]["files"], MAX_FILES);
         assert!(!manifest_path(&a).exists());
+    }
+    #[test]
+    fn a_worktree_and_the_root_repository_reserve_their_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("main")).unwrap();
+        let commit = |repo: &Path, file: &str| {
+            fs::write(repo.join(file), vec![7; 4096]).unwrap();
+            git(repo, &["add", file]).unwrap();
+            let identity = ["-c", "user.name=T", "-c", "user.email=t@example.invalid"];
+            git(repo, &[&identity[..], &["commit", "-m", file]].concat()).unwrap();
+        };
+        git(&src, &["init"]).unwrap();
+        fs::write(src.join(".gitignore"), "main/\n").unwrap();
+        commit(&src, "root.bin");
+        git(&src.join("main"), &["init"]).unwrap();
+        commit(&src.join("main"), "file.bin");
+        git(
+            &src.join("main"),
+            &["worktree", "add", "../linked", "-b", "side"],
+        )
+        .unwrap();
+        let stored = history(&src.join("main/.git"));
+        assert!(stored > 0);
+        assert_eq!(history(&src.join("linked/.git")), stored);
+        let found = operate(&temp.path().join("a"), Some(&src), Operation::Inventory).unwrap();
+        let rows: Vec<Row> = serde_json::from_value(found["rows"].clone()).unwrap();
+        let row = |path: &str| rows.iter().find(|r| r.path == path).unwrap();
+        assert_eq!(
+            (row("linked").bytes, row("linked").files),
+            (4096 + stored, 2)
+        );
+        // Ignored by the root repository, and a repository of its own.
+        assert_eq!(row("main").state, State::Ignored);
+        assert_eq!((row("main").bytes, row("main").files), (4096 + stored, 2));
+        assert_eq!(found["reserved"]["bytes"], history(&src.join(".git")));
+        assert_eq!(found["reserved"]["files"], 1);
+    }
+    #[test]
+    fn many_ignored_paths_do_not_fill_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        git(&src, &["init"]).unwrap();
+        git(&src.join("sub"), &["init"]).unwrap();
+        fs::write(src.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(src.join("kept"), "kept").unwrap();
+        for i in 0..EXCLUDED_LISTED + 25 {
+            fs::write(src.join(format!("{i:05}.log")), "").unwrap();
+        }
+        let a = temp.path().join("a");
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        assert_eq!(paths(&m), vec![".gitignore", "kept"]);
+        // Both repositories are named, the second beyond the listed paths.
+        assert_eq!(m.excluded.len(), EXCLUDED_LISTED + 1);
+        assert!(m.excluded.contains(&".git".to_owned()));
+        assert_eq!(m.excluded.last().unwrap(), "sub/.git");
+        assert_eq!(m.unlisted, 26);
+        operate(&a, Some(&src), Operation::CheckSource).unwrap();
+    }
+    #[test]
+    fn a_long_inventory_keeps_what_weighs_on_either_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("many")).unwrap();
+        for i in 0..300 {
+            fs::write(src.join(format!("many/{i}")), "").unwrap();
+        }
+        for i in 0..MAX_ROWS + 10 {
+            fs::write(src.join(format!("one-{i:05}")), "1").unwrap();
+        }
+        let found = operate(&temp.path().join("a"), Some(&src), Operation::Inventory).unwrap();
+        let rows: Vec<Row> = serde_json::from_value(found["rows"].clone()).unwrap();
+        assert_eq!(found["truncated"], true);
+        assert_eq!(rows.len(), MAX_ROWS);
+        assert_eq!(found["files"], 300 + MAX_ROWS + 10);
+        let many = rows.iter().find(|r| r.path == "many").unwrap();
+        assert_eq!((many.bytes, many.files), (0, 300));
     }
     #[test]
     fn machine_transfer_preserves_git_history_and_uncommitted_work() {

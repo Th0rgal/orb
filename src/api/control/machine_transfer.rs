@@ -272,9 +272,10 @@ async fn node_request(
         .await
         .map_err(|_| conflict("Machine unreachable; retry when it reconnects"))?;
     if !response.status().is_success() {
-        return Err(conflict(
-            "Machine transfer unavailable on this node; check its version and workspace",
-        ));
+        return Err(conflict(node_refusal(
+            response.status(),
+            &response.text().await.unwrap_or_default(),
+        )));
     }
     response
         .json()
@@ -284,6 +285,21 @@ async fn node_request(
 // Version 1 nodes omitted Claude from transfer discovery. Their authenticated
 // software inventory lets a rolling upgrade repair that omission without
 // restarting nodes that still own jobs. Version 2 is authoritative.
+pub(crate) const UNSUPPORTED_OPERATION: &str =
+    "Machine does not support this transfer operation; update it";
+/// What a node answered when it refused. Its own reason for a conflict is the
+/// one the user can act on; a request it cannot parse is an operation it
+/// predates.
+fn node_refusal(status: StatusCode, body: &str) -> String {
+    let reason = body.trim();
+    if status == StatusCode::UNPROCESSABLE_ENTITY {
+        UNSUPPORTED_OPERATION.into()
+    } else if status == StatusCode::CONFLICT && !reason.is_empty() {
+        reason.chars().take(2_000).collect()
+    } else {
+        "Machine transfer unavailable on this node; check its version and workspace".into()
+    }
+}
 fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
     if capabilities["version"].as_u64() != Some(1) {
         return;
@@ -322,6 +338,31 @@ async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value,
 #[cfg(test)]
 mod claude_capability_tests {
     use super::*;
+    #[test]
+    fn a_node_refusal_keeps_its_reason_and_names_an_unknown_operation() {
+        let limit = "Workspace exceeds transfer limit (10 GiB / 50,000 files): 28.9 GiB in 408581 files. Largest: rvb (7.1 GiB, 126454 files)";
+        assert_eq!(node_refusal(StatusCode::CONFLICT, limit), limit);
+        assert_eq!(
+            node_refusal(StatusCode::CONFLICT, &"é".repeat(5_000))
+                .chars()
+                .count(),
+            2_000
+        );
+        assert_eq!(
+            node_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown variant `inventory`"
+            ),
+            UNSUPPORTED_OPERATION
+        );
+        for (status, body) in [
+            (StatusCode::CONFLICT, " "),
+            (StatusCode::UNAUTHORIZED, "token"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "panic"),
+        ] {
+            assert!(node_refusal(status, body).starts_with("Machine transfer unavailable"));
+        }
+    }
     #[test]
     fn legacy_inventory_is_evidence_not_a_blanket_allowlist() {
         let installed = json!({"components":[{"id":"claudecode","installed":true,"path":"/usr/local/bin/claude","version":"2.1.283"}]});

@@ -59,7 +59,7 @@ export function TransferSelection(p: { inventory: WorkspaceInventory; choice: Ch
         </details>
       </Show>}</For>
     </div>
-    <p class="transfer-note"><Show when={p.inventory.reserved?.bytes}>The totals include about {formatBytes(p.inventory.reserved!.bytes)} of Git history and conversation. </Show>Unticked folders stay on the source. Build output and toolchains can be rebuilt on the destination.
+    <p class="transfer-note">Sizes include each repository's Git history.<Show when={p.inventory.reserved?.bytes}> {formatBytes(p.inventory.reserved!.bytes)} always move{p.inventory.reserved!.files === 1 ? "s" : ""}: the workspace's own history and a long conversation.</Show> Unticked folders stay on the source. Build output and toolchains can be rebuilt on the destination.
       <Show when={p.inventory.protected}> {formatCount(p.inventory.protected, "credential or configuration path")} never move{p.inventory.protected === 1 ? "s" : ""}.</Show>
       <Show when={p.inventory.truncated}> Only the largest folders are listed.</Show></p>
   </section>;

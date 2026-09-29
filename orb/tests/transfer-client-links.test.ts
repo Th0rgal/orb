@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 const manifest = { bytes: 0, excluded: [], files: [], links: [{ path: "bin/cargo", target: "rustup" }] };
 vi.mock("../src/clientRuns", () => ({ machineIdentity: async () => "computer", nativeInvoke: () => async () => manifest }));
 vi.mock("../src/localAgents", () => ({ localBinding: () => ({ cwd: "/work" }), refreshLocalAgents: async () => [], rememberBinding: async () => {} }));
-import { snapshotTransfer, type TransferAction } from "../src/machineTransfer";
+import { inventoryTransfer, snapshotTransfer, type TransferAction } from "../src/machineTransfer";
 
 const action: TransferAction = { id: "move", mission_id: "conversation", phase: "preparing", source: { kind: "client", id: "computer" }, destination: { kind: "core" }, backend: "codex", created_at: "now" };
 afterEach(() => vi.restoreAllMocks());
@@ -24,4 +24,15 @@ it("registers a local snapshot with links on a backend that carries them", async
   const posted = backend({ features: ["links"] });
   expect((await snapshotTransfer(action)).phase).toBe("copying");
   expect(posted).toMatchObject([{ op: "client_snapshot", manifest }]);
+});
+
+const remote: TransferAction = { ...action, source: { kind: "node", id: "old-agent" } };
+const answers = (status: number, body: string) => vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(body, { status }));
+it("treats only an unknown operation as a source that predates the inventory", async () => {
+  answers(422, "unknown variant `inventory`");
+  expect(await inventoryTransfer(remote)).toBeUndefined();
+  answers(409, "Machine does not support this transfer operation; update it");
+  expect(await inventoryTransfer(remote)).toBeUndefined();
+  answers(409, "Source execution has not terminated");
+  await expect(inventoryTransfer(remote)).rejects.toThrow("Source execution has not terminated");
 });
