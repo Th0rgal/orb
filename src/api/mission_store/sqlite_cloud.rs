@@ -5,7 +5,7 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 pub(super) async fn list(store: &SqliteMissionStore) -> Result<Vec<Execution>, String> {
-    let conn = store.conn.clone();
+    let conn = store.reader();
     tokio::task::spawn_blocking(move || {
         let c = conn.blocking_lock();
         let mut q = c
