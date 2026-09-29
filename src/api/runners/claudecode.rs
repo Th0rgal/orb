@@ -4003,26 +4003,46 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     },
                     "Rotating to alternate Anthropic account"
                 );
-                result = run_claudecode_turn(
-                    workspace,
-                    work_dir,
-                    &effective_msg,
-                    model,
-                    model_effort,
-                    agent,
-                    mission_id,
-                    events_tx.clone(),
-                    cancel.clone(),
-                    secrets.clone(),
-                    app_working_dir,
-                    effective_sid.as_deref(),
-                    is_continuation,
-                    tool_hub.clone(),
-                    status.clone(),
-                    Some(alt_auth),
-                    force_argv_prompt,
-                )
-                .await;
+                // The session of the account that just hit its limit is still
+                // being torn down. An alternate started in that window exits
+                // at once: give the same account a second start before moving
+                // on, since it may be the only one with quota.
+                for start in 0..2 {
+                    if start > 0 {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            rotation_attempt = idx + 1,
+                            "Alternate Anthropic account died at startup; starting it once more"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    result = run_claudecode_turn(
+                        workspace,
+                        work_dir,
+                        &effective_msg,
+                        model,
+                        model_effort,
+                        agent,
+                        mission_id,
+                        events_tx.clone(),
+                        cancel.clone(),
+                        secrets.clone(),
+                        app_working_dir,
+                        effective_sid.as_deref(),
+                        is_continuation,
+                        tool_hub.clone(),
+                        status.clone(),
+                        Some(alt_auth.clone()),
+                        force_argv_prompt,
+                    )
+                    .await;
+                    if result.success
+                        || !claudecode_result_is_startup_transport_failure(&result)
+                        || cancel.is_cancelled()
+                    {
+                        break;
+                    }
+                }
                 note_claude_turn_for_limits(app_working_dir, Some(&alt_limit_key), &result);
                 // Continue rotating on account-specific failures.
                 // Other LLM errors (model errors, context limit, etc.)
