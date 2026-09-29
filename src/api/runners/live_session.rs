@@ -34,6 +34,11 @@ pub(crate) fn park(mission_id: Uuid) -> oneshot::Receiver<String> {
     rx
 }
 
+/// Missions whose session is parked and can take a message now.
+pub(crate) fn parked_missions() -> Vec<Uuid> {
+    PARKED.lock().unwrap().keys().copied().collect()
+}
+
 pub(crate) fn unpark(mission_id: Uuid) {
     PARKED.lock().unwrap().remove(&mission_id);
 }

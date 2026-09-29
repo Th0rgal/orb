@@ -189,6 +189,39 @@ fn enqueue_control_message(queue: &mut VecDeque<ControlQueueEntry>, entry: Contr
 /// and rotate behind runnable work; when all entries are parked the queue
 /// returns to its original order and nothing is dequeued, avoiding both
 /// head-of-line blocking and a retry spin on the active run constraint.
+/// Move the first plain message queued for `mission_id` to its parked Claude
+/// session. Agent overrides, scheduler batches and slash commands need a
+/// fresh turn and stay queued.
+fn hand_over_to_parked_session(
+    mission_id: Uuid,
+    is_main: bool,
+    queue: &mut VecDeque<ControlQueueEntry>,
+    parallel_runners: &mut std::collections::HashMap<Uuid, super::mission_runner::MissionRunner>,
+) -> Option<(Uuid, String, Option<String>)> {
+    fn plain(content: &str, agent: &Option<String>, source: &Option<String>) -> bool {
+        agent.is_none()
+            && source.as_deref() != Some("scheduler")
+            && !content.trim_start().starts_with('/')
+    }
+    if let Some(position) = queue.iter().position(|entry| {
+        (entry.3 == Some(mission_id) || (entry.3.is_none() && is_main))
+            && plain(&entry.1, &entry.2, &entry.4)
+    }) {
+        super::runners::live_session::deliver(mission_id, queue[position].1.clone()).ok()?;
+        let entry = queue.remove(position)?;
+        return Some((entry.0, entry.1, entry.4));
+    }
+    let runner = parallel_runners.get_mut(&mission_id)?;
+    let position = runner
+        .queue
+        .iter()
+        .position(|message| plain(&message.content, &message.agent, &message.source))?;
+    super::runners::live_session::deliver(mission_id, runner.queue[position].content.clone())
+        .ok()?;
+    let message = runner.queue.remove(position)?;
+    Some((message.id, message.content, message.source))
+}
+
 async fn pop_next_runnable_control_queue(
     queue: &mut VecDeque<ControlQueueEntry>,
     store: &Arc<dyn MissionStore>,
@@ -22748,29 +22781,6 @@ async fn control_actor_loop(
                             }
                         }
 
-                        // A parked Claude session takes the message on its
-                        // stdin: starting another process would stop the
-                        // background tasks it is waiting for.
-                        let parked_target = effective_target.or(running_mid);
-                        if let Some(mid) = parked_target {
-                            if msg_agent.is_none()
-                                && source.as_deref() != Some("scheduler")
-                                && !content.trim_start().starts_with('/')
-                                && super::runners::live_session::deliver(mid, content.clone())
-                                    .is_ok()
-                            {
-                                let _ = events_tx.send(AgentEvent::UserMessage {
-                                    id,
-                                    content,
-                                    queued: false,
-                                    mission_id: Some(mid),
-                                    source: source.clone(),
-                                });
-                                let _ = respond.send(UserMessageAck::Delivered);
-                                continue;
-                            }
-                        }
-
                         // Determine if target is already running somewhere
                         let target_in_parallel = effective_target
                             .map(|tid| parallel_runners.contains_key(&tid))
@@ -26529,6 +26539,39 @@ async fn control_actor_loop(
             }
             // Poll parallel runners for completion
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // A parked Claude session takes the next message queued for its
+                // mission on its stdin: starting another process would stop the
+                // background tasks it is waiting for. The message went through
+                // the usual admission, lease checks and persistence when queued.
+                for mid in super::runners::live_session::parked_missions() {
+                    let Some((id, content, source)) = hand_over_to_parked_session(
+                        mid,
+                        running_mission_id == Some(mid),
+                        &mut queue,
+                        &mut parallel_runners,
+                    ) else {
+                        continue;
+                    };
+                    let _ = events_tx.send(AgentEvent::UserMessage {
+                        id,
+                        content,
+                        queued: false,
+                        mission_id: Some(mid),
+                        source,
+                    });
+                    if let Err(error) = persist_control_queue_if_changed(
+                        &mission_store,
+                        &session_user_id,
+                        &queue,
+                        &parallel_runners,
+                        &recovered_consumed_user_messages,
+                        &mut last_persisted_queue,
+                    )
+                    .await
+                    {
+                        tracing::warn!(mission_id = %mid, "Failed to persist the queue after a parked delivery: {error}");
+                    }
+                }
                 let mut completed_missions = Vec::new();
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
@@ -27332,77 +27375,6 @@ async fn control_actor_loop(
                         } else if let Some(runner) = parallel_runners.get_mut(&mid) {
                             // Update parallel runner activity
                             runner.touch();
-                        }
-                    }
-
-                    // A Claude session just parked: hand it one message that was
-                    // queued for its mission while the turn was running.
-                    if let AgentEvent::MissionActivity {
-                        tool_name,
-                        mission_id: Some(mid),
-                        ..
-                    } = &event
-                    {
-                        if tool_name == super::runners::live_session::PARKED_MARKER {
-                            let mid = *mid;
-                            let main = running_mission_id == Some(mid);
-                            let mut handed: Option<(Uuid, String, Option<String>)> = None;
-                            if let Some(position) = queue.iter().position(|entry| {
-                                entry.2.is_none()
-                                    && (entry.3 == Some(mid) || (entry.3.is_none() && main))
-                                    && entry.4.as_deref() != Some("scheduler")
-                                    && !entry.1.trim_start().starts_with('/')
-                            }) {
-                                if super::runners::live_session::deliver(
-                                    mid,
-                                    queue[position].1.clone(),
-                                )
-                                .is_ok()
-                                {
-                                    if let Some(entry) = queue.remove(position) {
-                                        handed = Some((entry.0, entry.1, entry.4));
-                                    }
-                                }
-                            } else if let Some(runner) = parallel_runners.get_mut(&mid) {
-                                if let Some(position) = runner.queue.iter().position(|message| {
-                                    message.agent.is_none()
-                                        && message.source.as_deref() != Some("scheduler")
-                                        && !message.content.trim_start().starts_with('/')
-                                }) {
-                                    if super::runners::live_session::deliver(
-                                        mid,
-                                        runner.queue[position].content.clone(),
-                                    )
-                                    .is_ok()
-                                    {
-                                        if let Some(message) = runner.queue.remove(position) {
-                                            handed =
-                                                Some((message.id, message.content, message.source));
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some((id, content, source)) = handed {
-                                let _ = events_tx.send(AgentEvent::UserMessage {
-                                    id,
-                                    content,
-                                    queued: false,
-                                    mission_id: Some(mid),
-                                    source,
-                                });
-                                if let Err(error) = persist_control_queue_if_changed(
-                                    &mission_store,
-                                    &session_user_id,
-                                    &queue,
-                                    &parallel_runners,
-                                    &recovered_consumed_user_messages,
-                                    &mut last_persisted_queue,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(mission_id = %mid, "Failed to persist the queue after a parked delivery: {error}");
-                                }
-                            }
                         }
                     }
 

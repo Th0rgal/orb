@@ -1789,7 +1789,9 @@ pub fn run_claudecode_turn<'a>(
         // A message that reached the slot just as the CLI woke itself: it is
         // answered after the current turn, so one more result is expected.
         let mut extra_input_pending = false;
-        let mut ended_parked: Option<&'static str> = None;
+        // How a parked session ended: whether that was expected, and the note
+        // that closes the turn (every reply was already delivered).
+        let mut ended_parked: Option<(bool, &'static str)> = None;
         let parked_timeout = Duration::from_secs(
             std::env::var("SANDBOXED_SH_CLAUDECODE_PARKED_TIMEOUT_SECS")
                 .ok()
@@ -1941,9 +1943,12 @@ pub fn run_claudecode_turn<'a>(
                             "Parked Claude session stayed quiet; retiring it"
                         );
                         ended_parked = Some(if background.running() > 0 {
-                            "Stopped waiting: the background tasks produced nothing for too long."
+                            (
+                                false,
+                                "Stopped waiting: the background tasks reported nothing for too long and were stopped.",
+                            )
                         } else {
-                            "The background tasks have finished."
+                            (true, "The background tasks have finished.")
                         });
                         break;
                     }
@@ -1984,7 +1989,10 @@ pub fn run_claudecode_turn<'a>(
                     // Grace period expired after process exit — no `result` event arrived.
                     if parked {
                         ended_parked =
-                            Some("The Claude session ended while waiting for its background tasks.");
+                            Some((
+                                false,
+                                "The Claude session ended while waiting for its background tasks; they were stopped.",
+                            ));
                         reader_handle.abort();
                         break;
                     }
@@ -2042,7 +2050,10 @@ pub fn run_claudecode_turn<'a>(
                                 mission_id: Some(mission_id),
                                 resumable: true,
                             });
-                            ended_parked = Some("The Claude session ended while waiting for its background tasks.");
+                            ended_parked = Some((
+                                false,
+                                "The Claude session ended while waiting for its background tasks; they were stopped.",
+                            ));
                             break;
                         }
                     }
@@ -2798,11 +2809,20 @@ pub fn run_claudecode_turn<'a>(
                                         && !res.is_error
                                         && res.subtype != "error"
                                         && !res.error_message().starts_with("API Error:")
+                                        && !is_success_path_rate_limited_error(&res.error_message())
+                                        && !is_success_path_auth_error(&res.error_message())
+                                        && !is_success_path_provider_payload_error(
+                                            &res.error_message(),
+                                        )
                                     {
                                         extra_input_pending = false;
                                         let reply = res
                                             .result
                                             .filter(|text| !text.trim().is_empty())
+                                            .or_else(|| {
+                                                Some(std::mem::take(&mut final_result))
+                                                    .filter(|text| !text.trim().is_empty())
+                                            })
                                             .unwrap_or_else(|| {
                                                 text_buffer.values().cloned().collect::<String>()
                                             });
@@ -2937,9 +2957,9 @@ pub fn run_claudecode_turn<'a>(
             }
         }
 
-        if let Some(note) = ended_parked {
-            // Every reply was already delivered when its turn ended.
+        if let Some((expected, note)) = ended_parked {
             saw_terminal_result_event = true;
+            had_error = !expected;
             final_result = note.to_string();
         }
         super::live_session::unpark(mission_id);
