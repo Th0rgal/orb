@@ -329,6 +329,13 @@ export async function getRemoteNodes(): Promise<RemoteNodesResponse> {
   return api("/api/remote-nodes");
 }
 
+/** A disabled account stays listed but is never chosen for a request. */
+export async function setProviderEnabled(id: string, enabled: boolean): Promise<AIProvider> {
+  return api<AIProvider>(`/api/ai/providers/${encodeURIComponent(id)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
+
 export async function listProviders(): Promise<AIProvider[]> {
   const data = await api<AIProvider[] | { providers?: AIProvider[] }>("/api/ai/providers");
   if (Array.isArray(data)) return data;

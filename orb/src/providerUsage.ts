@@ -51,6 +51,8 @@ export function usageWindows(u: ProviderUsage) {
 }
 
 export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage) {
+  // Checked first: the backend skips a disabled account whatever its quota.
+  if (a.enabled === false) return "disabled";
   if (a.status.type === "needs_reauth" || usage?.status === "needs_reauth") return "needs_reauth";
   if (usage?.error) return "error";
   if (usage && usageWindows(usage).some(window => window.used >= 1)) return "quota_exhausted";

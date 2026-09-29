@@ -20,6 +20,7 @@ import {
   completeProviderOAuth,
   isConnected,
   listProviders,
+  setProviderEnabled,
   openExternalUrl,
   startCliProxyLogin,
   submitCliProxyLoginCallback,
@@ -290,6 +291,11 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
   const oauth = () => p.list.filter((x) => x.uses_oauth);
   const keys = () => p.list.filter((x) => !x.uses_oauth);
+  const [toggleError, setToggleError] = createSignal<string | null>(null);
+  const toggle = (a: AIProvider, enabled: boolean) => {
+    setToggleError(null);
+    void setProviderEnabled(a.id, enabled).then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
+  };
 
   let disposed = false;
   let fetching = false;
@@ -322,12 +328,13 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </button>
       </div>
       <p class="s-lead">Configured providers from the connected sandboxed.sh backend.</p>
+      <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
 
       <section class="s-sec">
         <h3>Subscriptions (OAuth)</h3>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -341,7 +348,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
@@ -680,11 +687,11 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
   );
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => void; onEditKey?: () => void }) {
+function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => void; onEditKey?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage);
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const expandable = () => !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [open, setOpen] = createSignal(false);
@@ -715,9 +722,12 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
         </Show>
         <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span></Show>
       </Dynamic>
-      <Show when={canReconnect() || p.onEditKey}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
+      <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
       </div>
-      <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={p.onEditKey ? [{kind:"item",label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : [{kind:"item",label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}]} />}</Show>
+      <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
+        ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
+        {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
+      ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
           <Show when={hasProviderUsageDetails(p.usage)}>
