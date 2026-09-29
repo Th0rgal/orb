@@ -36,6 +36,8 @@ const RESUME_LIMIT=3;
 /** A turn that only waits for its background tasks yields to a waiting message after this long. */
 const BACKGROUND_WAIT_MS=10*60_000;
 const offline=(error:unknown)=>/Load failed|Failed to fetch|NetworkError|network connection was lost|timed out|error sending request/i.test(String(error));
+/** Core was restarting or unreachable: the answer to the launch was lost, not refused. */
+const unreachable=(error:unknown)=>offline(error)||/\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out/i.test(String(error));
 const retryable=(row:QueuedLocalMessage)=>row.state==='error'||(row.state==='dispatching'&&!!row.error)||(row.state==='accepted'&&!!row.interrupted);
 function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'){
  stored.state='queued';stored.autoResumed=true;stored.cut=cut;stored.resumes=(stored.resumes??0)+1;delete stored.error;delete stored.interrupted;
@@ -276,6 +278,18 @@ export function startLocalQueueWorker(){
     }
     if(row.state==='accepted'){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
+     continue;
+    }
+    if(row.state==='dispatching'&&row.error&&unreachable(row.error)&&(row.resumes??0)<RESUME_LIMIT){
+     // The launch met a restarting or unreachable Core. Recovery confirms that no agent runs
+     // for it (or stops the one that does) before the message is sent again.
+     try{
+      await recoverLocalLaunch(row.mission);if(!valid())return;
+      recordLocalFailure(row.mission,null);
+      if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+      await update(key,row.id,stored=>{if(stored.state!=='dispatching'||stored.error!==row.error)return;stored.state='queued';stored.resumes=(stored.resumes??0)+1;delete stored.error;delete stored.receipt;delete stored.claimedAt;});
+      again=true;
+     }catch{/* Still unreachable, or the previous agent is still stopping: the next check tries again. */}
      continue;
     }
     if(row.state==='dispatching'&&!row.error&&Date.now()-(row.claimedAt??0)>30_000){
