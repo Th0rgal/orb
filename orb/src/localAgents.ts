@@ -227,21 +227,38 @@ export async function materializeMentions(
   });
   const files: LocalFile[] = [];
   const replacements: Array<{ raw: string; absolute: string }> = [];
-  const contextMentions = mentions.filter(m => m.value === "context" || m.value.startsWith("context/"));
+  const explicitContext = (value: string) => value === "context" || value.startsWith("context/");
+  // Project files and folders are the synced project context. Point the agent
+  // at that live replica so what it writes there syncs to the sidebar; a copy
+  // under .paloma/attach never came back (mission 49660417 wrote @Context).
+  const projectPath = (value: string) => {
+    const bare = value.replace(/\/$/, "");
+    return chips.some(chip => chip.kind !== "controller" && chip.path?.replace(/\/$/, "") === bare);
+  };
+  for (const mention of mentions) if (projectPath(mention.value) && isSecretPath(mention.value.replace(/\/$/, ""))) throw new Error(`${mention.value} is not copied. Your draft is kept.`);
+  const contextMentions = mentions.filter(m => explicitContext(m.value) || projectPath(m.value));
+  const required = contextMentions.some(m => explicitContext(m.value));
   let contextRoot: string | undefined;
   const contextPaths=new Map<string,string>();
   if (contextMentions.length) {
     const invoke = tauriInvoke();
-    if (!invoke) throw new Error("Shared context requires the Orb desktop app on this computer.");
-    const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]};
-    if(!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
-    contextRoot=result.root;
-    contextMentions.forEach((mention,index)=>contextPaths.set(mention.value.replace(/\/$/,""),result.resolved_paths[index]));
+    if (!invoke && required) throw new Error("Shared context requires the Orb desktop app on this computer.");
+    try {
+      if (invoke) {
+        const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]};
+        if(!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
+        contextRoot=result.root;
+        contextMentions.forEach((mention,index)=>contextPaths.set(mention.value.replace(/\/$/,""),result.resolved_paths[index]));
+      }
+    } catch (error) {
+      // Without the live replica, project files are still copied as before.
+      if (required) throw error;
+    }
   }
   let folderBytes = 0;
   for (const mention of mentions) {
     const bare = mention.value.replace(/\/$/, "");
-    if (contextRoot && (bare === "context" || bare.startsWith("context/"))) {
+    if (contextRoot && contextPaths.has(bare)) {
       replacements.push({raw:mention.raw,absolute:`${contextRoot}${contextPaths.get(bare) ? "/"+contextPaths.get(bare) : ""}`});
       continue;
     }
