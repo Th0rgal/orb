@@ -342,3 +342,16 @@ it('sends again a message that failed only because nothing could be reached',asy
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1000);
  expect(mocks.launch).toHaveBeenCalledTimes(1);expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
+it('sends again, after checking the previous run, a launch that met a restarting Core',async()=>{
+ mocks.active=false;mocks.launch.mockRejectedValueOnce(new Error('Could not inspect previous run (502 Bad Gateway): error code: 502'));
+ stop=startLocalQueueWorker();await enqueueLocalMessage(request,'first');await enqueueLocalMessage({...request,prompt:'second'},'second');await vi.advanceTimersByTimeAsync(3000);
+ expect(mocks.recover).toHaveBeenCalledWith('mission');
+ expect(mocks.launch.mock.calls.map(call=>call[0].prompt)).toEqual(['first','first','second']);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+it('keeps an uncertain launch fenced while the previous agent cannot be confirmed stopped',async()=>{
+ mocks.active=false;mocks.launch.mockRejectedValueOnce(new Error('503 Service Unavailable'));mocks.recover.mockRejectedValue(new Error('agent still running'));
+ stop=startLocalQueueWorker();await enqueueLocalMessage(request,'first');await vi.advanceTimersByTimeAsync(65000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'dispatching',error:expect.stringContaining('uncertain')});
+});
