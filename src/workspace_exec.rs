@@ -2377,6 +2377,20 @@ impl WorkspaceExec {
         // Raw openpty with a minimal `setsid`/`TIOCSCTTY` pre_exec works.
         #[cfg(unix)]
         if matches!(self.workspace.workspace_type, WorkspaceType::Host) {
+            // A host harness is a child of the API process. Without its own
+            // scope it, and every build it starts, runs in the API service's
+            // cgroup: on 2026-09-29 Lean builds of one host mission starved
+            // the API of CPU until it stopped answering. Same wrapper as the
+            // container path, so the mission caps apply.
+            let mission_id = env
+                .get("MISSION_ID")
+                .and_then(|value| uuid::Uuid::parse_str(value).ok());
+            let unit = exec_scope_unit_for_mission("host", Some(cwd), mission_id);
+            if let Some(mut scoped) = self.mission_resource_caps().scope_run_args(&unit) {
+                scoped.push(program.to_string());
+                scoped.extend_from_slice(args);
+                return self.spawn_unix_pty(cwd, "systemd-run", &scoped, &env);
+            }
             return self.spawn_unix_pty(cwd, program, args, &env);
         }
 

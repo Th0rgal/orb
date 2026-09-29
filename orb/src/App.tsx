@@ -5,7 +5,7 @@ import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {QueuedMessages} from "./QueuedMessages";
-import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow} from "./localMessageQueue";
+import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow,resumePrompt} from "./localMessageQueue";
 import {createQueuedEdit} from "./queuedEdit";
 import {BtwSettings} from "./btwSettings";
 import {createPlanProgress, type PlanProgressData} from "./PlanProgress";
@@ -14,6 +14,7 @@ import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
 import { startLocalOrigin } from "./localAgents";
 import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
+import { MachineLoadBadge, byLeastLoaded, recordFleet, recordMissions } from "./machineLoad";
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
@@ -1097,6 +1098,7 @@ export default function App() {
   const [remoteLaunch, setRemoteLaunch] = createSignal<{ state: "loading" | "ready" | "error"; capability: RemoteLaunchCapability | null }>({ state: "loading", capability: null });
   const acceptFleet = (fleet: RemoteNodesResponse) => {
     setFleetNodes(fleet.nodes);
+    recordFleet(fleet.nodes);
     setRemoteLaunch({ state: "ready", capability: fleet.remote_launch ?? null });
   };
   const harnessName = (id: string) => harnessChoices().find((c) => c.backend.id === id)?.backend.name ?? id;
@@ -1125,6 +1127,7 @@ export default function App() {
     try {
       const fresh = await listMissions();
       setMissions((prev) => mergeById(prev, fresh));
+      recordMissions(fresh);
       const live = new Set(["active", "running", "pending", "queued", "starting", "resuming"]);
       for (const m of fresh) if (live.has(m.status)) prefetchTranscript(m.id);
       for (const key of cacheRecents()) {
@@ -1170,7 +1173,12 @@ export default function App() {
     if (sep < 0) return null;
     return { slug: rest.slice(0, sep), path: rest.slice(sep + 1) };
   });
-  const sortedNodes = () => preferSparkAdministration([...fleetNodes()],node=>node.id).sort((a, b) => Number(b.status === "online") - Number(a.status === "online"));
+  // Usable machines first; among them the least busy, then the one with most free memory.
+  const usableNode = (node: RemoteNodeView) => node.status === "online" && (!node.cordoned || isAdministrationNode(node));
+  const sortedNodes = createMemo(() => {
+    const nodes = preferSparkAdministration([...fleetNodes()], node => node.id);
+    return [...byLeastLoaded(nodes.filter(usableNode), node => node.id), ...nodes.filter(node => !usableNode(node))];
+  });
   const machineLabel = () => {
     if (isConnected()) {
       if (newMachine() === "core") return "Core (agent-core)";
@@ -1888,6 +1896,7 @@ export default function App() {
                               <span class="menu-title">This computer</span>
 
                             </span>
+                            <MachineLoadBadge machine="client" />
                           </button>
                           <div class="menu-sep" />
                           <div class="machine-section-label">Remote</div>
@@ -1904,6 +1913,7 @@ export default function App() {
                             <span class="menu-col">
                               <span class="menu-title">Core</span><span class="machine-inline-note">agent-core</span>
                             </span>
+                            <MachineLoadBadge machine="core" />
                           </button>
                           <div class="menu-sep" />
                           <div class="machine-section-label machine-nodes-label">Compute nodes</div>
@@ -1923,6 +1933,7 @@ export default function App() {
                                 <span class="menu-col">
                                   <span class="menu-title">{isAdministrationNode(n) ? "DGX Spark · Admin" : n.id}</span>
                                 </span>
+                                <MachineLoadBadge machine={n.id} />
                                 <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
                               </button>
                             )}
@@ -2311,6 +2322,11 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const sendQueueFromComposer = () => {
     if (editingQueued() || !queuedLocalMessages(p.id).some(row => row.state === "queued" && row.waiting)) return;
     void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+  };
+  // Waiting messages go first: they are what the user asked for next. With none, the agent continues its work.
+  const resume = () => {
+    if (queuedLocalMessages(p.id).length) void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+    else void sendMsg(resumePrompt, [], []);
   };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   let scroller: HTMLDivElement | undefined;
@@ -2702,7 +2718,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />

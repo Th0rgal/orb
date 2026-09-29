@@ -809,10 +809,34 @@ const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
 
 pub struct SqliteMissionStore {
     conn: Arc<Mutex<Connection>>,
+    /// Read-only connections for the queries clients poll. In WAL mode they
+    /// do not wait for the writer, so a slow write or a burst of event
+    /// writes no longer queues every status request behind one lock.
+    readers: Arc<Vec<Arc<Mutex<Connection>>>>,
+    next_reader: Arc<std::sync::atomic::AtomicUsize>,
     content_dir: PathBuf,
 }
 
+/// Read connections opened next to the writer.
+const READ_CONNECTIONS: usize = 4;
+
 impl SqliteMissionStore {
+    /// A connection for a query that only reads committed state.
+    fn reader(&self) -> Arc<Mutex<Connection>> {
+        if self.readers.is_empty() {
+            return self.conn.clone();
+        }
+        let turn = self
+            .next_reader
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Prefer an idle reader over queueing behind a busy one.
+        (0..self.readers.len())
+            .map(|offset| &self.readers[(turn + offset) % self.readers.len()])
+            .find(|reader| reader.try_lock().is_ok())
+            .unwrap_or(&self.readers[turn % self.readers.len()])
+            .clone()
+    }
+
     /// Parse an automation row from the database.
     fn parse_automation_row(row: &rusqlite::Row<'_>) -> Result<Automation, rusqlite::Error> {
         let id: String = row.get(0)?;
@@ -1073,13 +1097,29 @@ impl SqliteMissionStore {
             // Run migrations for existing databases
             Self::run_migrations(&conn)?;
 
-            Ok::<_, String>(conn)
+            let mut readers = Vec::with_capacity(READ_CONNECTIONS);
+            for _ in 0..READ_CONNECTIONS {
+                let reader = Connection::open(&db_path)
+                    .map_err(|e| format!("Failed to open SQLite read connection: {}", e))?;
+                reader
+                    .busy_timeout(std::time::Duration::from_secs(10))
+                    .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
+                reader
+                    .pragma_update(None, "query_only", true)
+                    .map_err(|e| format!("Failed to make the connection read-only: {}", e))?;
+                readers.push(Arc::new(Mutex::new(reader)));
+            }
+
+            Ok::<_, String>((conn, readers))
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))??;
+        let (conn, readers) = conn;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(readers),
+            next_reader: Arc::default(),
             content_dir,
         })
     }
@@ -1110,6 +1150,8 @@ impl SqliteMissionStore {
         .map_err(|e| e.to_string())??;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::default(),
+            next_reader: Arc::default(),
             content_dir,
         })
     }
@@ -2986,7 +3028,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn list_missions(&self, limit: usize, offset: usize) -> Result<Vec<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -3028,7 +3070,7 @@ impl MissionStore for SqliteMissionStore {
         if filter.is_empty() {
             return self.list_missions(limit, offset).await;
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || {
             const PAGE: i64 = 200;
@@ -3323,7 +3365,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn get_mission(&self, id: Uuid) -> Result<Option<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_str = id.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -4732,7 +4774,7 @@ impl MissionStore for SqliteMissionStore {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -5435,7 +5477,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn latest_assistant_text(&self, mission_id: Uuid) -> Result<Option<String>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_str = mission_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -5985,7 +6027,7 @@ impl MissionStore for SqliteMissionStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Option<Vec<String>> =
             event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
@@ -6065,7 +6107,7 @@ impl MissionStore for SqliteMissionStore {
         event_types: Option<&[&str]>,
         limit: Option<usize>,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Option<Vec<String>> =
             event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
@@ -6145,7 +6187,7 @@ impl MissionStore for SqliteMissionStore {
         event_types: Option<&[&str]>,
         limit: Option<usize>,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Option<Vec<String>> =
             event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
@@ -7406,7 +7448,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn list_active_automations(&self) -> Result<Vec<Automation>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();

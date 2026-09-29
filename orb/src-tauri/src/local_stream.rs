@@ -118,6 +118,9 @@ pub struct Output(
     Mutex<Vec<Activity>>,
     Mutex<()>,
     std::sync::Condvar,
+    /// When the turn answered and only its background tasks remain (ms since
+    /// the epoch), or zero.
+    std::sync::atomic::AtomicU64,
 );
 
 pub struct ReaderGuard(Arc<Output>);
@@ -129,6 +132,23 @@ impl Drop for ReaderGuard {
     }
 }
 impl Output {
+    /// The turn has answered and now only waits for its background tasks, or
+    /// it started working again.
+    pub fn waiting_on_background(&self, waiting: bool) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as u64);
+        if !waiting {
+            self.5.store(0, Ordering::SeqCst);
+        } else {
+            let _ = self
+                .5
+                .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+    pub fn waiting_since(&self) -> Option<u64> {
+        Some(self.5.load(Ordering::SeqCst)).filter(|at| *at > 0)
+    }
     pub fn activities(&self) -> Vec<Activity> {
         self.2.lock().unwrap().clone()
     }
@@ -561,7 +581,20 @@ mod tests {
             session_id: None,
             error: None,
             resumed: false,
+            waiting_since: None,
         }
+    }
+    #[test]
+    fn waiting_on_background_keeps_its_first_instant_until_work_resumes() {
+        let output = Output::default();
+        assert_eq!(output.waiting_since(), None);
+        output.waiting_on_background(true);
+        let since = output.waiting_since().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        output.waiting_on_background(true);
+        assert_eq!(output.waiting_since(), Some(since));
+        output.waiting_on_background(false);
+        assert_eq!(output.waiting_since(), None);
     }
     #[test]
     fn terminal_publication_is_once_and_late_subscribers_do_not_leak() {

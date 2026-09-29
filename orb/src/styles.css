@@ -123,6 +123,8 @@
 
 * { box-sizing: border-box; }
 :root { --t: 90ms; --ease: cubic-bezier(.2, .7, .2, 1); }
+/* Queued messages sit a step below the composer, as in Cursor. */
+:root { --queue-bg: color-mix(in srgb, var(--bg-elev) 50%, var(--bg)); }
 html, body, #root, .app { height: 100%; margin: 0; background: transparent; }
 body {
   /* Transparent so the macOS vibrancy shows through the sidebar. */
@@ -601,21 +603,13 @@ code {
 .dock > .col { pointer-events: auto; }
 .dock .composer { position: relative; z-index: 1; box-shadow: 0 4px 18px rgb(0 0 0 / 8%); }
 .dock .error-notice { position: relative; z-index: 1; }
-/* Fade the transcript beneath the controls without darkening the space above
-   the composer. Use the surface color so this also works in light themes. */
-.dock :is(.under, .cloud-conversation-meta) { position: relative; }
-.dock :is(.under, .cloud-conversation-meta)::before {
-  content: "";
-  position: absolute;
-  inset: -18px -24px -24px;
-  z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(to bottom,
-    transparent 0,
-    color-mix(in srgb, var(--bg) 90%, transparent) 18px,
-    var(--bg) 34px);
-  filter: blur(8px);
-  opacity: 0.9;
+/* Fade the transcript out beneath the controls with a mask rather than a painted
+   layer: a second --bg fill over the translucent .main made the area behind the
+   queue and composer darker and opaque. Works in every theme and opacity. */
+.scroll:has(+ .dock) {
+  --dock-fade: calc(100% - var(--dock-height, 110px));
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
+  mask-image: linear-gradient(to bottom, #000 calc(var(--dock-fade) - 16px), transparent calc(var(--dock-fade) + 10px));
 }
 
 .actions { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -1332,7 +1326,7 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .attach-chip button { color: var(--fg-4); }
 
 /* Core-queued follow-ups (remote missions) share the local queue card. */
-.queued-messages { margin: 0 0 8px; padding: 10px 8px 6px; border: 1px solid var(--stroke); border-radius: var(--radius-xl); background: var(--bg-elev); max-height: 220px; overflow-y: auto; font: 14px/20px var(--sans); }
+.queued-messages { margin: 0 0 8px; padding: 10px 8px 6px; border: 1px solid var(--stroke); border-radius: var(--radius-xl); background: var(--queue-bg); max-height: 220px; overflow-y: auto; font: 14px/20px var(--sans); }
 .queued-label { padding: 0 8px; color: var(--fg-2); margin-bottom: 4px; }
 .queued-messages ol { list-style: none; margin: 0; padding: 0; }
 .queued-messages li { padding: 7px 8px; border-radius: var(--radius-md); color: var(--fg); }
@@ -1476,6 +1470,9 @@ button.fork-trigger:hover { color: var(--fg); }
 .machine-menu .menu-sub { font: 11px/1.4 var(--sans); color: var(--fg-3); }
 .machine-menu .menu-item { gap: 10px; padding: 9px 10px; }
 .machine-menu .menu-ico { align-self: center; }
+.machine-load { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; padding-right: 8px; font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--fg-3); white-space: nowrap; flex-shrink: 0; }
+.machine-load svg { opacity: .8; }
+.machine-transfer-end { display: inline-flex; align-items: center; flex-shrink: 0; }
 .machine-node-state { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg-3); white-space: nowrap; }
 .machine-state-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-4); }
 .machine-state-dot.online { background: var(--fg-3); }
@@ -2236,7 +2233,7 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Follow-up queue: same width as the composer, quiet surface and compact header. */
 /* Queued follow-ups: one card above the composer, one line per message (Cursor-like). */
-.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--bg-elev); color:var(--fg-2); font:14px/20px var(--sans); }
+.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); }
 .followup-queue.collapsed { padding-bottom:10px; }
 .followup-queue header { display:flex; align-items:center; gap:10px; min-height:24px; padding:0 4px 0 8px; }
 .queue-count { color:var(--fg-2); }
@@ -2506,7 +2503,6 @@ select.orb-select-native:disabled { cursor: default; }
 .composer-image img { cursor: zoom-in; }
 
 /* A saved prompt must not turn the floating composer into a second transcript. */
-.dock:has(.followup-queue)::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--bg) 18px); }
 .prompt-editor-actions .send { width: auto; padding: 0 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .resend-status { color: var(--fg-3); font-size: 12px; margin: -12px 10px 20px; }
 .resend-status button { margin-left: 10px; text-decoration: underline; }

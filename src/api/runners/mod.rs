@@ -12,6 +12,7 @@ pub(crate) mod codex;
 pub(crate) mod errors;
 pub(crate) mod gemini;
 pub(crate) mod grok;
+pub(crate) mod live_session;
 pub(crate) mod midturn;
 pub(crate) mod opencode;
 pub(crate) mod stream_guard;

@@ -54,11 +54,14 @@ function MathFormula(p: {text: string; display?: boolean}) {
 function inline(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
   // Keep code spans opaque; currency such as "$15 and $20" is ordinary text.
-  const pattern = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  // Emphasis that wraps a code span is taken whole first, or the span would
+  // split it and leave its asterisks as text.
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?`[^`\n]*`(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
-    if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
+    if (match[0].startsWith('**')) out.push(<strong>{inline(match[0].slice(2, -2), links)}</strong>);
+    else if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
     else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
     else out.push(<MathFormula text={match[3] ?? match[4]}/>);
     last = match.index! + match[0].length;

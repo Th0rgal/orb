@@ -4,6 +4,7 @@ import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceH
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { LaptopIcon } from "./icons";
 import { pollWhileVisible } from "./poll";
+import { recordLocalMemory } from "./machineLoad";
 
 type Snapshot = {
   sampled_at?: number;
@@ -30,6 +31,7 @@ export function LocalMachine() {
       pending = true;
       try {
         const result = await invoke("local_machine_metrics",{details:open()&&!document.hidden});
+        recordLocalMemory(result.memory_total > 0 ? Math.max(0, result.memory_total - result.memory_used) : undefined);
         if (!disposed) { setSample(result); setHistory(old => freshSamples(appendSamples(old, result.history ?? [{ time: Date.now(), cpu: result.cpu_percent, gpu: result.gpu_percent, memory: result.memory_total > 0 ? result.memory_used / result.memory_total * 100 : null }]))); saveHistory("local", history()); setError(""); }
       } catch (e) { if (!disposed) setError(`Couldn’t refresh local metrics: ${String(e)}`); }
       finally { pending = false; }
