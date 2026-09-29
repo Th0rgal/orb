@@ -8930,7 +8930,10 @@ async fn get_provider_usage(
                         &chatgpt_account_id,
                     )
                     .await;
-                    if report == Err(crate::api::codex_usage::UsageError::Unauthorized) {
+                    if matches!(
+                        report,
+                        Err(crate::api::codex_usage::UsageError::Unauthorized)
+                    ) {
                         let refreshed = match find_openai_oauth_account_by_chatgpt_account_id(
                             working_dir,
                             &chatgpt_account_id,
@@ -8958,7 +8961,10 @@ async fn get_provider_usage(
                                 tracing::warn!(provider = %store_key, %error, "Codex token is refused and could not be refreshed");
                             }
                         }
-                        if report == Err(crate::api::codex_usage::UsageError::Unauthorized) {
+                        if matches!(
+                            report,
+                            Err(crate::api::codex_usage::UsageError::Unauthorized)
+                        ) {
                             base["status"] = serde_json::json!("needs_reauth");
                             if let Some(snap) = state.codex_usage.get_any(&store_key).await {
                                 return Ok(Json(merge_codex_usage(base, &snap)));

@@ -266,6 +266,7 @@ pub fn parse_codex_headers(headers: &reqwest::header::HeaderMap) -> Option<Codex
             .and_then(|v| v.parse().ok()),
         credits_unlimited: header_str(headers, "x-codex-credits-unlimited")
             .map(|v| v.eq_ignore_ascii_case("true")),
+        limit_reached: None,
         source: None,
     };
     // Some deployments only carry the bare reset/used pair; treat the snapshot
