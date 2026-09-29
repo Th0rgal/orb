@@ -146,6 +146,10 @@ under "left behind" in the inventory. The destination creates links only during
 verification, after every file is written and hashed, so no block is written
 through one. A destination that predates links is refused: a node before
 copying (its capabilities lack the `links` feature), any machine at the receipt.
+Deploy Core before the nodes: a Core that predates links would accept a
+snapshot from an updated node and drop its links without a word, while an
+updated Core refuses what an older node or Orb cannot do. Orb checks the
+`features` of the transfer view before registering a local snapshot with links.
 A workspace over the limits is refused before hashing, with its totals and its
 largest top-level directories.
 Explicit uploaded-image references missing from the inventory, or outside the

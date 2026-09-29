@@ -14,7 +14,8 @@ export interface TransferAction {
   created_at: string;
 }
 export interface Destination { machine: Machine; label: string; available: boolean; reason?: string; harnesses?: string[] }
-export interface TransferView { version: number; actions: TransferAction[]; destinations: Destination[] }
+/** `features` is absent from a backend that predates it. */
+export interface TransferView { version: number; features?: string[]; actions: TransferAction[]; destinations: Destination[] }
 export const machineLabel = (m: Machine) => m.kind === "core" ? "Core" : m.kind === "client" ? "This computer" : m.id;
 export const sameMachine = (a: Machine, b: Machine) => a.kind === b.kind && (a.kind === "core" || (b.kind !== "core" && a.id === b.id));
 export const activeTransfer = (a: TransferAction) => !["activated", "cancelled"].includes(a.phase);
@@ -65,6 +66,8 @@ export async function snapshotTransfer(action: TransferAction): Promise<Transfer
   const binding = localBinding(action.mission_id);
   if (!binding) throw new Error("The source workspace is unavailable on this computer.");
   const manifest = await transferFiles<Manifest>(action, "source", { op: "snapshot" });
+  // A backend that predates links would record the files and silently drop the links.
+  if (manifest.links?.length && !(await inspectTransfer(action.mission_id)).features?.includes("links")) throw new Error("Update the connected backend to move a workspace containing links. The conversation has not moved.");
   return transferRequest(action.mission_id, { op: "client_snapshot", transfer_id: action.id, client_id: await machineIdentity(), root: binding.cwd, manifest });
 }
 export async function copyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false): Promise<TransferAction> {

@@ -422,7 +422,7 @@ pub async fn inspect(
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"features":["links"],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
