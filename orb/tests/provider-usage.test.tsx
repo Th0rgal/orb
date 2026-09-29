@@ -70,3 +70,8 @@ it("does not mistake absent subscription data for an exhausted account", () => {
   expect(usageWindows(u)).toEqual([]);
   expect(effectiveProviderStatus({...account("mini"),provider_type:"minimax"},u)).toBe("connected");
 });
+
+it("shows a disabled account as disabled whatever its quota", () => {
+  expect(effectiveProviderStatus({ ...account("ben"), enabled: false }, usage(100))).toBe("disabled");
+  expect(effectiveProviderStatus({ ...account("ben"), enabled: false }, { ...usage(10), status: "needs_reauth" })).toBe("disabled");
+});
