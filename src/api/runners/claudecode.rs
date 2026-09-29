@@ -2220,6 +2220,20 @@ pub fn run_claudecode_turn<'a>(
                     if keep_alive && line.contains("\"system\"") {
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
                             background.consume(&event);
+                            if event["subtype"]
+                                .as_str()
+                                .is_some_and(|kind| kind.contains("task"))
+                            {
+                                tracing::debug!(
+                                    mission_id = %mission_id,
+                                    subtype = %event["subtype"],
+                                    task_id = %event["task_id"],
+                                    tasks = %event["tasks"],
+                                    status = %event["status"],
+                                    live = background.running(),
+                                    "Claude background task event"
+                                );
+                            }
                         }
                     }
 
