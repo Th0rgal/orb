@@ -37,6 +37,13 @@ use tokio::sync::RwLock;
 /// as-is instead of re-probing.
 pub const ACTIVE_TTL: Duration = Duration::from_secs(900); // 15 min
 
+/// The usage report costs no message, so it is read far more often than a
+/// probe runs. A plan change or a reset shows within this delay.
+pub const USAGE_TTL: Duration = Duration::from_secs(60);
+
+/// The account's usage report: plan, windows, credits. Free to read.
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
 /// The Codex backend endpoint that returns `x-codex-*` rate-limit headers.
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -97,7 +104,16 @@ pub struct CodexUsageSnapshot {
     )]
     pub credits_unlimited: Option<bool>,
 
-    /// `"probe"` (full, from an active probe) or `"passive"` (partial, from a
+    /// Whether the account is out of messages right now. Only the account's
+    /// usage report says so; headers and passive stamps leave it unknown.
+    #[serde(
+        rename = "codex_limit_reached",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit_reached: Option<bool>,
+
+    /// `"usage"` (the account's usage report), `"probe"` (headers of a real
+    /// request) or `"passive"` (partial, from a
     /// real-traffic 429). Lets the UI label staleness/source.
     #[serde(rename = "codex_source", skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -142,6 +158,31 @@ impl CodexUsageStore {
                 None
             }
         })
+    }
+
+    /// Latest snapshot for an account if it is younger than `ttl`.
+    pub async fn get_younger_than(
+        &self,
+        account_id: &str,
+        ttl: Duration,
+    ) -> Option<CodexUsageSnapshot> {
+        let entries = self.entries.read().await;
+        entries
+            .get(account_id)
+            .filter(|stored| stored.captured_at.elapsed() < ttl)
+            .map(|stored| stored.snapshot.clone())
+    }
+
+    /// Store the account's own usage report.
+    pub async fn put_usage(&self, account_id: String, mut snapshot: CodexUsageSnapshot) {
+        snapshot.source = Some("usage".to_string());
+        self.entries.write().await.insert(
+            account_id,
+            Stored {
+                snapshot,
+                captured_at: Instant::now(),
+            },
+        );
     }
 
     /// Latest snapshot regardless of age (used as a last-resort fallback when a
@@ -225,6 +266,7 @@ pub fn parse_codex_headers(headers: &reqwest::header::HeaderMap) -> Option<Codex
             .and_then(|v| v.parse().ok()),
         credits_unlimited: header_str(headers, "x-codex-credits-unlimited")
             .map(|v| v.eq_ignore_ascii_case("true")),
+        limit_reached: None,
         source: None,
     };
     // Some deployments only carry the bare reset/used pair; treat the snapshot
@@ -252,6 +294,83 @@ pub fn parse_cooldown_reset(body: &[u8], now_unix: i64) -> Option<i64> {
     }
     let reset_secs = err.get("reset_seconds").and_then(|r| r.as_i64())?;
     Some(now_unix + reset_secs)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum UsageError {
+    /// The token is refused although it has not expired, as after a plan
+    /// change or a sign-in elsewhere. A refresh may repair it.
+    Unauthorized,
+    Other(String),
+}
+
+/// Read a usage report as the Codex backend returns it.
+pub fn parse_usage(report: &serde_json::Value) -> Option<CodexUsageSnapshot> {
+    let limits = report.get("rate_limit")?;
+    let window = |name: &str| limits.get(name).filter(|window| window.is_object());
+    let used = |name: &str| window(name)?.get("used_percent")?.as_f64();
+    let minutes = |name: &str| Some(window(name)?.get("limit_window_seconds")?.as_u64()? / 60);
+    let reset = |name: &str| window(name)?.get("reset_at")?.as_i64();
+    let credits = report.get("credits");
+    Some(CodexUsageSnapshot {
+        plan_type: report
+            .get("plan_type")
+            .and_then(|plan| plan.as_str())
+            .map(str::to_string),
+        active_limit: None,
+        primary_used_percent: used("primary_window"),
+        primary_window_minutes: minutes("primary_window"),
+        primary_reset_at: reset("primary_window"),
+        secondary_used_percent: used("secondary_window"),
+        secondary_window_minutes: minutes("secondary_window"),
+        secondary_reset_at: reset("secondary_window"),
+        credits_balance: credits
+            .and_then(|credits| credits.get("balance"))
+            .and_then(|balance| match balance {
+                serde_json::Value::String(text) => text.parse().ok(),
+                other => other.as_f64(),
+            }),
+        credits_unlimited: credits
+            .and_then(|credits| credits.get("unlimited"))
+            .and_then(|unlimited| unlimited.as_bool()),
+        limit_reached: limits
+            .get("limit_reached")
+            .and_then(|reached| reached.as_bool()),
+        source: Some("usage".to_string()),
+    })
+}
+
+/// Read the account's usage report. It consumes nothing.
+pub async fn read_usage(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: &str,
+) -> Result<CodexUsageSnapshot, UsageError> {
+    let response = client
+        .get(CODEX_USAGE_URL)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("chatgpt-account-id", account_id)
+        .header("originator", "codex_cli_rs")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| UsageError::Other(format!("Codex usage request failed: {error}")))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(UsageError::Unauthorized);
+    }
+    if !status.is_success() {
+        return Err(UsageError::Other(format!(
+            "Codex usage returned HTTP {}",
+            status.as_u16()
+        )));
+    }
+    let report: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| UsageError::Other(format!("Codex usage is not JSON: {error}")))?;
+    parse_usage(&report)
+        .ok_or_else(|| UsageError::Other("Codex usage has no rate limits".to_string()))
 }
 
 /// Active probe: ask the Codex backend for this account's limits and parse the
@@ -319,6 +438,34 @@ mod tests {
             );
         }
         h
+    }
+
+    #[test]
+    fn reads_a_usage_report() {
+        let exhausted = serde_json::json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {
+                    "used_percent": 100, "limit_window_seconds": 604800,
+                    "reset_after_seconds": 330077, "reset_at": 1791046737
+                },
+                "secondary_window": null
+            },
+            "credits": { "has_credits": false, "unlimited": false, "balance": "0" }
+        });
+        let snap = parse_usage(&exhausted).unwrap();
+        assert_eq!(snap.plan_type.as_deref(), Some("pro"));
+        assert_eq!(snap.primary_used_percent, Some(100.0));
+        assert_eq!(snap.primary_window_minutes, Some(10080));
+        assert_eq!(snap.primary_reset_at, Some(1791046737));
+        assert_eq!(snap.secondary_used_percent, None);
+        assert_eq!(snap.credits_balance, Some(0.0));
+        assert_eq!(snap.limit_reached, Some(true));
+        assert_eq!(snap.source.as_deref(), Some("usage"));
+
+        assert!(parse_usage(&serde_json::json!({ "plan_type": "pro" })).is_none());
     }
 
     #[test]
