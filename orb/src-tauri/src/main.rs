@@ -83,6 +83,7 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 mod bindings;
+mod diagnostics;
 use bindings::local_bindings;
 
 fn main() {
@@ -117,6 +118,7 @@ fn main() {
             // is released again after a stretch of inactivity.
             app.state::<voice::VoiceState>().start_idle_reaper();
             machine_metrics::start(app.state::<voice::VoiceState>().inner().clone());
+            diagnostics::start(app.handle().clone());
             // macOS vibrancy: the window is transparent and the sidebar
             // shows the desktop through a sidebar-material blur, like
             // Cursor/Xcode. The main pane paints an opaque background in
@@ -139,6 +141,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            diagnostics::diagnostics_append,
             bindings::local_binding_set,
             bindings::local_bindings_subscribe,
             bindings::local_bindings_unsubscribe,
