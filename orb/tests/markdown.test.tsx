@@ -122,3 +122,25 @@ it("keeps citation examples inside code literal and handles spaces and markdown 
   expect(container.querySelector('p code')?.textContent).toBe(citation);
   expect(container.querySelector('pre')?.textContent).toContain(citation);
 });
+
+describe("emphasis around code spans", () => {
+  it("renders bold that ends with a code span", () => {
+    const { container } = render(() => <MdView text={"- **La mission `be655506`** continue de travailler sur `final/*`.\n- **La PR #1 est mergée dans `main`** avec un commit (`12c18b46`)."} />);
+    const strong = [...container.querySelectorAll("strong")].map(node => node.textContent);
+    expect(strong).toEqual(["La mission be655506", "La PR #1 est mergée dans main"]);
+    expect(container.querySelector("strong code")?.textContent).toBe("be655506");
+    expect(container.textContent).not.toContain("**");
+    expect(container.querySelectorAll("code")).toHaveLength(4);
+  });
+  it("renders bold that starts with or surrounds a code span", () => {
+    const { container } = render(() => <MdView text={"**`main`** is protected and **use `a` then `b` here** works."} />);
+    expect([...container.querySelectorAll("strong")].map(node => node.textContent)).toEqual(["main", "use a then b here"]);
+    expect(container.textContent).not.toContain("**");
+  });
+  it("keeps asterisks inside code and separate bold runs apart", () => {
+    const { container } = render(() => <MdView text={"**a** uses `x ** y` and **b**; escaped \\*\\*not `bold`\\*\\*"} />);
+    expect([...container.querySelectorAll("strong")].map(node => node.textContent)).toEqual(["a", "b"]);
+    expect([...container.querySelectorAll("code")].map(node => node.textContent)).toEqual(["x ** y", "bold"]);
+    expect(container.textContent).toContain("**not bold**");
+  });
+});
