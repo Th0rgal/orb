@@ -75,7 +75,29 @@ pub(crate) fn is_auth_error(message: &str) -> bool {
         .any(|needle| contains_ascii_case_insensitive(message, needle))
 }
 
+/// Claude Code words a subscription limit as "You've hit your limit",
+/// "You've hit your session limit" or "your weekly limit", followed by the
+/// reset time.
+fn hit_a_subscription_limit(lower: &str) -> bool {
+    ["you've hit your ", "you have hit your "]
+        .iter()
+        .any(|start| {
+            lower.find(start).is_some_and(|at| {
+                let rest = &lower[at + start.len()..];
+                rest.find("limit").is_some_and(|end| {
+                    end <= 24
+                        && rest[..end]
+                            .chars()
+                            .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '-')
+                })
+            })
+        })
+}
+
 pub(crate) fn is_rate_limited_error(message: &str) -> bool {
+    if hit_a_subscription_limit(&message.replace('\u{2019}', "'").to_ascii_lowercase()) {
+        return true;
+    }
     const RATE_LIMIT_MARKERS: [&str; 22] = [
         "overloaded_error",
         "weekly quota exhausted",
@@ -222,6 +244,8 @@ pub(crate) fn is_success_path_rate_limited_error(message: &str) -> bool {
     let lower = message.trim().replace('\u{2019}', "'").to_ascii_lowercase();
     lower.starts_with("you've hit your limit")
         || lower.starts_with("you have hit your limit")
+        || ((lower.starts_with("you've hit your ") || lower.starts_with("you have hit your "))
+            && hit_a_subscription_limit(&lower))
         || lower.starts_with("you're out of usage credits")
         || lower.starts_with("you are out of usage credits")
         || lower.starts_with("you're out of credits")
@@ -243,6 +267,24 @@ pub(crate) fn is_success_path_provider_payload_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_or_weekly_limit_is_a_rate_limit() {
+        for message in [
+            "You've hit your session limit · resets 5:30pm (Europe/Berlin)",
+            "You\u{2019}ve hit your weekly limit · resets Oct 3",
+            "You have hit your Opus limit · resets 9pm",
+        ] {
+            assert!(is_rate_limited_error(message), "{message}");
+            assert!(is_success_path_rate_limited_error(message), "{message}");
+        }
+        assert!(!is_rate_limited_error(
+            "You've hit your target for this sprint."
+        ));
+        assert!(!is_success_path_rate_limited_error(
+            "You've hit your stride; the time limit is no longer a concern."
+        ));
+    }
 
     // Golden marker tests: each entry is a real string observed in prod
     // incidents (journals, mission DBs). If a refactor of the predicates

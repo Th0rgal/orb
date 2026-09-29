@@ -147,8 +147,30 @@ pub(crate) fn schedule_mission_scope_teardown(
             }
             _ => {}
         }
-        stop_mission_exec_scopes(mission_id, &reason).await;
+        // A host mission's scope also holds what the agent left running on
+        // purpose between turns (a detached run, a build daemon). It ends
+        // with the mission, not with each turn.
+        let keep_host = !status_ends_host_scope(&status);
+        for unit in list_exec_scope_units().await {
+            if !crate::workspace_exec::exec_unit_belongs_to_mission(&unit, mission_id) {
+                continue;
+            }
+            let host = machine_name_from_exec_unit(&unit).as_deref()
+                == Some(crate::workspace_exec::HOST_MACHINE);
+            if host && keep_host {
+                continue;
+            }
+            stop_unit(&unit, &reason).await;
+        }
     });
+}
+
+/// Statuses after which a host mission is not expected to continue.
+fn status_ends_host_scope(status: &MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Completed | MissionStatus::Acknowledged | MissionStatus::NotFeasible
+    )
 }
 
 fn legacy_scope_is_reapable(

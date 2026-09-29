@@ -12,6 +12,9 @@ use std::sync::Arc;
 /// and a `server_shutdown` terminal reason instead of `cancelled`.
 static SHUTDOWN_INITIATED: AtomicBool = AtomicBool::new(false);
 
+/// How long open connections get to finish once missions are drained.
+const SHUTDOWN_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Returns `true` if `handle_shutdown_signal` has begun draining missions
 /// for a graceful shutdown.
 pub fn is_shutdown_initiated() -> bool {
@@ -1439,6 +1442,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal(shutdown_state).await;
+            // Missions are marked and their runners cancelled. What remains
+            // are long-lived connections (event streams, file watches, model
+            // proxy calls) that never close on their own: the process used to
+            // sit in `deactivating` until it was killed by hand.
+            tokio::spawn(async {
+                tokio::time::sleep(SHUTDOWN_EXIT_GRACE).await;
+                tracing::warn!("Open connections outlived the shutdown grace; exiting");
+                std::process::exit(0);
+            });
         })
         .await?;
 

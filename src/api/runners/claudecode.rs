@@ -1416,6 +1416,9 @@ pub fn run_claudecode_turn<'a>(
         // Inject Telegram action environment variables when processing a Telegram message.
         // These are needed by the telegram-action CLI helper inside the container to schedule
         // reminders, send replies, etc.
+        // Names the mission's scope, so its end can stop what it left behind.
+        env.entry("SANDBOXED_SH_MISSION_ID".to_string())
+            .or_insert_with(|| mission_id.to_string());
         let telegram_action_helpers_enabled =
             message.contains("[Telegram from ") || message.contains("[Telegram workflow reply ");
         if telegram_action_helpers_enabled {
@@ -2997,6 +3000,15 @@ pub fn run_claudecode_turn<'a>(
             }
         }
 
+        // A session stopped by the restart itself is not a failed turn: report
+        // it as interrupted by the shutdown, which startup recovery resumes.
+        if !cancelled
+            && crate::api::routes::is_shutdown_initiated()
+            && (!saw_terminal_result_event || ended_parked.is_some_and(|(expected, _)| !expected))
+        {
+            cancelled = true;
+            ended_parked = None;
+        }
         if let Some((expected, note)) = ended_parked {
             saw_terminal_result_event = true;
             had_error = !expected;
