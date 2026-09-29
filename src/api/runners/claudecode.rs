@@ -84,6 +84,20 @@ fn stale_resumed_result(
         && res.errors.is_empty()
 }
 
+fn write_initial_prompt(
+    stdin: &mut Option<Box<dyn std::io::Write + Send>>,
+    frames: Option<String>,
+) -> bool {
+    use std::io::Write as _;
+    match (stdin.as_mut(), frames) {
+        (Some(writer), Some(frames)) => writer
+            .write_all(frames.as_bytes())
+            .and_then(|_| writer.flush())
+            .is_ok(),
+        _ => false,
+    }
+}
+
 /// Stop a CLI that outlived its terminal result. The PTY child may be the
 /// MCP launch wrapper, which runs the CLI in its own process group: SIGKILL
 /// on the wrapper alone orphans a CLI that keeps working unobserved. SIGTERM
@@ -1590,30 +1604,7 @@ pub fn run_claudecode_turn<'a>(
                 )
                 .with_terminal_reason(TerminalReason::LlmError);
             }
-            let mut initial_prompt_delivered = false;
-            if let Some(w) = stdin_writer.as_mut() {
-                if native_plan {
-                    use std::io::Write as _;
-                    let _ = writeln!(
-                        w,
-                        "{}",
-                        serde_json::json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}})
-                    );
-                }
-                let init = serde_json::json!({
-                    "type": "user",
-                    "message": { "role": "user", "content": [{ "type": "text", "text": effective_message }] }
-                });
-                use std::io::Write as _;
-                match writeln!(w, "{}", init).and_then(|_| w.flush()) {
-                    Ok(()) => initial_prompt_delivered = true,
-                    Err(e) => tracing::error!(
-                        mission_id = %mission_id,
-                        "Failed to write initial stream-json prompt: {e}"
-                    ),
-                }
-            }
-            if !initial_prompt_delivered {
+            if stdin_writer.is_none() {
                 // Without the prompt the CLI would idle on an empty session —
                 // a silent no-op turn. Fail loudly instead.
                 pty.kill();
@@ -1624,6 +1615,25 @@ pub fn run_claudecode_turn<'a>(
                 .with_terminal_reason(TerminalReason::LlmError);
             }
         }
+        // The prompt waits until the CLI shows a first line (or a short
+        // delay): input written while the session is still starting can be
+        // discarded before its stdin pipe reads the terminal.
+        let mut pending_initial_prompt: Option<String> = stream_input.then(|| {
+            let prompt = serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [{ "type": "text", "text": effective_message }] }
+            });
+            if native_plan {
+                format!(
+                    "{}\n{}\n",
+                    serde_json::json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}}),
+                    prompt
+                )
+            } else {
+                format!("{prompt}\n")
+            }
+        });
+        let initial_prompt_deadline = Instant::now() + Duration::from_secs(3);
         // Poll cadence for mid-turn operator-note injection (stream-input mode).
         let mut last_note_poll = Instant::now();
         tracing::debug!(mission_id = %mission_id, "PTY writer taken (kept alive)");
@@ -2141,11 +2151,29 @@ pub fn run_claudecode_turn<'a>(
                         }
                     }
                 }
+                _ = tokio::time::sleep_until(initial_prompt_deadline), if pending_initial_prompt.is_some() => {
+                    if !write_initial_prompt(&mut stdin_writer, pending_initial_prompt.take()) {
+                        pty.kill();
+                        reader_handle.abort();
+                        had_error = true;
+                        final_result = "Stream-input mode could not deliver the initial prompt over stdin".to_string();
+                        break;
+                    }
+                }
                 line_opt = line_rx.recv() => {
                     let Some((read_at, raw_line)) = line_opt else {
                         // EOF - PTY closed
                         break;
                     };
+                    if pending_initial_prompt.is_some()
+                        && !write_initial_prompt(&mut stdin_writer, pending_initial_prompt.take())
+                    {
+                        pty.kill();
+                        reader_handle.abort();
+                        had_error = true;
+                        final_result = "Stream-input mode could not deliver the initial prompt over stdin".to_string();
+                        break;
+                    }
 
                     if last_queue_report.elapsed() >= Duration::from_secs(1) {
                         tracing::debug!(mission_id = %mission_id, queue_depth = line_rx.len(),
