@@ -37,6 +37,106 @@ fn failure_detail(result: &crate::agents::AgentResult) -> String {
     format!("ChatGPT requires account or submission reconciliation; reason={:?}; stage={stage}; no replacement conversation was created", result.terminal_reason)
 }
 
+/// Stored in `Turn::cursor`: this turn goes to a new conversation that starts
+/// with the recorded history, because the original can no longer be opened.
+const REPLACEMENT: &str = "replacement";
+/// Recorded history carried into a replacement conversation, in characters.
+const REPLACEMENT_HISTORY_LIMIT: usize = 60_000;
+
+/// What is typed into ChatGPT for this turn. It must be the same on every
+/// tick: the job ledger identifies a submission by this text.
+fn outgoing(e: &Execution, i: usize) -> String {
+    let turn = &e.turns[i];
+    if turn.cursor.as_deref() != Some(REPLACEMENT) {
+        return turn.prompt.clone();
+    }
+    // Most recent exchanges first, until the budget is spent.
+    let mut kept = Vec::new();
+    let mut budget = REPLACEMENT_HISTORY_LIMIT;
+    for earlier in e.turns[..i].iter().rev() {
+        let question = earlier.prompt.trim();
+        let answer = earlier.result.as_deref().unwrap_or_default().trim();
+        let exchange = format!("User:\n{question}\n\nAssistant:\n{answer}");
+        let size = exchange.chars().count();
+        if size > budget {
+            // The latest exchange is always carried: its question in full when
+            // it fits, and as much of the beginning of its answer as remains.
+            if kept.is_empty() {
+                let asked: String = question.chars().take(budget).collect();
+                let room = budget.saturating_sub(asked.chars().count());
+                let said: String = answer.chars().take(room).collect();
+                kept.push(format!(
+                    "User:\n{asked}\n\nAssistant:\n{said}\n[The rest of this answer was left out for length.]"
+                ));
+            }
+            break;
+        }
+        budget -= size;
+        kept.push(exchange);
+    }
+    kept.reverse();
+    format!(
+        "This continues an earlier conversation that can no longer be opened. Its exchanges follow, oldest first. Treat them as the history of this conversation and answer only the new message.\n\n{}\n\nNew message:\n{}",
+        kept.join("\n\n"),
+        turn.prompt.trim()
+    )
+}
+
+/// Every earlier answer is on record, so the conversation can go on elsewhere.
+fn history_recorded(e: &Execution, i: usize) -> bool {
+    i > 0
+        && e.turns[..i].iter().all(|t| {
+            t.phase == Phase::ResponseComplete
+                && t.result.as_deref().is_some_and(|r| !r.trim().is_empty())
+        })
+}
+
+/// Marks the turn only. The stale ledger pointer is dropped once this state
+/// is saved, and again at the start of any later tick that still finds it.
+fn replace_conversation(e: &mut Execution, i: usize) {
+    e.turns[i].cursor = Some(REPLACEMENT.into());
+    e.turns[i].phase = Phase::Queued;
+    e.turns[i].external_id = None;
+    e.external_id = None;
+    e.external_url = None;
+}
+
+/// The browser could not open the recorded conversation and sent nothing.
+/// Records the replacement on the latest revision, so a follow-up queued in
+/// the meantime does not leave this turn pointing at the lost conversation.
+async fn save_replacement(
+    store: &Arc<dyn MissionStore>,
+    mut e: Execution,
+    i: usize,
+    detail: Option<&str>,
+) -> Result<Execution, String> {
+    for _ in 0..4 {
+        replace_conversation(&mut e, i);
+        e.turns[i].detail = detail.map(str::to_owned);
+        match worker::save(store, e.clone()).await {
+            Err(error) if error == "Cloud execution revision changed" => {
+                let turn = e.turns[i].key.clone();
+                e = store
+                    .cloud_executions()
+                    .await?
+                    .into_iter()
+                    .find(|r| r.mission_id == e.mission_id)
+                    .filter(|r| r.turns.get(i).is_some_and(|t| t.key == turn))
+                    .ok_or("Cloud execution changed during the replacement")?;
+            }
+            saved => return saved,
+        }
+    }
+    Err("Cloud replacement conflicted repeatedly; reconcile before sending".into())
+}
+
+fn conversation_unreachable(result: &crate::agents::AgentResult) -> bool {
+    result.data.as_ref().is_some_and(|data| {
+        data.get("resume_resolution").and_then(Value::as_str) == Some("continuation_not_found")
+            && data.get("fresh_prompt_submitted").and_then(Value::as_bool) == Some(false)
+    })
+}
+
 pub(super) async fn tick(
     store: &Arc<dyn MissionStore>,
     mut e: Execution,
@@ -45,11 +145,29 @@ pub(super) async fn tick(
     let Some(i) = e.turns.iter().position(|t| !t.phase.terminal()) else {
         return Ok(());
     };
-    let phase = e.turns[i].phase;
+    let mut phase = e.turns[i].phase;
     if matches!(phase, Phase::Incompatible | Phase::SubmissionUncertain) {
         return Ok(());
     }
-    let prior = jobs::load_job(app_dir, e.mission_id);
+    let mut prior = jobs::load_job(app_dir, e.mission_id);
+    // A replacement turn whose ledger still describes another prompt was
+    // interrupted before anything was sent: a submission would have rewritten
+    // that record. Drop the pointer to the lost conversation and start over.
+    if e.turns[i].cursor.as_deref() == Some(REPLACEMENT)
+        && matches!(phase, Phase::Queued | Phase::Submitting)
+        && prior.as_ref().is_some_and(|r| {
+            r.state != jobs::JobState::Submitted
+                && r.prompt_sha256
+                    != jobs::prompt_fingerprint(
+                        &outgoing(&e, i),
+                        e.turns[i].model.as_deref().or(e.selection.model.as_deref()),
+                    )
+        })
+    {
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id)?;
+        prior = None;
+        phase = Phase::Queued;
+    }
     // Retry observation only, never submission, for transient hydration/transport
     // failures. Bound retries and preserve genuine authentication holds.
     if phase == Phase::ReconnectRequired
@@ -71,7 +189,7 @@ pub(super) async fn tick(
             r.state != jobs::JobState::Submitted
                 || r.prompt_sha256
                     != jobs::prompt_fingerprint(
-                        &e.turns[i].prompt,
+                        &outgoing(&e, i),
                         e.turns[i].model.as_deref().or(e.selection.model.as_deref()),
                     )
         })
@@ -81,14 +199,24 @@ pub(super) async fn tick(
         return Ok(());
     }
     if i > 0
+        && e.turns[i].cursor.as_deref() != Some(REPLACEMENT)
         && prior.as_ref().is_none_or(|r| {
             !jobs::continuable_conversation(r) && r.state != jobs::JobState::Submitted
         })
     {
-        e.turns[i].phase = Phase::SubmissionUncertain;
-        e.turns[i].detail = Some("The original ChatGPT conversation cannot be verified".into());
-        worker::receipt(store, e, i).await?;
-        return Ok(());
+        // Every earlier answer is on record: the conversation can go on in a
+        // new chat that starts with that history. Nothing was sent for this
+        // turn yet, so no submission can be duplicated.
+        if phase != Phase::Queued || !history_recorded(&e, i) {
+            e.turns[i].phase = Phase::SubmissionUncertain;
+            e.turns[i].detail = Some("The original ChatGPT conversation cannot be verified".into());
+            worker::receipt(store, e, i).await?;
+            return Ok(());
+        }
+        // Saved as queued first: the pointer is dropped only once this is on
+        // record, so an interruption in between is healed by the next tick.
+        e = save_replacement(store, e, i, None).await?;
+        jobs::forget_unreachable_conversation(app_dir, e.mission_id)?;
     }
     e.turns[i].phase = Phase::Submitting;
     e = worker::save(store, e).await?;
@@ -100,7 +228,7 @@ pub(super) async fn tick(
         .await
         .map_err(|e| e.to_string())?;
     let (tx, mut rx) = broadcast::channel(256);
-    let message = e.turns[i].prompt.clone();
+    let message = outgoing(&e, i);
     let model = e.turns[i]
         .model
         .clone()
@@ -176,6 +304,24 @@ pub(super) async fn tick(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+    } else if conversation_unreachable(&result)
+        && e.turns[i].cursor.as_deref() != Some(REPLACEMENT)
+        && history_recorded(&e, i)
+    {
+        // Found out only now, in the browser. Nothing was sent: the next tick
+        // sends this message to a replacement conversation.
+        // A receipt keeps identifiers it is not given. Removing the pointer to
+        // the lost conversation needs a full save.
+        let mission = e.mission_id;
+        save_replacement(
+            store,
+            e,
+            i,
+            Some("The original ChatGPT conversation could not be opened; continuing in a new one"),
+        )
+        .await?;
+        jobs::forget_unreachable_conversation(app_dir, mission)?;
+        return Ok(());
     } else {
         e.turns[i].phase = if jobs::load_job(app_dir, e.mission_id)
             .is_some_and(|j| j.state == jobs::JobState::Submitted)
@@ -192,6 +338,166 @@ pub(super) async fn tick(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn execution(turns: Vec<Turn>) -> Execution {
+        serde_json::from_value(serde_json::json!({
+            "mission_id": uuid::Uuid::new_v4(),
+            "request_key": "k",
+            "request_signature": "s",
+            "revision": 1,
+            "selection": {"provider":"chatgpt","account":"a","model":"gpt-6-pro","repository":null,"git_ref":null},
+            "external_id": null,
+            "external_url": null,
+            "parent_mission_id": null,
+            "turns": turns,
+        }))
+        .unwrap()
+    }
+    fn answered(prompt: &str, result: &str) -> Turn {
+        let mut turn = Turn::new(prompt.into(), prompt.into());
+        turn.phase = Phase::ResponseComplete;
+        turn.result = Some(result.into());
+        turn
+    }
+
+    #[test]
+    fn a_replacement_conversation_starts_with_the_recorded_history() {
+        let mut next = Turn::new("n".into(), "And in Rust?".into());
+        let plain = execution(vec![answered("Hello", "Hi."), next.clone()]);
+        assert_eq!(outgoing(&plain, 1), "And in Rust?");
+        next.cursor = Some(REPLACEMENT.into());
+        let e = execution(vec![
+            answered("First question", "First answer"),
+            answered("Second question", "Second answer"),
+            next,
+        ]);
+        let sent = outgoing(&e, 2);
+        let order: Vec<_> = [
+            "First question",
+            "First answer",
+            "Second question",
+            "Second answer",
+            "New message:\nAnd in Rust?",
+        ]
+        .iter()
+        .map(|part| sent.find(part).expect(part))
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{sent}");
+        // The ledger identifies the submission by this text.
+        assert_eq!(sent, outgoing(&e, 2));
+    }
+
+    #[test]
+    fn only_an_unopened_conversation_with_nothing_sent_is_replaced() {
+        let unreachable = crate::agents::AgentResult::failure("x", 0).with_data(
+            serde_json::json!({"resume_resolution":"continuation_not_found","fresh_prompt_submitted":false}),
+        );
+        assert!(conversation_unreachable(&unreachable));
+        for data in [
+            serde_json::json!({"resume_resolution":"resume_mismatch","fresh_prompt_submitted":false}),
+            serde_json::json!({"resume_resolution":"continuation_not_found","fresh_prompt_submitted":true}),
+            serde_json::json!({"driver_failure_stage":"send"}),
+        ] {
+            assert!(!conversation_unreachable(
+                &crate::agents::AgentResult::failure("x", 0).with_data(data)
+            ));
+        }
+        let mut pending = Turn::new("p".into(), "Unanswered".into());
+        pending.phase = Phase::SubmissionUncertain;
+        let next = Turn::new("n".into(), "Next".into());
+        assert!(history_recorded(
+            &execution(vec![answered("a", "b"), next.clone()]),
+            1
+        ));
+        assert!(!history_recorded(
+            &execution(vec![pending, next.clone()]),
+            1
+        ));
+        assert!(!history_recorded(&execution(vec![next]), 0));
+        let mut e = execution(vec![
+            answered("a", "b"),
+            Turn::new("n".into(), "Next".into()),
+        ]);
+        e.external_id = Some("/c/old".into());
+        e.turns[1].phase = Phase::Submitting;
+        replace_conversation(&mut e, 1);
+        assert_eq!(e.turns[1].phase, Phase::Queued);
+        assert_eq!(e.turns[1].cursor.as_deref(), Some(REPLACEMENT));
+        assert!(e.external_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_replacement_survives_a_follow_up_queued_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            crate::api::mission_store::SqliteMissionStore::new(dir.path().into(), "replace-race")
+                .await
+                .unwrap(),
+        );
+        let mut first = execution(vec![
+            answered("a", "b"),
+            Turn::new("n".into(), "Next".into()),
+        ]);
+        first.revision = 0;
+        first.external_id = Some("/c/old".into());
+        let mut observed = store
+            .save_cloud_execution(first, None, None, None, vec![])
+            .await
+            .unwrap();
+        observed.turns[1].phase = Phase::Submitting;
+        observed = worker::save(&store, observed).await.unwrap();
+        let mut concurrent = observed.clone();
+        concurrent.enqueue("later".into(), "Later".into()).unwrap();
+        worker::save(&store, concurrent).await.unwrap();
+        save_replacement(&store, observed, 1, Some("continuing"))
+            .await
+            .unwrap();
+        let row = store.cloud_executions().await.unwrap().remove(0);
+        assert_eq!(row.turns.len(), 3);
+        assert_eq!(row.turns[1].phase, Phase::Queued);
+        assert_eq!(row.turns[1].cursor.as_deref(), Some(REPLACEMENT));
+        assert!(row.external_id.is_none());
+    }
+
+    #[test]
+    fn a_replacement_keeps_the_most_recent_history_within_its_budget() {
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let long = "x".repeat(REPLACEMENT_HISTORY_LIMIT);
+        let e = execution(vec![
+            answered("Oldest question", &long),
+            answered("Recent question", "Recent answer"),
+            next,
+        ]);
+        let sent = outgoing(&e, 2);
+        assert!(sent.contains("Recent question") && sent.contains("Recent answer"));
+        assert!(!sent.contains("Oldest question"));
+        assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
+        // One exchange larger than the budget keeps its question and the
+        // beginning of its answer.
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let answer = format!("BEGINNING {} END", "y".repeat(REPLACEMENT_HISTORY_LIMIT));
+        let sent = outgoing(
+            &execution(vec![answered("The only question", &answer), next]),
+            1,
+        );
+        assert!(sent.contains("User:\nThe only question\n\nAssistant:\nBEGINNING"));
+        assert!(!sent.contains(" END"));
+        assert!(sent.contains("left out for length"));
+        // A long question is kept whole; the answer takes what is left.
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let question = format!(
+            "{} QUESTION-END",
+            "q".repeat(REPLACEMENT_HISTORY_LIMIT * 2 / 3)
+        );
+        let sent = outgoing(&execution(vec![answered(&question, &answer), next]), 1);
+        assert!(sent.contains("QUESTION-END\n\nAssistant:\nBEGINNING"));
+        assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
+    }
+
     #[test]
     fn failure_receipt_preserves_stage_without_copying_browser_content() {
         let result = crate::agents::AgentResult::failure("private browser page content", 0)

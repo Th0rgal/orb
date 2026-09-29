@@ -30,6 +30,7 @@ from scripts.chatgpt_ui_driver import (
     locate_composer_control,
     model_selection,
     normalized_prompt,
+    prompt_matches,
     raise_if_rate_limited,
     resume_conversation_path,
     safe_download_name,
@@ -667,6 +668,26 @@ class ChatGptUiDriverTests(unittest.TestCase):
             normalized_prompt("hello\n  world\t"), normalized_prompt(" hello world")
         )
         self.assertNotEqual(normalized_prompt("hello"), normalized_prompt("hello!"))
+
+    def test_a_long_prompt_matches_the_collapsed_form_the_page_shows(self) -> None:
+        prompt = "Je veux que tu lances une recherche avancée. " * 90
+        shown = " ".join(prompt.split())[:600]
+        self.assertTrue(prompt_matches(prompt, prompt))
+        self.assertTrue(prompt_matches(shown + "…", prompt))
+        self.assertTrue(prompt_matches(shown + "\nShow more", prompt))
+        self.assertTrue(prompt_matches(shown + " … Afficher plus", prompt))
+        self.assertTrue(prompt_matches(prompt + "\nShow less", prompt))
+        self.assertTrue(prompt_matches(prompt + " Afficher moins", prompt))
+        self.assertTrue(prompt_matches("l’indicateur «\u00a0décisif\u00a0»", "l'indicateur « décisif »"))
+        # Too short to identify the prompt, or not its beginning.
+        self.assertFalse(prompt_matches(shown[:120] + "…", prompt))
+        self.assertFalse(prompt_matches("Autre demande. " + shown, prompt))
+        self.assertFalse(prompt_matches(shown + " et autre chose", prompt))
+        # A beginning without the mark of a cut may be an earlier prompt.
+        self.assertFalse(prompt_matches(shown, prompt))
+        self.assertFalse(prompt_matches(shown, shown + " Puis compare avec 2024."))
+        self.assertFalse(prompt_matches("hello", "hello!"))
+        self.assertFalse(prompt_matches("hello…", "hello world"))
 
 
 if __name__ == "__main__":
