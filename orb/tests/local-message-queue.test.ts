@@ -325,3 +325,20 @@ it('a turn that only waits for a background task yields to a waiting message aft
  expect(mocks.stopNative).toHaveBeenCalledWith('mission');
  expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
+it('a followed turn that only waits for a background task yields to the message behind it',async()=>{
+ mocks.active=false;let finish!:(value:unknown)=>void;
+ mocks.follow.mockImplementationOnce(()=>new Promise(resolve=>finish=resolve));
+ stop=startLocalQueueWorker();await enqueueLocalMessage(request,'first');await vi.advanceTimersByTimeAsync(50);
+ mocks.active=true;mocks.stopNative.mockImplementation(async()=>{mocks.active=false;finish({text:'Partial',done:true,exit_code:0,resumed:true});});
+ mocks.poll.mockImplementation(async()=>({done:!mocks.active,waiting_since:mocks.active?Date.now()-11*60_000:null}));
+ await enqueueLocalMessage({...request,prompt:'second'},'second');await vi.advanceTimersByTimeAsync(31000);
+ expect(mocks.stopNative).toHaveBeenCalledWith('mission');
+ expect(mocks.launch.mock.calls.map(call=>call[0].prompt)).toEqual(['first','second']);
+});
+it('sends again a message that failed only because nothing could be reached',async()=>{
+ mocks.active=false;
+ const id=await enqueueLocalMessage(request,'first');
+ for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===id){row.state='error';row.error='error sending request for url (https://core/api/control/missions/mission/client-run)';}
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);expect(queuedLocalMessages('mission')).toHaveLength(0);
+});

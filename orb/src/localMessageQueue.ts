@@ -35,7 +35,7 @@ export function cutByConnection(result:Pick<PollLocal,'text'|'error'>|undefined)
 const RESUME_LIMIT=3;
 /** A turn that only waits for its background tasks yields to a waiting message after this long. */
 const BACKGROUND_WAIT_MS=10*60_000;
-const offline=(error:unknown)=>/Load failed|Failed to fetch|NetworkError|network connection was lost|timed out/i.test(String(error));
+const offline=(error:unknown)=>/Load failed|Failed to fetch|NetworkError|network connection was lost|timed out|error sending request/i.test(String(error));
 const retryable=(row:QueuedLocalMessage)=>row.state==='error'||(row.state==='dispatching'&&!!row.error)||(row.state==='accepted'&&!!row.interrupted);
 function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'){
  stored.state='queued';stored.autoResumed=true;stored.cut=cut;stored.resumes=(stored.resumes??0)+1;delete stored.error;delete stored.interrupted;
@@ -232,7 +232,21 @@ export function startLocalQueueWorker(){
    for(const row of rows){
     if(!valid())return;if(seen.has(row.mission))continue;seen.add(row.mission);
     const runKey=`${key}:${row.mission}`;
-    if(settling.has(runKey)||stopping.has(runKey))continue;
+    if(stopping.has(runKey))continue;
+    if(settling.has(runKey)){
+     // This queue started the turn and follows it. It has answered and only waits for a
+     // background task: a message waiting behind it goes next after the same delay.
+     if(rows.some(r=>r.mission===row.mission&&r.state==='queued'&&!held(r))){
+      const native=await pollLocal(row.mission).catch(()=>undefined);
+      if(native&&!native.done&&native.waiting_since&&Date.now()-native.waiting_since>BACKGROUND_WAIT_MS)void sendQueuedNow(row.mission).catch(()=>{});
+     }
+     continue;
+    }
+    // A message that failed only because nothing could be reached was never sent: it waits again.
+    if(row.state==='error'&&!row.interrupted&&!row.receipt&&offline(row.error)){
+     await update(key,row.id,stored=>{if(stored.state==='error'&&!stored.receipt){stored.state='queued';stored.error='Waiting for the connection to come back.';}});
+     again=true;continue;
+    }
     if(row.interrupted&&row.state==='accepted'&&!row.autoResumed){
      // The previous agent was still finishing when recovery was first tried. Look again.
      try{
