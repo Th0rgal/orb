@@ -639,8 +639,17 @@ fn spawn_claude(
         .spawn()
         .map_err(|e| format!("failed to start Claude Code: {e}"))?;
     {
-        let mut stdin = child.stdin.take().ok_or("Claude stdin missing")?;
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().ok_or("Claude stdin missing")?,
+        ));
         let stdout = child.stdout.take().ok_or("Claude stdout missing")?;
+        let recheck = Arc::new(Recheck::default());
+        {
+            let recheck = Arc::clone(&recheck);
+            let stdin = Arc::clone(&stdin);
+            let delays = recheck_delays(&request.id);
+            thread::spawn(move || recheck.run(&stdin, &delays));
+        }
         let mission_id = crate::interactions::session(&request.id);
         let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
         let prompt = plan.unwrap_or(&request.prompt).to_owned();
@@ -651,11 +660,20 @@ fn spawn_claude(
         thread::spawn(move || {
             let _guard = guard;
             let result = (|| -> Result<(), String> {
-                write_line(&mut stdin, &json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}}).to_string())?;
-                write_line(
-                    &mut stdin,
-                    &json!({"type":"user","message":{"role":"user","content":prompt}}).to_string(),
+                let send = |line: Value| write_line(&mut *stdin.lock().unwrap(), &line.to_string());
+                let say = |text: &str| {
+                    send(json!({"type":"user","message":{"role":"user","content":text}}))
+                };
+                // The turn has answered and only waits for its background
+                // tasks, or it works again.
+                let waiting = |tasks: Option<&ClaudeBackground>| {
+                    output.waiting_on_background(tasks.is_some());
+                    recheck.waiting(tasks.map(ClaudeBackground::list));
+                };
+                send(
+                    json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}}),
                 )?;
+                say(&prompt)?;
                 let mut implement_after_result = false;
                 let mut claude_text = ClaudeText::default();
                 let mut background = ClaudeBackground::default();
@@ -672,7 +690,7 @@ fn spawn_claude(
                     if matches!(event["type"].as_str(), Some("assistant" | "stream_event")) {
                         request_started = true;
                         answered = false;
-                        output.waiting_on_background(false);
+                        waiting(None);
                     }
                     if event["type"] != "stream_event"
                         || matches!(
@@ -683,10 +701,11 @@ fn spawn_claude(
                         output.publish_activities();
                     }
                     background.consume(&event);
+                    background.note_output(&line);
                     // Waiting ends with the last background task, or with a
                     // question: what follows is the agent's own turn.
                     if !background.running() || event["type"] == "control_request" {
-                        output.waiting_on_background(false);
+                        waiting(None);
                     }
                     if implement_after_result
                         && event["type"] == "assistant"
@@ -750,10 +769,12 @@ fn spawn_claude(
                                 }
                             }
                         };
-                        write_line(&mut stdin,&json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}).to_string())?;
+                        send(
+                            json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}),
+                        )?;
                         // Answered, by the user or by itself: the wait goes on.
                         if answered && background.running() {
-                            output.waiting_on_background(true);
+                            waiting(Some(&background));
                         }
                     } else if event["type"] == "result" {
                         // A resumed session first settles what the previous process
@@ -786,13 +807,21 @@ fn spawn_claude(
                         // can trigger more turns and permission requests afterwards.
                         if background.running() {
                             answered = true;
-                            output.waiting_on_background(true);
+                            waiting(Some(&background));
+                            // Only the agent knows whether it still waits for a
+                            // command it left running: it is asked once per command.
+                            if let Some(question) = background.unchecked() {
+                                recheck.restart();
+                                say(&question)?;
+                            }
                             continue;
                         }
                         if implement_after_result {
                             implement_after_result = false;
-                            write_line(&mut stdin,&json!({"type":"control_request","request_id":"orb-execute","request":{"subtype":"set_permission_mode","mode":"bypassPermissions"}}).to_string())?;
-                            write_line(&mut stdin,&json!({"type":"user","message":{"role":"user","content":"Implement the approved plan."}}).to_string())?;
+                            send(
+                                json!({"type":"control_request","request_id":"orb-execute","request":{"subtype":"set_permission_mode","mode":"bypassPermissions"}}),
+                            )?;
+                            say("Implement the approved plan.")?;
                             continue;
                         }
                         break;
@@ -802,6 +831,7 @@ fn spawn_claude(
                 }
                 Ok(())
             })();
+            recheck.close();
             crate::interactions::finish(&mission_id);
             if let Err(e) = result {
                 *failures.lock().unwrap() = Some(e);
@@ -1425,11 +1455,116 @@ fn write_line(stdin: &mut impl Write, line: &str) -> Result<(), String> {
     stdin.flush().map_err(|e| e.to_string())
 }
 
+/// How long an agent waits on the same background tasks before Orb asks it
+/// again whether they are still wanted. The last delay repeats.
+const RECHECK_DELAYS: [Duration; 3] = [
+    Duration::from_secs(3600),
+    Duration::from_secs(4 * 3600),
+    Duration::from_secs(12 * 3600),
+];
+
+fn recheck_delays(_id: &str) -> Vec<Duration> {
+    #[cfg(test)]
+    if let Some(delays) = tests::recheck_delays().lock().unwrap().get(_id) {
+        return delays.clone();
+    }
+    RECHECK_DELAYS.to_vec()
+}
+
+#[derive(Clone)]
+struct BackgroundTask {
+    id: String,
+    kind: String,
+    label: String,
+    output: Option<PathBuf>,
+    started: Instant,
+}
+impl BackgroundTask {
+    fn new(id: &str, event: &Value, known: Option<&BackgroundTask>) -> Self {
+        let field = |name: &str, known: Option<&String>| {
+            event[name]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(240).collect())
+                .or_else(|| known.cloned())
+                .unwrap_or_default()
+        };
+        Self {
+            id: id.into(),
+            kind: field("task_type", known.map(|t| &t.kind)),
+            label: field("description", known.map(|t| &t.label)),
+            output: known.and_then(|t| t.output.clone()),
+            started: known.map_or_else(Instant::now, |t| t.started),
+        }
+    }
+    /// A command ends only when its process does, unlike an agent.
+    fn shell(&self) -> bool {
+        self.kind == "local_bash"
+    }
+    fn describe(&self) -> String {
+        let kind = match self.kind.as_str() {
+            "local_bash" => "shell command",
+            "local_agent" => "agent",
+            "" => "task",
+            other => other,
+        };
+        let minutes = self.started.elapsed().as_secs() / 60;
+        let age = if minutes < 60 {
+            format!("{minutes} min")
+        } else {
+            format!("{} h {} min", minutes / 60, minutes % 60)
+        };
+        let label = if self.label.is_empty() {
+            "(no description)"
+        } else {
+            &self.label
+        };
+        let mut text = format!("- {label} ({kind}, id {}, running for {age})", self.id);
+        let Some(path) = &self.output else {
+            return text;
+        };
+        text.push_str(&format!("\n  output file: {}", path.display()));
+        match output_tail(path) {
+            Some(lines) if lines.is_empty() => text.push_str("\n  it has printed nothing"),
+            Some(lines) => {
+                text.push_str("\n  last output:");
+                for line in lines {
+                    text.push_str(&format!("\n    {line}"));
+                }
+            }
+            None => {}
+        }
+        text
+    }
+}
+
+/// The last lines a background command printed.
+fn output_tail(path: &Path) -> Option<Vec<String>> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(4096))).ok()?;
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<String> = text
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(5)
+        .map(|line| line.trim_end().chars().take(200).collect())
+        .collect();
+    lines.reverse();
+    Some(lines)
+}
+
 /// Prefer the CLI's authoritative live task snapshot; older CLIs expose edges.
 #[derive(Default)]
 struct ClaudeBackground {
-    tasks: std::collections::HashSet<String>,
+    tasks: HashMap<String, BackgroundTask>,
     has_snapshot: bool,
+    /// Commands the agent was already asked about.
+    checked: std::collections::HashSet<String>,
 }
 impl ClaudeBackground {
     fn consume(&mut self, event: &Value) {
@@ -1443,13 +1578,20 @@ impl ClaudeBackground {
                     self.tasks = tasks
                         .iter()
                         .filter(|t| t["ambient"] != true)
-                        .filter_map(|t| t["task_id"].as_str().map(str::to_owned))
+                        .filter_map(|t| {
+                            let id = t["task_id"].as_str()?;
+                            Some((id.into(), BackgroundTask::new(id, t, self.tasks.get(id))))
+                        })
                         .collect();
                 }
             }
-            Some("task_started") if !self.has_snapshot && event["ambient"] != true => {
+            Some("task_started") if event["ambient"] != true => {
                 if let Some(id) = event["task_id"].as_str() {
-                    self.tasks.insert(id.into());
+                    // A snapshot decides which tasks run; this only names them.
+                    if !self.has_snapshot || self.tasks.contains_key(id) {
+                        let task = BackgroundTask::new(id, event, self.tasks.get(id));
+                        self.tasks.insert(id.into(), task);
+                    }
                 }
             }
             Some("task_notification") if !self.has_snapshot => {
@@ -1460,8 +1602,113 @@ impl ClaudeBackground {
             _ => {}
         }
     }
+    /// The CLI names a command's output file in the tool result that started it.
+    fn note_output(&mut self, line: &str) {
+        for task in self.tasks.values_mut() {
+            if task.output.is_some() || !task.shell() {
+                continue;
+            }
+            let name = format!("/tasks/{}.output", task.id);
+            let Some(end) = line.find(&name).map(|at| at + name.len()) else {
+                continue;
+            };
+            let start = line[..end]
+                .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\\')
+                .map_or(0, |at| at + 1);
+            task.output = Some(PathBuf::from(&line[start..end])).filter(|p| p.is_absolute());
+        }
+    }
     fn running(&self) -> bool {
         !self.tasks.is_empty()
+    }
+    fn list(&self) -> Vec<BackgroundTask> {
+        let mut tasks: Vec<_> = self.tasks.values().cloned().collect();
+        tasks.sort_by_key(|task| task.started);
+        tasks
+    }
+    /// What to ask an agent that ended its turn with commands it was not asked
+    /// about yet. Agents it started end by themselves and are not questioned.
+    fn unchecked(&mut self) -> Option<String> {
+        let tasks: Vec<_> = self
+            .list()
+            .into_iter()
+            .filter(|task| task.shell() && !self.checked.contains(&task.id))
+            .collect();
+        if tasks.is_empty() {
+            return None;
+        }
+        self.checked
+            .extend(tasks.iter().map(|task| task.id.clone()));
+        Some(background_question(
+            "Your turn ended while these background commands still run:",
+            &tasks,
+        ))
+    }
+}
+
+fn background_question(title: &str, tasks: &[BackgroundTask]) -> String {
+    let list: Vec<_> = tasks.iter().map(BackgroundTask::describe).collect();
+    format!(
+        "[Automatic check from Orb, not a message from the user]\n{title}\n{}\n\n\
+         The conversation stays busy until every one of them exits. Keep a task only if you \
+         wait for its result and it can still finish: you are woken when it exits. Stop with \
+         TaskStop each task that is stuck, that loops without a way to end, or whose result \
+         you no longer need. Do not start new work. Reply in one short sentence.",
+        list.join("\n")
+    )
+}
+
+/// Asks the agent again about background tasks it has waited on for long.
+#[derive(Default)]
+struct Recheck(Mutex<RecheckState>, std::sync::Condvar);
+#[derive(Default)]
+struct RecheckState {
+    waiting: Option<(Instant, Vec<BackgroundTask>)>,
+    asked: usize,
+    closed: bool,
+}
+impl Recheck {
+    fn waiting(&self, tasks: Option<Vec<BackgroundTask>>) {
+        let mut state = self.0.lock().unwrap();
+        let since = state.waiting.as_ref().map(|(since, _)| *since);
+        if tasks.is_none() && since.is_none() {
+            return;
+        }
+        state.waiting = tasks.map(|tasks| (since.unwrap_or_else(Instant::now), tasks));
+        self.1.notify_all();
+    }
+    /// New tasks start from the first delay.
+    fn restart(&self) {
+        self.0.lock().unwrap().asked = 0;
+    }
+    fn close(&self) {
+        self.0.lock().unwrap().closed = true;
+        self.1.notify_all();
+    }
+    fn run(&self, stdin: &Mutex<std::process::ChildStdin>, delays: &[Duration]) {
+        let mut state = self.0.lock().unwrap();
+        while !state.closed {
+            let Some((since, _)) = &state.waiting else {
+                state = self.1.wait(state).unwrap();
+                continue;
+            };
+            let delay = delays[state.asked.min(delays.len() - 1)];
+            let left = delay.saturating_sub(since.elapsed());
+            if !left.is_zero() {
+                state = self.1.wait_timeout(state, left).unwrap().0;
+                continue;
+            }
+            // The answer is a turn of its own: the next delay counts from its end.
+            let (_, tasks) = state.waiting.take().unwrap();
+            state.asked += 1;
+            drop(state);
+            let question = background_question("These background tasks still run:", &tasks);
+            let line = json!({"type":"user","message":{"role":"user","content":question}});
+            if write_line(&mut *stdin.lock().unwrap(), &line.to_string()).is_err() {
+                return;
+            }
+            state = self.0.lock().unwrap();
+        }
     }
 }
 
@@ -2248,6 +2495,138 @@ printf '%s\n' '{"type":"result"}'
         assert!(!state.running());
         state.consume(&json!({"type":"system","subtype":"task_started","task_id":"stale"}));
         assert!(!state.running());
+    }
+
+    /// Shorter delays for the run of one test.
+    pub(super) fn recheck_delays() -> &'static Mutex<HashMap<String, Vec<Duration>>> {
+        static DELAYS: OnceLock<Mutex<HashMap<String, Vec<Duration>>>> = OnceLock::new();
+        DELAYS.get_or_init(Default::default)
+    }
+
+    #[test]
+    fn claude_background_asks_once_about_each_command_and_never_about_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("tasks").join("loop.output");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "one\n\ntwo\n").unwrap();
+        let mut state = ClaudeBackground::default();
+        state.consume(
+            &json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+            {"task_id":"loop","task_type":"local_bash","description":"Wait for release builds"},
+            {"task_id":"explore","task_type":"local_agent","description":"Explore importer"},
+            {"task_id":"watch","task_type":"local_bash","ambient":true}]}),
+        );
+        state.note_output(&json!({"type":"user","message":{"content":[{"type":"tool_result","content":format!("Output is being written to: {}. You will be notified", log.display())}]}}).to_string());
+        let question = state.unchecked().unwrap();
+        assert!(
+            question
+                .contains("- Wait for release builds (shell command, id loop, running for 0 min)"),
+            "{question}"
+        );
+        assert!(
+            question.contains(&format!("output file: {}\n", log.display())),
+            "{question}"
+        );
+        assert!(
+            question.contains("last output:\n    one\n    two\n"),
+            "{question}"
+        );
+        assert!(
+            !question.contains("Explore importer") && !question.contains("watch"),
+            "{question}"
+        );
+        assert!(state.unchecked().is_none());
+        // The snapshot after its answer still lists the command: it keeps its age and file.
+        state.consume(
+            &json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+            {"task_id":"loop","task_type":"local_bash","description":"Wait for release builds"},
+            {"task_id":"build","task_type":"local_bash","description":"Build"}]}),
+        );
+        assert_eq!(state.list()[0].output.as_deref(), Some(log.as_path()));
+        let question = state.unchecked().unwrap();
+        assert!(
+            question.contains("id build") && !question.contains("id loop"),
+            "{question}"
+        );
+        state.consume(
+            &json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+            {"task_id":"explore","task_type":"local_agent","description":"Explore importer"}]}),
+        );
+        assert!(state.running() && state.unchecked().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_is_asked_about_a_command_it_left_running_then_again_after_the_delay() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude-fixture");
+        std::fs::write(&bin, r#"#!/bin/sh
+read -r init
+read -r prompt
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"loop","task_type":"local_bash","description":"Wait for release builds"}]}'
+printf '%s\n' '{"type":"assistant","message":{"id":"a","content":[{"type":"text","text":"Released."}]}}'
+printf '%s\n' '{"type":"result"}'
+read -r first || exit 21
+printf '%s\n' "$first" > first.json
+printf '%s\n' '{"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"Still waiting."}]}}'
+printf '%s\n' '{"type":"result"}'
+read -r second || exit 22
+printf '%s\n' "$second" > second.json
+printf '%s\n' '{"type":"assistant","message":{"id":"c","content":[{"type":"text","text":"Stopped it."}]}}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+printf '%s\n' '{"type":"result"}'
+"#).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let id = format!("claude-recheck-{}", uuid_like());
+        recheck_delays()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), vec![Duration::from_millis(150)]);
+        let started = Instant::now();
+        local_agents_start(StartRequest {
+            id: id.clone(),
+            harness: "claudecode".into(),
+            bin: bin.to_string_lossy().into_owned(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "Release".into(),
+            model: None,
+            session_id: None,
+            image_paths: vec![],
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut waited = false;
+        loop {
+            let state = local_agents_poll(id.clone()).unwrap();
+            waited |= state.waiting_since.is_some();
+            if state.done {
+                assert!(state.text.contains("Stopped it."), "{}", state.text);
+                break;
+            }
+            assert!(Instant::now() < deadline, "Claude did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(waited);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        let read = |name: &str| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(name)).unwrap()).unwrap()
+        };
+        let first = read("first.json")["message"]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(first.contains("Your turn ended while these background commands still run:\n- Wait for release builds"), "{first}");
+        let second = read("second.json")["message"]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            second.contains("These background tasks still run:\n- Wait for release builds"),
+            "{second}"
+        );
+        recheck_delays().lock().unwrap().remove(&id);
+        runs().lock().unwrap().remove(&id);
     }
 
     #[cfg(unix)]

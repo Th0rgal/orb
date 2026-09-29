@@ -108,6 +108,24 @@ reported summaries/commands, and elapsed time is omitted when the start event
 was missed. Failed background tasks stay visible; completed work is expandable.
 Old native builds remain readable without invented durations or results.
 
+### Background task checks (2026-09-29)
+
+A command that never exits held a conversation busy for 33 minutes after its
+final answer: a polling loop waited for a line that another broken loop could
+never print. From outside, such a loop looks the same as a long build the agent
+waits for, so Orb sets no time limit. It asks the agent instead, through the
+open stdin (`ClaudeBackground::unchecked` and `Recheck` in
+`orb/src-tauri/src/local_agents.rs`):
+
+- When a turn ends while shell commands (`local_bash`) still run, the agent is
+  asked once per command to keep the ones it waits for and to stop the others.
+  Background agents are not questioned at this point: they end by themselves.
+- While the wait goes on, the agent is asked again about every remaining task
+  after 1 h, then 4 h, then every 12 h, counted from the end of its previous
+  answer. The question carries each task's age, output file and last lines.
+
+The answer is an ordinary turn and appears in the conversation.
+
 Regression coverage: `agent-activity.test.tsx`, `agent-activity.browser.spec.ts`
 (WebKit desktop/mobile), and native `local_stream` lifecycle tests.
 
