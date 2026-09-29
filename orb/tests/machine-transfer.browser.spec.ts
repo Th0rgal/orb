@@ -26,7 +26,8 @@ test("moves from the footer with an inventory and no automatic execution", async
   await expect(page.getByRole("dialog", { name: "Change machine" })).toBeVisible();
   await page.getByRole("button", { name: "Prepare transfer" }).click();
   const inventory = page.getByRole("region", { name: "Workspace inventory" });
-  await expect(inventory.getByText("1 file · 3 B")).toBeVisible();
+  await inventory.getByText("1 file · 3 B").click();
+  await expect(inventory.getByText("notes.txt")).toBeVisible();
   await expect(inventory.getByText("context")).toBeVisible();
   await expect(inventory.getByText("link points outside the workspace")).toBeVisible();
   await inventory.locator("summary", { hasText: "Links" }).click();

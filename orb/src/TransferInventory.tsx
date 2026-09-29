@@ -7,16 +7,17 @@ const BUNDLE = ".transfer-git.bundle";
 /** Paths listed under an opened folder; a workspace may hold 50,000 of them. */
 const SHOWN = 50;
 export interface InventoryGroup { name: string; files: number; bytes: number; history: number; paths: string[] }
-/** The moved files by top-level folder, largest first. Git bundles count as history, not as files. */
+export const LOOSE = "Top-level files";
+/** The moved files by top-level folder, largest first. Files at the root share one group; Git bundles count as history, not as files. */
 export function inventoryGroups(manifest: Manifest): InventoryGroup[] {
   const groups = new Map<string, InventoryGroup>();
   for (const file of manifest.files) {
     const slash = file.path.indexOf("/"), bundle = file.path === BUNDLE || file.path.endsWith(`/${BUNDLE}`);
-    const name = slash < 0 || (bundle && file.path.lastIndexOf("/") === slash) ? (bundle ? slash < 0 ? "Workspace" : file.path.slice(0, slash) : file.path) : file.path.slice(0, slash);
+    const name = slash < 0 ? bundle ? "Workspace" : LOOSE : file.path.slice(0, slash);
     const group = groups.get(name) ?? { name, files: 0, bytes: 0, history: 0, paths: [] };
     group.bytes += file.bytes;
     if (bundle) group.history += file.bytes;
-    else { group.files++; if (group.paths.length < SHOWN && file.path !== name) group.paths.push(file.path.slice(name.length + 1)); }
+    else { group.files++; if (group.paths.length < SHOWN) group.paths.push(slash < 0 ? file.path : file.path.slice(slash + 1)); }
     groups.set(name, group);
   }
   return [...groups.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
@@ -38,7 +39,7 @@ export function TransferInventory(p: { manifest: Manifest }) {
       <h3>Moving</h3>
       <div class="transfer-groups">
         <For each={groups()}>{g => <details class="transfer-group" classList={{ leaf: !g.paths.length }}>
-          <summary><span class="transfer-path">{g.name}</span><span class="transfer-meta">{g.files ? formatCount(g.files, "file") : "Git history"} · {formatBytes(g.bytes)}</span><span class="transfer-bar" style={{ width: `${Math.max(2, g.bytes / largest() * 100)}%` }} /></summary>
+          <summary><span classList={{ "transfer-path": g.name !== LOOSE && g.name !== "Workspace" }}>{g.name}</span><span class="transfer-meta">{g.files ? formatCount(g.files, "file") : "Git history"} · {formatBytes(g.bytes)}</span><span class="transfer-bar" style={{ width: `${Math.max(2, g.bytes / largest() * 100)}%` }} /></summary>
           <Show when={g.paths.length}><ul>
             <For each={g.paths}>{path => <li class="transfer-path">{path}</li>}</For>
             <Show when={g.files > g.paths.length}><li class="transfer-more">and {formatCount(g.files - g.paths.length, "more file")}</li></Show>
@@ -50,7 +51,8 @@ export function TransferInventory(p: { manifest: Manifest }) {
     <Show when={skipped().length}><details class="transfer-section" open>
       <summary>Left behind<span class="transfer-count warn">{skipped().length}</span></summary>
       <p>These stay on the source: they cannot be recreated on another machine.</p>
-      <ul><For each={skipped()}>{s => <li><span class="transfer-path">{s.path}</span><small>{s.reason}</small></li>}</For></ul>
+      <ul><For each={skipped().slice(0, SHOWN)}>{s => <li><span class="transfer-path">{s.path}</span><small>{s.reason}</small></li>}</For>
+        <Show when={skipped().length > SHOWN}><li class="transfer-more">and {formatCount(skipped().length - SHOWN, "more path")}</li></Show></ul>
     </details></Show>
     <Show when={links().length}><details class="transfer-section">
       <summary>Links<span class="transfer-count">{links().length}</span></summary>
