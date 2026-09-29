@@ -629,6 +629,8 @@ pub(crate) struct NativeGrokObserver {
     session_persisted: Option<String>,
     auth_cancel_requested: bool,
     running_since: Option<std::time::Instant>,
+    /// The latest `pump` itself read the log to its current end.
+    pumped_to_end: bool,
 }
 
 /// Jobs that allocated their Claude session (`--session-id`) rather than
@@ -686,6 +688,7 @@ impl NativeGrokObserver {
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
             running_since: None,
+            pumped_to_end: false,
         })
     }
 
@@ -697,6 +700,7 @@ impl NativeGrokObserver {
         node: &RemoteNodeConfig,
         shared_token: &str,
     ) {
+        self.pumped_to_end = false;
         if self.streaming == LogStreaming::Unsupported {
             return;
         }
@@ -725,6 +729,7 @@ impl NativeGrokObserver {
             let caught_up = chunk.next_offset >= chunk.log_len;
             self.apply_chunk(&chunk, client, node, shared_token).await;
             if caught_up || chunk.data.is_empty() {
+                self.pumped_to_end = caught_up;
                 return;
             }
         }
@@ -960,9 +965,9 @@ impl NativeGrokObserver {
             .as_deref()
             .is_some_and(|error| error.contains("No conversation found with session ID"));
         // No event is proof Claude never started only when the whole log was
-        // read from offset zero, not just the terminal tail.
-        let complete_log =
-            self.streaming == LogStreaming::Supported && self.log_offset >= self.log_len;
+        // read from offset zero and the terminal fetch itself reached its end
+        // (a failed fetch leaves stale offsets that look caught up).
+        let complete_log = self.streaming == LogStreaming::Supported && self.pumped_to_end;
         if !missing && !(allocated && complete_log && self.stream.json_events == 0) {
             return;
         }
