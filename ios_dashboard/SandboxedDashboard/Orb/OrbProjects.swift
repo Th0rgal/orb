@@ -93,7 +93,10 @@ struct OrbHome: View {
         defer { loading = false }
         if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = cached["projects"].items.map { OrbRow($0, project: true) } }
         do {
+            let requested = Date(), endpoint = api.endpoint
             let value = try await api.call("/api/projects")
+            // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
+            Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             try OrbDisk.save(value, key: "projects"); error = ""
             // Warm only the first project; never fan out across the entire account.
