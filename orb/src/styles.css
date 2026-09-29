@@ -1478,6 +1478,9 @@ button.fork-trigger:hover { color: var(--fg); }
 .machine-menu .menu-sub { font: 11px/1.4 var(--sans); color: var(--fg-3); }
 .machine-menu .menu-item { gap: 10px; padding: 9px 10px; }
 .machine-menu .menu-ico { align-self: center; }
+.machine-load { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; padding-right: 8px; font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--fg-3); white-space: nowrap; flex-shrink: 0; }
+.machine-load svg { opacity: .8; }
+.machine-transfer-end { display: inline-flex; align-items: center; flex-shrink: 0; }
 .machine-node-state { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg-3); white-space: nowrap; }
 .machine-state-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-4); }
 .machine-state-dot.online { background: var(--fg-3); }

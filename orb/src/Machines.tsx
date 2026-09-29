@@ -8,6 +8,7 @@ import { pollWhileVisible } from "./poll";
 import { createStore, produce } from "solid-js/store";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
+import { recordFleet } from "./machineLoad";
 import { getRemoteNodes, getApiUrl, getJwt, isConnected, type RemoteNodeView } from "./api";
 
 export type Machine = {
@@ -107,6 +108,7 @@ export function Machines() {
     try {
       const r = await getRemoteNodes();
       setNodes(r.nodes);
+      recordFleet(r.nodes);
     } catch {
       /* keep last good snapshot */
     }

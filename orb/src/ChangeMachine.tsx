@@ -2,12 +2,13 @@ import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministra
 import {connectionVersion} from "./api";
 import {nodeLabel} from "./missionLaunch";
 import { Select } from "./Select";
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
 import { cancelMission, getMission, type HarnessChoice, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal } from "./localAgents";
 import { appendClientTranscript, setClientMissionStatus } from "./api";
+import { MachineLoadBadge, byLeastLoaded, machineLoadTitle } from "./machineLoad";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView } from "./machineTransfer";
 
 type Loaded = { view: TransferView; rows: Destination[]; client?: string };
@@ -66,6 +67,12 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   const availableHarnesses = () => p.choices.filter(c => !selected()?.harnesses || selected()!.harnesses!.includes(c.backend.id));
   const compatible = () => !selected()?.harnesses || selected()!.harnesses!.includes(backend());
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const loadKey = (d: Destination) => d.machine.kind === "node" ? d.machine.id : d.machine.kind;
+  // This computer and Core keep their place; usable nodes go least busy first.
+  const ordered = createMemo(() => {
+    const rows = destinations(), node = (d: Destination) => d.machine.kind === "node";
+    return [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
+  });
   const load = async (force = false) => {
     setLoading(true); setReady(false); setError("");
     const version=connectionVersion();
@@ -161,8 +168,8 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
     <div class="menu-group">{selected() ? `Continue on ${selected()!.label}` : "Change machine…"}</div>
     <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
     <Show when={!selected()}>
-      <For each={destinations()}>{d => <button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? d.label} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
-        <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span>
+      <For each={ordered()}>{d => <button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
+        <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
       </button>}</For>
     </Show>
     <Show when={selected()}>
