@@ -61,8 +61,8 @@ const STALE_RESULT_WINDOW: std::time::Duration = std::time::Duration::from_secs(
 /// A resumed session first settles what the previous process left behind
 /// (stopped background tasks) and reports it as empty results of zero turns,
 /// one per batch of leftovers. The prompt has not run yet: the real turn and
-/// its own result follow. Leading results are skipped only inside
-/// `STALE_RESULT_WINDOW`, so a session with nothing to say still ends.
+/// its own result follow. When nothing follows within
+/// `STALE_RESULT_WINDOW`, the runner ends the turn with an empty reply.
 fn stale_resumed_result(
     resumed: bool,
     window_closed: bool,
@@ -1927,6 +1927,16 @@ pub fn run_claudecode_turn<'a>(
                     idle_timeout_triggered = true;
                     break;
                 }
+                _ = tokio::time::sleep_until(first_stale_result_at.map_or_else(Instant::now, |at| at + STALE_RESULT_WINDOW)),
+                    if first_stale_result_at.is_some() && !saw_assistant_activity => {
+                    // Nothing followed the leftovers: the empty result was the answer.
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        "No turn followed the stale results of the resumed Claude session; ending with an empty reply"
+                    );
+                    saw_terminal_result_event = true;
+                    break;
+                }
                 _ = process_exit_notify.notified(), if !process_exited => {
                     // The main PTY child (nsenter/claude) has exited.
                     // Give a short grace period to drain any buffered events
@@ -1940,6 +1950,12 @@ pub fn run_claudecode_turn<'a>(
                 }
                 _ = tokio::time::sleep_until(process_exit_grace_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86400))), if process_exited && line_rx.is_empty() => {
                     // Grace period expired after process exit — no `result` event arrived.
+                    if first_stale_result_at.is_some() && !saw_assistant_activity {
+                        // The session settled its leftovers and had nothing to add.
+                        saw_terminal_result_event = true;
+                        reader_handle.abort();
+                        break;
+                    }
                     tracing::warn!(
                         mission_id = %mission_id,
                         "Claude Code process exited without emitting a result event, breaking event loop"
