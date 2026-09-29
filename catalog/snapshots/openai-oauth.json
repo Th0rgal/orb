@@ -9,12 +9,12 @@
     {
       "id": "gpt-6.1-sol",
       "name": "GPT-6.1 Sol",
-      "description": "Newest Codex flagship (efforts low..ultra). Fast tier: 2x speed, increased usage."
+      "description": "Newest Codex flagship (efforts low..ultra). Default. Fast tier: 2x speed, increased usage."
     },
     {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
-      "description": "OpenAI's GPT-6 flagship in Codex (efforts low..ultra). Default."
+      "description": "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."
     },
     {
       "id": "gpt-6-sol",

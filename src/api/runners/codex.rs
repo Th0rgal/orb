@@ -1821,7 +1821,7 @@ pub(crate) async fn consume_codex_events(
     if lower_final.contains("does not exist or you do not have access")
         || lower_final.contains("model_not_found")
     {
-        final_message.push_str("\n\nTry model `gpt-6-astra` or `gpt-5.6-sol` for Codex missions.");
+        final_message.push_str("\n\nTry model `gpt-6.1-sol` or `gpt-6-astra` for Codex missions.");
         if matches!(
             model,
             Some("gpt-5.3-codex" | "gpt-5.4-codex" | "gpt-5.5-codex")
