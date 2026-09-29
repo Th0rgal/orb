@@ -91,6 +91,8 @@ pub struct PollState {
     pub session_id: Option<String>,
     pub error: Option<String>,
     pub resumed: bool,
+    /// Set while the turn has answered and only its background tasks remain.
+    pub waiting_since: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -348,6 +350,7 @@ fn watch_exit(
             session_id: session_id.lock().unwrap().clone(),
             error: error.lock().unwrap().clone(),
             resumed,
+            waiting_since: None,
         });
     });
 }
@@ -364,6 +367,7 @@ pub fn local_agents_poll(id: String) -> Result<PollState, String> {
         session_id: run.session_id.lock().map_err(|e| e.to_string())?.clone(),
         error: run.error.lock().map_err(|e| e.to_string())?.clone(),
         resumed: run.resumed,
+        waiting_since: run.text.waiting_since(),
     };
     Ok(snapshot)
 }
@@ -665,6 +669,7 @@ fn spawn_claude(
                     output.claude_activity(&event);
                     if matches!(event["type"].as_str(), Some("assistant" | "stream_event")) {
                         request_started = true;
+                        output.waiting_on_background(false);
                     }
                     if event["type"] != "stream_event"
                         || matches!(
@@ -768,6 +773,7 @@ fn spawn_claude(
                         // A result ends one turn, not the session: background agents
                         // can trigger more turns and permission requests afterwards.
                         if background.running() {
+                            output.waiting_on_background(true);
                             continue;
                         }
                         if implement_after_result {
