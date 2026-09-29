@@ -62,7 +62,7 @@ fn outgoing(e: &Execution, i: usize) -> String {
             // The latest exchange is always carried: its question in full when
             // it fits, and as much of the beginning of its answer as remains.
             if kept.is_empty() {
-                let asked: String = question.chars().take(budget / 2).collect();
+                let asked: String = question.chars().take(budget).collect();
                 let room = budget.saturating_sub(asked.chars().count());
                 let said: String = answer.chars().take(room).collect();
                 kept.push(format!(
@@ -424,6 +424,15 @@ mod tests {
         assert!(sent.contains("User:\nThe only question\n\nAssistant:\nBEGINNING"));
         assert!(!sent.contains(" END"));
         assert!(sent.contains("left out for length"));
+        // A long question is kept whole; the answer takes what is left.
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let question = format!(
+            "{} QUESTION-END",
+            "q".repeat(REPLACEMENT_HISTORY_LIMIT * 2 / 3)
+        );
+        let sent = outgoing(&execution(vec![answered(&question, &answer), next]), 1);
+        assert!(sent.contains("QUESTION-END\n\nAssistant:\nBEGINNING"));
         assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
     }
 
