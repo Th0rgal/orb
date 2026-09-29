@@ -76,6 +76,7 @@ fn stale_resumed_result(
             .as_deref()
             .is_none_or(|text| text.trim().is_empty())
         && res.error.is_none()
+        && res.message.is_none()
         && res.errors.is_empty()
 }
 
@@ -3763,6 +3764,11 @@ mod background_task_tests {
             "num_turns": 0, "result": ""
         }));
         assert!(!stale_resumed_result(true, false, false, &failed));
+        let diagnosed = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "num_turns": 0,
+            "result": "", "message": "API Error: overloaded"
+        }));
+        assert!(!stale_resumed_result(true, false, false, &diagnosed));
         let unknown_turns = result_event(serde_json::json!({
             "subtype": "success", "session_id": "s", "result": ""
         }));
