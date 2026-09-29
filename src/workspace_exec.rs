@@ -2254,6 +2254,14 @@ impl WorkspaceExec {
         let env = self.build_env(env);
         let (launch_program, launch_args) =
             crate::control_mcp::launch::wrap_command(program, args, &env);
+        // Harnesses without a PTY (Codex, OpenCode, Gemini, Grok) get the same
+        // scope as Claude Code: on 2026-09-29 five Codex workers and their
+        // Lean and Forge builds ran in the API's cgroup, at a load of 61.
+        let scoped = self.host_scope_invocation(cwd, &launch_program, &launch_args, &env);
+        let (launch_program, launch_args) = match scoped {
+            Some(scoped) => ("systemd-run".to_string(), scoped),
+            None => (launch_program, launch_args),
+        };
         let program = launch_program.as_str();
         let args = launch_args.as_slice();
         let host_env = (env.contains_key("SANDBOXED_MCP_WRAPPER")
@@ -2293,6 +2301,30 @@ impl WorkspaceExec {
             replace_command_env(&mut cmd, host_env);
         }
         spawn_streaming_command(&mut cmd)
+    }
+
+    /// `systemd-run` arguments that run a host harness in its own scope under
+    /// the missions slice, with the mission caps. None for other workspaces
+    /// and when no cap is configured (no systemd).
+    fn host_scope_invocation(
+        &self,
+        cwd: &Path,
+        program: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Option<Vec<String>> {
+        if !cfg!(unix) || !matches!(self.workspace.workspace_type, WorkspaceType::Host) {
+            return None;
+        }
+        let mission_id = ["MISSION_ID", "SANDBOXED_SH_MISSION_ID"]
+            .iter()
+            .find_map(|key| env.get(*key))
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        let unit = exec_scope_unit_for_mission(HOST_MACHINE, Some(cwd), mission_id);
+        let mut scoped = self.mission_resource_caps().scope_run_args(&unit)?;
+        scoped.push(program.to_string());
+        scoped.extend_from_slice(args);
+        Some(scoped)
     }
 
     /// Spawn a workspace-aware command with caller-provided stdio.
@@ -2385,14 +2417,7 @@ impl WorkspaceExec {
             // cgroup: on 2026-09-29 Lean builds of one host mission starved
             // the API of CPU until it stopped answering. Same wrapper as the
             // container path, so the mission caps apply.
-            let mission_id = ["MISSION_ID", "SANDBOXED_SH_MISSION_ID"]
-                .iter()
-                .find_map(|key| env.get(*key))
-                .and_then(|value| uuid::Uuid::parse_str(value).ok());
-            let unit = exec_scope_unit_for_mission(HOST_MACHINE, Some(cwd), mission_id);
-            if let Some(mut scoped) = self.mission_resource_caps().scope_run_args(&unit) {
-                scoped.push(program.to_string());
-                scoped.extend_from_slice(args);
+            if let Some(scoped) = self.host_scope_invocation(cwd, program, args, &env) {
                 return self.spawn_unix_pty(cwd, "systemd-run", &scoped, &env);
             }
             return self.spawn_unix_pty(cwd, program, args, &env);
