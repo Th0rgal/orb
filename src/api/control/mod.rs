@@ -17,6 +17,7 @@ pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
 pub(crate) mod remote_grok;
+pub(crate) mod usage_limit_wait;
 #[cfg(test)]
 use dispatch_admission::admit_dispatch;
 pub use dispatch_admission::DispatchAdmission;
@@ -22318,6 +22319,16 @@ async fn control_actor_loop(
             return Err(remote_grok::local_resume_refusal(&mission, &placement));
         }
 
+        // A mission waiting for a usage limit can be resumed before the
+        // reset (another account was added, credits were bought): the
+        // schedule is lifted and the stored resume prompt is used.
+        if usage_limit_wait::is_waiting(&mission) {
+            let prompt = usage_limit_wait::release(mission_store, &mission)
+                .await?
+                .unwrap_or_else(|| INTERRUPTED_RESUME_PROMPT.to_string());
+            return Ok((mission, prompt));
+        }
+
         // Check if mission can be resumed. Paused remains Paused until the
         // actor has acquired the durable writer lock and accepted the resume.
         // Failed missions can be resumed to retry after transient errors (e.g., 529 overloaded)
@@ -22932,11 +22943,21 @@ async fn control_actor_loop(
                                                 .await
                                                 .ok()
                                                 .flatten();
-                                            let combined = deferred_goal_for_incoming_message(
-                                                m.status,
-                                                previous_goal.as_deref(),
-                                                &if source.as_deref() == Some("scheduler") { content.clone() } else { deferred_messages::encode(id, &content) },
-                                            );
+                                            let combined = match previous_goal.as_deref() {
+                                                // An automation that fires during a long
+                                                // wait repeats the same message every time.
+                                                Some(previous)
+                                                    if usage_limit_wait::is_waiting(&m)
+                                                        && usage_limit_wait::already_deferred(previous, &content) =>
+                                                {
+                                                    previous.to_string()
+                                                }
+                                                _ => deferred_goal_for_incoming_message(
+                                                    m.status,
+                                                    previous_goal.as_deref(),
+                                                    &if source.as_deref() == Some("scheduler") { content.clone() } else { deferred_messages::encode(id, &content) },
+                                                ),
+                                            };
                                             if let Err(e) = mission_store
                                                 .set_deferred_goal(tid, Some(combined))
                                                 .await
@@ -25865,9 +25886,26 @@ async fn control_actor_loop(
                     // `match` closes — `agent_result` itself is out of scope
                     // by then. Empty string when the join errored.
                     let mut completed_agent_output = String::new();
+                    // Set when the mission was parked until a usage limit
+                    // resets: it must not be finalized as failed afterwards.
+                    let mut completed_usage_limit_wait = false;
                     match res {
-                        Ok((_mid, _user_msg, mut agent_result)) => {
+                        Ok((_mid, user_msg, mut agent_result)) => {
                             maybe_recover_soft_llm_error(&mut agent_result);
+                            // Every account is at its usage limit: the mission
+                            // waits for the reset instead of failing, and the
+                            // turn's message says so.
+                            let usage_limit_wait = match completed_mission_id {
+                                Some(mission_id) => {
+                                    usage_limit_wait::plan(&mission_store, mission_id, &agent_result)
+                                        .await
+                                }
+                                None => None,
+                            };
+                            if let Some((_, wait)) = &usage_limit_wait {
+                                agent_result.output =
+                                    usage_limit_wait::annotate_output(&agent_result.output, wait);
+                            }
                             let completion_evidence =
                                 completion_evidence_for_agent_result(&agent_result);
                             completed_terminal_reason = agent_result.terminal_reason;
@@ -25993,6 +26031,18 @@ async fn control_actor_loop(
                             // - Explicit complete_mission calls (which update DB status)
                             // - Parallel missions (each has its own DB status)
                             if !completed_waiting_remote_job {
+                                if let Some((mission, wait)) = &usage_limit_wait {
+                                    completed_usage_limit_wait = usage_limit_wait::park(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission,
+                                        wait,
+                                        &deferred_messages::strip(&user_msg),
+                                    )
+                                    .await;
+                                }
+                            }
+                            if !completed_waiting_remote_job && !completed_usage_limit_wait {
                                 if let Some(mission_id) = completed_mission_id {
                                 maybe_finalize_terminal_mission(
                                     &mission_store,
@@ -26276,7 +26326,9 @@ async fn control_actor_loop(
                             enqueue_agent_finished_messages(&mut queue, messages);
                         }
 
-                        if !queue_has_pending_target_mission(&queue, mission_id) {
+                        if !completed_usage_limit_wait
+                            && !queue_has_pending_target_mission(&queue, mission_id)
+                        {
                             maybe_finalize_terminal_mission(
                                 &mission_store,
                                 &events_tx,
@@ -26687,8 +26739,16 @@ async fn control_actor_loop(
                         continue;
                     }
                     if runner.check_finished() {
-                        if let Some((_msg_id, _user_msg, mut result)) = runner.poll_completion().await {
+                        if let Some((_msg_id, user_msg, mut result)) = runner.poll_completion().await {
                             maybe_recover_soft_llm_error(&mut result);
+                            // Same as the main runner: a usage limit on every
+                            // account makes the mission wait for the reset.
+                            let usage_limit_wait =
+                                usage_limit_wait::plan(&mission_store, *mission_id, &result).await;
+                            if let Some((_, wait)) = &usage_limit_wait {
+                                result.output =
+                                    usage_limit_wait::annotate_output(&result.output, wait);
+                            }
                             let durable_terminal_reason = result
                                 .terminal_reason
                                 .map(|reason| format!("{reason:?}"));
@@ -27016,7 +27076,22 @@ async fn control_actor_loop(
                                 );
 
                                 // If no queued messages, update status and mark for cleanup
-                                if !started {
+                                let parked = match &usage_limit_wait {
+                                    Some((mission, wait)) if !started && !waiting_remote_job => {
+                                        usage_limit_wait::park(
+                                            &mission_store,
+                                            &events_tx,
+                                            mission,
+                                            wait,
+                                            &deferred_messages::strip(&user_msg),
+                                        )
+                                        .await
+                                    }
+                                    _ => false,
+                                };
+                                if parked {
+                                    completed_missions.push(*mission_id);
+                                } else if !started {
                                     maybe_finalize_terminal_mission(
                                         &mission_store,
                                         &events_tx,
