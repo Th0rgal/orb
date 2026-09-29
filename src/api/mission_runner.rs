@@ -12185,7 +12185,7 @@ mod tests {
         let parsed = parse_opencode_sse_event(&line, None, None, &mut state, mission_id)
             .expect("reasoning event parses");
         match parsed.event {
-            Some(AgentEvent::Thinking { content, done, .. }) => {
+            Some(super::AgentEvent::Thinking { content, done, .. }) => {
                 assert_eq!(content, "17*23 = 391");
                 assert!(!done);
             }
