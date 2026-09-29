@@ -959,7 +959,11 @@ impl NativeGrokObserver {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("No conversation found with session ID"));
-        if !missing && !(allocated && self.stream.json_events == 0) {
+        // No event is proof Claude never started only when the whole log was
+        // read from offset zero, not just the terminal tail.
+        let complete_log =
+            self.streaming == LogStreaming::Supported && self.log_offset >= self.log_len;
+        if !missing && !(allocated && complete_log && self.stream.json_events == 0) {
             return;
         }
         let Some(session_id) = self.mission.session_id.clone() else {

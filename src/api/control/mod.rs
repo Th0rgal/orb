@@ -12355,7 +12355,8 @@ struct StdinPrompt {
 
 /// Stage a long prompt for stdin delivery; `None` keeps it inline.
 fn stdin_prompt(prompt: &str) -> Option<StdinPrompt> {
-    if prompt.len() <= INLINE_PROMPT_LIMIT {
+    // Measure what lands in argv: quoting expands each `'` to four bytes.
+    if shell_single_quote(&positional_prompt(prompt)).len() <= INLINE_PROMPT_LIMIT {
         return None;
     }
     let prompt = prompt.replace('\0', "");
@@ -37530,6 +37531,8 @@ Investigate <service/> failures.
         assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "0");
 
         assert!(stdin_prompt("short").is_none());
+        // 40 KB of apostrophes quotes to ~160 KB.
+        assert!(stdin_prompt(&"'".repeat(40 * 1024)).is_some());
         let huge = format!("objective {}latest turn", "é".repeat(STDIN_PROMPT_LIMIT));
         let staged = stdin_prompt(&huge).unwrap();
         let total: usize = staged.env.values().map(String::len).sum();
