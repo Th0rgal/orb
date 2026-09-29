@@ -13,6 +13,7 @@ const pending: Entry[] = [];
 const recent: Entry[] = [];
 const work = new Map<string, { calls: number; ms: number; worst: number }>();
 const requests = { count: 0, failed: 0, ms: 0, worst: 0, worstPath: "" };
+const routes = new Map<string, { count: number; ms: number }>();
 const streams = new Map<string, { events: number; bytes: number }>();
 let stalls = { count: 0, ms: 0, worst: 0 };
 let started = false;
@@ -46,6 +47,10 @@ export function timed<T>(name: string, run: () => T): T {
 
 export function requestDone(path: string, ms: number, ok: boolean, detail?: string): void {
   requests.count++; requests.ms += ms;
+  const route = path.split("?")[0].replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, ":id");
+  const row = routes.get(route) ?? { count: 0, ms: 0 };
+  row.count++; row.ms += ms;
+  routes.set(route, row);
   if (!ok) requests.failed++;
   if (ms > requests.worst) { requests.worst = ms; requests.worstPath = path; }
   if (ms >= SLOW_REQUEST_MS || !ok) note(ok ? "slow-request" : "failed-request", { path: path.slice(0, 160), ms: round(ms), ...(detail ? { detail: detail.slice(0, 200) } : {}) });
@@ -84,11 +89,12 @@ function summary(): void {
     hidden: document.hidden,
     stalls: { count: stalls.count, ms: round(stalls.ms), worst: round(stalls.worst) },
     requests: { count: requests.count, failed: requests.failed, ms: round(requests.ms), worst: round(requests.worst), worstPath: requests.worstPath.slice(0, 160) },
+    routes: [...routes].sort((a, b) => b[1].count - a[1].count).slice(0, 10).map(([route, row]) => ({ route, count: row.count, ms: round(row.ms) })),
     streams: live,
     work: busiest,
     nodes: document.getElementsByTagName("*").length,
   });
-  work.clear(); streams.clear();
+  work.clear(); streams.clear(); routes.clear();
   stalls = { count: 0, ms: 0, worst: 0 };
   requests.count = requests.failed = requests.ms = requests.worst = 0; requests.worstPath = "";
 }

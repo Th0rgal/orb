@@ -34,6 +34,15 @@ export function rememberCoreState(local:Mission[],remote:Mission[],observedAt:nu
 export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(id:string)=>Promise<Mission>):Promise<Mission[]>{
  const seen=new Set(listed.map(mission=>mission.id));
  const missing=local.filter(mission=>!seen.has(mission.id)&&!localPending(mission)).slice(0,20);
- const found=await Promise.allSettled(missing.map(mission=>read(mission.id)));
- return found.flatMap(result=>result.status==="fulfilled"&&result.value?.id?[result.value]:[]);
+ // The list refreshes every few seconds; a conversation outside it is read far less often.
+ const now=Date.now(),due=missing.filter(mission=>{const last=unlistedReads.get(mission.id);return !last||now-last.at>=(last.mission&&LIVE_STATUSES.has(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
+ await Promise.allSettled(due.map(async mission=>{
+  try{const value=await read(mission.id);unlistedReads.set(mission.id,{at:Date.now(),mission:value?.id?value:undefined});}
+  catch{unlistedReads.set(mission.id,{at:Date.now(),mission:undefined});}
+ }));
+ return missing.flatMap(mission=>{const value=unlistedReads.get(mission.id)?.mission;return value?[value]:[];});
 }
+const UNLISTED_LIVE_MS=30_000,UNLISTED_SETTLED_MS=10*60_000;
+const LIVE_STATUSES=new Set(["active","running","pending","queued","starting","resuming"]);
+const unlistedReads=new Map<string,{at:number;mission?:Mission}>();
+export function forgetUnlistedReads(){unlistedReads.clear();}
