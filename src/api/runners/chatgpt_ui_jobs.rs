@@ -296,6 +296,15 @@ pub fn mark_completed(app_working_dir: &Path, mission_id: Uuid) {
     });
 }
 
+/// Drop the pointer to a conversation that can no longer be opened, so the
+/// mission's next message may start a replacement conversation. Only for a
+/// record that holds no pending submission.
+pub fn forget_unreachable_conversation(app_working_dir: &Path, mission_id: Uuid) {
+    if load_job(app_working_dir, mission_id).is_some_and(|r| r.state != JobState::Submitted) {
+        let _ = std::fs::remove_file(job_path(app_working_dir, mission_id));
+    }
+}
+
 pub fn mark_abandoned(app_working_dir: &Path, mission_id: Uuid, code: &str) {
     update_job(app_working_dir, mission_id, |record| {
         record.state = JobState::Abandoned;

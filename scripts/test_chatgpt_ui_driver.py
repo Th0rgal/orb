@@ -676,6 +676,8 @@ class ChatGptUiDriverTests(unittest.TestCase):
         self.assertTrue(prompt_matches(shown + "…", prompt))
         self.assertTrue(prompt_matches(shown + "\nShow more", prompt))
         self.assertTrue(prompt_matches(shown + " … Afficher plus", prompt))
+        self.assertTrue(prompt_matches(prompt + "\nShow less", prompt))
+        self.assertTrue(prompt_matches(prompt + " Afficher moins", prompt))
         self.assertTrue(prompt_matches("l’indicateur «\u00a0décisif\u00a0»", "l'indicateur « décisif »"))
         # Too short to identify the prompt, or not its beginning.
         self.assertFalse(prompt_matches(shown[:120] + "…", prompt))

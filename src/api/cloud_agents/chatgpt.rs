@@ -77,6 +77,32 @@ fn outgoing(e: &Execution, i: usize) -> String {
     )
 }
 
+/// Every earlier answer is on record, so the conversation can go on elsewhere.
+fn history_recorded(e: &Execution, i: usize) -> bool {
+    i > 0
+        && e.turns[..i].iter().all(|t| {
+            t.phase == Phase::ResponseComplete
+                && t.result.as_deref().is_some_and(|r| !r.trim().is_empty())
+        })
+}
+
+fn replace_conversation(e: &mut Execution, i: usize, app_dir: &Path) {
+    jobs::forget_unreachable_conversation(app_dir, e.mission_id);
+    e.turns[i].cursor = Some(REPLACEMENT.into());
+    e.turns[i].phase = Phase::Queued;
+    e.turns[i].external_id = None;
+    e.external_id = None;
+    e.external_url = None;
+}
+
+/// The browser could not open the recorded conversation and sent nothing.
+fn conversation_unreachable(result: &crate::agents::AgentResult) -> bool {
+    result.data.as_ref().is_some_and(|data| {
+        data.get("resume_resolution").and_then(Value::as_str) == Some("continuation_not_found")
+            && data.get("fresh_prompt_submitted").and_then(Value::as_bool) == Some(false)
+    })
+}
+
 pub(super) async fn tick(
     store: &Arc<dyn MissionStore>,
     mut e: Execution,
@@ -129,19 +155,13 @@ pub(super) async fn tick(
         // Every earlier answer is on record: the conversation can go on in a
         // new chat that starts with that history. Nothing was sent for this
         // turn yet, so no submission can be duplicated.
-        let answered = e.turns[..i].iter().all(|t| {
-            t.phase == Phase::ResponseComplete
-                && t.result.as_deref().is_some_and(|r| !r.trim().is_empty())
-        });
-        if phase != Phase::Queued || !answered {
+        if phase != Phase::Queued || !history_recorded(&e, i) {
             e.turns[i].phase = Phase::SubmissionUncertain;
             e.turns[i].detail = Some("The original ChatGPT conversation cannot be verified".into());
             worker::receipt(store, e, i).await?;
             return Ok(());
         }
-        e.turns[i].cursor = Some(REPLACEMENT.into());
-        e.external_id = None;
-        e.external_url = None;
+        replace_conversation(&mut e, i, app_dir);
     }
     e.turns[i].phase = Phase::Submitting;
     e = worker::save(store, e).await?;
@@ -229,6 +249,16 @@ pub(super) async fn tick(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+    } else if conversation_unreachable(&result)
+        && e.turns[i].cursor.as_deref() != Some(REPLACEMENT)
+        && history_recorded(&e, i)
+    {
+        // Found out only now, in the browser. Nothing was sent: the next tick
+        // sends this message to a replacement conversation.
+        replace_conversation(&mut e, i, app_dir);
+        e.turns[i].detail = Some(
+            "The original ChatGPT conversation could not be opened; continuing in a new one".into(),
+        );
     } else {
         e.turns[i].phase = if jobs::load_job(app_dir, e.mission_id)
             .is_some_and(|j| j.state == jobs::JobState::Submitted)
@@ -293,6 +323,46 @@ mod tests {
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{sent}");
         // The ledger identifies the submission by this text.
         assert_eq!(sent, outgoing(&e, 2));
+    }
+
+    #[test]
+    fn only_an_unopened_conversation_with_nothing_sent_is_replaced() {
+        let unreachable = crate::agents::AgentResult::failure("x", 0).with_data(
+            serde_json::json!({"resume_resolution":"continuation_not_found","fresh_prompt_submitted":false}),
+        );
+        assert!(conversation_unreachable(&unreachable));
+        for data in [
+            serde_json::json!({"resume_resolution":"resume_mismatch","fresh_prompt_submitted":false}),
+            serde_json::json!({"resume_resolution":"continuation_not_found","fresh_prompt_submitted":true}),
+            serde_json::json!({"driver_failure_stage":"send"}),
+        ] {
+            assert!(!conversation_unreachable(
+                &crate::agents::AgentResult::failure("x", 0).with_data(data)
+            ));
+        }
+        let mut pending = Turn::new("p".into(), "Unanswered".into());
+        pending.phase = Phase::SubmissionUncertain;
+        let next = Turn::new("n".into(), "Next".into());
+        assert!(history_recorded(
+            &execution(vec![answered("a", "b"), next.clone()]),
+            1
+        ));
+        assert!(!history_recorded(
+            &execution(vec![pending, next.clone()]),
+            1
+        ));
+        assert!(!history_recorded(&execution(vec![next]), 0));
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = execution(vec![
+            answered("a", "b"),
+            Turn::new("n".into(), "Next".into()),
+        ]);
+        e.external_id = Some("/c/old".into());
+        e.turns[1].phase = Phase::Submitting;
+        replace_conversation(&mut e, 1, dir.path());
+        assert_eq!(e.turns[1].phase, Phase::Queued);
+        assert_eq!(e.turns[1].cursor.as_deref(), Some(REPLACEMENT));
+        assert!(e.external_id.is_none());
     }
 
     #[test]

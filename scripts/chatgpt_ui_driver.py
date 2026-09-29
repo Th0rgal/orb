@@ -173,7 +173,9 @@ def prompt_matches(rendered: str, message: str) -> bool:
     if shown == sent:
         return True
     shown = _COLLAPSE_TAIL.sub("", shown).rstrip()
-    return len(shown) >= COLLAPSED_PROMPT_MIN and len(sent) > len(shown) and sent.startswith(shown)
+    if shown == sent:
+        return len(sent) >= COLLAPSED_PROMPT_MIN
+    return len(shown) >= COLLAPSED_PROMPT_MIN and sent.startswith(shown)
 
 
 def model_selection(requested: str) -> tuple[str, str]:
