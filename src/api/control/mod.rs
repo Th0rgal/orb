@@ -3884,15 +3884,15 @@ pub(crate) async fn resolve_claudecode_default_model(
 /// Return the default model for Codex CLI when no override is specified.
 pub(crate) fn resolve_codex_default_model() -> String {
     // Keep aligned with the live ChatGPT Codex catalog (`codex debug models`):
-    // gpt-6-astra listed on both prod accounts 2026-09-05 (efforts low..ultra,
-    // default medium). Owner decision: Astra is the Codex default.
+    // gpt-6.1-sol is first in the catalog of both prod accounts since
+    // 2026-09-29 (efforts low..ultra). Owner decision: it is the Codex default.
     if let Ok(model) = std::env::var("CODEX_DEFAULT_MODEL") {
         let trimmed = model.trim();
         if !trimmed.is_empty() {
             return trimmed.to_string();
         }
     }
-    "gpt-6-astra".to_string()
+    "gpt-6.1-sol".to_string()
 }
 
 /// Return the default model for Gemini CLI when no override is specified.
@@ -36407,7 +36407,7 @@ And the report:
             normalize_model_override_for_backend(Some("codex"), "openai/gpt-6"),
             Some("gpt-6-astra".to_string())
         );
-        assert_eq!(resolve_codex_default_model(), "gpt-6-astra");
+        assert_eq!(resolve_codex_default_model(), "gpt-6.1-sol");
         assert_eq!(
             normalize_model_override_for_backend(Some("opencode"), "openai/gpt-5.6"),
             Some("openai/gpt-5.6".to_string())
