@@ -469,6 +469,7 @@ async fn list_projects(
             objective: p.objective,
             status: Some(p.status),
             updated_at: Some(p.updated_at),
+            color: p.color,
         })
         .collect();
     let entries: Vec<serde_json::Value> = dedupe_roster(rows, &aliases, &overrides)
@@ -480,6 +481,9 @@ async fn list_projects(
                 "objective": p.objective,
                 "status": p.status,
                 "updated_at": p.updated_at,
+                // Present even when null: tells clients this backend stores
+                // project colors, so their local copy is only a fallback.
+                "color": p.color,
             })
         })
         .collect();
@@ -493,6 +497,7 @@ struct RosterRow {
     objective: Option<String>,
     status: Option<String>,
     updated_at: Option<String>,
+    color: Option<String>,
 }
 
 /// Collapse alias rows onto their canonical project, drop archived/deleted
@@ -542,6 +547,7 @@ fn dedupe_roster(
                 take(&mut existing.title, row.title);
                 take(&mut existing.objective, row.objective);
                 take(&mut existing.status, row.status);
+                take(&mut existing.color, row.color);
                 if row.updated_at > existing.updated_at {
                     existing.updated_at = row.updated_at;
                 }
@@ -608,6 +614,7 @@ mod tests {
             objective: None,
             status: Some(status.into()),
             updated_at: Some(at.into()),
+            color: None,
         };
         let out = dedupe_roster(
             vec![
@@ -642,6 +649,47 @@ mod tests {
         assert_eq!(out[0].updated_at.as_deref(), Some("2026-09-19T10:00:00Z"));
         // Alias status (archived) must not hide the canonical live project.
         assert_eq!(out[1].status.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn roster_color_follows_the_canonical_row_and_fills_from_an_alias() {
+        let aliases: std::collections::HashMap<String, String> = [
+            ("verity".to_string(), "verity-core".to_string()),
+            ("lido".to_string(), "verity-lido".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let row = |slug: &str, color: Option<&str>| RosterRow {
+            slug: slug.into(),
+            title: None,
+            objective: None,
+            status: Some("active".into()),
+            updated_at: Some("2026-09-19T10:00:00Z".into()),
+            color: color.map(str::to_string),
+        };
+        let out = dedupe_roster(
+            vec![
+                row("verity", Some("rose")),
+                row("verity-core", Some("blue")),
+                row("lido", Some("green")),
+                row("verity-lido", None),
+                row("plain", None),
+            ],
+            &aliases,
+            &std::collections::HashMap::new(),
+        );
+        let colors: Vec<(&str, Option<&str>)> = out
+            .iter()
+            .map(|r| (r.slug.as_str(), r.color.as_deref()))
+            .collect();
+        assert_eq!(
+            colors,
+            vec![
+                ("verity-core", Some("blue")),
+                ("verity-lido", Some("green")),
+                ("plain", None),
+            ]
+        );
     }
 
     #[test]

@@ -767,6 +767,77 @@ pub async fn upsert_project(
     Ok(Json(record))
 }
 
+/// The `color` of an appearance write: `Some(name)` sets, `None` clears.
+/// The field is required, so a body that forgot it cannot clear a color.
+fn appearance_color(body: &serde_json::Value) -> Result<Option<String>, String> {
+    match body.get("color") {
+        None => Err("missing 'color' (a palette name, or null to clear)".to_string()),
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(name)) => {
+            super::projects_store::normalize_project_color(Some(name))
+        }
+        Some(_) => Err("'color' must be a palette name or null".to_string()),
+    }
+}
+
+/// The roster rows that fold onto `slug`, the one carrying its appearance
+/// first: its own row, or, when the project only exists through alias rows,
+/// the first alias that has one.
+fn appearance_rows(
+    store: &super::projects_store::ProjectsStore,
+    aliases: &HashMap<String, String>,
+    slug: &str,
+) -> Result<Vec<String>, String> {
+    let mut keys = roster_lookup_keys_with(aliases, slug);
+    for key in project_tag_keys_with(aliases, slug) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let mut rows = Vec::new();
+    for key in keys {
+        if is_plain_key(&key) && store.get_project(&key)?.is_some() {
+            rows.push(key);
+        }
+    }
+    Ok(rows)
+}
+
+/// `POST /api/projects/:slug/appearance` — body `{"color": <name> | null}`.
+/// Stores the operator's color for the project so every client shows the same
+/// one. Does not bump `updated_at`: the roster is ordered by it, and picking a
+/// color is not project activity.
+pub async fn set_project_appearance(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let color = appearance_color(&body).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let aliases = hermes_projects_dir()
+        .map(|dir| read_alias_map(&dir))
+        .unwrap_or_default();
+    let rows = appearance_rows(&state.projects, &aliases, &slug).map_err(store_err)?;
+    let Some((row, others)) = rows.split_first() else {
+        return Err((StatusCode::NOT_FOUND, format!("unknown project '{slug}'")));
+    };
+    let written = state
+        .projects
+        .set_color(row, color.as_deref())
+        .map_err(store_err)?;
+    if !written {
+        return Err((StatusCode::NOT_FOUND, format!("unknown project '{slug}'")));
+    }
+    // The roster fills a colorless canonical row from its aliases: a color
+    // left on one of them would come back after a clear.
+    for other in others {
+        state.projects.set_color(other, None).map_err(store_err)?;
+    }
+    Ok(Json(serde_json::json!({ "slug": slug, "color": color })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RenameProjectRequest {
     pub new_slug: String,
@@ -2015,6 +2086,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/:slug/updates", get(project_updates))
         .route("/:slug/action", axum::routing::post(project_action))
         .route("/:slug/rename", axum::routing::post(rename_project))
+        .route(
+            "/:slug/appearance",
+            axum::routing::post(set_project_appearance),
+        )
         .route("/:slug/status", axum::routing::post(set_project_status))
         .route("/:slug/track", axum::routing::post(set_project_track))
         .route(
@@ -2916,6 +2991,7 @@ fn synthetic_project_record(slug: &str) -> super::projects_store::ProjectRecord 
         created_at: now.clone(),
         updated_at: now,
         mode_signal_at: None,
+        color: None,
     }
 }
 
@@ -4775,6 +4851,58 @@ fn parse_delivery(session_id: &str, timestamp: f64, content: &str) -> DeliveryUp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_body_sets_clears_and_rejects() {
+        let parse = |body: serde_json::Value| appearance_color(&body);
+        assert_eq!(
+            parse(serde_json::json!({ "color": "blue" })),
+            Ok(Some("blue".to_string()))
+        );
+        assert_eq!(
+            parse(serde_json::json!({ "color": "Purple" })),
+            Ok(Some("purple".to_string()))
+        );
+        assert_eq!(parse(serde_json::json!({ "color": null })), Ok(None));
+        // A forgotten field must not read as "clear".
+        assert!(parse(serde_json::json!({})).is_err());
+        assert!(parse(serde_json::json!({ "colour": "blue" })).is_err());
+        assert!(parse(serde_json::json!({ "color": "red" })).is_err());
+        assert!(parse(serde_json::json!({ "color": "" })).is_err());
+        assert!(parse(serde_json::json!({ "color": "#8aaed4" })).is_err());
+        assert!(parse(serde_json::json!({ "color": 3 })).is_err());
+    }
+
+    #[test]
+    fn appearance_lands_on_the_row_the_roster_shows() {
+        let store = crate::api::projects_store::ProjectsStore::open_in_memory().expect("store");
+        let aliases: HashMap<String, String> = [("verity".to_string(), "verity-core".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            appearance_rows(&store, &aliases, "verity-core"),
+            Ok(Vec::new())
+        );
+        // Only the alias has a row: the roster folds it onto the canonical
+        // slug, so the canonical slug's color is written there.
+        store
+            .upsert_project("verity", None, None, None, None)
+            .expect("alias row");
+        assert_eq!(
+            appearance_rows(&store, &aliases, "verity-core"),
+            Ok(vec!["verity".to_string()])
+        );
+        // The canonical row wins once it exists, from either name.
+        store
+            .upsert_project("verity-core", None, None, None, None)
+            .expect("canonical row");
+        let family = vec!["verity-core".to_string(), "verity".to_string()];
+        assert_eq!(
+            appearance_rows(&store, &aliases, "verity-core"),
+            Ok(family.clone())
+        );
+        assert_eq!(appearance_rows(&store, &aliases, "verity"), Ok(family));
+    }
 
     #[test]
     fn humanize_slug_makes_a_readable_name() {
@@ -6777,6 +6905,7 @@ mod tests {
             created_at: "2026-08-16T00:00:00Z".to_string(),
             updated_at: "2026-08-16T00:00:00Z".to_string(),
             mode_signal_at: None,
+            color: None,
         }
     }
 

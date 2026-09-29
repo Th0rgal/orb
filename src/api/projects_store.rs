@@ -141,7 +141,9 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at         TEXT NOT NULL,
     -- Watermark for the last mode write. HTTP set_mode stamps now; ingest
     -- only overwrites when the delivery is at least this new.
-    mode_signal_at     TEXT
+    mode_signal_at     TEXT,
+    -- Operator-chosen palette entry (see PROJECT_COLORS); NULL is the default.
+    color              TEXT
 );
 
 -- Project ownership is local control-plane data. Hermes owns the job itself;
@@ -508,6 +510,9 @@ impl ProjectsStore {
             "mode_signal_at",
             "mode_signal_at TEXT",
         )?;
+        // 2026-09: the project color moved from each client's local storage
+        // to the record, so desktop and iOS show the same one.
+        Self::ensure_column(connection, "projects", "color", "color TEXT")?;
         // Rows that already had a mode before this column existed must not
         // look unstamped: the first ingest would otherwise overwrite them.
         connection.execute(
@@ -1833,7 +1838,7 @@ impl ProjectsStore {
             .prepare(
                 "SELECT slug, title, objective, status, mode, wait_ticks, \
                  next_action, blocker, controller_cron_id, repository, \
-                 created_at, updated_at, mode_signal_at FROM projects \
+                 created_at, updated_at, mode_signal_at, color FROM projects \
                  ORDER BY updated_at DESC, slug",
             )
             .map_err(|e| e.to_string())?;
@@ -1851,7 +1856,7 @@ impl ProjectsStore {
             .query_row(
                 "SELECT slug, title, objective, status, mode, wait_ticks, \
                  next_action, blocker, controller_cron_id, repository, \
-                 created_at, updated_at, mode_signal_at FROM projects WHERE slug = ?1",
+                 created_at, updated_at, mode_signal_at, color FROM projects WHERE slug = ?1",
                 params![slug],
                 Self::project_from_row,
             )
@@ -2026,7 +2031,23 @@ impl ProjectsStore {
             created_at: row.get(10)?,
             updated_at: row.get(11)?,
             mode_signal_at: row.get(12)?,
+            color: row.get(13)?,
         })
+    }
+
+    /// Set (`Some`) or clear (`None`) the project's color. Appearance is not
+    /// activity: `updated_at` orders the roster and must not move here.
+    /// Returns false when the slug has no roster row.
+    pub fn set_color(&self, slug: &str, color: Option<&str>) -> Result<bool, String> {
+        let color = normalize_project_color(color)?;
+        let connection = self.lock()?;
+        let affected = connection
+            .execute(
+                "UPDATE projects SET color = ?2 WHERE slug = ?1",
+                params![slug, color],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(affected > 0)
     }
 
     /// Create or update a project's descriptive fields. Leaves status/mode and
@@ -4523,6 +4544,26 @@ pub(crate) fn rfc3339_after(candidate: &str, existing: &str) -> bool {
     }
 }
 
+/// The palette every client offers, by name. Clients own the rendering (hex
+/// values); the record only says which entry was chosen.
+pub const PROJECT_COLORS: [&str; 5] = ["blue", "green", "amber", "rose", "purple"];
+
+/// A color write as stored: a palette name, or `None` for the default.
+pub fn normalize_project_color(color: Option<&str>) -> Result<Option<String>, String> {
+    let Some(color) = color else {
+        return Ok(None);
+    };
+    let name = color.trim().to_ascii_lowercase();
+    if PROJECT_COLORS.contains(&name.as_str()) {
+        Ok(Some(name))
+    } else {
+        Err(format!(
+            "unknown project color '{color}'; expected one of {} or null",
+            PROJECT_COLORS.join(", ")
+        ))
+    }
+}
+
 /// A project as an object in its own right, not a union reconstructed per read.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProjectRecord {
@@ -4547,6 +4588,10 @@ pub struct ProjectRecord {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode_signal_at: Option<String>,
+    /// Always serialized: an explicit `null` tells a client that this backend
+    /// stores colors and the project has none, which a missing field (older
+    /// backend) does not.
+    pub color: Option<String>,
 }
 
 /// A chat-planned roadmap item: the project-scoped precursor of a board task.
@@ -6087,6 +6132,122 @@ mod tests {
             "2026-08-16T12:00:00Z",
             "2026-08-16T12:00:00+00:00"
         ));
+    }
+
+    #[test]
+    fn project_color_is_set_and_cleared_without_moving_updated_at() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        let created = store
+            .upsert_project("colored", Some("Colored"), None, None, None)
+            .expect("create");
+        assert_eq!(created.color, None);
+        store
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE projects SET updated_at = '2026-08-01T00:00:00Z' WHERE slug = 'colored'",
+                [],
+            )
+            .expect("pin updated_at");
+
+        assert!(store.set_color("colored", Some("blue")).expect("set"));
+        let set = store.get_project("colored").expect("read").expect("row");
+        assert_eq!(set.color.as_deref(), Some("blue"));
+        assert_eq!(set.updated_at, "2026-08-01T00:00:00Z");
+        let listed = store.list_projects().expect("list");
+        assert_eq!(listed[0].color.as_deref(), Some("blue"));
+
+        // Stored normalized, whatever the caller's casing.
+        assert!(store.set_color("colored", Some(" Rose ")).expect("set"));
+        let rose = store.get_project("colored").expect("read").expect("row");
+        assert_eq!(rose.color.as_deref(), Some("rose"));
+
+        assert!(store.set_color("colored", None).expect("clear"));
+        let cleared = store.get_project("colored").expect("read").expect("row");
+        assert_eq!(cleared.color, None);
+        assert_eq!(cleared.updated_at, "2026-08-01T00:00:00Z");
+
+        // A descriptive write keeps the color: upsert never touches it.
+        store.set_color("colored", Some("green")).expect("set");
+        let renamed = store
+            .upsert_project("colored", Some("Renamed"), None, None, None)
+            .expect("upsert");
+        assert_eq!(renamed.color.as_deref(), Some("green"));
+    }
+
+    #[test]
+    fn project_color_rejects_values_outside_the_palette() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("colored", None, None, None, None)
+            .expect("create");
+        store.set_color("colored", Some("amber")).expect("set");
+        for invalid in ["red", "", "#8aaed4", "blue; DROP TABLE projects"] {
+            let error = store
+                .set_color("colored", Some(invalid))
+                .expect_err("invalid color");
+            assert!(error.contains("unknown project color"), "{error}");
+        }
+        let kept = store.get_project("colored").expect("read").expect("row");
+        assert_eq!(kept.color.as_deref(), Some("amber"));
+        // An unknown slug is reported, not created.
+        assert!(!store.set_color("missing", Some("blue")).expect("no row"));
+        assert!(store.get_project("missing").expect("read").is_none());
+    }
+
+    #[test]
+    fn project_color_travels_with_a_rename() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("before", None, None, None, None)
+            .expect("create");
+        store.set_color("before", Some("purple")).expect("set");
+        let moved = store.rename_project("before", "after").expect("rename");
+        assert_eq!(moved.color.as_deref(), Some("purple"));
+    }
+
+    #[test]
+    fn color_column_is_added_to_an_existing_projects_table() {
+        let connection = Connection::open_in_memory().expect("conn");
+        connection
+            .execute_batch(
+                "CREATE TABLE projects (
+                    slug TEXT PRIMARY KEY NOT NULL,
+                    title TEXT, objective TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    mode TEXT,
+                    wait_ticks INTEGER NOT NULL DEFAULT 0,
+                    next_action TEXT, blocker TEXT,
+                    controller_cron_id TEXT, repository TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    mode_signal_at TEXT
+                );
+                INSERT INTO projects (slug, title, created_at, updated_at)
+                VALUES ('legacy', 'Legacy', '2026-08-01T00:00:00Z', '2026-08-10T12:00:00Z');",
+            )
+            .expect("old schema");
+        ProjectsStore::initialize(&connection).expect("migrate");
+        // Running the migration again on the migrated table is a no-op.
+        ProjectsStore::initialize(&connection).expect("migrate twice");
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(projects)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(columns.iter().filter(|name| *name == "color").count(), 1);
+        let store = ProjectsStore {
+            connection: Mutex::new(connection),
+        };
+        let legacy = store.get_project("legacy").expect("read").expect("row");
+        assert_eq!(legacy.title.as_deref(), Some("Legacy"));
+        assert_eq!(legacy.color, None);
+        assert_eq!(legacy.updated_at, "2026-08-10T12:00:00Z");
+        assert!(store.set_color("legacy", Some("green")).expect("set"));
+        let colored = store.get_project("legacy").expect("read").expect("row");
+        assert_eq!(colored.color.as_deref(), Some("green"));
+        assert_eq!(colored.updated_at, "2026-08-10T12:00:00Z");
     }
 
     #[test]
