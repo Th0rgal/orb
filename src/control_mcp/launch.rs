@@ -303,6 +303,19 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     {
         use std::os::unix::process::CommandExt;
         process.as_std_mut().process_group(0);
+        // The harness runs in its own process group. On a PTY that group must
+        // be the terminal's foreground group, or the first read of its input
+        // (the stdin pipe of a stream-json session) stops it with SIGTTIN.
+        unsafe {
+            process.pre_exec(|| {
+                if libc::isatty(0) == 1 {
+                    let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                    libc::tcsetpgrp(0, libc::getpgrp());
+                    libc::signal(libc::SIGTTOU, previous);
+                }
+                Ok(())
+            });
+        }
     }
     let mut child = process
         .spawn()
