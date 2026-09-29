@@ -12735,7 +12735,7 @@ mod tests {
         let store = SqliteMissionStore::new(dir.path().to_path_buf(), "prune")
             .await
             .unwrap();
-        let total = PALOMA_DECISIONS_KEPT + 2 * PALOMA_DECISION_PRUNE_EVERY;
+        let total = super::PALOMA_DECISIONS_KEPT + 2 * super::PALOMA_DECISION_PRUNE_EVERY;
         {
             let conn = store.conn.lock().await;
             conn.execute_batch("BEGIN").unwrap();
@@ -12750,7 +12750,7 @@ mod tests {
             }
             conn.execute_batch("COMMIT").unwrap();
         }
-        for n in 0..PALOMA_DECISION_PRUNE_EVERY {
+        for n in 0..super::PALOMA_DECISION_PRUNE_EVERY {
             store
                 .create_paloma_decision(PalomaDecision {
                     id: Uuid::new_v4(),
@@ -12779,10 +12779,10 @@ mod tests {
             })
             .unwrap();
         assert!(
-            kept <= PALOMA_DECISIONS_KEPT + PALOMA_DECISION_PRUNE_EVERY,
+            kept <= super::PALOMA_DECISIONS_KEPT + super::PALOMA_DECISION_PRUNE_EVERY,
             "kept {kept}"
         );
-        assert!(kept >= PALOMA_DECISIONS_KEPT, "kept {kept}");
+        assert!(kept >= super::PALOMA_DECISIONS_KEPT, "kept {kept}");
         let latest = store.list_paloma_decisions(1).await.unwrap();
         assert!(latest[0].created_at.starts_with("2026-06-01"));
     }
