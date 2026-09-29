@@ -3591,6 +3591,9 @@ async fn recycle_stale_companion_processes(binary: &str, destination: &str) -> u
     let Ok(output) = Command::new("pgrep").args(["-x", binary]).output().await else {
         return 0;
     };
+    let own_cgroup = tokio::fs::read_to_string("/proc/self/cgroup")
+        .await
+        .unwrap_or_default();
     let mut recycled = 0;
     for pid in String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -3605,6 +3608,17 @@ async fn recycle_stale_companion_processes(binary: &str, destination: &str) -> u
         if exe != format!("{destination} (deleted)") {
             continue;
         }
+        // The launcher and the MCP server of a live harness are part of a
+        // mission. The shutdown that follows interrupts that mission so that
+        // startup recovery resumes it; killing them first ended its turn as
+        // a transport failure, which nothing resumes (mission f0fbffbb,
+        // 2026-09-29).
+        let cgroup = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .await
+            .unwrap_or_default();
+        if belongs_to_a_mission(&cgroup, &own_cgroup) {
+            continue;
+        }
         if Command::new("kill")
             .arg(pid.to_string())
             .output()
@@ -3616,6 +3630,48 @@ async fn recycle_stale_companion_processes(binary: &str, destination: &str) -> u
         }
     }
     recycled
+}
+
+/// Whether a process runs in a mission scope or in this service's own cgroup,
+/// from the content of its `/proc/<pid>/cgroup`.
+fn belongs_to_a_mission(cgroup: &str, own_cgroup: &str) -> bool {
+    let path = |content: &str| {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .map(str::trim)
+            .map(str::to_owned)
+    };
+    match path(cgroup) {
+        Some(process) => {
+            process.starts_with("/missions.slice/") || path(own_cgroup).as_deref() == Some(&process)
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod companion_recycling_tests {
+    use super::belongs_to_a_mission;
+
+    #[test]
+    fn mission_processes_are_left_to_the_shutdown() {
+        let own = "1:name=systemd:/\n0::/system.slice/sandboxed-sh-prod.service\n";
+        assert!(belongs_to_a_mission(
+            "0::/missions.slice/sandboxed-exec-host-mf0fbffbb-81226671.scope\n",
+            own
+        ));
+        assert!(belongs_to_a_mission(
+            "0::/system.slice/sandboxed-sh-prod.service\n",
+            own
+        ));
+        // A companion started by Hermes keeps being recycled.
+        assert!(!belongs_to_a_mission(
+            "0::/system.slice/hermes-assistant.service\n",
+            own
+        ));
+        assert!(!belongs_to_a_mission("", own));
+    }
 }
 
 async fn prepare_deploy_backup(destination: &str, backup: &str) -> Result<DeployRollback, String> {
