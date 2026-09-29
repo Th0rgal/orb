@@ -701,7 +701,7 @@ fn spawn_claude(
                         output.publish_activities();
                     }
                     background.consume(&event);
-                    background.note_output(&line);
+                    background.note_output(&event);
                     // Waiting ends with the last background task, or with a
                     // question: what follows is the agent's own turn.
                     if !background.running() || event["type"] == "control_request" {
@@ -1542,6 +1542,31 @@ impl BackgroundTask {
     }
 }
 
+fn strings<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => found.push(text),
+        Value::Array(items) => items.iter().for_each(|item| strings(item, found)),
+        Value::Object(fields) => fields.values().for_each(|item| strings(item, found)),
+        _ => {}
+    }
+}
+
+/// The path in "… written to: <path>/tasks/<id>.output. You will …", with the
+/// separators of any system. A path may hold spaces.
+fn output_path<'a>(text: &'a str, id: &str) -> Option<&'a str> {
+    let end = ['/', '\\'].iter().find_map(|separator| {
+        let name = format!("tasks{separator}{id}.output");
+        text.find(&name).map(|at| at + name.len())
+    })?;
+    let before = &text[..end];
+    let start = before
+        .rfind(": ")
+        .map(|at| at + 2)
+        .or_else(|| before.rfind(char::is_whitespace).map(|at| at + 1))
+        .unwrap_or(0);
+    Some(&before[start..])
+}
+
 /// The last lines a background command printed.
 fn output_tail(path: &Path) -> Option<Vec<String>> {
     use std::io::{Seek, SeekFrom};
@@ -1607,19 +1632,20 @@ impl ClaudeBackground {
         }
     }
     /// The CLI names a command's output file in the tool result that started it.
-    fn note_output(&mut self, line: &str) {
+    fn note_output(&mut self, event: &Value) {
+        if event["type"] != "user" || self.tasks.values().all(|t| t.output.is_some()) {
+            return;
+        }
+        let mut texts = Vec::new();
+        strings(&event["message"]["content"], &mut texts);
         for task in self.tasks.values_mut() {
-            if task.output.is_some() || !task.shell() {
-                continue;
+            if task.output.is_none() && task.shell() {
+                task.output = texts
+                    .iter()
+                    .find_map(|text| output_path(text, &task.id))
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute());
             }
-            let name = format!("/tasks/{}.output", task.id);
-            let Some(end) = line.find(&name).map(|at| at + name.len()) else {
-                continue;
-            };
-            let start = line[..end]
-                .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\\')
-                .map_or(0, |at| at + 1);
-            task.output = Some(PathBuf::from(&line[start..end])).filter(|p| p.is_absolute());
         }
     }
     fn running(&self) -> bool {
@@ -2526,7 +2552,7 @@ printf '%s\n' '{"type":"result"}'
             {"task_id":"explore","task_type":"local_agent","description":"Explore importer"},
             {"task_id":"watch","task_type":"local_bash","ambient":true}]}),
         );
-        state.note_output(&json!({"type":"user","message":{"content":[{"type":"tool_result","content":format!("Output is being written to: {}. You will be notified", log.display())}]}}).to_string());
+        state.note_output(&json!({"type":"user","message":{"content":[{"type":"tool_result","content":format!("Output is being written to: {}. You will be notified", log.display())}]}}));
         let question = state.unchecked().unwrap();
         assert!(
             question
@@ -2563,6 +2589,21 @@ printf '%s\n' '{"type":"result"}'
             {"task_id":"explore","task_type":"local_agent","description":"Explore importer"}]}),
         );
         assert!(state.running() && state.unchecked().is_none());
+    }
+
+    #[test]
+    fn claude_output_path_keeps_spaces_and_the_separators_of_the_system() {
+        let unix = "Command running in background with ID: b1. Output is being written to: /private/tmp/My Runs/tasks/b1.output. You will be notified";
+        assert_eq!(
+            output_path(unix, "b1"),
+            Some("/private/tmp/My Runs/tasks/b1.output")
+        );
+        assert_eq!(output_path(unix, "b2"), None);
+        let windows = r"Output is being written to: C:\Users\Jane Doe\AppData\tasks\b1.output. You";
+        assert_eq!(
+            output_path(windows, "b1"),
+            Some(r"C:\Users\Jane Doe\AppData\tasks\b1.output")
+        );
     }
 
     #[cfg(unix)]
