@@ -817,6 +817,10 @@ pub struct SqliteMissionStore {
     content_dir: PathBuf,
 }
 
+/// Decisions kept for the audit views, and how often an insert trims the rest.
+const PALOMA_DECISIONS_KEPT: i64 = 10_000;
+const PALOMA_DECISION_PRUNE_EVERY: i64 = 500;
+
 /// Read connections opened next to the writer.
 const READ_CONNECTIONS: usize = 4;
 
@@ -8808,6 +8812,18 @@ impl MissionStore for SqliteMissionStore {
                 ],
             )
             .map_err(|e| e.to_string())?;
+            // Only the latest decisions are ever read. Without a bound, one
+            // week of a looping scheduler left 16 million rows (13.6 GB with
+            // indexes) in the production database.
+            if conn.last_insert_rowid() % PALOMA_DECISION_PRUNE_EVERY == 0 {
+                conn.execute(
+                    "DELETE FROM paloma_decisions WHERE created_at < (
+                         SELECT created_at FROM paloma_decisions
+                         ORDER BY created_at DESC LIMIT 1 OFFSET ?1)",
+                    params![PALOMA_DECISIONS_KEPT],
+                )
+                .map_err(|e| e.to_string())?;
+            }
             Ok(stored)
         })
         .await
@@ -12711,6 +12727,64 @@ mod tests {
             .await
             .expect("telegram channel");
         channel.id
+    }
+
+    #[tokio::test]
+    async fn paloma_decisions_keep_only_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().to_path_buf(), "prune")
+            .await
+            .unwrap();
+        let total = PALOMA_DECISIONS_KEPT + 2 * PALOMA_DECISION_PRUNE_EVERY;
+        {
+            let conn = store.conn.lock().await;
+            conn.execute_batch("BEGIN").unwrap();
+            for n in 0..total {
+                conn.execute(
+                    "INSERT INTO paloma_decisions (id, event_source, channel, reason_code,
+                        proposed_action, allowed, policy_snapshot_json, created_at)
+                     VALUES (?1, 'scheduler', 'telegram', 'long_running', 'create_alert', 1, '{}', ?2)",
+                    params![format!("seed-{n}"), format!("2026-05-20T10:00:00.{n:09}Z")],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        for n in 0..PALOMA_DECISION_PRUNE_EVERY {
+            store
+                .create_paloma_decision(PalomaDecision {
+                    id: Uuid::new_v4(),
+                    event_source: "scheduler".to_string(),
+                    mission_id: None,
+                    user_id: None,
+                    channel: "telegram".to_string(),
+                    reason_code: "long_running".to_string(),
+                    proposed_action: "create_alert".to_string(),
+                    allowed: true,
+                    suppression_reason: None,
+                    policy_snapshot_json: "{}".to_string(),
+                    generated_text_hash: None,
+                    generated_text_preview: None,
+                    created_at: format!("2026-06-01T10:00:00.{n:09}Z"),
+                })
+                .await
+                .unwrap();
+        }
+        let kept: i64 = store
+            .conn
+            .lock()
+            .await
+            .query_row("SELECT COUNT(*) FROM paloma_decisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            kept <= PALOMA_DECISIONS_KEPT + PALOMA_DECISION_PRUNE_EVERY,
+            "kept {kept}"
+        );
+        assert!(kept >= PALOMA_DECISIONS_KEPT, "kept {kept}");
+        let latest = store.list_paloma_decisions(1).await.unwrap();
+        assert!(latest[0].created_at.starts_with("2026-06-01"));
     }
 
     #[tokio::test]

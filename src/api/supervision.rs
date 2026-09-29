@@ -1186,6 +1186,16 @@ fn idle_child_needs_parent_ping(status: MissionStatus, idle_seconds: u64, thresh
     ) && idle_seconds >= threshold
 }
 
+/// Forks of a conversation carry the workspace they were forked from.
+fn is_conversation_fork(tags: &[String]) -> bool {
+    tags.iter().any(|tag| tag.starts_with("fork-workspace:"))
+}
+
+/// True when the child crossed the idle threshold before this process started.
+fn stalled_before_start(idle_seconds: u64, since_start: u64, threshold: u64) -> bool {
+    idle_seconds.saturating_sub(since_start) >= threshold
+}
+
 /// Sweep recent missions for parked children idle past `threshold` and inject
 /// a strict control message into their parent mission. One notification per
 /// stall episode (keyed by the child's `last_activity` at notify time), capped
@@ -1210,9 +1220,17 @@ async fn notify_parents_of_idle_children(
         }
     };
 
+    // A stall that was already past the threshold when this process started
+    // was reported by the previous one: the notified map does not survive a
+    // restart, and each restart used to ping the parent again.
+    static STARTED: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    let started = *STARTED.get_or_init(chrono::Utc::now);
+
     let candidates: Vec<_> = missions
         .iter()
         .filter(|m| m.parent_mission_id.is_some())
+        // A conversation fork belongs to the user, not to an orchestrator.
+        .filter(|m| !is_conversation_fork(&m.project.tags))
         .filter(|m| {
             matches!(
                 m.status,
@@ -1254,6 +1272,10 @@ async fn notify_parents_of_idle_children(
             Err(_) => continue,
         };
         if !idle_child_needs_parent_ping(child.status, idle_seconds, threshold) {
+            continue;
+        }
+        let since_start = (now - started).num_seconds().max(0) as u64;
+        if stalled_before_start(idle_seconds, since_start, threshold) {
             continue;
         }
 
@@ -1729,6 +1751,24 @@ mod tests {
             60,
             3600
         ));
+    }
+
+    #[test]
+    fn a_restart_does_not_repeat_an_old_stall() {
+        // Idle for 5 days, process up for 2 minutes: reported before.
+        assert!(stalled_before_start(5 * 86_400, 120, 3600));
+        // Crossed the threshold after this process started.
+        assert!(!stalled_before_start(3700, 600, 3600));
+        assert!(!stalled_before_start(3600, 7200, 3600));
+    }
+
+    #[test]
+    fn a_conversation_fork_is_not_a_worker() {
+        assert!(is_conversation_fork(&[
+            "fork-workspace:e19e93c0-6942-4f16-ba04-9adfcafed915".to_string(),
+            "disk-estimate-gib:64".to_string(),
+        ]));
+        assert!(!is_conversation_fork(&["pr-writer".to_string()]));
     }
 
     #[test]

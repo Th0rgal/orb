@@ -81,7 +81,10 @@ use super::mission_store::{
 use super::routes::AppState;
 
 pub(crate) const SERVER_SHUTDOWN_AUTO_RESUME_MAX_AGE_HOURS: u64 = 48;
-const INTERRUPTED_RESUME_PROMPT: &str = "You were interrupted, resume your work.";
+const INTERRUPTED_RESUME_PROMPT: &str =
+    "You were interrupted, resume your work. Background agents \
+and background commands you had started were stopped with you: check their state and restart the \
+ones you still need.";
 
 /// The 15-minute registered-liveness interrupt is a second idle gate beside
 /// the stuck-mission watchdog. #840 taught the watchdog to skip Hermes-tagged

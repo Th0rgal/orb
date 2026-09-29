@@ -2997,6 +2997,15 @@ pub fn run_claudecode_turn<'a>(
             }
         }
 
+        // A session stopped by the restart itself is not a failed turn: report
+        // it as interrupted by the shutdown, which startup recovery resumes.
+        if !cancelled
+            && crate::api::routes::is_shutdown_initiated()
+            && (!saw_terminal_result_event || ended_parked.is_some_and(|(expected, _)| !expected))
+        {
+            cancelled = true;
+            ended_parked = None;
+        }
         if let Some((expected, note)) = ended_parked {
             saw_terminal_result_event = true;
             had_error = !expected;
