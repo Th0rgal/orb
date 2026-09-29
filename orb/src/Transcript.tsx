@@ -10,6 +10,7 @@ import { copyText } from "./clipboard";
 import { remoteLog } from "./remoteLog";
 import { ErrorNotice } from "./ErrorNotice";
 import { forkContext } from "./forkContext";
+import { backgroundWake, type BackgroundWake } from "./backgroundWake";
 import { For, Show, createSignal, createEffect, createMemo, createContext, useContext, onCleanup } from "solid-js";
 import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
@@ -119,7 +120,29 @@ function MessageImage(p: {path:string; index:number; onUrl:(url:string|null)=>vo
   </>;
 }
 
-const AUTOMATIC_SOURCES = new Set(["scheduler", "idle-worker-watchdog", "transport_auto_resume", "remote-build-terminal", "task-board"]);
+const AUTOMATIC_SOURCES = new Set(["background-task", "scheduler", "idle-worker-watchdog", "transport_auto_resume", "remote-build-terminal", "task-board"]);
+
+/** The coordinator resumed the agent after a background shell ended. It is
+ * not something the user wrote, so it is not shown as their message. */
+function BackgroundWakeRow(p: { wake: BackgroundWake }) {
+  const status = () => p.wake.killed ? "was stopped" : "finished";
+  return (
+    <details class="background-wake">
+      <summary title="Sent automatically by the agent coordinator to resume the agent">
+        <Ic.CmdIcon size={12} />
+        <span>Background task {status()} · agent resumed</span>
+        <code>{p.wake.command.split("\n")[0]}</code>
+      </summary>
+      <div class="background-wake-body">
+        <pre>{p.wake.command}</pre>
+        <Show when={p.wake.output && !p.wake.killed} fallback={<p>{p.wake.killed ? "The shell was killed before it finished, so there is no output." : "No output was captured."}</p>}>
+          <pre>{p.wake.output}</pre>
+        </Show>
+        <Show when={p.wake.note}><p>{p.wake.note}</p></Show>
+      </div>
+    </details>
+  );
+}
 
 export function UserTurn(p: { text: string; images?: DraftImage[]; source?: string; attached?: boolean; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   const fork = createMemo(() => forkContext(p.text));
@@ -333,7 +356,9 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
             case "user":
               // Only the turn still waiting for a reply animates: once anything
               // has been said or done after it, the work is visible on its own.
-              return <UserTurn text={item.text} images={item.images} source={item.source} attached={item.attached} onSend={p.onSend} pending={p.pending && item.key === lastUserKey()} />;
+              return <Show when={backgroundWake(item.text, item.source)} fallback={<UserTurn text={item.text} images={item.images} source={item.source} attached={item.attached} onSend={p.onSend} pending={p.pending && item.key === lastUserKey()} />}>
+                {wake => <BackgroundWakeRow wake={wake()} />}
+              </Show>;
             case "think":
               return <ThinkBlock item={item} />;
             case "text":
