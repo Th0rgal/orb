@@ -6,7 +6,8 @@ import { Bot } from "./sidebarIcons";
  * (running missions, fleet status, local metrics). Menus only read the result. */
 export interface MachineLoad { sessions: number; freeMemory?: number }
 
-const LIVE = new Set(["active", "running", "pending", "queued", "starting", "resuming"]);
+// Only executing agents: queued or resuming work has no agent process yet.
+const LIVE = new Set(["active", "running", "starting"]);
 const [missions, setMissions] = createSignal<Mission[]>([]);
 const [fleet, setFleet] = createSignal<RemoteNodeView[]>([]);
 const [localMemory, setLocalMemory] = createSignal<number>();

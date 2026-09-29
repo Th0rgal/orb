@@ -16,6 +16,10 @@ it("counts running agents on the machine that runs them", () => {
     mission("e", "active", { tags: ["placement:client"] }),
     mission("f", "active", { backend: "cloud_chatgpt" }),
     mission("g", "completed", { remote_node_id: "babylon" }),
+    // Waiting for a runner: no agent process yet.
+    mission("h", "pending", { remote_node_id: "babylon" }),
+    mission("i", "queued", { remote_node_id: "babylon" }),
+    mission("j", "resuming", { remote_node_id: "babylon" }),
   ]);
   expect(machineLoad("ashur").sessions).toBe(2);
   expect(machineLoad("core").sessions).toBe(1);
