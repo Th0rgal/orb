@@ -361,6 +361,9 @@ pub fn exec_scope_unit(machine_name: &str, cwd: Option<&Path>) -> String {
     exec_scope_unit_for_mission(machine_name, cwd, None)
 }
 
+/// Machine token of scopes that hold a host-workspace harness.
+pub const HOST_MACHINE: &str = "host";
+
 fn exec_scope_unit_for_mission(
     machine_name: &str,
     cwd: Option<&Path>,
@@ -2382,10 +2385,11 @@ impl WorkspaceExec {
             // cgroup: on 2026-09-29 Lean builds of one host mission starved
             // the API of CPU until it stopped answering. Same wrapper as the
             // container path, so the mission caps apply.
-            let mission_id = env
-                .get("MISSION_ID")
+            let mission_id = ["MISSION_ID", "SANDBOXED_SH_MISSION_ID"]
+                .iter()
+                .find_map(|key| env.get(*key))
                 .and_then(|value| uuid::Uuid::parse_str(value).ok());
-            let unit = exec_scope_unit_for_mission("host", Some(cwd), mission_id);
+            let unit = exec_scope_unit_for_mission(HOST_MACHINE, Some(cwd), mission_id);
             if let Some(mut scoped) = self.mission_resource_caps().scope_run_args(&unit) {
                 scoped.push(program.to_string());
                 scoped.extend_from_slice(args);
