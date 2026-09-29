@@ -5821,6 +5821,17 @@ async fn remote_launch_persists_prompt_and_lease_then_survives_watchdog_until_te
     .await;
     let done = store.get_mission(mission_id).await.unwrap().unwrap();
     assert_eq!(done.terminal_reason.as_deref(), Some("remote_node_job"));
+    // The status is written first and the lease is settled in a second write.
+    wait_until("run lease settlement", 10, || async {
+        store
+            .get_latest_mission_run(mission_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .execution_state
+            .is_terminal()
+    })
+    .await;
     let latest = store
         .get_latest_mission_run(mission_id)
         .await
