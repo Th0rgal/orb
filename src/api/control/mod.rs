@@ -22748,6 +22748,29 @@ async fn control_actor_loop(
                             }
                         }
 
+                        // A parked Claude session takes the message on its
+                        // stdin: starting another process would stop the
+                        // background tasks it is waiting for.
+                        let parked_target = effective_target.or(running_mid);
+                        if let Some(mid) = parked_target {
+                            if msg_agent.is_none()
+                                && source.as_deref() != Some("scheduler")
+                                && !content.trim_start().starts_with('/')
+                                && super::runners::live_session::deliver(mid, content.clone())
+                                    .is_ok()
+                            {
+                                let _ = events_tx.send(AgentEvent::UserMessage {
+                                    id,
+                                    content,
+                                    queued: false,
+                                    mission_id: Some(mid),
+                                    source: source.clone(),
+                                });
+                                let _ = respond.send(UserMessageAck::Delivered);
+                                continue;
+                            }
+                        }
+
                         // Determine if target is already running somewhere
                         let target_in_parallel = effective_target
                             .map(|tid| parallel_runners.contains_key(&tid))
@@ -27312,6 +27335,77 @@ async fn control_actor_loop(
                         }
                     }
 
+                    // A Claude session just parked: hand it one message that was
+                    // queued for its mission while the turn was running.
+                    if let AgentEvent::MissionActivity {
+                        tool_name,
+                        mission_id: Some(mid),
+                        ..
+                    } = &event
+                    {
+                        if tool_name == super::runners::live_session::PARKED_MARKER {
+                            let mid = *mid;
+                            let main = running_mission_id == Some(mid);
+                            let mut handed: Option<(Uuid, String, Option<String>)> = None;
+                            if let Some(position) = queue.iter().position(|entry| {
+                                entry.2.is_none()
+                                    && (entry.3 == Some(mid) || (entry.3.is_none() && main))
+                                    && entry.4.as_deref() != Some("scheduler")
+                                    && !entry.1.trim_start().starts_with('/')
+                            }) {
+                                if super::runners::live_session::deliver(
+                                    mid,
+                                    queue[position].1.clone(),
+                                )
+                                .is_ok()
+                                {
+                                    if let Some(entry) = queue.remove(position) {
+                                        handed = Some((entry.0, entry.1, entry.4));
+                                    }
+                                }
+                            } else if let Some(runner) = parallel_runners.get_mut(&mid) {
+                                if let Some(position) = runner.queue.iter().position(|message| {
+                                    message.agent.is_none()
+                                        && message.source.as_deref() != Some("scheduler")
+                                        && !message.content.trim_start().starts_with('/')
+                                }) {
+                                    if super::runners::live_session::deliver(
+                                        mid,
+                                        runner.queue[position].content.clone(),
+                                    )
+                                    .is_ok()
+                                    {
+                                        if let Some(message) = runner.queue.remove(position) {
+                                            handed =
+                                                Some((message.id, message.content, message.source));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((id, content, source)) = handed {
+                                let _ = events_tx.send(AgentEvent::UserMessage {
+                                    id,
+                                    content,
+                                    queued: false,
+                                    mission_id: Some(mid),
+                                    source,
+                                });
+                                if let Err(error) = persist_control_queue_if_changed(
+                                    &mission_store,
+                                    &session_user_id,
+                                    &queue,
+                                    &parallel_runners,
+                                    &recovered_consumed_user_messages,
+                                    &mut last_persisted_queue,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(mission_id = %mid, "Failed to persist the queue after a parked delivery: {error}");
+                                }
+                            }
+                        }
+                    }
+
                     // --- Activity tracking & subtask detection ---
                     match &event {
                         AgentEvent::ToolCall { name, args, tool_call_id, mission_id } => {
@@ -27639,7 +27733,13 @@ async fn control_actor_loop(
                             // Always reclaim the correlated command, even if this
                             // isn't a background start, so the map can't leak.
                             let command = pending_bash_commands.remove(tool_call_id);
-                            if name == "Bash" {
+                            // A session that outlives its turns reports its own
+                            // background tasks and wakes itself.
+                            if name == "Bash"
+                                && !mission_id.is_some_and(
+                                    super::runners::live_session::is_attached,
+                                )
+                            {
                                 if let (Some(mid), Some(text)) =
                                     (mission_id, tool_result_text(result))
                                 {

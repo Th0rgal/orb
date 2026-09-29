@@ -1543,7 +1543,7 @@ pub fn run_claudecode_turn<'a>(
         // SDK stream-json requires non-TTY stdin. Retain the PTY output for
         // streaming, but pipe its raw input through cat. All CLI arguments are
         // positional shell parameters, never interpolated into shell source.
-        let (program, full_args) = if native_plan {
+        let (program, full_args) = if stream_input {
             let mut piped = vec![
                 "-c".to_string(),
                 "cat | \"$@\"".to_string(),
@@ -1779,6 +1779,25 @@ pub fn run_claudecode_turn<'a>(
         let mut saw_non_init_event = false;
         let mut saw_assistant_activity = false;
         let mut first_stale_result_at: Option<Instant> = None;
+        // A result ends one turn, not the session: while the CLI still has
+        // background tasks the process is kept and the runner parks.
+        let keep_alive = stream_input && !native_plan && super::live_session::enabled();
+        let _session_guard = super::live_session::SessionGuard::attach(mission_id, keep_alive);
+        let mut background = super::live_session::ClaudeBackground::default();
+        let mut parked = false;
+        let mut parked_slot: Option<tokio::sync::oneshot::Receiver<String>> = None;
+        // A message that reached the slot just as the CLI woke itself: it is
+        // answered after the current turn, so one more result is expected.
+        let mut extra_input_pending = false;
+        let mut ended_parked: Option<&'static str> = None;
+        let parked_timeout = Duration::from_secs(
+            std::env::var("SANDBOXED_SH_CLAUDECODE_PARKED_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(6 * 3600),
+        );
+        // Without a live task nothing will wake a parked session.
+        let parked_linger = Duration::from_secs(60);
         let startup_timeout = Duration::from_secs(
             std::env::var("SANDBOXED_SH_CLAUDECODE_STARTUP_TIMEOUT_SECS")
                 .ok()
@@ -1915,6 +1934,19 @@ pub fn run_claudecode_turn<'a>(
                         ));
                 }
                 _ = tokio::time::sleep_until(idle_deadline), if saw_non_init_event => {
+                    if parked {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            background_tasks = background.running(),
+                            "Parked Claude session stayed quiet; retiring it"
+                        );
+                        ended_parked = Some(if background.running() > 0 {
+                            "Stopped waiting: the background tasks produced nothing for too long."
+                        } else {
+                            "The background tasks have finished."
+                        });
+                        break;
+                    }
                     tracing::warn!(
                         mission_id = %mission_id,
                         wait_state = ?turn_wait_state,
@@ -1950,6 +1982,12 @@ pub fn run_claudecode_turn<'a>(
                 }
                 _ = tokio::time::sleep_until(process_exit_grace_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86400))), if process_exited && line_rx.is_empty() => {
                     // Grace period expired after process exit — no `result` event arrived.
+                    if parked {
+                        ended_parked =
+                            Some("The Claude session ended while waiting for its background tasks.");
+                        reader_handle.abort();
+                        break;
+                    }
                     if first_stale_result_at.is_some() && !saw_assistant_activity {
                         // The session settled its leftovers and had nothing to add.
                         saw_terminal_result_event = true;
@@ -1982,6 +2020,41 @@ pub fn run_claudecode_turn<'a>(
                 // immediately leaves the turn in AwaitingTerminalResult/
                 // AwaitingClaude (not this state), so those stalls remain subject
                 // to the watchdog as before.
+                message = async { parked_slot.as_mut().expect("guarded by is_some").await }, if parked_slot.is_some() => {
+                    parked_slot = None;
+                    if let Ok(content) = message {
+                        let frame = serde_json::json!({
+                            "type": "user",
+                            "message": { "role": "user", "content": [{ "type": "text", "text": content }] }
+                        });
+                        let delivered = stdin_writer.as_mut().is_some_and(|w| {
+                            use std::io::Write as _;
+                            writeln!(w, "{}", frame).and_then(|_| w.flush()).is_ok()
+                        });
+                        if delivered {
+                            tracing::info!(mission_id = %mission_id, "Delivered a message to the parked Claude session");
+                            parked = false;
+                            turn_wait_state = ClaudeTurnWaitState::AwaitingClaude;
+                            idle_deadline = claudecode_idle_deadline(turn_wait_state, Instant::now(), idle_timeout, tool_idle_timeout, post_tool_result_idle_timeout, tool_timeout_override);
+                        } else {
+                            let _ = events_tx.send(AgentEvent::Error {
+                                message: "The parked Claude session could not receive the message; send it again.".to_string(),
+                                mission_id: Some(mission_id),
+                                resumable: true,
+                            });
+                            ended_parked = Some("The Claude session ended while waiting for its background tasks.");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(last_heartbeat_at + heartbeat_interval), if parked => {
+                    let _ = events_tx.send(AgentEvent::MissionActivity {
+                        label: format!("Waiting for {} background task(s)", background.running()),
+                        tool_name: "claudecode_heartbeat".to_string(),
+                        mission_id: Some(mission_id),
+                    });
+                    last_heartbeat_at = Instant::now();
+                }
                 _ = tokio::time::sleep_until(last_note_poll + crate::api::runners::midturn::MID_TURN_POLL), if stream_input && stdin_writer.is_some() => {
                     last_note_poll = Instant::now();
                     crate::api::runners::midturn::drain_and_inject(
@@ -2144,6 +2217,12 @@ pub fn run_claudecode_turn<'a>(
                         }
                     }
 
+                    if keep_alive && line.contains("\"system\"") {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                            background.consume(&event);
+                        }
+                    }
+
                     let claude_event: ClaudeEvent = match serde_json::from_str(line) {
                         Ok(event) => event,
                         Err(e) => {
@@ -2177,6 +2256,25 @@ pub fn run_claudecode_turn<'a>(
                         ClaudeEvent::Assistant(_) | ClaudeEvent::StreamEvent(_)
                     ) {
                         saw_assistant_activity = true;
+                        if parked {
+                            // The CLI woke itself: a background task reported back.
+                            parked = false;
+                            super::live_session::unpark(mission_id);
+                            if let Some(content) =
+                                parked_slot.take().and_then(|mut slot| slot.try_recv().ok())
+                            {
+                                let frame = serde_json::json!({
+                                    "type": "user",
+                                    "message": { "role": "user", "content": [{ "type": "text", "text": content }] }
+                                });
+                                if let Some(w) = stdin_writer.as_mut() {
+                                    use std::io::Write as _;
+                                    extra_input_pending =
+                                        writeln!(w, "{}", frame).and_then(|_| w.flush()).is_ok();
+                                }
+                            }
+                            turn_wait_state = ClaudeTurnWaitState::AwaitingClaude;
+                        }
                     }
                     if !matches!(claude_event, ClaudeEvent::System(_)) {
                         saw_non_init_event = true;
@@ -2676,10 +2774,78 @@ pub fn run_claudecode_turn<'a>(
                                         );
                                         continue;
                                     }
-                                    saw_terminal_result_event = true;
                                     if let Some(cost) = res.total_cost_usd {
                                         total_cost_usd = Some(cost);
                                     }
+                                    if keep_alive
+                                        && stdin_writer.is_some()
+                                        && !process_exited
+                                        && (background.running() > 0 || extra_input_pending)
+                                        && !res.is_error
+                                        && res.subtype != "error"
+                                        && !res.error_message().starts_with("API Error:")
+                                    {
+                                        extra_input_pending = false;
+                                        let reply = res
+                                            .result
+                                            .filter(|text| !text.trim().is_empty())
+                                            .unwrap_or_else(|| {
+                                                text_buffer.values().cloned().collect::<String>()
+                                            });
+                                        if !reply.trim().is_empty() {
+                                            // The turn's cost is reported once, with the
+                                            // message that ends the session.
+                                            let _ = events_tx.send(AgentEvent::AssistantMessage {
+                                                id: Uuid::new_v4(),
+                                                content: reply,
+                                                success: true,
+                                                cost_cents: 0,
+                                                cost_source: crate::agents::CostSource::Unknown,
+                                                usage: None,
+                                                model: observed_model.clone(),
+                                                model_normalized: None,
+                                                mission_id: Some(mission_id),
+                                                shared_files: None,
+                                                resumable: true,
+                                                completion_evidence: None,
+                                            });
+                                        }
+                                        text_buffer.clear();
+                                        last_text_len = 0;
+                                        block_types.clear();
+                                        thinking_buffer.clear();
+                                        finalized_thinking_indices.clear();
+                                        active_thinking_index = None;
+                                        first_text_delta_at = None;
+                                        repetition_guard.reset();
+                                        pending_tools.clear();
+                                        tool_timeout_override = None;
+                                        final_result.clear();
+                                        parked = true;
+                                        parked_slot = Some(super::live_session::park(mission_id));
+                                        tracing::info!(
+                                            mission_id = %mission_id,
+                                            background_tasks = background.running(),
+                                            "Claude turn ended with background tasks running; keeping the session"
+                                        );
+                                        let _ = events_tx.send(AgentEvent::MissionActivity {
+                                            label: format!(
+                                                "Waiting for {} background task(s)",
+                                                background.running()
+                                            ),
+                                            tool_name: super::live_session::PARKED_MARKER.to_string(),
+                                            mission_id: Some(mission_id),
+                                        });
+                                        last_heartbeat_at = Instant::now();
+                                        idle_deadline = Instant::now()
+                                            + if background.running() > 0 {
+                                                parked_timeout
+                                            } else {
+                                                parked_linger
+                                            };
+                                        continue;
+                                    }
+                                    saw_terminal_result_event = true;
                                     // Check for errors: explicit error flags OR embedded API error payloads.
                                     //
                                     // Note: Claude Code may populate error details in `error` / `message`
@@ -2717,14 +2883,23 @@ pub fn run_claudecode_turn<'a>(
                                     );
                                 }
                             }
-                    idle_deadline = claudecode_idle_deadline(
-                        turn_wait_state,
-                        Instant::now(),
-                        idle_timeout,
-                        tool_idle_timeout,
-                        post_tool_result_idle_timeout,
-                        tool_timeout_override,
-                    );
+                    idle_deadline = if parked {
+                        Instant::now()
+                            + if background.running() > 0 {
+                                parked_timeout
+                            } else {
+                                parked_linger
+                            }
+                    } else {
+                        claudecode_idle_deadline(
+                            turn_wait_state,
+                            Instant::now(),
+                            idle_timeout,
+                            tool_idle_timeout,
+                            post_tool_result_idle_timeout,
+                            tool_timeout_override,
+                        )
+                    };
                     // Emit a throttled liveness heartbeat so the stuck-mission
                     // watchdog (control.rs:stuck_mission_watchdog_loop) does not
                     // cancel us while Claude is producing CLI scaffolding events
@@ -2747,6 +2922,13 @@ pub fn run_claudecode_turn<'a>(
                 }
             }
         }
+
+        if let Some(note) = ended_parked {
+            // Every reply was already delivered when its turn ended.
+            saw_terminal_result_event = true;
+            final_result = note.to_string();
+        }
+        super::live_session::unpark(mission_id);
 
         // Wait for child process to finish and clean up.
         tracing::debug!(
@@ -2781,7 +2963,9 @@ pub fn run_claudecode_turn<'a>(
         // The SDK session intentionally keeps reading for its next turn. Once
         // its terminal result is captured, retire this process promptly; the
         // next user turn resumes the durable session.
-        let cli_exit_grace = std::time::Duration::from_secs(if native_plan { 1 } else { 30 });
+        // Behind the stdin pipe the CLI never sees its input close, so it is
+        // stopped rather than awaited.
+        let cli_exit_grace = std::time::Duration::from_secs(if stream_input { 1 } else { 30 });
         let child_pid = pty.process_id();
         let mut wait_handle = tokio::task::spawn_blocking(move || {
             let mut pty = pty;
