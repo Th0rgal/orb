@@ -2309,7 +2309,14 @@ pub fn run_claudecode_turn<'a>(
                         ClaudeEvent::Assistant(_) | ClaudeEvent::StreamEvent(_)
                     ) {
                         saw_assistant_activity = true;
-                        if parked {
+                        // Background agents stream through the same session:
+                        // only the main thread starting a turn ends the wait.
+                        let main_thread = match &claude_event {
+                            ClaudeEvent::Assistant(event) => event.parent_tool_use_id.is_none(),
+                            ClaudeEvent::StreamEvent(event) => event.parent_tool_use_id.is_none(),
+                            _ => false,
+                        };
+                        if parked && main_thread {
                             // The CLI woke itself: a background task reported back.
                             parked = false;
                             super::live_session::unpark(mission_id);
