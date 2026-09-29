@@ -818,6 +818,11 @@ pub(crate) async fn run_codex_turn_with_rotation(
         {
             let mut attempted_credentials: HashSet<String> = HashSet::new();
             let mut attempt_idx = 0usize;
+            // A thread that did not exist before this turn and did nothing in
+            // it holds no work: a usage limit may move the turn to another
+            // account. A thread from an earlier turn stays on its account.
+            let bound_before_turn =
+                !matches!(continuity::read(&native_input.path), Ok(None));
             // Raw outputs of attempts that failed specifically on a usage cap,
             // so an exhausted pool can be summarized instead of echoing the
             // last account's bare "try again at …" message.
@@ -1004,6 +1009,20 @@ pub(crate) async fn run_codex_turn_with_rotation(
                             reason,
                             "Codex account constrained; leasing next account"
                         );
+                        if !bound_before_turn {
+                            match continuity::release_unused(&native_input.path) {
+                                Ok(true) => tracing::info!(
+                                    mission_id = %mission_id,
+                                    "Released the unused native thread of the constrained account"
+                                ),
+                                Ok(false) => {}
+                                Err(error) => tracing::warn!(
+                                    mission_id = %mission_id,
+                                    %error,
+                                    "Could not release the native thread of the constrained account"
+                                ),
+                            }
+                        }
                         last_constrained_result = Some(result);
                     }
                     _ => {

@@ -4724,8 +4724,34 @@ pub struct ProviderResponse {
     /// Account identifier (email or username) from the connected OAuth account
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_email: Option<String>,
+    /// Set while the account is kept out of rotation after a usage limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown: Option<ProviderCooldownResponse>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Why and until when an account is skipped when accounts are chosen.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ProviderCooldownResponse {
+    pub until: chrono::DateTime<chrono::Utc>,
+    /// Always `usage_limit` today; other reasons use short in-memory pauses.
+    pub reason: &'static str,
+    /// The limit that was hit, as the provider worded it.
+    pub limit: String,
+    /// False when the provider gave no reset time and a default delay applies.
+    pub announced: bool,
+}
+
+fn provider_cooldown(id: uuid::Uuid) -> Option<ProviderCooldownResponse> {
+    crate::account_limits::shared()
+        .active(&crate::account_limits::account_key(id))
+        .map(|cooldown| ProviderCooldownResponse {
+            until: cooldown.until,
+            reason: "usage_limit",
+            limit: cooldown.limit,
+            announced: cooldown.announced,
+        })
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -4879,6 +4905,8 @@ fn build_provider_response(
             matches!(auth, Some(AuthKind::OAuth)),
         ),
         account_email,
+        // Host-tier providers have no store account to park.
+        cooldown: None,
         created_at: now,
         updated_at: now,
     }
@@ -4954,6 +4982,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         use_for_backends,
         credential_owner: credential_owner_for(pt, has_oauth),
         account_email: provider.account_email.clone(),
+        cooldown: provider_cooldown(provider.id),
         created_at: provider.created_at,
         updated_at: provider.updated_at,
     }
