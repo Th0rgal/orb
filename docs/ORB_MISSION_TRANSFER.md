@@ -138,7 +138,20 @@ Git credentials, hooks and runtime configuration are excluded. The index is
 rebuilt from HEAD, so staged changes become unstaged. Empty directories and
 repositories without any refs are not recreated as Git repositories.
 
-Symlinks and special files currently require materialization before transfer.
+Symbolic links travel as links and are never followed. A relative target that
+stays inside the workspace is kept as written; an absolute target inside the
+workspace becomes relative. Links pointing outside the workspace, targets with
+`..` after a name, sockets, pipes and devices stay on the source and are listed
+under "left behind" in the inventory. The destination creates links only during
+verification, after every file is written and hashed, so no block is written
+through one. A destination that predates links is refused: a node before
+copying (its capabilities lack the `links` feature), any machine at the receipt.
+Deploy Core before the nodes: a Core that predates links would accept a
+snapshot from an updated node and drop its links without a word, while an
+updated Core refuses what an older node or Orb cannot do. Orb checks the
+`features` of the transfer view before registering a local snapshot with links.
+A workspace over the limits is refused before hashing, with its totals and its
+largest top-level directories.
 Explicit uploaded-image references missing from the inventory, or outside the
 known workspace roots, block preparation. Arbitrary external filesystem paths
 are not followed or rewritten. This version does not import external attachments

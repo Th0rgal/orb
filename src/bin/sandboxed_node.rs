@@ -1140,7 +1140,9 @@ async fn transfer_capabilities(
         &paths,
         state.managed_auth.advertised().iter().any(|p| p == "grok"),
     );
-    Ok(Json(serde_json::json!({"version":2,"harnesses":harnesses})))
+    Ok(Json(
+        serde_json::json!({"version":2,"harnesses":harnesses,"features":["links"]}),
+    ))
 }
 fn transfer_harnesses(paths: &std::ffi::OsStr, grok_auth: bool) -> Vec<&'static str> {
     [

@@ -9,6 +9,7 @@ import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal } from "./localAgents";
 import { appendClientTranscript, setClientMissionStatus } from "./api";
 import { MachineLoadBadge, byLeastLoaded, machineLoadTitle } from "./machineLoad";
+import { TransferInventory, formatBytes } from "./TransferInventory";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView } from "./machineTransfer";
 
 type Loaded = { view: TransferView; rows: Destination[]; client?: string };
@@ -164,36 +165,53 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
       e.preventDefault(); items[(index + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
     }
   };
-  return <div ref={root} class="menu machine-transfer-menu" role={selected() ? "dialog" : "menu"} aria-label="Change machine" onKeyDown={keys}>
-    <div class="menu-group">{selected() ? `Continue on ${selected()!.label}` : "Change machine…"}</div>
-    <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
+  const STEPS = ["Prepare", "Copy", "Verify", "Activate"];
+  // The step in hand: preparing until an inventory exists, then the stage of the move.
+  const step = () => !action()?.manifest ? 0 : stage().startsWith("Verifying") ? 2 : stage().startsWith("Activating") ? 3 : 1;
+  const back = () => { setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
+  return <div ref={root} class="menu machine-transfer-menu" classList={{ "transfer-dialog": !!selected() }} role={selected() ? "dialog" : "menu"} aria-label="Change machine" onKeyDown={keys}>
     <Show when={!selected()}>
+      <div class="menu-group">Change machine…</div>
+      <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
       <For each={ordered()}>{d => <button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
         <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
       </button>}</For>
     </Show>
     <Show when={selected()}>
+      <header class="transfer-head">
+        <Show when={!action() && !busy()}><button type="button" class="icon-btn sm" aria-label="Choose another machine" title="Choose another machine" onClick={back}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" /></svg></button></Show>
+        <div><strong>Continue on {selected()!.label}</strong><small>{machineLabel(current())} → {selected()!.label}</small></div>
+      </header>
+      <ol class="transfer-steps" aria-label="Transfer progress">
+        <For each={STEPS}>{(name, i) => <li classList={{ done: i() < step(), current: i() === step() }} aria-current={i() === step() ? "step" : undefined}>{name}</li>}</For>
+      </ol>
       <div class="transfer-body">
-        <p>Move this conversation and its workspace files. The agent will wait for your next message.</p>
+        <Show when={loading()}><p role="status">{destinations().length?"Updating machines…":"Checking machines…"}</p></Show>
         <Show when={selected()?.reason}><p role="status">{selected()!.reason}</p></Show>
+        <Show when={!action()?.manifest}><p>The conversation and its workspace files move together. The agent waits for your next message.</p></Show>
         <Show when={!action()}>
-          <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
-            <Show when={!compatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
-            <For each={availableHarnesses()}>{c => <option value={c.backend.id} selected={c.backend.id === backend()}>{c.backend.name}</option>}</For>
-          </Select></label>
-          <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value} selected={m.value === model()}>{m.label}</option>}</For></Select></label>
+          <div class="transfer-options">
+            <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
+              <Show when={!compatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
+              <For each={availableHarnesses()}>{c => <option value={c.backend.id} selected={c.backend.id === backend()}>{c.backend.name}</option>}</For>
+            </Select></label>
+            <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value} selected={m.value === model()}>{m.label}</option>}</For></Select></label>
+          </div>
           <Show when={!compatible()}><p>Choose a harness available on this machine.</p></Show>
         </Show>
-        <Show when={action()?.manifest}>{m => <details><summary>{m().files.length} files · {(m().bytes / 1024 / 1024).toFixed(1)} MiB</summary><ul><For each={m().files}>{f => <li>{f.path}</li>}</For></ul><Show when={m().excluded.length}><p>Excluded credentials, generated configuration and caches:</p><ul><For each={m().excluded}>{f => <li>{f}</li>}</For></ul></Show></details>}</Show>
-        <Show when={busy()}><div role="status">{stage()}</div><Show when={stage().startsWith("Copying")}><progress max="1" value={progress()} /></Show></Show>
+        <Show when={action()?.manifest}>{m => <TransferInventory manifest={m()} />}</Show>
+        <Show when={error()}><ErrorNotice error={error()} /></Show>
+      </div>
+      <footer class="transfer-foot">
+        <Show when={busy()}><div class="transfer-status" role="status"><span>{stage()}</span><Show when={stage().startsWith("Copying")}><span>{Math.round(progress() * 100)}% of {formatBytes(action()?.manifest?.bytes ?? 0)}</span><progress max="1" value={progress()} /></Show></div></Show>
         <div class="transfer-actions">
           <button class="pill" disabled={stage() === "Activating destination…" && busy()} onClick={() => busy() ? cancelled = true : void cancel()}>Cancel</button>
           <Show when={action()?.manifest} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}>
-            <button class="pill on" disabled={busy()} onClick={() => void move()}>Move to {selected()!.label}</button>
+            <Show when={!busy()}><button class="pill on" onClick={() => void move()}>Move to {selected()!.label}</button></Show>
           </Show>
         </div>
-      </div>
+      </footer>
     </Show>
-    <Show when={error()}><ErrorNotice error={error()} /><Show when={!action() && !loading()}><button class="menu-item" onClick={() => void load(true)}>Retry</button></Show></Show>
+    <Show when={error() && !selected()}><ErrorNotice error={error()} /><Show when={!loading()}><button class="menu-item" onClick={() => void load(true)}>Retry</button></Show></Show>
   </div>;
 }
