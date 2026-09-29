@@ -102,6 +102,34 @@ fn replace_conversation(e: &mut Execution, i: usize) {
 }
 
 /// The browser could not open the recorded conversation and sent nothing.
+/// Records the replacement on the latest revision, so a follow-up queued in
+/// the meantime does not leave this turn pointing at the lost conversation.
+async fn save_replacement(
+    store: &Arc<dyn MissionStore>,
+    mut e: Execution,
+    i: usize,
+    detail: Option<&str>,
+) -> Result<Execution, String> {
+    for _ in 0..4 {
+        replace_conversation(&mut e, i);
+        e.turns[i].detail = detail.map(str::to_owned);
+        match worker::save(store, e.clone()).await {
+            Err(error) if error == "Cloud execution revision changed" => {
+                let turn = e.turns[i].key.clone();
+                e = store
+                    .cloud_executions()
+                    .await?
+                    .into_iter()
+                    .find(|r| r.mission_id == e.mission_id)
+                    .filter(|r| r.turns.get(i).is_some_and(|t| t.key == turn))
+                    .ok_or("Cloud execution changed during the replacement")?;
+            }
+            saved => return saved,
+        }
+    }
+    Err("Cloud replacement conflicted repeatedly; reconcile before sending".into())
+}
+
 fn conversation_unreachable(result: &crate::agents::AgentResult) -> bool {
     result.data.as_ref().is_some_and(|data| {
         data.get("resume_resolution").and_then(Value::as_str) == Some("continuation_not_found")
@@ -185,10 +213,9 @@ pub(super) async fn tick(
             worker::receipt(store, e, i).await?;
             return Ok(());
         }
-        replace_conversation(&mut e, i);
         // Saved as queued first: the pointer is dropped only once this is on
         // record, so an interruption in between is healed by the next tick.
-        e = worker::save(store, e).await?;
+        e = save_replacement(store, e, i, None).await?;
         jobs::forget_unreachable_conversation(app_dir, e.mission_id);
     }
     e.turns[i].phase = Phase::Submitting;
@@ -283,14 +310,16 @@ pub(super) async fn tick(
     {
         // Found out only now, in the browser. Nothing was sent: the next tick
         // sends this message to a replacement conversation.
-        replace_conversation(&mut e, i);
-        e.turns[i].detail = Some(
-            "The original ChatGPT conversation could not be opened; continuing in a new one".into(),
-        );
         // A receipt keeps identifiers it is not given. Removing the pointer to
         // the lost conversation needs a full save.
         let mission = e.mission_id;
-        worker::save(store, e).await?;
+        save_replacement(
+            store,
+            e,
+            i,
+            Some("The original ChatGPT conversation could not be opened; continuing in a new one"),
+        )
+        .await?;
         jobs::forget_unreachable_conversation(app_dir, mission);
         return Ok(());
     } else {
@@ -396,6 +425,39 @@ mod tests {
         assert_eq!(e.turns[1].phase, Phase::Queued);
         assert_eq!(e.turns[1].cursor.as_deref(), Some(REPLACEMENT));
         assert!(e.external_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_replacement_survives_a_follow_up_queued_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            crate::api::mission_store::SqliteMissionStore::new(dir.path().into(), "replace-race")
+                .await
+                .unwrap(),
+        );
+        let mut first = execution(vec![
+            answered("a", "b"),
+            Turn::new("n".into(), "Next".into()),
+        ]);
+        first.revision = 0;
+        first.external_id = Some("/c/old".into());
+        let mut observed = store
+            .save_cloud_execution(first, None, None, None, vec![])
+            .await
+            .unwrap();
+        observed.turns[1].phase = Phase::Submitting;
+        observed = worker::save(&store, observed).await.unwrap();
+        let mut concurrent = observed.clone();
+        concurrent.enqueue("later".into(), "Later".into()).unwrap();
+        worker::save(&store, concurrent).await.unwrap();
+        save_replacement(&store, observed, 1, Some("continuing"))
+            .await
+            .unwrap();
+        let row = store.cloud_executions().await.unwrap().remove(0);
+        assert_eq!(row.turns.len(), 3);
+        assert_eq!(row.turns[1].phase, Phase::Queued);
+        assert_eq!(row.turns[1].cursor.as_deref(), Some(REPLACEMENT));
+        assert!(row.external_id.is_none());
     }
 
     #[test]
