@@ -1633,7 +1633,6 @@ pub fn run_claudecode_turn<'a>(
                 format!("{prompt}\n")
             }
         });
-        let initial_prompt_deadline = Instant::now() + Duration::from_secs(3);
         // Poll cadence for mid-turn operator-note injection (stream-input mode).
         let mut last_note_poll = Instant::now();
         tracing::debug!(mission_id = %mission_id, "PTY writer taken (kept alive)");
@@ -1850,6 +1849,8 @@ pub fn run_claudecode_turn<'a>(
         );
         let mut last_heartbeat_at = Instant::now();
         let startup_deadline = Instant::now() + startup_timeout;
+        let initial_prompt_deadline =
+            Instant::now() + Duration::from_secs(3).min(startup_timeout / 2);
         let mut turn_wait_state = ClaudeTurnWaitState::Startup;
         let mut tool_timeout_override: Option<tokio::time::Instant> = None;
         let mut idle_deadline = claudecode_idle_deadline(
@@ -1958,7 +1959,7 @@ pub fn run_claudecode_turn<'a>(
                                 "Stopped waiting: the background tasks reported nothing for too long and were stopped.",
                             )
                         } else {
-                            (true, "The background tasks have finished.")
+                            (true, "The background tasks have ended.")
                         });
                         break;
                     }
