@@ -8544,7 +8544,7 @@ fn codex_fast_mode_model_supported(model: Option<&str>) -> bool {
         return false;
     };
     let model = model.rsplit('/').next().unwrap_or(model);
-    ["gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4"]
+    ["gpt-6.1", "gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4"]
         .iter()
         .any(|prefix| model == *prefix || model.starts_with(&format!("{prefix}-")))
 }
@@ -8558,7 +8558,7 @@ fn validate_fast_mode(backend: &str, model: Option<&str>, fast_mode: bool) -> Re
     }
     if !codex_fast_mode_model_supported(model) {
         return Err(format!(
-            "fast_mode requires an explicit supported model; use a GPT-5.6, GPT-5.5, or GPT-5.4 model (received '{}')",
+            "fast_mode requires an explicit supported model; use a GPT-6.1, GPT-6, GPT-5.6, GPT-5.5, or GPT-5.4 model (received '{}')",
             model.unwrap_or("none")
         ));
     }

@@ -7,9 +7,24 @@
   "completeness": "partial",
   "models": [
     {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol",
+      "description": "Newest Codex flagship (efforts low..ultra). Fast tier: 2x speed, increased usage."
+    },
+    {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
       "description": "OpenAI's GPT-6 flagship in Codex (efforts low..ultra). Default."
+    },
+    {
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "description": "GPT-6 model for complex reasoning and coding (efforts low..ultra). Fast tier: 1.5x speed."
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "description": "GPT-6 model optimized for speed and cost (efforts low..max). Fast tier: 1.5x speed."
     },
     {
       "id": "gpt-5.6",

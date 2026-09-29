@@ -4105,6 +4105,23 @@ pub async fn prepare_codex_oauth_account_for_launch(
     working_dir: &Path,
     selected: &CodexOAuthAccount,
 ) -> Result<CodexOAuthAccount, String> {
+    prepare_codex_oauth_account(working_dir, selected, false).await
+}
+
+/// Refresh now, whatever the expiry says: the backend refuses a token it has
+/// invalidated (plan change, sign-in elsewhere) long before it expires.
+pub async fn refresh_codex_oauth_account_now(
+    working_dir: &Path,
+    selected: &CodexOAuthAccount,
+) -> Result<CodexOAuthAccount, String> {
+    prepare_codex_oauth_account(working_dir, selected, true).await
+}
+
+async fn prepare_codex_oauth_account(
+    working_dir: &Path,
+    selected: &CodexOAuthAccount,
+    refused: bool,
+) -> Result<CodexOAuthAccount, String> {
     if crate::api::oauth_owner::skip_refresh_if_owned(
         ProviderType::OpenAI,
         "prepare_codex_oauth_account_for_launch",
@@ -4121,7 +4138,10 @@ pub async fn prepare_codex_oauth_account_for_launch(
         .unwrap_or_else(|| selected.clone());
 
     let now = chrono::Utc::now().timestamp_millis();
-    if !codex_oauth_access_token_needs_refresh(current.expires_at, now) {
+    // Another caller may have replaced the refused token while this one
+    // waited for the lock.
+    let replaced = current.access_token != selected.access_token;
+    if !codex_oauth_access_token_needs_refresh(current.expires_at, now) && (!refused || replaced) {
         let _ = sync_shared_codex_oauth_auth(&current);
         return Ok(current);
     }
@@ -8314,6 +8334,29 @@ async fn check_provider_health(
 
 /// Merge a Codex usage snapshot's `codex_*` fields into the base provider-usage
 /// JSON object the dashboard consumes.
+/// The account can send messages again (plan change, reset, credits): a limit
+/// recorded earlier must not keep it out of rotation until the old reset.
+async fn release_codex_limit(state: &super::routes::AppState, id: uuid::Uuid) {
+    let limits = crate::account_limits::shared();
+    let Some(provider) = state.ai_providers.get(id).await else {
+        return;
+    };
+    let subscription =
+        crate::provider_health::store_account_subscription_key(provider.provider_type, &provider);
+    let held = limits.is_cooling(&crate::account_limits::account_key(id))
+        || subscription
+            .as_ref()
+            .is_some_and(|key| limits.is_cooling(&crate::account_limits::subscription_key(&key.0)));
+    if !held {
+        return;
+    }
+    state.health_tracker.clear_cooldown(id).await;
+    if let Some(key) = subscription {
+        state.health_tracker.clear_subscription_cooldown(&key).await;
+    }
+    tracing::info!(provider = %id, "Codex account has messages again; its recorded limit is lifted");
+}
+
 fn merge_codex_usage(
     mut base: serde_json::Value,
     snap: &crate::api::codex_usage::CodexUsageSnapshot,
@@ -8828,9 +8871,11 @@ async fn get_provider_usage(
                         return Ok(Json(base));
                     };
 
-                    // Fresh cached snapshot (probe within TTL, or a recent
-                    // passive cooldown stamp) — serve without re-probing.
-                    if let Some(snap) = state.codex_usage.get_fresh(&store_key).await {
+                    if let Some(snap) = state
+                        .codex_usage
+                        .get_younger_than(&store_key, crate::api::codex_usage::USAGE_TTL)
+                        .await
+                    {
                         return Ok(Json(merge_codex_usage(base, &snap)));
                     }
 
@@ -8875,6 +8920,72 @@ async fn get_provider_usage(
                         }
                         return Ok(Json(base));
                     };
+
+                    // The usage report first: it is free and says what the
+                    // plan allows now, which a recorded limit cannot.
+                    let mut token = token;
+                    let mut report = crate::api::codex_usage::read_usage(
+                        &state.http_client,
+                        &token,
+                        &chatgpt_account_id,
+                    )
+                    .await;
+                    if report == Err(crate::api::codex_usage::UsageError::Unauthorized) {
+                        let refreshed = match find_openai_oauth_account_by_chatgpt_account_id(
+                            working_dir,
+                            &chatgpt_account_id,
+                        ) {
+                            Some(account) => {
+                                refresh_codex_oauth_account_now(working_dir, &account).await
+                            }
+                            None => Err("the account is not in the provider store".to_string()),
+                        };
+                        match refreshed {
+                            Ok(account) => {
+                                tracing::info!(
+                                    provider = %store_key,
+                                    "Replaced a Codex token the backend refused before its expiry"
+                                );
+                                token = account.access_token;
+                                report = crate::api::codex_usage::read_usage(
+                                    &state.http_client,
+                                    &token,
+                                    &chatgpt_account_id,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(provider = %store_key, %error, "Codex token is refused and could not be refreshed");
+                            }
+                        }
+                        if report == Err(crate::api::codex_usage::UsageError::Unauthorized) {
+                            base["status"] = serde_json::json!("needs_reauth");
+                            if let Some(snap) = state.codex_usage.get_any(&store_key).await {
+                                return Ok(Json(merge_codex_usage(base, &snap)));
+                            }
+                            return Ok(Json(base));
+                        }
+                    }
+                    match report {
+                        Ok(snap) => {
+                            state
+                                .codex_usage
+                                .put_usage(store_key.clone(), snap.clone())
+                                .await;
+                            if snap.limit_reached == Some(false) {
+                                if let Some(id) = provider_uuid {
+                                    release_codex_limit(&state, id).await;
+                                }
+                            }
+                            return Ok(Json(merge_codex_usage(base, &snap)));
+                        }
+                        Err(error) => {
+                            tracing::debug!(?error, "Codex usage report unavailable");
+                            if let Some(snap) = state.codex_usage.get_fresh(&store_key).await {
+                                return Ok(Json(merge_codex_usage(base, &snap)));
+                            }
+                        }
+                    }
 
                     // Active probe (A).
                     match crate::api::codex_usage::probe(

@@ -179,6 +179,23 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         aliases: &["gpt-6-astra", "gpt-6"],
         pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
     },
+    // GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna (Codex catalog 2026-09-29). No
+    // public rate yet: they carry the rates of their GPT-5.6 namesakes.
+    PricingEntry {
+        canonical: "gpt-6.1-sol",
+        aliases: &["gpt-6.1-sol", "gpt-6-1-sol", "gpt-6.1"],
+        pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
+    },
+    PricingEntry {
+        canonical: "gpt-6-sol",
+        aliases: &["gpt-6-sol"],
+        pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
+    },
+    PricingEntry {
+        canonical: "gpt-6-luna",
+        aliases: &["gpt-6-luna"],
+        pricing: pricing(1_000, 6_000, Some(1_250), Some(100)),
+    },
     PricingEntry {
         canonical: "gpt-5.6-sol",
         aliases: &["gpt-5.6", "gpt-5-6", "gpt-5.6-sol", "gpt-5-6-sol"],
