@@ -257,8 +257,12 @@ export function MissionFailure(p: { mission?: Mission | null; error?: string; ac
   const message = () => p.error || (phase().detail === "client runner"
     ? "The local run could not be completed. Retry on the computer that started it."
     : phase().detail || "The mission stopped before completion.");
-  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice title={phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
-    <Show when={p.onResume && phase().label !== "Cancelled"}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+  const resumable = () => !!p.onResume && phase().label !== "Cancelled";
+  // The transcript already shows the failure: only the action is missing there.
+  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)} fallback={
+    <Show when={!p.active && p.failureInTranscript && phase().failed && resumable()}><div class="error-notice-actions"><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></div></Show>
+  }><ErrorNotice title={phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
+    <Show when={resumable()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
   </ErrorNotice></Show>;
 }
 
