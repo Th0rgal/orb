@@ -680,6 +680,11 @@ fn spawn_claude(
                         output.publish_activities();
                     }
                     background.consume(&event);
+                    // Waiting ends with the last background task, or with a
+                    // question: what follows is the agent's own turn.
+                    if !background.running() || event["type"] == "control_request" {
+                        output.waiting_on_background(false);
+                    }
                     if implement_after_result
                         && event["type"] == "assistant"
                         && event["message"]["content"]
