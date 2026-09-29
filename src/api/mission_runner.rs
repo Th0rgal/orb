@@ -2493,6 +2493,25 @@ pub(crate) fn parse_opencode_sse_event(
                 }
             }
         }
+        // One event per finished reasoning part, carrying its whole text.
+        "reasoning" => {
+            let part = props.get("part").unwrap_or(&props);
+            let text = part
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if text.is_empty() || state.last_emitted_thinking.as_deref() == Some(text) {
+                None
+            } else {
+                state.last_emitted_thinking = Some(text.to_string());
+                Some(AgentEvent::Thinking {
+                    content: text.to_string(),
+                    done: false,
+                    mission_id: Some(mission_id),
+                })
+            }
+        }
         "tool_use" => {
             let part = props.get("part").unwrap_or(&props);
             if let Some((event, extra)) =
@@ -12150,6 +12169,32 @@ mod tests {
     fn extract_part_text_normal_type_checks_text_first() {
         let val = json!({"text": "hello", "content": "world"});
         assert_eq!(extract_part_text(&val, "text"), Some("hello"));
+    }
+
+    #[test]
+    fn parse_opencode_sse_event_reads_reasoning_parts() {
+        let mut state = OpencodeSseState::default();
+        let mission_id = Uuid::new_v4();
+        let line = serde_json::json!({
+            "type": "reasoning",
+            "sessionID": "ses_1",
+            "part": { "id": "prt_1", "type": "reasoning", "text": "17*23 = 391" }
+        })
+        .to_string();
+
+        let parsed = parse_opencode_sse_event(&line, None, None, &mut state, mission_id)
+            .expect("reasoning event parses");
+        match parsed.event {
+            Some(super::AgentEvent::Thinking { content, done, .. }) => {
+                assert_eq!(content, "17*23 = 391");
+                assert!(!done);
+            }
+            other => panic!("expected a thinking event, got {other:?}"),
+        }
+        // The same part repeated is not a new thought.
+        let repeated = parse_opencode_sse_event(&line, None, None, &mut state, mission_id)
+            .expect("reasoning event parses");
+        assert!(repeated.event.is_none());
     }
 
     #[test]

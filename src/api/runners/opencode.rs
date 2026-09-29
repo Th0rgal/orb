@@ -446,7 +446,8 @@ pub async fn run_opencode_turn(
     let mut inner_cmd = String::new();
     inner_cmd.push_str("#!/bin/sh\n");
     inner_cmd.push_str(&shell_escape(&cli_runner));
-    inner_cmd.push_str(" run --format json --model ");
+    // Without `--thinking` the CLI drops reasoning parts from its JSON output.
+    inner_cmd.push_str(" run --format json --thinking --model ");
     inner_cmd.push_str(&shell_escape(opencode_model.as_ref()));
     if let Some(a) = agent {
         inner_cmd.push_str(" --agent ");

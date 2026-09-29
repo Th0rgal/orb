@@ -12627,7 +12627,7 @@ pub(crate) fn remote_execution_for_plan(
             // also its HOME), and nothing depends on the service user's home.
             let mut command = String::from(
                 "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; \
-                 opencode run --format json",
+                 opencode run --format json --thinking",
             );
             let mut env = HashMap::from([
                 (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
@@ -37954,8 +37954,9 @@ Investigate <service/> failures.
         };
         let exec = remote_execution_for_plan(&plan, "https://core.example/", "sk-proxy-abc");
         assert!(
-            exec.command
-                .contains("opencode run --format json --model 'builtin/xai/grok-4.6' 'build'"),
+            exec.command.contains(
+                "opencode run --format json --thinking --model 'builtin/xai/grok-4.6' 'build'"
+            ),
             "{}",
             exec.command
         );
