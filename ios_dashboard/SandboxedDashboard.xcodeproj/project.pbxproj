@@ -33,11 +33,13 @@
 		48ADF499E7EE67D254FBE45A /* LoadingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC2B6E9848FF220F103DED2 /* LoadingView.swift */; };
 		4A00159CD0C4FADA04E8A32E /* ControlSupportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB25F60D74459F14EEB22EFD /* ControlSupportViews.swift */; };
 		4A639CAB6EE0ED8079A721C2 /* ToolUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF491A4406AFF7E284592477 /* ToolUIView.swift */; };
+		4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */; };
 		4CA1C40455E8DABE4CD24A9A /* OrbLiveUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A0C852566E4DC6B1E9620D /* OrbLiveUITests.swift */; };
 		4D1C2019BB5F366370CDFF53 /* Ask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A99DCA3D66FD93467432EA1C /* Ask.swift */; };
 		4F14A189BFE75A1CA225B797 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D6534BE4C1B5E0BEA90A5A /* Workspace.swift */; };
 		50EBDCFBA58915481F5EC995 /* FidoApprovalOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */; };
 		51E9D9F51934DFC8EAD58CDC /* QueueSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EAAE29E81F160F8E8409B7D /* QueueSheet.swift */; };
+		57464CF87C1C599592030E8A /* OrbProjectAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */; };
 		58A71FAA4BF80A3C1C866EF2 /* Hermes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7868B572B7E5DBED9E52D160 /* Hermes.swift */; };
 		58D2BEEDF2B4B34B3B98487C /* ToolUIOptionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCD083A671640B2F286D7C06 /* ToolUIOptionListView.swift */; };
 		5D1FB1BE4D58CC95A500B684 /* ControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2E4AC8C92D9F496B8152B8F /* ControlView.swift */; };
@@ -115,6 +117,7 @@
 /* Begin PBXFileReference section */
 		018CEF52A93FCF430A128017 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		081ACA60E04DBCB6E7313072 /* WorkerSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerSheetView.swift; sourceTree = "<group>"; };
+		0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjectAppearanceTests.swift; sourceTree = "<group>"; };
 		08C648C1D5FC7491563EE824 /* Project.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Project.swift; sourceTree = "<group>"; };
 		0C2AB7D53F29AB97345FA4DA /* ThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeTests.swift; sourceTree = "<group>"; };
 		0C6DBBABC4AE0FD4368A185C /* Mission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Mission.swift; sourceTree = "<group>"; };
@@ -191,6 +194,7 @@
 		D4015786D778B76973EA06D5 /* ProjectsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsView.swift; sourceTree = "<group>"; };
 		D81DFFD4B67ABE07FB546B2B /* GlassButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassButton.swift; sourceTree = "<group>"; };
 		D9E023EEFFFA9B1092B66006 /* ANSIParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANSIParser.swift; sourceTree = "<group>"; };
+		E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjectAppearance.swift; sourceTree = "<group>"; };
 		E387E6A01D00EAD668074CCC /* WorkerBuckets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerBuckets.swift; sourceTree = "<group>"; };
 		E4CA8C69928B3838868EE34A /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
 		E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDesktopParityTests.swift; sourceTree = "<group>"; };
@@ -316,6 +320,7 @@
 				CB1276147AB3D26931AC35DA /* OrbDocuments.swift */,
 				BDD651E846151C5070BA0765 /* OrbMath.swift */,
 				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
+				E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */,
 				BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */,
 				B053370536BB82FE142FF2E5 /* OrbQuestions.swift */,
 				273DF8C1DD6EDF4D4D8627A0 /* OrbQuiz.swift */,
@@ -401,6 +406,7 @@
 				1828D2FC9160FC8677E10502 /* NetworkResilienceTests.swift */,
 				12549983596F9F58C1C2A71C /* OrbContractTests.swift */,
 				E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */,
+				0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */,
 				4734279056A622F4537AFA07 /* OrbRichTextTests.swift */,
 				16444DBBDC6D78A5324C783D /* ProjectTests.swift */,
 				0C2AB7D53F29AB97345FA4DA /* ThemeTests.swift */,
@@ -624,6 +630,7 @@
 				A302B87C0F47502BF4719F5F /* OrbDocuments.swift in Sources */,
 				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
 				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
+				57464CF87C1C599592030E8A /* OrbProjectAppearance.swift in Sources */,
 				A6630933655F984C81618775 /* OrbProjects.swift in Sources */,
 				2BF91FF226E55712A9B5C080 /* OrbQuestions.swift in Sources */,
 				42EB1014A46E016216A63172 /* OrbQuiz.swift in Sources */,
@@ -665,6 +672,7 @@
 				2BBA61051DFCB7A780604B87 /* NetworkResilienceTests.swift in Sources */,
 				EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */,
 				D88BAEAA28DF9920DCABF1A0 /* OrbDesktopParityTests.swift in Sources */,
+				4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */,
 				45E3B02A9F7E3B159E60CA3F /* OrbRichTextTests.swift in Sources */,
 				66F676EDC1A217D788AF9656 /* ProjectTests.swift in Sources */,
 				7EF75A17733EE6E54126C7A7 /* ThemeTests.swift in Sources */,

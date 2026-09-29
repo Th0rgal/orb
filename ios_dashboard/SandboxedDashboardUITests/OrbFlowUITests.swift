@@ -234,6 +234,38 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["Save"].tap()
         XCTAssertTrue(app.buttons["Edit"].waitForExistence(timeout: 10))
     }
+    @MainActor func testProjectColorIsChosenAndKeptAcrossLaunches() throws {
+        var app = launch()
+        func choose(_ name: String) {
+            XCTAssertTrue(app.buttons["Project actions"].waitForExistence(timeout: 10))
+            app.buttons["Project actions"].tap()
+            XCTAssertTrue(app.buttons["project-color"].waitForExistence(timeout: 5))
+            app.buttons["project-color"].tap()
+            XCTAssertTrue(app.buttons[name].waitForExistence(timeout: 5))
+        }
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        choose("Green")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label IN %@", ["Default", "Blue", "Green", "Amber", "Rose", "Purple"])).count, 6)
+        capture(app, "project-color-menu")
+        app.buttons["Green"].tap()
+        XCTAssertTrue(app.buttons["folder.Design/Images"].waitForExistence(timeout: 10))
+        capture(app, "project-color-folders")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 10))
+        capture(app, "project-color-projects")
+        app.terminate()
+        app = launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        choose("Green")
+        XCTAssertTrue(app.buttons["Green"].isSelected)
+        XCTAssertFalse(app.buttons["Default"].isSelected)
+        app.buttons["Default"].tap()
+        choose("Default")
+        XCTAssertTrue(app.buttons["Default"].isSelected)
+        app.buttons["Default"].tap()
+    }
     @MainActor func testRichChatGPTConversationAndReopen() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))

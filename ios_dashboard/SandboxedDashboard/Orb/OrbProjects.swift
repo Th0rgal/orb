@@ -18,13 +18,14 @@ struct OrbCircle: View {
     var body: some View { Image(systemName: symbol).font(.system(size: 18, weight: .regular)).frame(width: 26, height: 26) }
 }
 
-/// Match desktop's neutral leading glyph; reserve color for execution status.
+/// Match desktop's neutral leading glyph; only a project's own color tints its folders.
 struct OrbListIcon: View {
     let symbol: String
+    var color: Color?
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: 18, weight: .regular))
-            .foregroundStyle(OrbStyle.icon)
+            .foregroundStyle(color ?? OrbStyle.icon)
             .frame(width: 22, height: 24)
             .accessibilityHidden(true)
     }
@@ -42,6 +43,7 @@ struct OrbHome: View {
     @State private var renaming: OrbRow?
     @State private var renamedTitle = ""
     private let api = OrbCore.shared
+    private let appearance = OrbProjectAppearance.shared
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -50,13 +52,14 @@ struct OrbHome: View {
                     ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
                         NavigationLink { OrbProjectPage(project: project) } label: {
                             HStack(spacing: 16) {
-                                OrbListIcon(symbol: "folder")
+                                OrbListIcon(symbol: "folder", color: appearance.color(project.id))
                                 Text(project.name).font(.title3).foregroundStyle(.primary)
                                 Spacer(); Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                             }.padding(.vertical, 14).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 42) }
                         }.accessibilityIdentifier("project.\(project.id)")
                         .contextMenu {
                             Button("Rename") { renamedTitle = project.name; renaming = project }
+                            OrbProjectColorMenu(project: project.id)
                             Button("Archive") { Task { do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")])); await load() } catch { self.error = error.localizedDescription } } }
                         }
                     }
@@ -90,7 +93,10 @@ struct OrbHome: View {
         defer { loading = false }
         if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = cached["projects"].items.map { OrbRow($0, project: true) } }
         do {
+            let requested = Date(), endpoint = api.endpoint
             let value = try await api.call("/api/projects")
+            // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
+            Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             try OrbDisk.save(value, key: "projects"); error = ""
             // Warm only the first project; never fan out across the entire account.
@@ -117,6 +123,7 @@ struct OrbProjectPage: View {
     @State private var newFolder = false
     @State private var folderName = ""
     private let api = OrbCore.shared
+    private let appearance = OrbProjectAppearance.shared
     private var visible: [OrbRow] {
         missions.filter { row in
             (search.isEmpty || row.name.localizedCaseInsensitiveContains(search)) &&
@@ -154,6 +161,7 @@ struct OrbProjectPage: View {
             ToolbarItem(placement: .topBarTrailing) { Menu {
                 Picker("Show", selection: $filter) { ForEach(["All", "Working", "Needs attention", "Archived"], id: \.self) { Text($0) } }
                 Button("New folder") { newFolder = true }
+                OrbProjectColorMenu(project: project.id)
                 NavigationLink("Project context") { OrbDocuments(project: project.id, path: "") }
             } label: { OrbCircle(symbol: "ellipsis") }.accessibilityLabel("Project actions") }
         }
@@ -190,7 +198,7 @@ struct OrbProjectPage: View {
                     HStack {
                         Button { if !collapsed.insert(folder).inserted { collapsed.remove(folder) } } label: {
                             HStack(spacing: 10) {
-                                OrbListIcon(symbol: "folder")
+                                OrbListIcon(symbol: "folder", color: appearance.color(project.id))
                                 Text(folder.split(separator: "/").last.map(String.init) ?? folder).font(.headline)
                                 Spacer()
                                 Image(systemName: collapsed.contains(folder) ? "chevron.right" : "chevron.down").font(.system(size: 11)).foregroundStyle(OrbStyle.icon)

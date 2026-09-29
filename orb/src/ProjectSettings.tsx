@@ -1,4 +1,4 @@
-import { projectColor, projectColors, setProjectColor } from "./projectAppearance";
+import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as Ic from "./icons";
@@ -136,7 +136,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
           <section class="s-sec">
             <h3>Appearance</h3>
             <div class="s-card"><div class="s-row">
-              <div class="s-row-text"><div class="s-row-title">Project color</div><div class="s-row-desc">On this device</div></div>
+              <div class="s-row-text"><div class="s-row-title">Project color</div><div class="s-row-desc">{projectColorsSynced() ? "Synced across your devices" : "On this device"}</div></div>
               <div class="ps-colors" role="group" aria-label="Project color"><For each={projectColors}>{color =>
                 <button class="ps-color" title={color.name} aria-label={color.name} aria-pressed={(projectColor(p.slug) ?? "") === color.value}
                   style={{ "--swatch": color.value || "var(--fg-3)" }} onClick={() => { try { setProjectColor(p.slug, color.value); } catch { setSaveError("Couldn’t save project color."); } }} />

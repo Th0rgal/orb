@@ -3,6 +3,7 @@ import { cacheReset } from "./pageCache";
 import type { ClientRunReceipt } from "./clientRuns";
 import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
+import { applyProjectRoster } from "./projectAppearance";
 
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
@@ -466,6 +467,8 @@ export interface ProjectSummary {
   objective?: string | null;
   status: string;
   updated_at: string;
+  /** Palette name, `null` for none; absent on a backend that does not store colors. */
+  color?: string | null;
 }
 
 export interface ProjectFileEntry {
@@ -500,9 +503,12 @@ export async function archiveProject(slug: string): Promise<void> {
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {
+  const fetchedAt = Date.now(), url = getApiUrl();
   const data = await cachedCatalog<{ projects: ProjectSummary[] }>("/api/projects",
     value => !!value && typeof value === "object" && Array.isArray((value as {projects?: unknown}).projects)
       && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"));
+  // Colors ride on the roster; applying them never fails the list.
+  try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(() => {}); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(
     (p) => p.status !== "archived" && p.status !== "deleted" && !archivedSlugs.has(p.slug),
   );
