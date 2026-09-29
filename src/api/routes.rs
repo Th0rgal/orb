@@ -208,6 +208,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let ai_providers = Arc::new(
         crate::ai_providers::AIProviderStore::new(config.working_dir.join(AI_PROVIDERS_PATH)).await,
     );
+    super::ai_providers::register_shared_provider_store(Arc::clone(&ai_providers));
     let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
     let pending_github_oauth = Arc::new(RwLock::new(HashMap::new()));
     let github_connection = Arc::new(

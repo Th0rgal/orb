@@ -3917,6 +3917,16 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         Some(TerminalReason::RateLimited | TerminalReason::AuthError)
     ) {
         let rotation_reason = result.terminal_reason;
+        // An alternate account whose access token expired is refreshed, not
+        // skipped: it may be the only one with quota left.
+        let refreshed = crate::api::ai_providers::refresh_expired_anthropic_store_accounts().await;
+        if refreshed > 0 {
+            tracing::info!(
+                mission_id = %mission_id,
+                refreshed,
+                "Refreshed expired Anthropic accounts before rotation"
+            );
+        }
         let rotation_accounts = anthropic_rotation_accounts(workspace, work_dir, app_working_dir);
         if !rotation_accounts.accounts.is_empty() {
             tracing::info!(

@@ -874,6 +874,135 @@ pub struct ResolvedEntry {
     pub subscription_key: Option<SubscriptionKey>,
 }
 
+/// Brings an expired store OAuth access token back to life while a chain is
+/// being resolved, so an account that still holds a refresh token is used
+/// instead of dropped. Injected so tests never reach a provider.
+#[async_trait::async_trait]
+pub trait StoreOAuthRefresher: Send + Sync {
+    /// Returns true when the store now holds a fresh access token for
+    /// `account_id`.
+    async fn refresh(
+        &self,
+        ai_providers: &crate::ai_providers::AIProviderStore,
+        account_id: Uuid,
+        provider_type: crate::ai_providers::ProviderType,
+        refresh_token: &str,
+    ) -> bool;
+}
+
+/// How long chain resolution waits for a refresh before moving on without the
+/// account. The refresh itself keeps running.
+const OAUTH_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// After a failed refresh the account is not retried on every resolution.
+const OAUTH_REFRESH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+static OAUTH_REFRESH_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Production refresher: the single locked writer for store-account OAuth
+/// rotation (`refresh_store_account_oauth_locked`), which also refuses
+/// credentials CLIProxyAPI owns.
+pub struct LockedStoreOAuthRefresher;
+
+#[async_trait::async_trait]
+impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
+    async fn refresh(
+        &self,
+        ai_providers: &crate::ai_providers::AIProviderStore,
+        account_id: Uuid,
+        provider_type: crate::ai_providers::ProviderType,
+        refresh_token: &str,
+    ) -> bool {
+        let recently_failed = OAUTH_REFRESH_FAILURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&account_id)
+            .is_some_and(|at| at.elapsed() < OAUTH_REFRESH_RETRY_AFTER);
+        if recently_failed {
+            return false;
+        }
+        // Detached: a rotating refresh token is consumed by the request, so a
+        // caller that goes away (client disconnect) must not abandon the
+        // rotation before the new pair is stored.
+        let store = ai_providers.clone();
+        let token = refresh_token.to_string();
+        let task = tokio::spawn(async move {
+            crate::api::ai_providers::refresh_store_account_oauth_locked(
+                &store,
+                account_id,
+                provider_type,
+                &token,
+            )
+            .await
+        });
+        let outcome = match tokio::time::timeout(OAUTH_REFRESH_WAIT, task).await {
+            Ok(Ok(Ok(_))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(error.to_string()),
+            Ok(Err(error)) => Err(format!("refresh task failed: {error}")),
+            Err(_) => Err("refresh still running".to_string()),
+        };
+        let mut failures = OAUTH_REFRESH_FAILURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match outcome {
+            Ok(()) => {
+                failures.remove(&account_id);
+                tracing::info!(
+                    account_id = %account_id,
+                    provider = provider_type.id(),
+                    "Refreshed expired OAuth token while resolving accounts"
+                );
+                true
+            }
+            Err(error) => {
+                failures.insert(account_id, std::time::Instant::now());
+                tracing::warn!(
+                    account_id = %account_id,
+                    provider = provider_type.id(),
+                    error = %error,
+                    "Could not refresh expired OAuth token while resolving accounts"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Tests resolve without a refresher unless they inject one, so no test can
+/// send a fixture token to a provider.
+fn default_oauth_refresher() -> Option<&'static dyn StoreOAuthRefresher> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        Some(&LockedStoreOAuthRefresher)
+    }
+}
+
+/// An OAuth-only store account sandboxed.sh owns, whose access token is
+/// expired (or about to be) and which still holds a usable refresh token.
+fn store_oauth_is_refreshable(
+    provider_type: crate::ai_providers::ProviderType,
+    account: &crate::ai_providers::AIProvider,
+    now_ms: i64,
+) -> bool {
+    use crate::ai_providers::ProviderType as PT;
+    if !matches!(provider_type, PT::Anthropic | PT::OpenAI) || account.api_key.is_some() {
+        return false;
+    }
+    let Some(oauth) = account.oauth.as_ref() else {
+        return false;
+    };
+    oauth.expires_at <= now_ms + 60_000
+        && !oauth.refresh_token.trim().is_empty()
+        && !crate::api::ai_providers::provider_refresh_token_is_rejected(account)
+        && !crate::api::oauth_owner::cli_proxy_owns(provider_type)
+}
+
 /// In-memory store for model chains, persisted to disk as JSON.
 #[derive(Debug, Clone)]
 pub struct ModelChainStore {
@@ -1315,6 +1444,26 @@ impl ModelChainStore {
         standard_accounts: &[StandardAccount],
         health_tracker: &ProviderHealthTracker,
     ) -> Vec<ResolvedEntry> {
+        self.resolve_entries_with_refresher(
+            entries,
+            ai_providers,
+            standard_accounts,
+            health_tracker,
+            default_oauth_refresher(),
+        )
+        .await
+    }
+
+    /// [`Self::resolve_entries`] with an explicit OAuth refresher (`None`
+    /// drops expired accounts, the behaviour before refresh-on-resolve).
+    pub async fn resolve_entries_with_refresher(
+        &self,
+        entries: &[ChainEntry],
+        ai_providers: &crate::ai_providers::AIProviderStore,
+        standard_accounts: &[StandardAccount],
+        health_tracker: &ProviderHealthTracker,
+        refresher: Option<&dyn StoreOAuthRefresher>,
+    ) -> Vec<ResolvedEntry> {
         let mut resolved = Vec::new();
 
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1339,7 +1488,36 @@ impl ModelChainStore {
                 std::collections::HashSet::new();
 
             // 1. Check AIProviderStore (custom providers, multi-account)
-            let store_accounts = ai_providers.get_all_by_type(provider_type).await;
+            let mut store_accounts = ai_providers.get_all_by_type(provider_type).await;
+            // An Anthropic OAuth access token is forwarded as the credential,
+            // so an expired one is refreshed here, under the store's refresh
+            // lock, before the account is looked at. OpenAI (Codex) tokens
+            // are refreshed by the proxy when the request is sent.
+            if let Some(refresher) = refresher {
+                let mut refreshed = false;
+                for account in &store_accounts {
+                    if provider_type != crate::ai_providers::ProviderType::Anthropic
+                        || !store_oauth_is_refreshable(provider_type, account, now_ms)
+                        || !health_tracker.is_healthy(account.id).await
+                    {
+                        continue;
+                    }
+                    let Some(oauth) = account.oauth.as_ref() else {
+                        continue;
+                    };
+                    refreshed |= refresher
+                        .refresh(
+                            ai_providers,
+                            account.id,
+                            provider_type,
+                            &oauth.refresh_token,
+                        )
+                        .await;
+                }
+                if refreshed {
+                    store_accounts = ai_providers.get_all_by_type(provider_type).await;
+                }
+            }
             let mut store_contributed_entry = false;
 
             for account in &store_accounts {
@@ -1446,8 +1624,16 @@ impl ModelChainStore {
                         && account.api_key.is_none()
                         && account.oauth.is_some()
                         && crate::api::ai_providers::xai_cli_proxy_account_available();
+                // A Codex account sandboxed.sh owns is refreshed under its own
+                // lock when the proxy prepares it for a request
+                // (`prepare_codex_oauth_account_for_launch`), so an expired
+                // access token does not make it unusable.
+                let openai_oauth_refreshable = refresher.is_some()
+                    && provider_type == crate::ai_providers::ProviderType::OpenAI
+                    && store_oauth_is_refreshable(provider_type, account, now_ms);
                 if account.api_key.is_none()
                     && !oauth_is_fresh
+                    && !openai_oauth_refreshable
                     && !google_oauth_routable
                     && !kimi_oauth_routable
                     && !xai_oauth_cli_proxy_routable
@@ -1503,7 +1689,7 @@ impl ModelChainStore {
                         && crate::api::ai_providers::xai_cli_proxy_account_available();
                 let entry_has_oauth = credential_is_oauth_token
                     || (provider_type == crate::ai_providers::ProviderType::OpenAI
-                        && oauth_is_fresh
+                        && (oauth_is_fresh || openai_oauth_refreshable)
                         && routed_api_key.is_none())
                     || google_oauth_routable
                     || xai_oauth_cli_proxy_routable
@@ -2667,5 +2853,215 @@ mod tests {
             .await;
         assert!(tracker.is_healthy(account).await);
         assert!(tracker.subscription_is_healthy(Some(&key)).await);
+    }
+
+    /// Stands in for the locked store refresh: writes a new token pair the way
+    /// a successful refresh does, or fails, and counts its calls.
+    struct FakeRefresher {
+        succeed: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeRefresher {
+        fn new(succeed: bool) -> Self {
+            Self {
+                succeed,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreOAuthRefresher for FakeRefresher {
+        async fn refresh(
+            &self,
+            ai_providers: &AIProviderStore,
+            account_id: Uuid,
+            _provider_type: ProviderType,
+            refresh_token: &str,
+        ) -> bool {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.succeed {
+                return false;
+            }
+            ai_providers
+                .set_oauth_credentials(
+                    account_id,
+                    OAuthCredentials {
+                        access_token: format!("fresh-from-{refresh_token}"),
+                        refresh_token: format!("{refresh_token}-rotated"),
+                        expires_at: future_ms(8),
+                    },
+                )
+                .await
+                .is_some()
+        }
+    }
+
+    fn anthropic_entry() -> ChainEntry {
+        ChainEntry {
+            provider_id: "anthropic".to_string(),
+            model_id: "claude-sonnet".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_refreshes_expired_anthropic_oauth_instead_of_skipping() {
+        let expired = anth_oauth_account("a@example.com", Some("org-a"), past_ms(1));
+        let expired_id = expired.id;
+        let fresh = anth_oauth_account("b@example.com", Some("org-b"), future_ms(4));
+        let store = store_with(vec![expired, fresh]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let tracker = ProviderHealthTracker::new();
+
+        let dropped = chains
+            .resolve_entries_with_refresher(&[anthropic_entry()], &store, &[], &tracker, None)
+            .await;
+        assert_eq!(dropped.len(), 1, "without a refresher it is dropped");
+
+        let refresher = FakeRefresher::new(true);
+        let resolved = chains
+            .resolve_entries_with_refresher(
+                &[anthropic_entry()],
+                &store,
+                &[],
+                &tracker,
+                Some(&refresher),
+            )
+            .await;
+        assert_eq!(
+            refresher.calls(),
+            1,
+            "only the expired account is refreshed"
+        );
+        assert_eq!(resolved.len(), 2);
+        let entry = resolved
+            .iter()
+            .find(|entry| entry.account_id == expired_id)
+            .expect("refreshed account is selectable");
+        assert_eq!(
+            entry.api_key.as_deref(),
+            Some("fresh-from-rt-a@example.com")
+        );
+        assert!(entry.has_oauth);
+    }
+
+    #[tokio::test]
+    async fn resolve_drops_the_account_when_the_refresh_fails() {
+        let expired = anth_oauth_account("a@example.com", Some("org-a"), past_ms(1));
+        let store = store_with(vec![expired]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let refresher = FakeRefresher::new(false);
+        let resolved = chains
+            .resolve_entries_with_refresher(
+                &[anthropic_entry()],
+                &store,
+                &[],
+                &ProviderHealthTracker::new(),
+                Some(&refresher),
+            )
+            .await;
+        assert_eq!(refresher.calls(), 1);
+        assert!(resolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_does_not_refresh_accounts_it_would_not_use() {
+        // In cooldown, without a refresh token, with a rejected refresh
+        // token, or holding an API key: none may reach the OAuth endpoint.
+        let cooling = anth_oauth_account("a@example.com", Some("org-a"), past_ms(1));
+        let cooling_id = cooling.id;
+        let mut no_refresh_token = anth_oauth_account("b@example.com", Some("org-b"), past_ms(1));
+        no_refresh_token.oauth.as_mut().unwrap().refresh_token = String::new();
+        let mut with_key = anth_oauth_account("c@example.com", Some("org-c"), past_ms(1));
+        with_key.api_key = Some("sk-ant-key".to_string());
+        let store = store_with(vec![cooling, no_refresh_token, with_key]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let tracker = ProviderHealthTracker::new();
+        tracker
+            .record_failure(cooling_id, CooldownReason::QuotaExhausted, None)
+            .await;
+        let refresher = FakeRefresher::new(true);
+        let resolved = chains
+            .resolve_entries_with_refresher(
+                &[anthropic_entry()],
+                &store,
+                &[],
+                &tracker,
+                Some(&refresher),
+            )
+            .await;
+        assert_eq!(refresher.calls(), 0);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].api_key.as_deref(), Some("sk-ant-key"));
+    }
+
+    #[tokio::test]
+    async fn resolve_keeps_expired_codex_oauth_for_refresh_at_request_time() {
+        let mut account = AIProvider::new(ProviderType::OpenAI, "Codex".into());
+        account.oauth = Some(OAuthCredentials {
+            access_token: "codex-access".into(),
+            refresh_token: "codex-refresh".into(),
+            expires_at: past_ms(3),
+        });
+        account.status = ProviderStatus::Connected;
+        let id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let entry = ChainEntry {
+            provider_id: "openai".into(),
+            model_id: "gpt-6-astra".into(),
+        };
+        let tracker = ProviderHealthTracker::new();
+
+        let refresher = FakeRefresher::new(true);
+        let resolved = chains
+            .resolve_entries_with_refresher(
+                std::slice::from_ref(&entry),
+                &store,
+                &[],
+                &tracker,
+                Some(&refresher),
+            )
+            .await;
+        assert_eq!(refresher.calls(), 0, "the proxy refreshes Codex on use");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].account_id, id);
+        assert!(resolved[0].api_key.is_none());
+        assert!(resolved[0].has_oauth);
+
+        let dropped = chains
+            .resolve_entries_with_refresher(&[entry], &store, &[], &tracker, None)
+            .await;
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn rejected_refresh_token_is_not_refreshable() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut account = anth_oauth_account("a@example.com", None, past_ms(1));
+        assert!(store_oauth_is_refreshable(
+            ProviderType::Anthropic,
+            &account,
+            now
+        ));
+        use sha2::{Digest, Sha256};
+        account.rejected_oauth_refresh_fingerprint =
+            Some(hex::encode(Sha256::digest(b"rt-a@example.com")));
+        assert!(!store_oauth_is_refreshable(
+            ProviderType::Anthropic,
+            &account,
+            now
+        ));
+        let fresh = anth_oauth_account("b@example.com", None, future_ms(2));
+        assert!(!store_oauth_is_refreshable(
+            ProviderType::Anthropic,
+            &fresh,
+            now
+        ));
     }
 }

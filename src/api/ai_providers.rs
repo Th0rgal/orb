@@ -74,7 +74,9 @@ fn oauth_refresh_token_fingerprint(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn provider_refresh_token_is_rejected(provider: &crate::ai_providers::AIProvider) -> bool {
+pub(crate) fn provider_refresh_token_is_rejected(
+    provider: &crate::ai_providers::AIProvider,
+) -> bool {
     match (
         provider.rejected_oauth_refresh_fingerprint.as_deref(),
         provider.oauth.as_ref(),
@@ -4317,13 +4319,24 @@ pub fn get_all_openai_oauth_accounts(working_dir: &Path) -> Vec<CodexOAuthAccoun
         if (stored_expires_at.is_some() || decoded_expires_at.is_some())
             && oauth_token_expired(expires_at)
         {
-            tracing::warn!(
-                provider_id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>"),
-                account_email = p.get("account_email").and_then(|v| v.as_str()),
-                expires_at,
-                "Skipping expired OpenAI OAuth provider entry for Codex rotation"
-            );
-            continue;
+            // An expired access token is refreshed under the account's lock
+            // when the account is prepared for launch, so the account stays
+            // selectable unless its refresh token is known to be dead or the
+            // credential is CLIProxyAPI's to refresh.
+            let refresh_rejected = p
+                .get("rejected_oauth_refresh_fingerprint")
+                .and_then(|v| v.as_str())
+                .is_some_and(|rejected| rejected == oauth_refresh_token_fingerprint(refresh));
+            if refresh_rejected || crate::api::oauth_owner::cli_proxy_owns(ProviderType::OpenAI) {
+                tracing::warn!(
+                    provider_id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>"),
+                    account_email = p.get("account_email").and_then(|v| v.as_str()),
+                    expires_at,
+                    refresh_rejected,
+                    "Skipping expired OpenAI OAuth provider entry for Codex rotation"
+                );
+                continue;
+            }
         }
         let chatgpt_account_id = match extract_chatgpt_account_id(access) {
             Some(id) => id,
@@ -12275,6 +12288,35 @@ pub async fn refresh_due_store_oauth(
         }
     }
     (found, refreshed)
+}
+
+static SHARED_PROVIDER_STORE: std::sync::OnceLock<Arc<crate::ai_providers::AIProviderStore>> =
+    std::sync::OnceLock::new();
+
+/// Make the provider store reachable from mission runners, which only receive
+/// the app working directory. Refreshing through a second store instance would
+/// leave this one holding (and later rewriting) the revoked token pair.
+pub fn register_shared_provider_store(store: Arc<crate::ai_providers::AIProviderStore>) {
+    let _ = SHARED_PROVIDER_STORE.set(store);
+}
+
+/// Refresh the Anthropic store accounts whose access token is expired, so
+/// account rotation can use them instead of skipping them. Goes through
+/// [`refresh_due_store_oauth`], hence the same lock and ownership rules as the
+/// periodic refresher. Returns how many accounts were refreshed.
+pub async fn refresh_expired_anthropic_store_accounts() -> u32 {
+    let Some(store) = SHARED_PROVIDER_STORE.get().cloned() else {
+        return 0;
+    };
+    // Detached: a cancelled mission must not abandon a token rotation before
+    // the new pair is stored.
+    tokio::spawn(async move {
+        refresh_due_store_oauth(&store, ProviderType::Anthropic, 60_000)
+            .await
+            .1
+    })
+    .await
+    .unwrap_or(0)
 }
 
 /// Refresh a single **store-backed** OAuth account under the global per-type
