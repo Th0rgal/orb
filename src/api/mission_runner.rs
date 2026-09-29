@@ -903,6 +903,23 @@ pub(crate) fn limit_reset_of(
         .max()
 }
 
+const LATE_USAGE_LIMIT: &str = "late_usage_limit";
+
+/// Result data of a turn that delivered its reply and then learned that the
+/// account reached its usage limit.
+pub(crate) fn late_usage_limit_data(message: &str) -> serde_json::Value {
+    serde_json::json!({ LATE_USAGE_LIMIT: message })
+}
+
+fn late_usage_limit(result: &AgentResult) -> Option<String> {
+    result
+        .data
+        .as_ref()?
+        .get(LATE_USAGE_LIMIT)?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// Keep the usage-limit registry in step with a turn run on the credential
 /// `key`: a usage limit parks it until the announced reset (on disk, so a
 /// restart does not forget it), and a served turn proves the allowance is
@@ -915,17 +932,19 @@ fn note_turn_for_limits(
     result: &AgentResult,
 ) {
     let limits = crate::account_limits::shared();
-    if result.success {
+    let late_limit = late_usage_limit(result);
+    if result.success && late_limit.is_none() {
         for key in limit_keys(working_dir, key) {
             limits.clear(&key);
         }
-    } else if result.terminal_reason == Some(TerminalReason::RateLimited)
-        && crate::account_limits::is_usage_limit_message(&result.output)
+    } else if late_limit.is_some()
+        || (result.terminal_reason == Some(TerminalReason::RateLimited)
+            && crate::account_limits::is_usage_limit_message(&result.output))
     {
         let cooldown = crate::account_limits::LimitCooldown::from_message(
             provider,
             account_kind,
-            &result.output,
+            late_limit.as_deref().unwrap_or(&result.output),
         );
         tracing::info!(
             provider,
@@ -14512,6 +14531,27 @@ mod tests {
             super::first_uncapped_credential("default", candidates(), |key| limits.is_cooling(key)),
             None
         );
+    }
+
+    #[test]
+    fn a_limit_reported_after_the_reply_parks_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::account_limits::account_key(uuid::Uuid::new_v4());
+        let reply = AgentResult::success("Done.", 0).with_data(late_usage_limit_data(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
+             purchase more credits or try again at Oct 5th, 2026 2:09 PM.",
+        ));
+        note_turn_for_limits(dir.path(), &key, "openai", "Codex", &reply);
+        assert!(crate::account_limits::shared().is_cooling(&key));
+        // A later served turn without a limit releases it.
+        note_turn_for_limits(
+            dir.path(),
+            &key,
+            "openai",
+            "Codex",
+            &AgentResult::success("Done.", 0),
+        );
+        assert!(!crate::account_limits::shared().is_cooling(&key));
     }
 
     #[test]
