@@ -13,7 +13,7 @@ pub(super) fn guard_start(conn: &Connection, id: Uuid) -> Result<(), String> {
     }
 }
 pub(super) async fn list(store: &SqliteMissionStore, id: Uuid) -> Result<Vec<Transfer>, String> {
-    let conn = store.conn.clone();
+    let conn = store.reader();
     tokio::task::spawn_blocking(move || {
         let c = conn.blocking_lock();
         let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='machine_transfers')", [], |r| r.get(0)).map_err(error)?;
