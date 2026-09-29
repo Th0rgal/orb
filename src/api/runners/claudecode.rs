@@ -3444,6 +3444,19 @@ pub fn run_claudecode_turn<'a>(
     }) // end Box::pin(async move { ... })
 }
 
+/// Whether rotation moves on to the next account after this result. A
+/// rate limit or an auth failure belongs to the account. So does an alternate
+/// that died before emitting any event: it says nothing about the accounts
+/// after it, and stopping there failed a mission whose second alternate had
+/// quota (mission f0fbffbb, 2026-09-29). Any other error would repeat on
+/// every account.
+fn rotation_continues_after(result: &AgentResult) -> bool {
+    matches!(
+        result.terminal_reason,
+        Some(TerminalReason::RateLimited | TerminalReason::AuthError)
+    ) || (!result.success && claudecode_result_is_startup_transport_failure(result))
+}
+
 fn claudecode_result_is_startup_transport_failure(result: &AgentResult) -> bool {
     result
         .data
@@ -3599,6 +3612,26 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         }
     }
 
+    // The default credential is skipped while it is parked on a usage limit
+    // and another account is not: the turn starts on that account instead of
+    // spending its first attempt on the exhausted one. A native interactive
+    // session keeps the default credential.
+    let primary_override = if native_plan_request {
+        None
+    } else {
+        claude_override_around_usage_limit(workspace, work_dir, app_working_dir)
+    };
+    if primary_override.is_some() {
+        tracing::info!(
+            mission_id = %mission_id,
+            "Default Anthropic credential is parked on a usage limit; starting on another account"
+        );
+    }
+    let mut primary_limit_key = match &primary_override {
+        Some(auth) => Some(claude_auth_limit_key(app_working_dir, auth)),
+        None => default_claude_limit_key(workspace, work_dir, app_working_dir),
+    };
+
     let mut result = run_claudecode_turn(
         workspace,
         work_dir,
@@ -3615,7 +3648,8 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         first_turn_is_continuation,
         tool_hub.clone(),
         status.clone(),
-        None, // override_auth: use default credential resolution
+        // `None` uses default credential resolution.
+        primary_override.clone(),
         false,
     )
     .await;
@@ -3652,7 +3686,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
             is_continuation,
             tool_hub.clone(),
             status.clone(),
-            None,
+            primary_override.clone(),
             true,
         )
         .await;
@@ -3699,7 +3733,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     true,
                     tool_hub.clone(),
                     status.clone(),
-                    None,
+                    primary_override.clone(),
                     force_argv_prompt,
                 )
                 .await;
@@ -3772,7 +3806,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     false,
                     tool_hub.clone(),
                     status.clone(),
-                    None,
+                    primary_override.clone(),
                     force_argv_prompt,
                 )
                 .await;
@@ -3904,7 +3938,14 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
             force_argv_prompt,
         )
         .await;
+        // That retry ran on the default credential, whatever the turn
+        // started on: its outcome belongs to that credential.
+        if primary_override.is_some() {
+            primary_limit_key = default_claude_limit_key(workspace, work_dir, app_working_dir);
+        }
     }
+
+    note_claude_turn_for_limits(app_working_dir, primary_limit_key.as_deref(), &result);
 
     // Account rotation: if rate-limited, or if auth still fails after
     // one refresh attempt, try alternate Anthropic credentials.
@@ -3917,6 +3958,19 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         Some(TerminalReason::RateLimited | TerminalReason::AuthError)
     ) {
         let rotation_reason = result.terminal_reason;
+        // Kept in case every alternate dies at startup: the turn then ends
+        // on what is known, the limit, not on a transport error.
+        let limited_result = result.clone();
+        // An alternate account whose access token expired is refreshed, not
+        // skipped: it may be the only one with quota left.
+        let refreshed = crate::api::ai_providers::refresh_expired_anthropic_store_accounts().await;
+        if refreshed > 0 {
+            tracing::info!(
+                mission_id = %mission_id,
+                refreshed,
+                "Refreshed expired Anthropic accounts before rotation"
+            );
+        }
         let rotation_accounts = anthropic_rotation_accounts(workspace, work_dir, app_working_dir);
         if !rotation_accounts.accounts.is_empty() {
             tracing::info!(
@@ -3931,6 +3985,19 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                 if cancel.is_cancelled() {
                     break;
                 }
+                // The account this turn already ran on, or one parked until
+                // its usage limit resets, would only fail again.
+                let alt_limit_key = claude_auth_limit_key(app_working_dir, &alt_auth);
+                let already_limited = rotation_reason == Some(TerminalReason::RateLimited)
+                    && primary_limit_key.as_deref() == Some(alt_limit_key.as_str());
+                if already_limited || limit_reset_of(app_working_dir, &alt_limit_key).is_some() {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        rotation_attempt = idx + 1,
+                        "Skipping Anthropic account parked on a usage limit"
+                    );
+                    continue;
+                }
                 rotated_anthropic_account = true;
                 tracing::info!(
                     mission_id = %mission_id,
@@ -3941,42 +4008,67 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     },
                     "Rotating to alternate Anthropic account"
                 );
-                result = run_claudecode_turn(
-                    workspace,
-                    work_dir,
-                    &effective_msg,
-                    model,
-                    model_effort,
-                    agent,
-                    mission_id,
-                    events_tx.clone(),
-                    cancel.clone(),
-                    secrets.clone(),
-                    app_working_dir,
-                    effective_sid.as_deref(),
-                    is_continuation,
-                    tool_hub.clone(),
-                    status.clone(),
-                    Some(alt_auth),
-                    force_argv_prompt,
-                )
-                .await;
+                // The session of the account that just hit its limit is still
+                // being torn down. An alternate started in that window exits
+                // at once: give the same account a second start before moving
+                // on, since it may be the only one with quota.
+                for start in 0..2 {
+                    if start > 0 {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            rotation_attempt = idx + 1,
+                            "Alternate Anthropic account died at startup; starting it once more"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    result = run_claudecode_turn(
+                        workspace,
+                        work_dir,
+                        &effective_msg,
+                        model,
+                        model_effort,
+                        agent,
+                        mission_id,
+                        events_tx.clone(),
+                        cancel.clone(),
+                        secrets.clone(),
+                        app_working_dir,
+                        effective_sid.as_deref(),
+                        is_continuation,
+                        tool_hub.clone(),
+                        status.clone(),
+                        Some(alt_auth.clone()),
+                        force_argv_prompt,
+                    )
+                    .await;
+                    if result.success
+                        || !claudecode_result_is_startup_transport_failure(&result)
+                        || cancel.is_cancelled()
+                    {
+                        break;
+                    }
+                }
+                note_claude_turn_for_limits(app_working_dir, Some(&alt_limit_key), &result);
                 // Continue rotating on account-specific failures.
                 // Other LLM errors (model errors, context limit, etc.)
                 // would fail on every account, so stop early to avoid
                 // masking the real failure.
-                match result.terminal_reason {
-                    Some(TerminalReason::RateLimited | TerminalReason::AuthError) => {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            rotation_attempt = idx + 1,
-                            ?result.terminal_reason,
-                            "Anthropic credential failed; rotating to next account"
-                        );
-                        continue;
-                    }
-                    _ => break,
+                if !rotation_continues_after(&result) {
+                    break;
                 }
+                tracing::info!(
+                    mission_id = %mission_id,
+                    rotation_attempt = idx + 1,
+                    ?result.terminal_reason,
+                    startup_failure = claudecode_result_is_startup_transport_failure(&result),
+                    "Anthropic credential failed; rotating to next account"
+                );
+            }
+            if !result.success
+                && claudecode_result_is_startup_transport_failure(&result)
+                && rotation_reason == Some(TerminalReason::RateLimited)
+            {
+                result = limited_result;
             }
         }
     }
@@ -4285,5 +4377,41 @@ mod opus_55_tests {
             }
         }
         assert_eq!(claude_thinking_budget(Some("claude-opus-5"), "high"), 16000);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::rotation_continues_after;
+    use crate::agents::{AgentResult, TerminalReason};
+
+    fn failed(reason: TerminalReason) -> AgentResult {
+        AgentResult::failure("failed".to_string(), 0).with_terminal_reason(reason)
+    }
+
+    #[test]
+    fn rotation_moves_on_after_account_failures_and_dead_starts() {
+        assert!(rotation_continues_after(&failed(
+            TerminalReason::RateLimited
+        )));
+        assert!(rotation_continues_after(&failed(TerminalReason::AuthError)));
+        // The alternate exited before any event (mission f0fbffbb).
+        let dead_start = failed(TerminalReason::LlmError).with_data(serde_json::json!({
+            "claudecode_transport_failure": { "stage": "startup" }
+        }));
+        assert!(rotation_continues_after(&dead_start));
+    }
+
+    #[test]
+    fn rotation_stops_on_results_that_would_repeat_or_succeeded() {
+        assert!(!rotation_continues_after(&failed(TerminalReason::LlmError)));
+        assert!(!rotation_continues_after(&failed(
+            TerminalReason::InfiniteLoop
+        )));
+        assert!(!rotation_continues_after(&AgentResult::success("done", 0)));
+        let mid_turn = failed(TerminalReason::LlmError).with_data(serde_json::json!({
+            "claudecode_transport_failure": { "stage": "mid_turn" }
+        }));
+        assert!(!rotation_continues_after(&mid_turn));
     }
 }

@@ -783,3 +783,60 @@ async fn codex_continuity_snapshot_drain_retains_errors_requests_and_nonmatching
         format!("{:?}", std::collections::VecDeque::from(retained))
     );
 }
+
+fn unused_binding(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("mission.json");
+    let binding = continuity::Binding {
+        version: 1,
+        identity: continuity::Identity {
+            mission_id: Uuid::new_v4(),
+            workspace_id: Uuid::nil(),
+            cwd: dir.to_path_buf(),
+            home: dir.to_path_buf(),
+            codex_home: dir.join(".codex"),
+            directory_ids: vec![],
+            account: continuity::account_fingerprint("oauth", "capped-account"),
+        },
+        thread_id: Some("thread-on-capped-account".into()),
+        goal_seen: true,
+    };
+    std::fs::write(&path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    std::fs::write(path.with_extension("lock"), b"").unwrap();
+    path
+}
+
+#[test]
+fn a_thread_that_did_nothing_is_released_for_another_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = unused_binding(dir.path());
+    assert!(continuity::release_unused(&path).unwrap());
+    assert!(continuity::read(&path).unwrap().is_none());
+
+    // An empty journal is still an unused thread.
+    let path = unused_binding(dir.path());
+    std::fs::write(path.with_extension("tools.json"), b"[]").unwrap();
+    assert!(continuity::release_unused(&path).unwrap());
+    assert!(!path.with_extension("tools.json").exists());
+}
+
+#[test]
+fn a_thread_that_ran_a_tool_or_is_attached_keeps_its_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = unused_binding(dir.path());
+    std::fs::write(
+        path.with_extension("tools.json"),
+        br#"[{"status":"completed","descriptor":{"id":"exec-1","name":"bash"}}]"#,
+    )
+    .unwrap();
+    assert!(!continuity::release_unused(&path).unwrap());
+    assert!(continuity::read(&path).unwrap().is_some());
+
+    std::fs::remove_file(path.with_extension("tools.json")).unwrap();
+    let attached = std::fs::File::open(path.with_extension("lock")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&attached).unwrap();
+    assert!(!continuity::release_unused(&path).unwrap());
+    assert!(continuity::read(&path).unwrap().is_some());
+
+    // Nothing to release for a mission that never started a thread.
+    assert!(!continuity::release_unused(&dir.path().join("absent.json")).unwrap());
+}

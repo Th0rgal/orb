@@ -74,7 +74,9 @@ fn oauth_refresh_token_fingerprint(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn provider_refresh_token_is_rejected(provider: &crate::ai_providers::AIProvider) -> bool {
+pub(crate) fn provider_refresh_token_is_rejected(
+    provider: &crate::ai_providers::AIProvider,
+) -> bool {
     match (
         provider.rejected_oauth_refresh_fingerprint.as_deref(),
         provider.oauth.as_ref(),
@@ -3013,6 +3015,62 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
     entries.into_iter().map(|(_, _, auth)| auth).collect()
 }
 
+/// The provider-store account an Anthropic credential belongs to, matched on
+/// its API key, access token or refresh token. `None` for a credential that
+/// only lives in the host credential tiers.
+pub(crate) fn anthropic_store_account_for_credential(
+    working_dir: &Path,
+    secret: &str,
+    refresh_token: Option<&str>,
+) -> Option<uuid::Uuid> {
+    let matches = |value: Option<&serde_json::Value>, wanted: &str| {
+        !wanted.trim().is_empty() && value.and_then(|v| v.as_str()) == Some(wanted)
+    };
+    load_ai_providers(working_dir).iter().find_map(|provider| {
+        if provider.get("provider_type").and_then(|v| v.as_str()) != Some("anthropic") {
+            return None;
+        }
+        let oauth = provider.get("oauth");
+        let owns = matches(provider.get("api_key"), secret)
+            || matches(oauth.and_then(|o| o.get("access_token")), secret)
+            || refresh_token.is_some_and(|refresh| {
+                matches(oauth.and_then(|o| o.get("refresh_token")), refresh)
+            });
+        if !owns {
+            return None;
+        }
+        provider
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    })
+}
+
+/// Usage-limit registry keys of a provider-store account: its own, and the
+/// one of the subscription it shares with sibling records (same organization
+/// or login). A limit hit through one record exhausts the allowance of all of
+/// them, so the harness rotation paths park and release both, like the proxy.
+pub(crate) fn store_account_limit_keys(working_dir: &Path, account_id: uuid::Uuid) -> Vec<String> {
+    let mut keys = vec![crate::account_limits::account_key(account_id)];
+    let subscription = std::fs::read_to_string(working_dir.join(AI_PROVIDERS_PATH))
+        .ok()
+        .and_then(|contents| {
+            serde_json::from_str::<Vec<crate::ai_providers::AIProvider>>(&contents).ok()
+        })
+        .and_then(|accounts| {
+            accounts
+                .into_iter()
+                .find(|account| account.id == account_id)
+        })
+        .and_then(|account| {
+            crate::provider_health::store_account_subscription_key(account.provider_type, &account)
+        });
+    if let Some(subscription) = subscription {
+        keys.push(crate::account_limits::subscription_key(&subscription.0));
+    }
+    keys
+}
+
 /// Get all available Anthropic credentials for Claude Code, in priority order.
 ///
 /// Collects credentials from all sources:
@@ -4317,13 +4375,24 @@ pub fn get_all_openai_oauth_accounts(working_dir: &Path) -> Vec<CodexOAuthAccoun
         if (stored_expires_at.is_some() || decoded_expires_at.is_some())
             && oauth_token_expired(expires_at)
         {
-            tracing::warn!(
-                provider_id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>"),
-                account_email = p.get("account_email").and_then(|v| v.as_str()),
-                expires_at,
-                "Skipping expired OpenAI OAuth provider entry for Codex rotation"
-            );
-            continue;
+            // An expired access token is refreshed under the account's lock
+            // when the account is prepared for launch, so the account stays
+            // selectable unless its refresh token is known to be dead or the
+            // credential is CLIProxyAPI's to refresh.
+            let refresh_rejected = p
+                .get("rejected_oauth_refresh_fingerprint")
+                .and_then(|v| v.as_str())
+                .is_some_and(|rejected| rejected == oauth_refresh_token_fingerprint(refresh));
+            if refresh_rejected || crate::api::oauth_owner::cli_proxy_owns(ProviderType::OpenAI) {
+                tracing::warn!(
+                    provider_id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>"),
+                    account_email = p.get("account_email").and_then(|v| v.as_str()),
+                    expires_at,
+                    refresh_rejected,
+                    "Skipping expired OpenAI OAuth provider entry for Codex rotation"
+                );
+                continue;
+            }
         }
         let chatgpt_account_id = match extract_chatgpt_account_id(access) {
             Some(id) => id,
@@ -4655,8 +4724,45 @@ pub struct ProviderResponse {
     /// Account identifier (email or username) from the connected OAuth account
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_email: Option<String>,
+    /// Set while the account is kept out of rotation after a usage limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown: Option<ProviderCooldownResponse>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Why and until when an account is skipped when accounts are chosen.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ProviderCooldownResponse {
+    pub until: chrono::DateTime<chrono::Utc>,
+    /// Always `usage_limit` today; other reasons use short in-memory pauses.
+    pub reason: &'static str,
+    /// The limit that was hit, as the provider worded it.
+    pub limit: String,
+    /// False when the provider gave no reset time and a default delay applies.
+    pub announced: bool,
+}
+
+/// The usage limit that keeps the account out of rotation: its own, or the
+/// one of the subscription it shares with a sibling record, as selection
+/// sees it.
+fn provider_cooldown(
+    provider: &crate::ai_providers::AIProvider,
+) -> Option<ProviderCooldownResponse> {
+    let limits = crate::account_limits::shared();
+    let subscription =
+        crate::provider_health::store_account_subscription_key(provider.provider_type, provider)
+            .map(|key| crate::account_limits::subscription_key(&key.0));
+    std::iter::once(crate::account_limits::account_key(provider.id))
+        .chain(subscription)
+        .filter_map(|key| limits.active(&key))
+        .max_by_key(|cooldown| cooldown.until)
+        .map(|cooldown| ProviderCooldownResponse {
+            until: cooldown.until,
+            reason: "usage_limit",
+            limit: cooldown.limit,
+            announced: cooldown.announced,
+        })
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -4810,6 +4916,8 @@ fn build_provider_response(
             matches!(auth, Some(AuthKind::OAuth)),
         ),
         account_email,
+        // Host-tier providers have no store account to park.
+        cooldown: None,
         created_at: now,
         updated_at: now,
     }
@@ -4885,6 +4993,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         use_for_backends,
         credential_owner: credential_owner_for(pt, has_oauth),
         account_email: provider.account_email.clone(),
+        cooldown: provider_cooldown(provider),
         created_at: provider.created_at,
         updated_at: provider.updated_at,
     }
@@ -9485,6 +9594,16 @@ async fn live_fetch_and_cache(
         obj.insert("optimize".to_string(), optimize);
     }
 
+    // Account selection orders accounts by this, without calling a provider.
+    if let (Ok(account_id), Some(remaining)) = (
+        uuid::Uuid::parse_str(&id),
+        crate::account_limits::remaining_quota_from_usage(&value),
+    ) {
+        state
+            .health_tracker
+            .record_remaining_quota(account_id, remaining);
+    }
+
     state.provider_usage_cache.insert(id, value.clone()).await;
     Ok(value)
 }
@@ -12275,6 +12394,35 @@ pub async fn refresh_due_store_oauth(
         }
     }
     (found, refreshed)
+}
+
+static SHARED_PROVIDER_STORE: std::sync::OnceLock<Arc<crate::ai_providers::AIProviderStore>> =
+    std::sync::OnceLock::new();
+
+/// Make the provider store reachable from mission runners, which only receive
+/// the app working directory. Refreshing through a second store instance would
+/// leave this one holding (and later rewriting) the revoked token pair.
+pub fn register_shared_provider_store(store: Arc<crate::ai_providers::AIProviderStore>) {
+    let _ = SHARED_PROVIDER_STORE.set(store);
+}
+
+/// Refresh the Anthropic store accounts whose access token is expired, so
+/// account rotation can use them instead of skipping them. Goes through
+/// [`refresh_due_store_oauth`], hence the same lock and ownership rules as the
+/// periodic refresher. Returns how many accounts were refreshed.
+pub async fn refresh_expired_anthropic_store_accounts() -> u32 {
+    let Some(store) = SHARED_PROVIDER_STORE.get().cloned() else {
+        return 0;
+    };
+    // Detached: a cancelled mission must not abandon a token rotation before
+    // the new pair is stored.
+    tokio::spawn(async move {
+        refresh_due_store_oauth(&store, ProviderType::Anthropic, 60_000)
+            .await
+            .1
+    })
+    .await
+    .unwrap_or(0)
 }
 
 /// Refresh a single **store-backed** OAuth account under the global per-type

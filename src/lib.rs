@@ -33,6 +33,7 @@
 //! - `task`: Task definitions and lightweight cost tracking
 //! - `opencode`: OpenCode API client
 
+pub mod account_limits;
 pub mod agents;
 pub mod ai_providers;
 pub mod api;

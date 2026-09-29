@@ -613,6 +613,10 @@ pub(crate) struct TerminalVerdict {
     pub(crate) content: String,
     /// Reason recorded on the mission/lease when the mission is finalized.
     pub(crate) status_reason: &'static str,
+    /// The error the harness itself reported, when it reported one. Failure
+    /// classification reads this rather than the whole report, whose
+    /// diagnostics quote arbitrary output.
+    pub(crate) cli_error: Option<String>,
 }
 
 pub(crate) struct NativeGrokObserver {
@@ -1145,6 +1149,7 @@ impl NativeGrokObserver {
             success,
             content,
             status_reason,
+            cli_error: self.stream.error.clone(),
         }
     }
 }

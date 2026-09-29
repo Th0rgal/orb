@@ -208,6 +208,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let ai_providers = Arc::new(
         crate::ai_providers::AIProviderStore::new(config.working_dir.join(AI_PROVIDERS_PATH)).await,
     );
+    super::ai_providers::register_shared_provider_store(Arc::clone(&ai_providers));
     let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
     let pending_github_oauth = Arc::new(RwLock::new(HashMap::new()));
     let github_connection = Arc::new(
@@ -217,6 +218,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .await,
     );
     let pending_github_integration = Arc::new(RwLock::new(HashMap::new()));
+
+    // Usage-limit cooldowns outlive the process: load them before anything
+    // selects an account.
+    crate::account_limits::shared().attach(
+        config
+            .working_dir
+            .join(".sandboxed-sh")
+            .join(crate::account_limits::COOLDOWNS_FILE),
+    );
 
     // Initialize provider health tracker and model chain store
     let health_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
@@ -652,6 +662,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Re-attach poll loops for async remote jobs that were in flight when
     // the previous process exited (durable handles in remote-jobs.json).
     super::control::spawn_remote_job_reconciler(Arc::clone(&state));
+    super::control::spawn_remote_usage_limit_replayer(Arc::clone(&state));
 
     // Start background OAuth token refresher task
     {

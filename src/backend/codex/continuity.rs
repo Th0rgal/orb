@@ -111,6 +111,47 @@ pub fn read(path: &Path) -> anyhow::Result<Option<Binding>> {
     }
 }
 
+/// Forget a native thread that has done nothing, so another account can start
+/// a fresh one. Returns false, and changes nothing, when the thread ran a tool
+/// or another process is attached to it.
+///
+/// A mission whose first turn hits a usage limit would otherwise stay bound
+/// to the exhausted account: the binding is written before the first model
+/// call, and a bound thread never changes account.
+pub fn release_unused(path: &Path) -> anyhow::Result<bool> {
+    let lock = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("codex_continuity_unavailable: open native lock"),
+    };
+    if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+        return Ok(false);
+    }
+    let _lock = LockedFile(lock);
+    if read(path)?.is_none() {
+        return Ok(false);
+    }
+    let journal = path.with_extension("tools.json");
+    match std::fs::read(&journal) {
+        Ok(bytes) => {
+            let entries: serde_json::Value = serde_json::from_slice(&bytes)
+                .context("codex_continuity_invalid: malformed tool journal")?;
+            if entries.as_array().is_none_or(|calls| !calls.is_empty()) {
+                return Ok(false);
+            }
+            std::fs::remove_file(&journal)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("codex_continuity_unavailable: read tool journal"),
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
 /// Held until the app-server has stopped. Existing actor/track fences remain
 /// authoritative; this also excludes two processes attaching one native thread.
 pub struct Lease {
