@@ -3015,6 +3015,37 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
     entries.into_iter().map(|(_, _, auth)| auth).collect()
 }
 
+/// The provider-store account an Anthropic credential belongs to, matched on
+/// its API key, access token or refresh token. `None` for a credential that
+/// only lives in the host credential tiers.
+pub(crate) fn anthropic_store_account_for_credential(
+    working_dir: &Path,
+    secret: &str,
+    refresh_token: Option<&str>,
+) -> Option<uuid::Uuid> {
+    let matches = |value: Option<&serde_json::Value>, wanted: &str| {
+        !wanted.trim().is_empty() && value.and_then(|v| v.as_str()) == Some(wanted)
+    };
+    load_ai_providers(working_dir).iter().find_map(|provider| {
+        if provider.get("provider_type").and_then(|v| v.as_str()) != Some("anthropic") {
+            return None;
+        }
+        let oauth = provider.get("oauth");
+        let owns = matches(provider.get("api_key"), secret)
+            || matches(oauth.and_then(|o| o.get("access_token")), secret)
+            || refresh_token.is_some_and(|refresh| {
+                matches(oauth.and_then(|o| o.get("refresh_token")), refresh)
+            });
+        if !owns {
+            return None;
+        }
+        provider
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    })
+}
+
 /// Get all available Anthropic credentials for Claude Code, in priority order.
 ///
 /// Collects credentials from all sources:

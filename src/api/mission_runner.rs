@@ -880,6 +880,33 @@ pub(crate) fn clear_codex_account_cooldown(fingerprint: &str) {
     map.remove(fingerprint);
 }
 
+/// Keep the usage-limit registry in step with a Codex turn: a credential that
+/// reports a usage limit is parked until the announced reset (on disk, so a
+/// restart does not forget it), and a served turn proves the allowance is
+/// back. The short in-memory cooldowns above still cover rate and capacity
+/// blips.
+pub(crate) fn note_codex_turn_for_limits(credential: &CodexCredential, result: &AgentResult) {
+    let Some(key) = credential.limit_key() else {
+        return;
+    };
+    let limits = crate::account_limits::shared();
+    if result.success {
+        limits.clear(&key);
+    } else if result.terminal_reason == Some(TerminalReason::RateLimited)
+        && crate::account_limits::is_usage_limit_message(&result.output)
+    {
+        let cooldown =
+            crate::account_limits::LimitCooldown::from_message("openai", "Codex", &result.output);
+        tracing::info!(
+            credential = %credential.label_for_logs(),
+            until = %cooldown.until,
+            announced = cooldown.announced,
+            "Codex account parked until its usage limit resets"
+        );
+        limits.set(&key, cooldown);
+    }
+}
+
 pub(crate) fn codex_cooldown_for_reason(reason: &TerminalReason) -> Option<std::time::Duration> {
     match reason {
         TerminalReason::RateLimited => Some(CODEX_RATE_LIMIT_COOLDOWN),
@@ -915,6 +942,26 @@ impl CodexCredential {
             CodexCredential::OAuth(acc) => format!("oauth:{}", acc.chatgpt_account_id),
             CodexCredential::CliProxy(endpoint) => format!("cliproxy:{}", endpoint.base_url),
         }
+    }
+
+    /// Key of this credential in the usage-limit registry. The proxy rotates
+    /// across its own accounts, so it has none.
+    pub(crate) fn limit_key(&self) -> Option<String> {
+        match self {
+            CodexCredential::ApiKey(key) => Some(crate::account_limits::credential_key(key)),
+            CodexCredential::OAuth(account) => {
+                Some(crate::account_limits::account_key(account.provider_id))
+            }
+            CodexCredential::CliProxy(_) => None,
+        }
+    }
+
+    /// When a usage limit on this credential resets, if it is parked on one.
+    fn limit_reset(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let key = self.limit_key()?;
+        crate::account_limits::shared()
+            .active(&key)
+            .map(|cooldown| cooldown.until)
     }
 
     fn concurrency_limit(&self) -> usize {
@@ -1424,6 +1471,28 @@ fn pick_codex_lease_pool<T>(fresh: Vec<T>, cooled: Vec<T>) -> Vec<T> {
     }
 }
 
+/// Order the lease candidates: credentials that are not parked, most free
+/// slots first; when every candidate is parked, those, soonest usable first.
+fn order_codex_lease_candidates<T>(
+    candidates: Vec<(CodexCredential, T, usize)>,
+) -> Vec<(CodexCredential, T, usize)> {
+    let (mut fresh, mut cooled): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
+        codex_account_cooldown_remaining(&candidate.0.fingerprint()).is_none()
+            && candidate.0.limit_reset().is_none()
+    });
+    fresh.sort_by_key(|candidate| Reverse(candidate.2));
+    // Among parked accounts, the one whose usage limit resets first is the
+    // most likely to work; accounts on a short cooldown only come before it.
+    cooled.sort_by_key(|candidate| (candidate.0.limit_reset(), Reverse(candidate.2)));
+    for candidate in &cooled {
+        tracing::debug!(
+            credential = %candidate.0.label_for_logs(),
+            "Codex credential on usage-cap cooldown; deprioritized for lease"
+        );
+    }
+    pick_codex_lease_pool(fresh, cooled)
+}
+
 pub(crate) async fn lease_codex_account(
     working_dir: &std::path::Path,
     tried_fingerprints: &HashSet<String>,
@@ -1453,19 +1522,7 @@ pub(crate) async fn lease_codex_account(
     // (single-account, or all subscriptions exhausted). Mixing them used to
     // lease the dead weekly-cap account (0 wait) while the healthy one was
     // only at 0/10 permits — P-CONSOLIDATION-1 then died on "try again Aug 20".
-    let (mut fresh, mut cooled): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
-        codex_account_cooldown_remaining(&candidate.0.fingerprint()).is_none()
-    });
-    fresh.sort_by_key(|candidate| Reverse(candidate.2));
-    cooled.sort_by_key(|candidate| Reverse(candidate.2));
-    for candidate in &cooled {
-        tracing::debug!(
-            credential = %candidate.0.label_for_logs(),
-            "Codex credential on usage-cap cooldown; deprioritized for lease"
-        );
-    }
-    let candidates: Vec<(CodexCredential, Arc<Semaphore>, usize)> =
-        pick_codex_lease_pool(fresh, cooled);
+    let candidates = order_codex_lease_candidates(candidates);
 
     for (cred, sem, available) in &candidates {
         if let Ok(permit) = sem.clone().try_acquire_owned() {
@@ -4711,6 +4768,117 @@ fn current_anthropic_auth_for_rotation(
         (None, Some(host)) => Some(host.auth.clone()),
         (None, None) => super::ai_providers::get_anthropic_auth_for_claudecode(app_working_dir),
     }
+}
+
+fn claude_auth_secret(auth: &super::ai_providers::ClaudeCodeAuth) -> &str {
+    match auth {
+        super::ai_providers::ClaudeCodeAuth::ApiKey(secret)
+        | super::ai_providers::ClaudeCodeAuth::OAuthToken(secret) => secret,
+    }
+}
+
+/// Key of an Anthropic credential in the usage-limit registry: the
+/// provider-store account it belongs to, else a digest of the credential.
+fn claude_limit_key(app_working_dir: &Path, secret: &str, refresh_token: Option<&str>) -> String {
+    match super::ai_providers::anthropic_store_account_for_credential(
+        app_working_dir,
+        secret,
+        refresh_token,
+    ) {
+        Some(account_id) => crate::account_limits::account_key(account_id),
+        None => crate::account_limits::credential_key(secret),
+    }
+}
+
+pub(crate) fn claude_auth_limit_key(
+    app_working_dir: &Path,
+    auth: &super::ai_providers::ClaudeCodeAuth,
+) -> String {
+    claude_limit_key(app_working_dir, claude_auth_secret(auth), None)
+}
+
+/// Registry key of the credential a Claude turn uses when it is given no
+/// override: the mission's mirrored CLI login when there is one, else the
+/// credential the runner resolves.
+pub(crate) fn default_claude_limit_key(
+    workspace: &Workspace,
+    mission_work_dir: &Path,
+    app_working_dir: &Path,
+) -> Option<String> {
+    let mission_creds = mission_work_dir.join(".claude").join(".credentials.json");
+    if let Ok(contents) = std::fs::read_to_string(&mission_creds) {
+        let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let oauth = value.get("claudeAiOauth")?;
+        let access = oauth.get("accessToken")?.as_str()?;
+        let refresh = oauth.get("refreshToken").and_then(|v| v.as_str());
+        return Some(claude_limit_key(app_working_dir, access, refresh));
+    }
+    current_anthropic_auth_for_rotation(workspace, mission_work_dir, app_working_dir)
+        .map(|auth| claude_auth_limit_key(app_working_dir, &auth))
+}
+
+/// Keep the usage-limit registry in step with a Claude turn run on the
+/// credential `key`: parked until the announced reset on a usage limit,
+/// released by a served turn.
+pub(crate) fn note_claude_turn_for_limits(key: Option<&str>, result: &AgentResult) {
+    let Some(key) = key else {
+        return;
+    };
+    let limits = crate::account_limits::shared();
+    if result.success {
+        limits.clear(key);
+    } else if result.terminal_reason == Some(TerminalReason::RateLimited)
+        && crate::account_limits::is_usage_limit_message(&result.output)
+    {
+        let cooldown = crate::account_limits::LimitCooldown::from_message(
+            "anthropic",
+            "Claude",
+            &result.output,
+        );
+        tracing::info!(
+            until = %cooldown.until,
+            announced = cooldown.announced,
+            limit = %cooldown.limit,
+            "Claude account parked until its usage limit resets"
+        );
+        limits.set(key, cooldown);
+    }
+}
+
+/// When the default Claude credential is parked on a usage limit, the first
+/// other credential that is not. `None` keeps the default credential: it is
+/// healthy, there is no alternative, or CLIProxyAPI owns the accounts.
+pub(crate) fn claude_override_around_usage_limit(
+    workspace: &Workspace,
+    mission_work_dir: &Path,
+    app_working_dir: &Path,
+) -> Option<super::ai_providers::ClaudeCodeAuth> {
+    if super::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic) {
+        return None;
+    }
+    let limits = crate::account_limits::shared();
+    let default_key = default_claude_limit_key(workspace, mission_work_dir, app_working_dir)?;
+    if !limits.is_cooling(&default_key) {
+        return None;
+    }
+    let candidates = super::ai_providers::get_all_anthropic_auth_for_claudecode(app_working_dir)
+        .into_iter()
+        .map(|auth| (claude_auth_limit_key(app_working_dir, &auth), auth))
+        .collect();
+    first_uncapped_credential(&default_key, candidates, &limits)
+}
+
+/// The first credential, in priority order, that is neither the default one
+/// nor parked on a usage limit.
+fn first_uncapped_credential<T>(
+    default_key: &str,
+    candidates: Vec<(String, T)>,
+    limits: &crate::account_limits::AccountCooldowns,
+) -> Option<T> {
+    candidates
+        .into_iter()
+        .find(|(key, _)| key != default_key && !limits.is_cooling(key))
+        .map(|(_, credential)| credential)
 }
 
 pub(crate) fn anthropic_rotation_accounts(
@@ -14068,5 +14236,213 @@ mod tests {
             "npm install -g @anthropic-ai/claude-code@'2.1.257'"
         );
         assert!(!command.contains("bun install"));
+    }
+
+    fn codex_oauth_credential(name: &str) -> super::CodexCredential {
+        super::CodexCredential::OAuth(crate::api::ai_providers::CodexOAuthAccount {
+            provider_id: uuid::Uuid::new_v4(),
+            chatgpt_account_id: format!("{name}-{}", uuid::Uuid::new_v4()),
+            refresh_token: "refresh".to_string(),
+            access_token: "access".to_string(),
+            expires_at: i64::MAX,
+            account_email: None,
+            priority: 0,
+        })
+    }
+
+    fn usage_limited(message: &str) -> AgentResult {
+        AgentResult::failure(message.to_string(), 0)
+            .with_terminal_reason(TerminalReason::RateLimited)
+    }
+
+    #[test]
+    fn codex_usage_limit_parks_the_account_until_the_announced_reset() {
+        let credential = codex_oauth_credential("capped");
+        let reset = chrono::Utc::now() + chrono::Duration::days(2);
+        let message = format!(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
+             purchase more credits or try again at {} (UTC).",
+            reset.format("%b %-d, %Y %-I:%M %p")
+        );
+        super::note_codex_turn_for_limits(&credential, &usage_limited(&message));
+        let parked = credential.limit_reset().expect("parked");
+        assert!(
+            (parked - reset).num_seconds().abs() < 60,
+            "{parked} vs {reset}"
+        );
+
+        // A transient rate limit does not move the announced reset.
+        super::note_codex_turn_for_limits(&credential, &usage_limited("Error: 429"));
+        assert_eq!(credential.limit_reset(), Some(parked));
+
+        // A served turn proves the allowance is back.
+        super::note_codex_turn_for_limits(&credential, &AgentResult::success("done", 0));
+        assert!(credential.limit_reset().is_none());
+    }
+
+    #[test]
+    fn transient_codex_rate_limit_is_not_parked_until_a_reset() {
+        let credential = codex_oauth_credential("transient");
+        super::note_codex_turn_for_limits(&credential, &usage_limited("status code: 429"));
+        assert!(credential.limit_reset().is_none());
+        let api_key = super::CodexCredential::ApiKey(format!("sk-test-{}", uuid::Uuid::new_v4()));
+        super::note_codex_turn_for_limits(
+            &api_key,
+            &usage_limited("You've hit your usage limit. try again in 2 hours."),
+        );
+        let key = api_key.limit_key().unwrap();
+        assert!(!key.contains("sk-test"), "the registry never holds the key");
+        assert!(api_key.limit_reset().is_some());
+        crate::account_limits::shared().clear(&key);
+    }
+
+    #[test]
+    fn codex_lease_order_skips_accounts_parked_on_a_usage_limit() {
+        let capped = codex_oauth_credential("capped");
+        let capped_later = codex_oauth_credential("capped-later");
+        let healthy = codex_oauth_credential("healthy");
+        super::note_codex_turn_for_limits(
+            &capped,
+            &usage_limited("You've hit your usage limit. try again in 3 hours."),
+        );
+        super::note_codex_turn_for_limits(
+            &capped_later,
+            &usage_limited("You've hit your usage limit. try again in 2 days."),
+        );
+        let fingerprints = |ordered: Vec<(super::CodexCredential, (), usize)>| {
+            ordered
+                .into_iter()
+                .map(|candidate| candidate.0.fingerprint())
+                .collect::<Vec<_>>()
+        };
+
+        // The capped account has every slot free, the healthy one none: the
+        // healthy one is still the only candidate.
+        let ordered = super::order_codex_lease_candidates(vec![
+            (capped_later.clone(), (), 10),
+            (capped.clone(), (), 10),
+            (healthy.clone(), (), 0),
+        ]);
+        assert_eq!(fingerprints(ordered), vec![healthy.fingerprint()]);
+
+        // Every account capped: the one that resets first is tried first.
+        let ordered = super::order_codex_lease_candidates(vec![
+            (capped_later.clone(), (), 10),
+            (capped.clone(), (), 1),
+        ]);
+        assert_eq!(
+            fingerprints(ordered),
+            vec![capped.fingerprint(), capped_later.fingerprint()]
+        );
+
+        for credential in [&capped, &capped_later] {
+            crate::account_limits::shared().clear(&credential.limit_key().unwrap());
+        }
+    }
+
+    #[test]
+    fn claude_credentials_are_keyed_by_their_store_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let account = uuid::Uuid::new_v4();
+        std::fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::json!([
+                {
+                    "id": account.to_string(),
+                    "provider_type": "anthropic",
+                    "oauth": {
+                        "access_token": "store-access",
+                        "refresh_token": "store-refresh",
+                        "expires_at": i64::MAX
+                    }
+                },
+                {
+                    "id": uuid::Uuid::new_v4().to_string(),
+                    "provider_type": "openai",
+                    "api_key": "store-access"
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let expected = crate::account_limits::account_key(account);
+        assert_eq!(
+            super::claude_limit_key(dir.path(), "store-access", None),
+            expected
+        );
+        // A CLI login whose access token was rotated is still recognised by
+        // its refresh token.
+        assert_eq!(
+            super::claude_limit_key(dir.path(), "rotated-access", Some("store-refresh")),
+            expected
+        );
+        let unknown = super::claude_limit_key(dir.path(), "tier-only-token", None);
+        assert_eq!(
+            unknown,
+            crate::account_limits::credential_key("tier-only-token")
+        );
+        assert!(!unknown.contains("tier-only-token"));
+    }
+
+    #[test]
+    fn claude_usage_limit_parks_and_a_served_turn_releases() {
+        let limits = crate::account_limits::shared();
+        let key = crate::account_limits::account_key(uuid::Uuid::new_v4());
+        super::note_claude_turn_for_limits(
+            Some(&key),
+            &usage_limited("You've hit your session limit · resets in 2 hours"),
+        );
+        let parked = limits.active(&key).expect("parked");
+        assert_eq!(parked.limit, "Claude session limit");
+        assert!(parked.announced);
+        assert!(parked.until > chrono::Utc::now() + chrono::Duration::minutes(110));
+
+        // Overload and plain 429s are not usage limits.
+        let other = crate::account_limits::account_key(uuid::Uuid::new_v4());
+        super::note_claude_turn_for_limits(Some(&other), &usage_limited("overloaded_error"));
+        assert!(!limits.is_cooling(&other));
+
+        super::note_claude_turn_for_limits(Some(&key), &AgentResult::success("ok", 0));
+        assert!(!limits.is_cooling(&key));
+    }
+
+    #[test]
+    fn claude_starts_on_the_first_account_that_is_not_capped() {
+        let limits = crate::account_limits::AccountCooldowns::in_memory();
+        let park = |key: &str| {
+            limits.set(
+                key,
+                crate::account_limits::LimitCooldown::from_message(
+                    "anthropic",
+                    "Claude",
+                    "You've hit your session limit · resets in 3 hours",
+                ),
+            )
+        };
+        let candidates = || {
+            vec![
+                ("default".to_string(), "default"),
+                ("second".to_string(), "second"),
+                ("third".to_string(), "third"),
+            ]
+        };
+        park("default");
+        assert_eq!(
+            super::first_uncapped_credential("default", candidates(), &limits),
+            Some("second")
+        );
+        park("second");
+        assert_eq!(
+            super::first_uncapped_credential("default", candidates(), &limits),
+            Some("third")
+        );
+        // Every account capped: keep the default credential.
+        park("third");
+        assert_eq!(
+            super::first_uncapped_credential("default", candidates(), &limits),
+            None
+        );
     }
 }

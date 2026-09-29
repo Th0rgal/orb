@@ -509,6 +509,15 @@ async fn clear_cooldown(
     let uuid = uuid::Uuid::parse_str(&account_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UUID".to_string()))?;
     state.health_tracker.clear_cooldown(uuid).await;
+    // A usage limit also parks the account's shared subscription; clearing
+    // only the account would leave it skipped until the announced reset.
+    if let Some(account) = state.ai_providers.get(uuid).await {
+        if let Some(key) =
+            crate::provider_health::store_account_subscription_key(account.provider_type, &account)
+        {
+            state.health_tracker.clear_subscription_cooldown(&key).await;
+        }
+    }
     Ok(Json(serde_json::json!({ "cleared": true })))
 }
 

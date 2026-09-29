@@ -103,6 +103,126 @@ fn preserved_upstream_error_response(
             response.headers_mut().insert(name, value.clone());
         }
     }
+    // Claude Code reads the subscription limit and its reset time from these
+    // headers; without them a usage limit looks like a plain 429.
+    for (name, value) in response_headers {
+        if name.as_str().starts_with(ANTHROPIC_UNIFIED_LIMIT_PREFIX) {
+            response.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    response
+}
+
+const ANTHROPIC_UNIFIED_LIMIT_PREFIX: &str = "anthropic-ratelimit-unified-";
+
+/// The usage-limit cooldown a 429 announces, or `None` when the 429 is a
+/// transient rate limit. The reset time comes from the Anthropic unified
+/// limit headers, else from the error body; a usage limit that announces
+/// none gets the default delay.
+fn usage_limit_from_429(
+    provider_type: ProviderType,
+    headers: &HeaderMap,
+    retry_after: Option<std::time::Duration>,
+    body: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<crate::account_limits::LimitCooldown> {
+    use crate::account_limits::{describe_limit, LimitCooldown, LimitReset};
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let account_kind = match provider_type {
+        ProviderType::Anthropic => "Claude",
+        ProviderType::OpenAI => "Codex",
+        other => other.display_name(),
+    };
+    let text = String::from_utf8_lossy(body);
+
+    if provider_type == ProviderType::Anthropic
+        && header("anthropic-ratelimit-unified-status")
+            .is_some_and(|status| status.eq_ignore_ascii_case("rejected"))
+    {
+        let announced = header("anthropic-ratelimit-unified-reset")
+            .and_then(|reset| reset.trim().parse::<i64>().ok())
+            .and_then(|reset| chrono::DateTime::<chrono::Utc>::from_timestamp(reset, 0))
+            .filter(|reset| *reset > now && *reset <= now + chrono::Duration::days(35));
+        let limit = match header("anthropic-ratelimit-unified-representative-claim") {
+            Some("five_hour") => "Claude session limit".to_string(),
+            Some(claim) if claim.starts_with("seven_day") => "Claude weekly limit".to_string(),
+            _ => describe_limit(account_kind, &text),
+        };
+        let reset = match announced {
+            Some(at) => LimitReset {
+                at,
+                announced: true,
+            },
+            None => crate::account_limits::limit_reset("", now, crate::account_limits::Zone::UTC),
+        };
+        return Some(LimitCooldown::new(provider_type.id(), limit, reset));
+    }
+
+    let (reason, _) = classify_429(provider_type, retry_after, body);
+    if !matches!(reason, CooldownReason::QuotaExhausted) {
+        return None;
+    }
+    let reset = match crate::account_limits::parse_limit_reset_from_body(body, now) {
+        Some(at) => LimitReset {
+            at,
+            announced: true,
+        },
+        None => crate::account_limits::limit_reset("", now, crate::account_limits::Zone::UTC),
+    };
+    Some(LimitCooldown::new(
+        provider_type.id(),
+        describe_limit(account_kind, &text),
+        reset,
+    ))
+}
+
+/// Every account of the chain is parked on a usage limit: answer the way the
+/// provider does, so the harness reports the limit and its reset time instead
+/// of retrying a cooldown it cannot outlast.
+fn usage_limit_response(
+    protocol: NativeProtocol,
+    chain_id: &str,
+    limit: &crate::account_limits::LimitCooldown,
+) -> Response {
+    let now = chrono::Utc::now();
+    let message = format!(
+        "You've hit your usage limit on every account configured for '{chain_id}' ({}). Try again at {}.",
+        limit.limit,
+        crate::account_limits::format_reset(limit.until, crate::account_limits::Zone::UTC),
+    );
+    let body = match protocol {
+        NativeProtocol::Responses => serde_json::json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "code": "usage_limit_reached",
+                "message": message,
+                "resets_at": limit.until.timestamp(),
+                "resets_in_seconds": (limit.until - now).num_seconds().max(0),
+            }
+        }),
+        NativeProtocol::AnthropicMessages => serde_json::json!({
+            "type": "error",
+            "error": { "type": "rate_limit_error", "message": message }
+        }),
+    };
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    let retry_after = cooldown_retry_after_secs().to_string();
+    if let Ok(value) = HeaderValue::from_str(&retry_after) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    if matches!(protocol, NativeProtocol::AnthropicMessages) {
+        for (name, value) in [
+            ("anthropic-ratelimit-unified-status", "rejected".to_string()),
+            (
+                "anthropic-ratelimit-unified-reset",
+                limit.until.timestamp().to_string(),
+            ),
+        ] {
+            if let Ok(value) = HeaderValue::from_str(&value) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+    }
     response
 }
 
@@ -1274,6 +1394,16 @@ async fn native_protocol_proxy(
             .chain_store
             .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
             .await;
+        let subscriptions = state
+            .chain_store
+            .configured_subscription_keys(&chain_entries, &state.ai_providers)
+            .await;
+        if let Some(limit) = state
+            .health_tracker
+            .earliest_limit_reset(&candidate_ids, &subscriptions)
+        {
+            return usage_limit_response(protocol, &chain_id, &limit);
+        }
         let cooling = state
             .health_tracker
             .any_account_has_active_cooldown(&candidate_ids)
@@ -1538,10 +1668,33 @@ async fn native_protocol_proxy(
             } else {
                 CooldownReason::ServerError
             };
-            state
-                .health_tracker
-                .record_entry_failure(entry, reason, retry_after)
-                .await;
+            // An exhausted usage allowance parks the account until the reset
+            // it announces; the next entry (another account) takes over.
+            let usage_limit = (status == StatusCode::TOO_MANY_REQUESTS)
+                .then(|| {
+                    usage_limit_from_429(
+                        provider_type,
+                        &response_headers,
+                        retry_after,
+                        &response_body,
+                        chrono::Utc::now(),
+                    )
+                })
+                .flatten();
+            match usage_limit {
+                Some(limit) => {
+                    state
+                        .health_tracker
+                        .record_entry_usage_limit(entry, limit)
+                        .await;
+                }
+                None => {
+                    state
+                        .health_tracker
+                        .record_entry_failure(entry, reason, retry_after)
+                        .await;
+                }
+            }
             last_upstream_error = Some((status, response_headers, response_body));
             continue;
         }
@@ -8289,5 +8442,164 @@ mod tests {
         let h = tracker.get_health(account_id).await;
         assert_eq!(h.last_failure_reason, None);
         assert!(h.is_healthy);
+    }
+
+    #[test]
+    fn codex_usage_limit_429_announces_its_reset() {
+        let now = chrono::Utc::now();
+        let resets_at = now.timestamp() + 5 * 3600;
+        let body = format!(
+            r#"{{"error":{{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":{resets_at}}}}}"#
+        );
+        let limit = usage_limit_from_429(
+            ProviderType::OpenAI,
+            &HeaderMap::new(),
+            None,
+            body.as_bytes(),
+            now,
+        )
+        .expect("usage limit");
+        assert_eq!(limit.until.timestamp(), resets_at);
+        assert!(limit.announced);
+        assert_eq!(limit.provider, "openai");
+        assert_eq!(limit.limit, "Codex usage limit");
+    }
+
+    #[test]
+    fn usage_limit_429_without_a_reset_gets_the_default_delay() {
+        let now = chrono::Utc::now();
+        let limit = usage_limit_from_429(
+            ProviderType::OpenAI,
+            &HeaderMap::new(),
+            None,
+            br#"{"error":{"type":"insufficient_quota","message":"You exceeded your current quota"}}"#,
+            now,
+        )
+        .expect("usage limit");
+        assert!(!limit.announced);
+        assert_eq!(limit.until, now + chrono::Duration::hours(1));
+    }
+
+    #[test]
+    fn transient_429_is_not_a_usage_limit() {
+        let now = chrono::Utc::now();
+        let body = br#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded, retry shortly"}}"#;
+        assert!(
+            usage_limit_from_429(ProviderType::OpenAI, &HeaderMap::new(), None, body, now)
+                .is_none()
+        );
+        // A Retry-After marks the 429 transient even with quota wording.
+        assert!(usage_limit_from_429(
+            ProviderType::Zai,
+            &HeaderMap::new(),
+            Some(std::time::Duration::from_secs(20)),
+            br#"{"error":{"message":"The usage limit has been reached"}}"#,
+            now
+        )
+        .is_none());
+        // Anthropic 429 without a rejected subscription status.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-status",
+            "allowed".parse().unwrap(),
+        );
+        assert!(usage_limit_from_429(
+            ProviderType::Anthropic,
+            &headers,
+            Some(std::time::Duration::from_secs(5)),
+            body,
+            now
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn anthropic_rejected_subscription_announces_its_reset_in_headers() {
+        let now = chrono::Utc::now();
+        let reset = now.timestamp() + 2 * 3600;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-status",
+            "rejected".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-reset",
+            reset.to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-representative-claim",
+            "five_hour".parse().unwrap(),
+        );
+        headers.insert("retry-after", "7200".parse().unwrap());
+        let limit = usage_limit_from_429(
+            ProviderType::Anthropic,
+            &headers,
+            Some(std::time::Duration::from_secs(3600)),
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit."}}"#,
+            now,
+        )
+        .expect("usage limit");
+        assert_eq!(limit.until.timestamp(), reset);
+        assert!(limit.announced);
+        assert_eq!(limit.limit, "Claude session limit");
+
+        // The headers reach the harness, which reads the limit from them.
+        let response = preserved_upstream_error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            bytes::Bytes::from_static(b"{}"),
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-status"],
+            "rejected"
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-reset"],
+            reset.to_string().as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_chain_answers_like_the_provider() {
+        let until = chrono::Utc::now() + chrono::Duration::hours(4);
+        let limit = crate::account_limits::LimitCooldown {
+            until,
+            provider: "openai".to_string(),
+            limit: "Codex usage limit".to_string(),
+            announced: true,
+            recorded_at: chrono::Utc::now(),
+        };
+        let response = usage_limit_response(NativeProtocol::Responses, "openai/gpt-6", &limit);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["type"], "usage_limit_reached");
+        assert_eq!(value["error"]["resets_at"], until.timestamp());
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(crate::account_limits::is_usage_limit_message(message));
+        // What the harness prints is read back to the same minute.
+        let parsed = crate::account_limits::parse_limit_reset(
+            message,
+            chrono::Utc::now(),
+            crate::account_limits::Zone::UTC,
+        )
+        .expect("reset time in the message");
+        assert!((until - parsed).num_seconds().abs() < 60);
+
+        let response = usage_limit_response(
+            NativeProtocol::AnthropicMessages,
+            "anthropic/claude",
+            &limit,
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-status"],
+            "rejected"
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-reset"],
+            until.timestamp().to_string().as_str()
+        );
     }
 }

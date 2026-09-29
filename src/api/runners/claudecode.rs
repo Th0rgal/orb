@@ -3599,6 +3599,26 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         }
     }
 
+    // The default credential is skipped while it is parked on a usage limit
+    // and another account is not: the turn starts on that account instead of
+    // spending its first attempt on the exhausted one. A native interactive
+    // session keeps the default credential.
+    let primary_override = if native_plan_request {
+        None
+    } else {
+        claude_override_around_usage_limit(workspace, work_dir, app_working_dir)
+    };
+    if primary_override.is_some() {
+        tracing::info!(
+            mission_id = %mission_id,
+            "Default Anthropic credential is parked on a usage limit; starting on another account"
+        );
+    }
+    let primary_limit_key = match &primary_override {
+        Some(auth) => Some(claude_auth_limit_key(app_working_dir, auth)),
+        None => default_claude_limit_key(workspace, work_dir, app_working_dir),
+    };
+
     let mut result = run_claudecode_turn(
         workspace,
         work_dir,
@@ -3615,7 +3635,8 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         first_turn_is_continuation,
         tool_hub.clone(),
         status.clone(),
-        None, // override_auth: use default credential resolution
+        // `None` uses default credential resolution.
+        primary_override.clone(),
         false,
     )
     .await;
@@ -3652,7 +3673,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
             is_continuation,
             tool_hub.clone(),
             status.clone(),
-            None,
+            primary_override.clone(),
             true,
         )
         .await;
@@ -3699,7 +3720,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     true,
                     tool_hub.clone(),
                     status.clone(),
-                    None,
+                    primary_override.clone(),
                     force_argv_prompt,
                 )
                 .await;
@@ -3772,7 +3793,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     false,
                     tool_hub.clone(),
                     status.clone(),
-                    None,
+                    primary_override.clone(),
                     force_argv_prompt,
                 )
                 .await;
@@ -3906,6 +3927,8 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         .await;
     }
 
+    note_claude_turn_for_limits(primary_limit_key.as_deref(), &result);
+
     // Account rotation: if rate-limited, or if auth still fails after
     // one refresh attempt, try alternate Anthropic credentials.
     // The first entry in the list is the highest-priority credential, which
@@ -3937,9 +3960,23 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                 ?rotation_reason,
                 "Primary Anthropic credential failed; trying alternate credentials"
             );
+            let limits = crate::account_limits::shared();
             for (idx, alt_auth) in rotation_accounts.accounts.into_iter().enumerate() {
                 if cancel.is_cancelled() {
                     break;
+                }
+                // The account this turn already ran on, or one parked until
+                // its usage limit resets, would only fail again.
+                let alt_limit_key = claude_auth_limit_key(app_working_dir, &alt_auth);
+                let already_limited = rotation_reason == Some(TerminalReason::RateLimited)
+                    && primary_limit_key.as_deref() == Some(alt_limit_key.as_str());
+                if already_limited || limits.is_cooling(&alt_limit_key) {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        rotation_attempt = idx + 1,
+                        "Skipping Anthropic account parked on a usage limit"
+                    );
+                    continue;
                 }
                 rotated_anthropic_account = true;
                 tracing::info!(
@@ -3971,6 +4008,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     force_argv_prompt,
                 )
                 .await;
+                note_claude_turn_for_limits(Some(&alt_limit_key), &result);
                 // Continue rotating on account-specific failures.
                 // Other LLM errors (model errors, context limit, etc.)
                 // would fail on every account, so stop early to avoid

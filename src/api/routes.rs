@@ -219,6 +219,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     );
     let pending_github_integration = Arc::new(RwLock::new(HashMap::new()));
 
+    // Usage-limit cooldowns outlive the process: load them before anything
+    // selects an account.
+    crate::account_limits::shared().attach(
+        config
+            .working_dir
+            .join(".sandboxed-sh")
+            .join(crate::account_limits::COOLDOWNS_FILE),
+    );
+
     // Initialize provider health tracker and model chain store
     let health_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
     let chain_store = Arc::new(

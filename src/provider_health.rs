@@ -248,6 +248,10 @@ pub struct ProviderHealthTracker {
     /// account backing the subscription hits 429, every other chain entry
     /// sharing the same subscription is skipped until the cooldown expires.
     subscription_cooldowns: Arc<RwLock<HashMap<SubscriptionKey, SubscriptionCooldown>>>,
+    /// Usage-limit cooldowns, which outlive the process and are shared with
+    /// the harness rotation paths. An account parked there is unhealthy here
+    /// even when this tracker never saw it fail.
+    limits: Arc<crate::account_limits::AccountCooldowns>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -289,12 +293,7 @@ impl Default for ProviderHealthTracker {
 
 impl ProviderHealthTracker {
     pub fn new() -> Self {
-        Self {
-            accounts: Arc::new(RwLock::new(HashMap::new())),
-            backoff_config: BackoffConfig::default(),
-            fallback_events: Arc::new(RwLock::new(Vec::new())),
-            subscription_cooldowns: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::with_backoff(BackoffConfig::default())
     }
 
     pub fn with_backoff(backoff_config: BackoffConfig) -> Self {
@@ -303,11 +302,38 @@ impl ProviderHealthTracker {
             backoff_config,
             fallback_events: Arc::new(RwLock::new(Vec::new())),
             subscription_cooldowns: Arc::new(RwLock::new(HashMap::new())),
+            // Tests get a registry of their own: the shared one would leak
+            // cooldowns between trackers that reuse a subscription key.
+            limits: if cfg!(test) {
+                crate::account_limits::AccountCooldowns::in_memory()
+            } else {
+                crate::account_limits::shared()
+            },
         }
+    }
+
+    /// Use `limits` as the usage-limit registry instead of the process-wide
+    /// one.
+    pub fn with_limits(mut self, limits: Arc<crate::account_limits::AccountCooldowns>) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    fn account_limit_is_active(&self, account_id: Uuid) -> bool {
+        self.limits
+            .is_cooling(&crate::account_limits::account_key(account_id))
+    }
+
+    fn subscription_limit_is_active(&self, key: &SubscriptionKey) -> bool {
+        self.limits
+            .is_cooling(&crate::account_limits::subscription_key(&key.0))
     }
 
     /// Check whether an account is currently healthy (not in cooldown).
     pub async fn is_healthy(&self, account_id: Uuid) -> bool {
+        if self.account_limit_is_active(account_id) {
+            return false;
+        }
         let accounts = self.accounts.read().await;
         accounts
             .get(&account_id)
@@ -319,9 +345,29 @@ impl ProviderHealthTracker {
     /// in an active cooldown.
     pub async fn any_account_has_active_cooldown(&self, account_ids: &[Uuid]) -> bool {
         let accounts = self.accounts.read().await;
-        account_ids
+        account_ids.iter().any(|id| {
+            accounts.get(id).is_some_and(AccountHealth::is_in_cooldown)
+                || self.account_limit_is_active(*id)
+        })
+    }
+
+    /// The soonest moment a usage limit on one of the given accounts or
+    /// subscriptions resets, when at least one is parked on such a limit.
+    pub fn earliest_limit_reset(
+        &self,
+        account_ids: &[Uuid],
+        subscriptions: &[SubscriptionKey],
+    ) -> Option<crate::account_limits::LimitCooldown> {
+        let accounts = account_ids
             .iter()
-            .any(|id| accounts.get(id).is_some_and(AccountHealth::is_in_cooldown))
+            .map(|id| crate::account_limits::account_key(*id));
+        let subscriptions = subscriptions
+            .iter()
+            .map(|key| crate::account_limits::subscription_key(&key.0));
+        accounts
+            .chain(subscriptions)
+            .filter_map(|key| self.limits.active(&key))
+            .min_by_key(|cooldown| cooldown.until)
     }
 
     /// Return true when any of the given subscription keys has an active
@@ -337,6 +383,7 @@ impl ProviderHealthTracker {
                 .get(key)
                 .and_then(|entry| entry.cooldown_until)
                 .is_some_and(|until| now < until)
+                || self.subscription_limit_is_active(key)
         })
     }
 
@@ -347,6 +394,9 @@ impl ProviderHealthTracker {
         let Some(key) = key else {
             return true;
         };
+        if self.subscription_limit_is_active(key) {
+            return false;
+        }
         let cooldowns = self.subscription_cooldowns.read().await;
         match cooldowns.get(key) {
             Some(entry) => entry
@@ -369,6 +419,8 @@ impl ProviderHealthTracker {
     /// Remove all account-scoped health state after its provider account is deleted.
     pub async fn remove_account(&self, account_id: Uuid) {
         self.accounts.write().await.remove(&account_id);
+        self.limits
+            .clear(&crate::account_limits::account_key(account_id));
     }
 
     /// Record a successful request for an account.
@@ -410,6 +462,10 @@ impl ProviderHealthTracker {
         health.consecutive_failures = 0;
         health.cooldown_until = None;
         drop(accounts);
+        // A served request proves the allowance is back, whatever reset time
+        // was announced.
+        self.limits
+            .clear(&crate::account_limits::account_key(account_id));
 
         if let Some(key) = subscription {
             let mut subs = self.subscription_cooldowns.write().await;
@@ -417,6 +473,9 @@ impl ProviderHealthTracker {
                 entry.cooldown_until = None;
                 entry.consecutive_failures = 0;
             }
+            drop(subs);
+            self.limits
+                .clear(&crate::account_limits::subscription_key(&key.0));
         }
     }
 
@@ -487,6 +546,7 @@ impl ProviderHealthTracker {
         };
 
         health.cooldown_until = Some(std::time::Instant::now() + cooldown);
+        let provider_id = health.provider_id.clone().unwrap_or_default();
 
         let is_degraded =
             health.consecutive_failures >= self.backoff_config.circuit_breaker_threshold;
@@ -529,7 +589,93 @@ impl ProviderHealthTracker {
             );
         }
 
+        // An exhausted allowance does not come back with a restart: keep the
+        // cooldown on disk. No reset time was announced on this path, so it
+        // is the fixed quota window (or the upstream retry delay).
+        if matches!(reason, CooldownReason::QuotaExhausted) {
+            let now = chrono::Utc::now();
+            let reset = crate::account_limits::LimitReset {
+                at: now
+                    + chrono::Duration::from_std(cooldown)
+                        .unwrap_or_else(|_| chrono::Duration::hours(1)),
+                announced: false,
+            };
+            self.park_until_limit_reset(
+                account_id,
+                subscription,
+                crate::account_limits::LimitCooldown::new(&provider_id, "usage limit", reset),
+            );
+        }
+
         cooldown
+    }
+
+    fn park_until_limit_reset(
+        &self,
+        account_id: Uuid,
+        subscription: Option<&SubscriptionKey>,
+        cooldown: crate::account_limits::LimitCooldown,
+    ) {
+        if let Some(key) = subscription {
+            self.limits.set(
+                &crate::account_limits::subscription_key(&key.0),
+                cooldown.clone(),
+            );
+        }
+        self.limits
+            .set(&crate::account_limits::account_key(account_id), cooldown);
+    }
+
+    /// Record a usage limit whose reset time is known: the account and its
+    /// shared subscription are skipped by every selection path until then,
+    /// across restarts. Returns the cooldown duration applied.
+    pub async fn record_usage_limit(
+        &self,
+        account_id: Uuid,
+        subscription: Option<&SubscriptionKey>,
+        cooldown: crate::account_limits::LimitCooldown,
+    ) -> std::time::Duration {
+        let remaining = (cooldown.until - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        let until = std::time::Instant::now() + remaining;
+        {
+            let mut accounts = self.accounts.write().await;
+            let health = accounts.entry(account_id).or_default();
+            health.total_requests += 1;
+            health.total_rate_limits += 1;
+            health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+            health.last_failure_reason = Some(CooldownReason::QuotaExhausted);
+            health.last_failure_at = Some(chrono::Utc::now());
+            health.cooldown_until = Some(until);
+        }
+        if let Some(key) = subscription {
+            let mut subs = self.subscription_cooldowns.write().await;
+            let entry = subs.entry(key.clone()).or_default();
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            entry.cooldown_until = Some(until);
+        }
+        tracing::info!(
+            account_id = %account_id,
+            subscription = ?subscription,
+            limit = %cooldown.limit,
+            until = %cooldown.until,
+            announced = cooldown.announced,
+            "Account parked until its usage limit resets"
+        );
+        self.park_until_limit_reset(account_id, subscription, cooldown);
+        remaining
+    }
+
+    /// Convenience wrapper over [`Self::record_usage_limit`] for a resolved
+    /// chain entry.
+    pub async fn record_entry_usage_limit(
+        &self,
+        entry: &ResolvedEntry,
+        cooldown: crate::account_limits::LimitCooldown,
+    ) -> std::time::Duration {
+        self.record_usage_limit(entry.account_id, entry.subscription_key.as_ref(), cooldown)
+            .await
     }
 
     /// Convenience wrapper: record a failure for a resolved chain entry,
@@ -610,12 +756,15 @@ impl ProviderHealthTracker {
         account_id: Uuid,
         health: &AccountHealth,
         backoff_config: &BackoffConfig,
+        limit_remaining: Option<std::time::Duration>,
     ) -> AccountHealthSnapshot {
+        // The longer of the in-memory cooldown and the usage-limit one.
+        let remaining = health.remaining_cooldown().max(limit_remaining);
         AccountHealthSnapshot {
             account_id,
             provider_id: health.provider_id.clone(),
-            is_healthy: !health.is_in_cooldown(),
-            cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
+            is_healthy: remaining.is_none(),
+            cooldown_remaining_secs: remaining.map(|d| d.as_secs_f64()),
             consecutive_failures: health.consecutive_failures,
             last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
             last_failure_at: health.last_failure_at,
@@ -637,17 +786,32 @@ impl ProviderHealthTracker {
 
     /// Get a snapshot of health state for an account (for API responses).
     pub async fn get_health(&self, account_id: Uuid) -> AccountHealthSnapshot {
+        let limit = self
+            .limits
+            .active(&crate::account_limits::account_key(account_id));
+        let limit_remaining = limit
+            .as_ref()
+            .and_then(|cooldown| (cooldown.until - chrono::Utc::now()).to_std().ok());
         let accounts = self.accounts.read().await;
         match accounts.get(&account_id) {
-            Some(health) => Self::snapshot(account_id, health, &self.backoff_config),
+            Some(health) => {
+                Self::snapshot(account_id, health, &self.backoff_config, limit_remaining)
+            }
+            // Parked by a cooldown loaded from disk or recorded by a harness
+            // rotation path: this tracker has no counters for it.
             None => AccountHealthSnapshot {
                 account_id,
-                provider_id: None,
-                is_healthy: true,
-                cooldown_remaining_secs: None,
+                provider_id: limit
+                    .as_ref()
+                    .map(|cooldown| cooldown.provider.clone())
+                    .filter(|provider| !provider.is_empty()),
+                is_healthy: limit_remaining.is_none(),
+                cooldown_remaining_secs: limit_remaining.map(|d| d.as_secs_f64()),
                 consecutive_failures: 0,
-                last_failure_reason: None,
-                last_failure_at: None,
+                last_failure_reason: limit
+                    .as_ref()
+                    .map(|_| CooldownReason::QuotaExhausted.to_string()),
+                last_failure_at: limit.as_ref().map(|cooldown| cooldown.recorded_at),
                 total_requests: 0,
                 total_successes: 0,
                 total_rate_limits: 0,
@@ -663,15 +827,38 @@ impl ProviderHealthTracker {
 
     /// Get health snapshots for all tracked accounts.
     pub async fn get_all_health(&self) -> Vec<AccountHealthSnapshot> {
-        let accounts = self.accounts.read().await;
-        accounts
-            .iter()
-            .map(|(&id, health)| Self::snapshot(id, health, &self.backoff_config))
-            .collect()
+        let tracked: Vec<Uuid> = self.accounts.read().await.keys().copied().collect();
+        // Accounts only known through a usage-limit cooldown are listed too.
+        let parked = self
+            .limits
+            .all_active_at(chrono::Utc::now())
+            .into_iter()
+            .filter_map(|(key, _)| Uuid::parse_str(&key).ok())
+            .filter(|id| !tracked.contains(id))
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::with_capacity(tracked.len() + parked.len());
+        for id in tracked.into_iter().chain(parked) {
+            snapshots.push(self.get_health(id).await);
+        }
+        snapshots
+    }
+
+    /// Clear the cooldown of a shared subscription (manual recovery, e.g.
+    /// after buying credits before the announced reset).
+    pub async fn clear_subscription_cooldown(&self, key: &SubscriptionKey) {
+        self.limits
+            .clear(&crate::account_limits::subscription_key(&key.0));
+        let mut subs = self.subscription_cooldowns.write().await;
+        if let Some(entry) = subs.get_mut(key) {
+            entry.cooldown_until = None;
+            entry.consecutive_failures = 0;
+        }
     }
 
     /// Clear cooldown for an account (e.g., after manual recovery).
     pub async fn clear_cooldown(&self, account_id: Uuid) {
+        self.limits
+            .clear(&crate::account_limits::account_key(account_id));
         let mut accounts = self.accounts.write().await;
         if let Some(health) = accounts.get_mut(&account_id) {
             health.cooldown_until = None;
@@ -3063,5 +3250,134 @@ mod tests {
             &fresh,
             now
         ));
+    }
+
+    fn limit_cooldown(hours: i64) -> crate::account_limits::LimitCooldown {
+        crate::account_limits::LimitCooldown {
+            until: chrono::Utc::now() + chrono::Duration::hours(hours),
+            provider: "anthropic".to_string(),
+            limit: "Claude session limit".to_string(),
+            announced: true,
+            recorded_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_limit_cooldown_survives_a_restart() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(crate::account_limits::COOLDOWNS_FILE);
+        let account = Uuid::new_v4();
+        let sibling = Uuid::new_v4();
+        let key = SubscriptionKey::new("anthropic", "org-restart");
+
+        let tracker = ProviderHealthTracker::new()
+            .with_limits(crate::account_limits::AccountCooldowns::load(path.clone()));
+        let applied = tracker
+            .record_usage_limit(account, Some(&key), limit_cooldown(3))
+            .await;
+        assert!(applied > std::time::Duration::from_secs(3 * 3600 - 60));
+        assert!(!tracker.is_healthy(account).await);
+        assert!(!tracker.subscription_is_healthy(Some(&key)).await);
+
+        // A new process: nothing in memory, only the file.
+        let restarted = ProviderHealthTracker::new()
+            .with_limits(crate::account_limits::AccountCooldowns::load(path.clone()));
+        assert!(!restarted.is_healthy(account).await);
+        assert!(restarted.is_healthy(sibling).await);
+        assert!(!restarted.subscription_is_healthy(Some(&key)).await);
+        assert!(restarted.any_account_has_active_cooldown(&[account]).await);
+        assert!(
+            restarted
+                .any_subscription_cooldown_active(std::slice::from_ref(&key))
+                .await
+        );
+        let health = restarted.get_health(account).await;
+        assert!(!health.is_healthy);
+        assert!(health.cooldown_remaining_secs.unwrap() > 3.0 * 3600.0 - 60.0);
+        assert_eq!(
+            health.last_failure_reason.as_deref(),
+            Some("quota_exhausted")
+        );
+        assert!(restarted
+            .get_all_health()
+            .await
+            .iter()
+            .any(|snapshot| snapshot.account_id == account && !snapshot.is_healthy));
+        let earliest = restarted
+            .earliest_limit_reset(&[account, sibling], &[])
+            .expect("parked account");
+        assert_eq!(earliest.limit, "Claude session limit");
+
+        // A served request releases the account and its subscription, on
+        // disk too.
+        restarted
+            .record_success_with_subscription(account, Some(&key))
+            .await;
+        assert!(restarted.is_healthy(account).await);
+        let again = ProviderHealthTracker::new()
+            .with_limits(crate::account_limits::AccountCooldowns::load(path));
+        assert!(again.is_healthy(account).await);
+        assert!(again.subscription_is_healthy(Some(&key)).await);
+    }
+
+    #[tokio::test]
+    async fn usage_limit_cooldown_ends_at_the_announced_reset() {
+        let tracker = ProviderHealthTracker::new();
+        let account = Uuid::new_v4();
+        let mut cooldown = limit_cooldown(1);
+        cooldown.until = chrono::Utc::now() - chrono::Duration::seconds(1);
+        tracker.record_usage_limit(account, None, cooldown).await;
+        assert!(tracker.is_healthy(account).await);
+        assert!(tracker.earliest_limit_reset(&[account], &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn quota_exhaustion_without_a_reset_time_is_persisted_too() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(crate::account_limits::COOLDOWNS_FILE);
+        let account = Uuid::new_v4();
+        let tracker = ProviderHealthTracker::new()
+            .with_limits(crate::account_limits::AccountCooldowns::load(path.clone()));
+        tracker
+            .record_failure(account, CooldownReason::QuotaExhausted, None)
+            .await;
+        // A transient rate limit stays in memory only.
+        let transient = Uuid::new_v4();
+        tracker
+            .record_failure(transient, CooldownReason::RateLimit, None)
+            .await;
+
+        let restarted = ProviderHealthTracker::new()
+            .with_limits(crate::account_limits::AccountCooldowns::load(path));
+        assert!(!restarted.is_healthy(account).await);
+        assert!(restarted.is_healthy(transient).await);
+        let parked = restarted.earliest_limit_reset(&[account], &[]).unwrap();
+        assert!(!parked.announced);
+
+        restarted.clear_cooldown(account).await;
+        assert!(restarted.is_healthy(account).await);
+    }
+
+    #[tokio::test]
+    async fn resolve_skips_an_account_parked_on_a_usage_limit() {
+        let capped = anth_oauth_account("a@example.com", Some("org-a"), future_ms(4));
+        let capped_id = capped.id;
+        let healthy = anth_oauth_account("b@example.com", Some("org-b"), future_ms(4));
+        let healthy_id = healthy.id;
+        let store = store_with(vec![capped, healthy]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        let tracker = ProviderHealthTracker::new();
+        tracker
+            .record_usage_limit(
+                capped_id,
+                Some(&SubscriptionKey::new("anthropic", "org-a")),
+                limit_cooldown(2),
+            )
+            .await;
+        let resolved = chains
+            .resolve_entries(&[anthropic_entry()], &store, &[], &tracker)
+            .await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].account_id, healthy_id);
     }
 }

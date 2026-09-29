@@ -972,6 +972,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     Some(cooldown) => set_codex_account_cooldown(&credential_fingerprint, cooldown),
                     None => clear_codex_account_cooldown(&credential_fingerprint),
                 }
+                note_codex_turn_for_limits(&lease.credential, &result);
                 drop(lease);
 
                 // Record usage-cap failures so an all-capped pool can be
