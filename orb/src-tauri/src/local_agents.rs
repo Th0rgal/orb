@@ -661,6 +661,8 @@ fn spawn_claude(
                 let mut background = ClaudeBackground::default();
                 let mut request_started = false;
                 let mut stale_result_skipped = false;
+                // The turn gave its result and only background tasks remain.
+                let mut answered = false;
                 for line in BufReader::new(stdout).lines() {
                     let line = line.map_err(|e| e.to_string())?;
                     let Ok(event) = serde_json::from_str::<Value>(&line) else {
@@ -669,6 +671,7 @@ fn spawn_claude(
                     output.claude_activity(&event);
                     if matches!(event["type"].as_str(), Some("assistant" | "stream_event")) {
                         request_started = true;
+                        answered = false;
                         output.waiting_on_background(false);
                     }
                     if event["type"] != "stream_event"
@@ -748,6 +751,10 @@ fn spawn_claude(
                             }
                         };
                         write_line(&mut stdin,&json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}).to_string())?;
+                        // Answered, by the user or by itself: the wait goes on.
+                        if answered && background.running() {
+                            output.waiting_on_background(true);
+                        }
                     } else if event["type"] == "result" {
                         // A resumed session first settles what the previous process
                         // left behind (a stopped background task) and reports it as
@@ -778,6 +785,7 @@ fn spawn_claude(
                         // A result ends one turn, not the session: background agents
                         // can trigger more turns and permission requests afterwards.
                         if background.running() {
+                            answered = true;
                             output.waiting_on_background(true);
                             continue;
                         }
