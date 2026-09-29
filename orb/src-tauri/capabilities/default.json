@@ -12,6 +12,7 @@
     "allow-window-theme",
     "allow-open-url",
     "allow-local-agents",
-    "allow-local-metrics"
+    "allow-local-metrics",
+    "allow-diagnostics"
   ]
 }

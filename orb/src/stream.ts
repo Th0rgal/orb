@@ -1,5 +1,6 @@
 import {batch} from "solid-js";
 import { clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
+import { streamLoad, timed } from "./diagnostics";
 
 export interface StoredEvent {
   id: number;
@@ -128,8 +129,8 @@ export function streamMission(
 ): () => void {
   let stopped = false;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
-  const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];batch(()=>{for(const event of pending)onEvent(event);});};
-  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();onEvent(event);}};
+  const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{for(const event of pending)onEvent(event);}));};
+  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
@@ -166,7 +167,7 @@ export function streamMission(
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        let idx = buffer.indexOf("\n\n");
+        let idx = buffer.indexOf("\n\n"), frames = 0;
         while (idx !== -1) {
           const raw = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 2);
@@ -178,6 +179,7 @@ export function streamMission(
             else if (line.startsWith("data:")) data += line.slice(5).trim();
           }
           if (!data) continue;
+          frames++;
           if (eventType === "stream_lagged") {
             onLagged();
             continue;
@@ -189,6 +191,7 @@ export function streamMission(
             /* malformed frame — skip */
           }
         }
+        streamLoad(`mission ${missionId.slice(0, 8)}`, frames, value.byteLength);
       }
       flush();
       throw new Error("stream ended");

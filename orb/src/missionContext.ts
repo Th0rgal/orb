@@ -1,4 +1,5 @@
 import type { StreamItem } from "./transcriptModel";
+import { timed } from "./diagnostics";
 
 /** Approximate context window for a harness. Grok 4.6 matches Cursor's 256K. */
 export function contextWindow(backend?: string | null): number {
@@ -32,6 +33,9 @@ function payloadLength(value: unknown): number {
 /** Rough token count from visible conversation (~4 chars/token).
  * Tool payloads are capped so a 150-tool run does not peg the ring at 100%. */
 export function estimateTokens(items: StreamItem[]): number {
+  return timed("token estimate", () => countTokens(items));
+}
+function countTokens(items: StreamItem[]): number {
   let chars = 0;
   for (const item of items) {
     if (item.kind === "user" || item.kind === "text") chars += item.text.length;

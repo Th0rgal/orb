@@ -5,6 +5,7 @@ import { CodeBlock } from "./CodeBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
+import { timed } from "./diagnostics";
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -158,6 +159,9 @@ function readTable(lines: string[], start: number): { block: Extract<Block, { t:
 }
 
 export function parseMarkdown(src: string): Block[] {
+  return timed("markdown", () => parseBlocks(src));
+}
+function parseBlocks(src: string): Block[] {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out: Block[] = [];
   let i = 0;

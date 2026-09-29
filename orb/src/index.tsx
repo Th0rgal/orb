@@ -3,6 +3,8 @@ import App from "./App";
 import {FindBar} from "./FindBar";
 import { initTheme } from "./theme";
 import "./styles.css";
+import { startDiagnostics } from "./diagnostics";
 
 initTheme();
+startDiagnostics();
 render(() => <><App /><FindBar /></>, document.getElementById("root")!);

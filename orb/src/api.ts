@@ -4,6 +4,7 @@ import type { ClientRunReceipt } from "./clientRuns";
 import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
+import { requestDone } from "./diagnostics";
 
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
@@ -82,6 +83,17 @@ export function api<T>(path: string, init?: RequestInit): Promise<T> {
   return apiRequest<T>(path, init);
 }
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${path}`;
+  try {
+    const result = await sendRequest<T>(path, init);
+    requestDone(label, performance.now() - from, true);
+    return result;
+  } catch (error) {
+    requestDone(label, performance.now() - from, false, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+async function sendRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {

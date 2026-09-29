@@ -2,3 +2,8 @@
 identifier = "allow-local-metrics"
 description = "Read local system usage and memory of Orb-owned processes"
 commands.allow = ["local_machine_metrics"]
+
+[[permission]]
+identifier = "allow-diagnostics"
+description = "Append the page's performance records to Orb's own log"
+commands.allow = ["diagnostics_append"]
