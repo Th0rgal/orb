@@ -1191,9 +1191,13 @@ fn is_conversation_fork(tags: &[String]) -> bool {
     tags.iter().any(|tag| tag.starts_with("fork-workspace:"))
 }
 
-/// True when the child crossed the idle threshold before this process started.
+/// True when the child crossed the idle threshold well before this process
+/// started, so the previous process had several passes to report it. A child
+/// that crossed it around the restart is reported: a rare repeat is better
+/// than a stall nobody hears about.
 fn stalled_before_start(idle_seconds: u64, since_start: u64, threshold: u64) -> bool {
-    idle_seconds.saturating_sub(since_start) >= threshold
+    const REPORTED_MARGIN_SECS: u64 = 600;
+    idle_seconds.saturating_sub(since_start) >= threshold + REPORTED_MARGIN_SECS
 }
 
 /// Sweep recent missions for parked children idle past `threshold` and inject
@@ -1760,6 +1764,8 @@ mod tests {
         // Crossed the threshold after this process started.
         assert!(!stalled_before_start(3700, 600, 3600));
         assert!(!stalled_before_start(3600, 7200, 3600));
+        // Crossed it during the downtime: nobody reported it yet.
+        assert!(!stalled_before_start(3600 + 300, 60, 3600));
     }
 
     #[test]
