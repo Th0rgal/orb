@@ -8807,9 +8807,83 @@ async fn remote_claude_allocates_and_resumes_native_session() {
     assert!(!command.contains("--session-id"));
     assert!(command.contains("--output-format stream-json"));
     assert!(command.contains("--include-partial-messages"));
-    *fixture.log.lock().unwrap() =
-        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
-    fixture.set_state("succeeded");
+    // A resumed job that dies silently (wrapper, timeout) keeps the session
+    // Claude did create.
+    fixture.set_state("failed");
+    wait_until("silent resume failure settles", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status != MissionStatus::Active
+    })
+    .await;
+    wait_until("resume ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        store.get_mission(id).await.unwrap().unwrap().session_id,
+        Some(session)
+    );
+}
+
+#[tokio::test]
+async fn remote_claude_that_never_started_does_not_resume_a_missing_session() {
+    let fixture = spawn_fixture_node(
+        "claude-unstarted-fixture",
+        "CLAUDE_UNSTARTED_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let response = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "title":"Claude never started", "prompt":"first turn", "project":"lido",
+            "backend":"claudecode", "model_override":"claude-opus-5-5",
+            "remote_node_id":"claude-unstarted-fixture", "idempotency_key":"claude-unstarted-test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+    let session = store.get_mission(id).await.unwrap().unwrap().session_id;
+    assert!(session.is_some());
+    // The launch dies before Claude prints anything (e.g. E2BIG).
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("failed");
+    wait_until("unstarted Claude job settles", 20, || async {
+        let mission = store.get_mission(id).await.unwrap().unwrap();
+        mission.status != MissionStatus::Active && mission.session_id.is_none()
+    })
+    .await;
+    wait_until("unstarted ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    // Instead of `--resume` on a session Claude never created ("No
+    // conversation found"), the client is told to continue in a replacement.
+    let submitted = fixture.submissions.lock().unwrap().len();
+    let response = h.request(false, id, json!({"content":"second turn"})).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .starts_with("REMOTE_RESUME_REQUIRES_REPLACEMENT:"));
+    assert_eq!(fixture.submissions.lock().unwrap().len(), submitted);
 }
 
 #[tokio::test]

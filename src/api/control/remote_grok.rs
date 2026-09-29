@@ -28,8 +28,8 @@
 //! on the same node with `--resume`; other remote harnesses (and a node that
 //! is no longer configured) are reported as needing a replacement mission.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::http::StatusCode;
 use uuid::Uuid;
@@ -629,6 +629,27 @@ pub(crate) struct NativeGrokObserver {
     session_persisted: Option<String>,
     auth_cancel_requested: bool,
     running_since: Option<std::time::Instant>,
+    /// The latest `pump` itself read the log to its current end.
+    pumped_to_end: bool,
+}
+
+/// Jobs that allocated their Claude session (`--session-id`) rather than
+/// resuming one. Process memory only: after a restart an eventless failure
+/// keeps the session, which is the safe direction.
+static ALLOCATED_CLAUDE_SESSIONS: LazyLock<Mutex<HashSet<Uuid>>> = LazyLock::new(Default::default);
+
+pub(crate) fn note_allocated_claude_session(job_id: Uuid) {
+    ALLOCATED_CLAUDE_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(job_id);
+}
+
+fn take_allocated_claude_session(job_id: Uuid) -> bool {
+    ALLOCATED_CLAUDE_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&job_id)
 }
 
 impl NativeGrokObserver {
@@ -667,6 +688,7 @@ impl NativeGrokObserver {
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
             running_since: None,
+            pumped_to_end: false,
         })
     }
 
@@ -678,6 +700,7 @@ impl NativeGrokObserver {
         node: &RemoteNodeConfig,
         shared_token: &str,
     ) {
+        self.pumped_to_end = false;
         if self.streaming == LogStreaming::Unsupported {
             return;
         }
@@ -706,6 +729,7 @@ impl NativeGrokObserver {
             let caught_up = chunk.next_offset >= chunk.log_len;
             self.apply_chunk(&chunk, client, node, shared_token).await;
             if caught_up || chunk.data.is_empty() {
+                self.pumped_to_end = caught_up;
                 return;
             }
         }
@@ -928,6 +952,56 @@ impl NativeGrokObserver {
         }
     }
 
+    /// The session id is published before submission, but Claude only creates
+    /// it once it starts. A launch that died first (fork 0a9943ec: "Argument
+    /// list too long") left every follow-up failing with "No conversation
+    /// found with session ID". Forget such a session so the next turn starts
+    /// fresh with the conversation replayed as context.
+    /// A resumed session that fails silently (wrapper, timeout) is kept.
+    async fn forget_unstarted_claude_session(&mut self, allocated: bool) {
+        let missing = self
+            .stream
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("No conversation found with session ID"));
+        // No event is proof Claude never started only when the whole log was
+        // read from offset zero and the terminal fetch itself reached its end
+        // (a failed fetch leaves stale offsets that look caught up).
+        let complete_log = self.streaming == LogStreaming::Supported && self.pumped_to_end;
+        if !missing && !(allocated && complete_log && self.stream.json_events == 0) {
+            return;
+        }
+        let Some(session_id) = self.mission.session_id.clone() else {
+            return;
+        };
+        let run = match self
+            .owner
+            .mission_store
+            .get_latest_mission_run(self.mission_id)
+            .await
+        {
+            Ok(Some(run)) if run.owner_actor_id == super::remote_job_lease_owner(self.job_id) => {
+                SessionUpdateRun::from(&run)
+            }
+            _ => return,
+        };
+        match self
+            .owner
+            .mission_store
+            .clear_unsubmitted_session_id(self.mission_id, &session_id, "claudecode", &run)
+            .await
+        {
+            Ok(true) => {
+                self.mission.session_id = None;
+                self.session_persisted = None;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error, "unstarted Claude session could not be cleared");
+            }
+        }
+    }
+
     /// Terminal decision for the job. Flushes the parser, closes an open
     /// thinking block, and reports the native CLI outcome.
     pub(crate) async fn verdict(
@@ -971,6 +1045,10 @@ impl NativeGrokObserver {
             && self.stream.error.is_none()
             && (!self.mission.goal_mode || legacy_claude || native_end)
             && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
+        let allocated = take_allocated_claude_session(self.job_id);
+        if self.stream.claude && !success {
+            self.forget_unstarted_claude_session(allocated).await;
+        }
         let mut content = self.stream.text.trim().to_string();
         if legacy_claude && success {
             content = format!(

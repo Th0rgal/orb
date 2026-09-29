@@ -5,7 +5,7 @@ import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {QueuedMessages} from "./QueuedMessages";
-import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow} from "./localMessageQueue";
+import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow,resumePrompt} from "./localMessageQueue";
 import {createQueuedEdit} from "./queuedEdit";
 import {BtwSettings} from "./btwSettings";
 import {createPlanProgress, type PlanProgressData} from "./PlanProgress";
@@ -2323,6 +2323,11 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     if (editingQueued() || !queuedLocalMessages(p.id).some(row => row.state === "queued" && row.waiting)) return;
     void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
   };
+  // Waiting messages go first: they are what the user asked for next. With none, the agent continues its work.
+  const resume = () => {
+    if (queuedLocalMessages(p.id).length) void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+    else void sendMsg(resumePrompt, [], []);
+  };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   let scroller: HTMLDivElement | undefined;
   let nearBottom = true;
@@ -2713,7 +2718,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />

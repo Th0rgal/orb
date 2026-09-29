@@ -54,6 +54,56 @@ fn successful_empty_terminal_result(
     !cancelled && !had_error && saw_terminal_result_event && final_result.trim().is_empty()
 }
 
+/// How long after its first stale result a resumed session may keep
+/// reporting leftovers before an empty result is taken as its answer.
+const STALE_RESULT_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A resumed session first settles what the previous process left behind
+/// (stopped background tasks) and reports it as empty results of zero turns,
+/// one per batch of leftovers. The prompt has not run yet: the real turn and
+/// its own result follow. When nothing follows within
+/// `STALE_RESULT_WINDOW`, the runner ends the turn with an empty reply.
+fn stale_resumed_result(
+    resumed: bool,
+    window_closed: bool,
+    saw_assistant_activity: bool,
+    res: &crate::backend::shared::ResultEvent,
+) -> bool {
+    resumed
+        && !window_closed
+        && !saw_assistant_activity
+        && res.num_turns == Some(0)
+        && !res.is_error
+        && res.subtype != "error"
+        && res
+            .result
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+        && res.error.is_none()
+        && res.message.is_none()
+        && res.errors.is_empty()
+}
+
+/// Stop a CLI that outlived its terminal result. The PTY child may be the
+/// MCP launch wrapper, which runs the CLI in its own process group: SIGKILL
+/// on the wrapper alone orphans a CLI that keeps working unobserved. SIGTERM
+/// lets the wrapper stop its harness group first.
+#[cfg(unix)]
+fn terminate_then_kill(pid: u32, exited: impl Fn() -> bool, term_grace: std::time::Duration) {
+    unsafe {
+        libc::killpg(pid as i32, libc::SIGTERM);
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let deadline = std::time::Instant::now() + term_grace;
+    while !exited() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unsafe {
+        libc::killpg(pid as i32, libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
 use crate::agents::{AgentResult, CompletionConfidence, CompletionSignal, TerminalReason};
 use crate::api::control::AgentEvent;
 use tokio::sync::RwLock;
@@ -1727,6 +1777,8 @@ pub fn run_claudecode_turn<'a>(
         let mut degenerate_evidence: Option<String> = None;
 
         let mut saw_non_init_event = false;
+        let mut saw_assistant_activity = false;
+        let mut first_stale_result_at: Option<Instant> = None;
         let startup_timeout = Duration::from_secs(
             std::env::var("SANDBOXED_SH_CLAUDECODE_STARTUP_TIMEOUT_SECS")
                 .ok()
@@ -1875,6 +1927,16 @@ pub fn run_claudecode_turn<'a>(
                     idle_timeout_triggered = true;
                     break;
                 }
+                _ = tokio::time::sleep_until(first_stale_result_at.map_or_else(Instant::now, |at| at + STALE_RESULT_WINDOW)),
+                    if first_stale_result_at.is_some() && !saw_assistant_activity => {
+                    // Nothing followed the leftovers: the empty result was the answer.
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        "No turn followed the stale results of the resumed Claude session; ending with an empty reply"
+                    );
+                    saw_terminal_result_event = true;
+                    break;
+                }
                 _ = process_exit_notify.notified(), if !process_exited => {
                     // The main PTY child (nsenter/claude) has exited.
                     // Give a short grace period to drain any buffered events
@@ -1888,6 +1950,12 @@ pub fn run_claudecode_turn<'a>(
                 }
                 _ = tokio::time::sleep_until(process_exit_grace_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86400))), if process_exited && line_rx.is_empty() => {
                     // Grace period expired after process exit — no `result` event arrived.
+                    if first_stale_result_at.is_some() && !saw_assistant_activity {
+                        // The session settled its leftovers and had nothing to add.
+                        saw_terminal_result_event = true;
+                        reader_handle.abort();
+                        break;
+                    }
                     tracing::warn!(
                         mission_id = %mission_id,
                         "Claude Code process exited without emitting a result event, breaking event loop"
@@ -2104,6 +2172,12 @@ pub fn run_claudecode_turn<'a>(
                         }
                     };
 
+                    if matches!(
+                        claude_event,
+                        ClaudeEvent::Assistant(_) | ClaudeEvent::StreamEvent(_)
+                    ) {
+                        saw_assistant_activity = true;
+                    }
                     if !matches!(claude_event, ClaudeEvent::System(_)) {
                         saw_non_init_event = true;
                         if matches!(turn_wait_state, ClaudeTurnWaitState::Startup) {
@@ -2588,6 +2662,20 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                 }
                                 ClaudeEvent::Result(res) => {
+                                    if stale_resumed_result(
+                                        use_resume,
+                                        first_stale_result_at
+                                            .is_some_and(|at| at.elapsed() >= STALE_RESULT_WINDOW),
+                                        saw_assistant_activity,
+                                        &res,
+                                    ) {
+                                        first_stale_result_at.get_or_insert_with(Instant::now);
+                                        tracing::info!(
+                                            mission_id = %mission_id,
+                                            "Skipping the stale empty result of a resumed Claude session; waiting for the real turn"
+                                        );
+                                        continue;
+                                    }
                                     saw_terminal_result_event = true;
                                     if let Some(cost) = res.total_cost_usd {
                                         total_cost_usd = Some(cost);
@@ -2709,13 +2797,17 @@ pub fn run_claudecode_turn<'a>(
                 );
                 #[cfg(unix)]
                 if let Some(pid) = child_pid {
-                    // The CLI is the session leader on its PTY, so its pgid
+                    // The PTY child is the session leader, so its pgid
                     // matches its pid — killpg takes down lingering MCP
                     // children too. Plain kill as a fallback.
-                    unsafe {
-                        libc::killpg(pid as i32, libc::SIGKILL);
-                        libc::kill(pid as i32, libc::SIGKILL);
-                    }
+                    let _ = tokio::task::spawn_blocking(move || {
+                        terminate_then_kill(
+                            pid,
+                            || claude_process_exited(pid),
+                            std::time::Duration::from_secs(8),
+                        )
+                    })
+                    .await;
                 }
                 wait_handle.await
             }
@@ -3661,7 +3753,94 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
 
 #[cfg(test)]
 mod background_task_tests {
-    use super::{parse_background_task_start, successful_empty_terminal_result};
+    use super::{
+        parse_background_task_start, stale_resumed_result, successful_empty_terminal_result,
+    };
+
+    fn result_event(value: serde_json::Value) -> crate::backend::shared::ResultEvent {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn resumed_session_skips_its_leading_empty_results() {
+        let stale = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "is_error": false,
+            "num_turns": 0, "result": ""
+        }));
+        assert!(stale_resumed_result(true, false, false, &stale));
+        // Past the window an empty result ends the turn, or the run would
+        // wait for the idle timeout.
+        assert!(!stale_resumed_result(true, true, false, &stale));
+        assert!(!stale_resumed_result(false, false, false, &stale));
+        assert!(!stale_resumed_result(true, false, true, &stale));
+    }
+
+    #[test]
+    fn resumed_session_keeps_real_and_failed_results() {
+        let reply = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "num_turns": 1, "result": "Done."
+        }));
+        assert!(!stale_resumed_result(true, false, false, &reply));
+        let failed = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "is_error": true,
+            "num_turns": 0, "result": ""
+        }));
+        assert!(!stale_resumed_result(true, false, false, &failed));
+        let diagnosed = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "num_turns": 0,
+            "result": "", "message": "API Error: overloaded"
+        }));
+        assert!(!stale_resumed_result(true, false, false, &diagnosed));
+        let unknown_turns = result_event(serde_json::json!({
+            "subtype": "success", "session_id": "s", "result": ""
+        }));
+        assert!(!stale_resumed_result(true, false, false, &unknown_turns));
+    }
+
+    /// The launch wrapper runs the CLI in its own process group; teardown
+    /// must let the wrapper stop it instead of orphaning it.
+    #[cfg(unix)]
+    #[test]
+    fn teardown_stops_a_harness_in_its_own_process_group() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("harness.pid");
+        let script = format!(
+            "set -m; sleep 60 & echo $! > {}; trap 'kill -TERM -- -$!; exit 0' TERM; wait",
+            pid_file.display()
+        );
+        let mut wrapper = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let harness: u32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "harness never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let wrapper_pid = wrapper.id();
+        super::terminate_then_kill(
+            wrapper_pid,
+            || super::claude_process_exited(wrapper_pid),
+            std::time::Duration::from_secs(5),
+        );
+        wrapper.wait().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !super::claude_process_exited(harness) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(super::claude_process_exited(harness));
+    }
 
     #[test]
     fn successful_empty_terminal_result_survives_runner_teardown() {

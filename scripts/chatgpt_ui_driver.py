@@ -151,6 +151,35 @@ def normalized_prompt(text: str) -> str:
     return " ".join(text.split())
 
 
+# ChatGPT shows only the beginning of a long user message, followed by an
+# ellipsis or a control to expand it. That visible beginning must be long
+# enough to identify the prompt.
+COLLAPSED_PROMPT_MIN = 200
+_COLLAPSE_TAIL = re.compile(
+    r"(?:\s*(?:…|\.\.\.|show (?:more|less)|afficher (?:plus|moins)|voir plus))+$",
+    re.IGNORECASE,
+)
+_TYPOGRAPHY = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "\u00a0": " ", "\u202f": " "})
+
+
+def prompt_matches(rendered: str, message: str) -> bool:
+    """Whether a rendered user message is the prompt this driver sent.
+
+    Exact apart from whitespace and typographic quotes. A long prompt also
+    matches the collapsed form the page shows for it: its own beginning,
+    followed by the mark of the cut. Without that mark a beginning proves
+    nothing: an earlier prompt may start with the same words.
+    """
+    whole = normalized_prompt(rendered.translate(_TYPOGRAPHY))
+    sent = normalized_prompt(message.translate(_TYPOGRAPHY))
+    if whole == sent:
+        return True
+    shown = _COLLAPSE_TAIL.sub("", whole).rstrip()
+    if shown == whole or len(shown) < COLLAPSED_PROMPT_MIN:
+        return False
+    return sent.startswith(shown)
+
+
 def model_selection(requested: str) -> tuple[str, str]:
     """Return the exact visible picker label and canonical model identifier."""
     normalized = " ".join(requested.strip().lower().split())
@@ -872,8 +901,7 @@ async def establish_resumed_chat(page, conversation_path: str, message: str) -> 
         if (parsed.netloc.lower() in CHATGPT_HOSTS
                 and parsed.path == conversation_path
                 and await user_messages.count() > 0
-                and normalized_prompt(await user_messages.last.inner_text())
-                    == normalized_prompt(message)):
+                and prompt_matches(await user_messages.last.inner_text(), message)):
             break
         await page.wait_for_timeout(500)
     else:
@@ -1165,11 +1193,17 @@ async def run(args, request) -> None:
                     submitted_route = conversation_path_from_url(page.url)
                     submitted_users = page.locator(USER_MESSAGE_SELECTOR)
                     if (submitted_route is not None
-                            and await submitted_users.count() > submission_user_count
-                            and normalized_prompt(await submitted_users.last.inner_text())
-                                == normalized_prompt(message)):
-                        submitted_emitted = True
-                        emit("submitted", conversation_path=submitted_route)
+                            and await submitted_users.count() > submission_user_count):
+                        shown = await submitted_users.last.inner_text()
+                        # This page sent the prompt from a verified blank chat and
+                        # an answer has started: the route is this conversation
+                        # even when the page renders the prompt differently.
+                        answering = await page.locator(ASSISTANT_MESSAGE_SELECTOR).count() > baseline
+                        if prompt_matches(shown, message) or answering:
+                            if not prompt_matches(shown, message):
+                                emit("diagnostic", message="stage=submitted_prompt_rendered_differently")
+                            submitted_emitted = True
+                            emit("submitted", conversation_path=submitted_route)
                 responses = page.locator(ASSISTANT_MESSAGE_SELECTOR)
                 count = await responses.count()
                 if count > baseline:
@@ -1194,8 +1228,22 @@ async def run(args, request) -> None:
                     route = conversation_path_from_url(page.url)
                     if route is not None and not final_history_loaded:
                         stage = "final_history"
-                        baseline = await establish_resumed_chat(page, route, message)
                         final_history_loaded = True
+                        streamed = last
+                        try:
+                            baseline = await establish_resumed_chat(page, route, message)
+                        except (ResumeNotFound, ResumeMismatch):
+                            # The answer was read in full from the live page. A
+                            # reload that cannot be matched to the prompt must
+                            # not discard it, nor cast doubt on the submission.
+                            emit("diagnostic", message="stage=final_history_unverified")
+                            if download_dir is not None:
+                                stage = "artifacts"
+                                answers = page.locator(ASSISTANT_MESSAGE_SELECTOR)
+                                if await answers.count() > 0:
+                                    await collect_downloads(page, answers.last, download_dir)
+                            emit("complete", content=streamed, model=model_used or None)
+                            return
                         last, stable = "", 0
                         stage = "response"
                         continue

@@ -91,6 +91,8 @@ pub struct PollState {
     pub session_id: Option<String>,
     pub error: Option<String>,
     pub resumed: bool,
+    /// Set while the turn has answered and only its background tasks remain.
+    pub waiting_since: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -348,6 +350,7 @@ fn watch_exit(
             session_id: session_id.lock().unwrap().clone(),
             error: error.lock().unwrap().clone(),
             resumed,
+            waiting_since: None,
         });
     });
 }
@@ -364,6 +367,7 @@ pub fn local_agents_poll(id: String) -> Result<PollState, String> {
         session_id: run.session_id.lock().map_err(|e| e.to_string())?.clone(),
         error: run.error.lock().map_err(|e| e.to_string())?.clone(),
         resumed: run.resumed,
+        waiting_since: run.text.waiting_since(),
     };
     Ok(snapshot)
 }
@@ -657,6 +661,8 @@ fn spawn_claude(
                 let mut background = ClaudeBackground::default();
                 let mut request_started = false;
                 let mut stale_result_skipped = false;
+                // The turn gave its result and only background tasks remain.
+                let mut answered = false;
                 for line in BufReader::new(stdout).lines() {
                     let line = line.map_err(|e| e.to_string())?;
                     let Ok(event) = serde_json::from_str::<Value>(&line) else {
@@ -665,6 +671,8 @@ fn spawn_claude(
                     output.claude_activity(&event);
                     if matches!(event["type"].as_str(), Some("assistant" | "stream_event")) {
                         request_started = true;
+                        answered = false;
+                        output.waiting_on_background(false);
                     }
                     if event["type"] != "stream_event"
                         || matches!(
@@ -675,6 +683,11 @@ fn spawn_claude(
                         output.publish_activities();
                     }
                     background.consume(&event);
+                    // Waiting ends with the last background task, or with a
+                    // question: what follows is the agent's own turn.
+                    if !background.running() || event["type"] == "control_request" {
+                        output.waiting_on_background(false);
+                    }
                     if implement_after_result
                         && event["type"] == "assistant"
                         && event["message"]["content"]
@@ -738,6 +751,10 @@ fn spawn_claude(
                             }
                         };
                         write_line(&mut stdin,&json!({"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}).to_string())?;
+                        // Answered, by the user or by itself: the wait goes on.
+                        if answered && background.running() {
+                            output.waiting_on_background(true);
+                        }
                     } else if event["type"] == "result" {
                         // A resumed session first settles what the previous process
                         // left behind (a stopped background task) and reports it as
@@ -768,6 +785,8 @@ fn spawn_claude(
                         // A result ends one turn, not the session: background agents
                         // can trigger more turns and permission requests afterwards.
                         if background.running() {
+                            answered = true;
+                            output.waiting_on_background(true);
                             continue;
                         }
                         if implement_after_result {

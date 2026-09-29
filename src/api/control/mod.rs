@@ -12337,6 +12337,67 @@ pub(crate) const REMOTE_OPENCODE_CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 /// parsed as an option (and yargs' `--` terminator swallows the message on
 /// `opencode run`, verified). A leading space is inert for the model and
 /// keeps the argument positional on every CLI version.
+/// Linux caps one argv/env string at 128 KiB (MAX_ARG_STRLEN) and the whole
+/// argv+envp at ARG_MAX (usually 2 MiB). Node jobs run `bash -lc <command>`,
+/// so a forked conversation inlined as a positional prompt failed with
+/// "Argument list too long" (fork 0a9943ec, 370 KB).
+const INLINE_PROMPT_LIMIT: usize = 96 * 1024;
+const STDIN_PROMPT_CHUNK: usize = 96 * 1024;
+const STDIN_PROMPT_LIMIT: usize = 1024 * 1024;
+const STDIN_PROMPT_ENV: &str = "SANDBOXED_PROMPT_PART_";
+
+struct StdinPrompt {
+    /// Shell that reassembles the prompt on fd 3 and drops the parts from the
+    /// environment, so the harness and its tools do not inherit them.
+    prelude: String,
+    env: HashMap<String, String>,
+}
+
+/// Stage a long prompt for stdin delivery; `None` keeps it inline.
+fn stdin_prompt(prompt: &str) -> Option<StdinPrompt> {
+    // Measure what lands in argv: quoting expands each `'` to four bytes.
+    if shell_single_quote(&positional_prompt(prompt)).len() <= INLINE_PROMPT_LIMIT {
+        return None;
+    }
+    let prompt = prompt.replace('\0', "");
+    let prompt = if prompt.len() > STDIN_PROMPT_LIMIT {
+        // Keep the objective at the head and the latest turns at the tail.
+        let marker = "\n\n[Middle of this prompt omitted: it exceeded the remote launch limit. Inspect workspace evidence as needed.]\n\n";
+        let mut head = STDIN_PROMPT_LIMIT / 4;
+        while !prompt.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = prompt.len() - (STDIN_PROMPT_LIMIT - head - marker.len());
+        while !prompt.is_char_boundary(tail) {
+            tail += 1;
+        }
+        format!("{}{marker}{}", &prompt[..head], &prompt[tail..])
+    } else {
+        prompt
+    };
+    let mut env = HashMap::new();
+    let mut names = Vec::new();
+    let mut rest = prompt.as_str();
+    while !rest.is_empty() {
+        let mut end = rest.len().min(STDIN_PROMPT_CHUNK);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let name = format!("{STDIN_PROMPT_ENV}{}", names.len());
+        env.insert(name.clone(), rest[..end].to_string());
+        names.push(name);
+        rest = &rest[end..];
+    }
+    let parts: Vec<String> = names.iter().map(|name| format!("\"${name}\"")).collect();
+    let prelude = format!(
+        "sandboxed_prompt=\"$(mktemp)\" || exit 1; printf %s {} > \"$sandboxed_prompt\" || exit 1; \
+         exec 3< \"$sandboxed_prompt\"; rm -f -- \"$sandboxed_prompt\"; unset sandboxed_prompt {}; ",
+        parts.join(" "),
+        names.join(" "),
+    );
+    Some(StdinPrompt { prelude, env })
+}
+
 fn positional_prompt(prompt: &str) -> String {
     if prompt.starts_with('-') {
         format!(" {prompt}")
@@ -12480,15 +12541,23 @@ pub(crate) fn remote_execution_for_plan(
                 command.push_str(" --resume ");
                 command.push_str(&shell_single_quote(session));
             }
-            command.push(' ');
-            command.push_str(&shell_single_quote(&positional_prompt(prompt)));
-            let env = HashMap::from([
+            let mut env = HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), api_base_url.to_string()),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), proxy_key.to_string()),
                 ("NO_COLOR".to_string(), "1".to_string()),
                 ("GH_NO_PAGER".to_string(), "1".to_string()),
                 ("GH_PROMPT_DISABLED".to_string(), "1".to_string()),
             ]);
+            match stdin_prompt(prompt) {
+                None => {
+                    command.push(' ');
+                    command.push_str(&shell_single_quote(&positional_prompt(prompt)));
+                }
+                Some(staged) => {
+                    command = format!("{}{command} <&3", staged.prelude);
+                    env.extend(staged.env);
+                }
+            }
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -13808,6 +13877,7 @@ async fn submit_leased_remote_job(
                 "native Claude session allocation rejected by run generation fence".into()
             }));
         }
+        remote_grok::note_allocated_claude_session(job_id);
     }
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
@@ -37416,6 +37486,63 @@ Investigate <service/> failures.
         let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
         assert!(execution.command.contains(&format!("--resume '{id}'")));
         assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
+    fn remote_claude_long_prompt_reaches_claude_on_stdin_not_argv() {
+        // Fork 0a9943ec replayed 370 KB of history as the positional prompt.
+        let prompt = format!("-{}é'\"$HOME`x`", "fork context ".repeat(30_000));
+        let plan = RemoteHarnessPlan::ClaudeCode {
+            model: Some("claude-opus-5-5".into()),
+            prompt: prompt.clone(),
+            resume_session_id: None,
+        };
+        let mut execution = remote_execution_for_plan(&plan, "https://core.example", "test");
+        bind_remote_claude_session(&mut execution, "c84bf30f-0d21-417e-82b7-48bda29ab007");
+        assert!(execution.command.len() < 4096, "{}", execution.command);
+        assert!(execution.command.contains("claude -p --session-id "));
+        assert!(execution.command.ends_with(" <&3"), "{}", execution.command);
+        let env = execution.env.unwrap();
+        let parts: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| key.starts_with(STDIN_PROMPT_ENV))
+            .collect();
+        assert!(parts.len() > 1);
+        assert!(parts
+            .iter()
+            .all(|(key, value)| key.len() + value.len() < 128 * 1024));
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "test");
+
+        // The prelude really reassembles the prompt and scrubs the parts.
+        let staged = stdin_prompt(&prompt).unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "{}env | grep -c '^{STDIN_PROMPT_ENV}' >&2; cat <&3",
+                staged.prelude
+            ))
+            .env_clear()
+            .envs(&staged.env)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), prompt);
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "0");
+
+        assert!(stdin_prompt("short").is_none());
+        // 40 KB of apostrophes quotes to ~160 KB.
+        assert!(stdin_prompt(&"'".repeat(40 * 1024)).is_some());
+        let huge = format!("objective {}latest turn", "é".repeat(STDIN_PROMPT_LIMIT));
+        let staged = stdin_prompt(&huge).unwrap();
+        let total: usize = staged.env.values().map(String::len).sum();
+        assert!(total <= STDIN_PROMPT_LIMIT, "{total}");
+        let joined: String = (0..staged.env.len())
+            .map(|i| staged.env[&format!("{STDIN_PROMPT_ENV}{i}")].as_str())
+            .collect();
+        assert!(joined.starts_with("objective "));
+        assert!(joined.ends_with("latest turn"));
+        assert!(joined.contains("Middle of this prompt omitted"));
     }
 
     #[test]

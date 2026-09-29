@@ -382,6 +382,8 @@ export interface PollLocal {
   session_id?: string | null;
   error?: string | null;
   resumed: boolean;
+  /** Set while the turn has answered and only its background tasks remain (ms since the epoch). */
+  waiting_since?: number | null;
 }
 
 export async function pollLocal(id: string): Promise<PollLocal> {
