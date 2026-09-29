@@ -20,11 +20,32 @@ pub struct Entry {
     pub sha256: String,
     pub executable: bool,
 }
+/// A symbolic link recreated at the destination. `target` is always relative and
+/// stays inside the workspace; it is never followed by this adapter.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Link {
+    pub path: String,
+    pub target: String,
+}
+/// A path left at the source because it cannot be reproduced elsewhere.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Skipped {
+    pub path: String,
+    pub reason: String,
+}
+pub const OUTSIDE_LINK: &str = "link points outside the workspace";
+pub const UNUSUAL_LINK: &str = "link target is not portable";
+pub const SPECIAL_FILE: &str = "socket, pipe or device";
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub files: Vec<Entry>,
     pub excluded: Vec<String>,
     pub bytes: u64,
+    // Absent from manifests written before links were transferable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -82,6 +103,87 @@ fn confined(root: &Path, value: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(current)
+}
+/// Directory depth of a checkpoint path's parent.
+fn depth(path: &str) -> usize {
+    path.split('/').count().saturating_sub(1)
+}
+/// A target that cannot leave the workspace: `..` only leads, never beyond the
+/// root, and is followed by plain names. Links are never children of links, so
+/// every hop of a chain lands inside the root as well.
+fn contained_target(path: &str, target: &str) -> bool {
+    if target.is_empty() || target.len() > 4096 || target.contains(['\\', '\0']) {
+        return false;
+    }
+    let mut up = 0;
+    let mut names = 0;
+    for part in Path::new(target).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if names == 0 => up += 1,
+            Component::Normal(_) => names += 1,
+            _ => return false,
+        }
+    }
+    up <= depth(path)
+}
+/// The target to record for a source link, or why it stays behind. Absolute
+/// targets inside one of the workspace's own `roots` become relative.
+fn portable_target(roots: &[&Path], path: &str, target: &Path) -> Result<String, &'static str> {
+    let Some(text) = target.to_str() else {
+        return Err(UNUSUAL_LINK);
+    };
+    if !target.is_absolute() {
+        if contained_target(path, text) {
+            return Ok(text.into());
+        }
+        let escapes = Path::new(path)
+            .parent()
+            .map(|p| p.join(target))
+            .is_some_and(|joined| {
+                let mut level = 0usize;
+                joined.components().any(|c| match c {
+                    Component::ParentDir => {
+                        let out = level == 0;
+                        level = level.saturating_sub(1);
+                        out
+                    }
+                    Component::Normal(_) => {
+                        level += 1;
+                        false
+                    }
+                    Component::CurDir => false,
+                    _ => true,
+                })
+            });
+        return Err(if escapes { OUTSIDE_LINK } else { UNUSUAL_LINK });
+    }
+    let inside = roots
+        .iter()
+        .find_map(|root| target.strip_prefix(root).ok())
+        .ok_or(OUTSIDE_LINK)?;
+    if inside
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(UNUSUAL_LINK);
+    }
+    let inside = inside.to_str().ok_or(UNUSUAL_LINK)?.replace('\\', "/");
+    let up = "../".repeat(depth(path));
+    let rewritten = if inside.is_empty() {
+        if up.is_empty() {
+            ".".into()
+        } else {
+            up.trim_end_matches('/').to_owned()
+        }
+    } else {
+        format!("{up}{inside}")
+    };
+    if contained_target(path, &rewritten) {
+        Ok(rewritten)
+    } else {
+        Err(UNUSUAL_LINK)
+    }
 }
 fn excluded(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
@@ -144,7 +246,71 @@ fn digest_beneath(root: &Path, path: &Path) -> Result<String, String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-fn inventory(root: &Path, dir: &Path, manifest: &mut Manifest) -> Result<(), String> {
+fn size(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+/// Counts what a snapshot would carry without reading file contents, so an
+/// oversized workspace is refused with its totals before anything is hashed.
+fn measure(root: &Path, max_bytes: u64, max_files: usize) -> Result<(), String> {
+    type Tally = std::collections::BTreeMap<String, (u64, usize)>;
+    fn walk(top: Option<&str>, dir: &Path, tally: &mut Tally) -> Result<(), String> {
+        for item in fs::read_dir(dir).map_err(err)? {
+            let item = item.map_err(err)?;
+            let name = item.file_name();
+            let name = name.to_str().ok_or("Non-UTF-8 filename")?;
+            if excluded(name) || name == ".transfer-git.bundle" {
+                continue;
+            }
+            let m = fs::symlink_metadata(item.path()).map_err(err)?;
+            let top = top.unwrap_or(name);
+            if m.is_dir() {
+                walk(Some(top), &item.path(), tally)?;
+            } else if m.is_file() || m.file_type().is_symlink() {
+                let row = tally.entry(top.to_owned()).or_default();
+                row.0 = row
+                    .0
+                    .checked_add(if m.is_file() { m.len() } else { 0 })
+                    .ok_or("Workspace size overflow")?;
+                row.1 += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut tally = Tally::new();
+    walk(None, root, &mut tally)?;
+    let bytes = tally
+        .values()
+        .try_fold(0u64, |sum, row| sum.checked_add(row.0))
+        .ok_or("Workspace size overflow")?;
+    let files: usize = tally.values().map(|row| row.1).sum();
+    if bytes <= max_bytes && files <= max_files {
+        return Ok(());
+    }
+    let mut rows: Vec<_> = tally.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let largest: Vec<_> = rows
+        .iter()
+        .take(5)
+        .map(|(top, (bytes, files))| format!("{top} ({}, {files} files)", size(*bytes)))
+        .collect();
+    Err(format!(
+        "Workspace exceeds transfer limit (10 GiB / 50,000 files): {} in {files} files. Largest: {}",
+        size(bytes),
+        largest.join(", ")
+    ))
+}
+/// `roots` are the spellings of the workspace root an absolute link may use.
+fn inventory(
+    roots: &[&Path],
+    root: &Path,
+    dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), String> {
     let mut entries = fs::read_dir(dir)
         .map_err(err)?
         .collect::<Result<Vec<_>, _>>()
@@ -169,19 +335,35 @@ fn inventory(root: &Path, dir: &Path, manifest: &mut Manifest) -> Result<(), Str
         }
         let m = fs::symlink_metadata(&path).map_err(err)?;
         if m.is_dir() {
-            inventory(root, &path, manifest)?;
+            inventory(roots, root, &path, manifest)?;
             continue;
         }
         if !m.is_file() {
-            return Err(format!(
-                "Resolve symlink or special file before moving: {rel}"
-            ));
+            // Never followed: the link itself travels, or stays behind.
+            let kept = if m.file_type().is_symlink() {
+                portable_target(roots, &rel, &fs::read_link(&path).map_err(err)?)
+            } else {
+                Err(SPECIAL_FILE)
+            };
+            match kept {
+                Ok(target) => manifest.links.push(Link { path: rel, target }),
+                Err(reason) => manifest.skipped.push(Skipped {
+                    path: rel,
+                    reason: reason.into(),
+                }),
+            }
+            if manifest.files.len() + manifest.links.len() > MAX_FILES
+                || manifest.skipped.len() > MAX_FILES
+            {
+                return Err("Workspace exceeds transfer limit (10 GiB / 50,000 files)".into());
+            }
+            continue;
         }
         manifest.bytes = manifest
             .bytes
             .checked_add(m.len())
             .ok_or("Workspace size overflow")?;
-        if manifest.bytes > MAX_BYTES || manifest.files.len() >= MAX_FILES {
+        if manifest.bytes > MAX_BYTES || manifest.files.len() + manifest.links.len() >= MAX_FILES {
             return Err("Workspace exceeds transfer limit (10 GiB / 50,000 files)".into());
         }
         #[cfg(unix)]
@@ -202,6 +384,35 @@ fn inventory(root: &Path, dir: &Path, manifest: &mut Manifest) -> Result<(), Str
             sha256,
             executable,
         });
+    }
+    Ok(())
+}
+/// Recreates the manifest's links once every file is in place. A retry after
+/// an interrupted verification finds the links it already made.
+fn restore_links(root: &Path, links: &[Link]) -> Result<(), String> {
+    for link in links {
+        let at = relative(&link.path)?;
+        let parent = match at.parent().and_then(Path::to_str) {
+            Some("") | None => root.to_owned(),
+            Some(parent) => confined(root, parent)?,
+        };
+        fs::create_dir_all(&parent).map_err(err)?;
+        let path = parent.join(at.file_name().ok_or("Invalid link path")?);
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                if fs::read_link(&path).map_err(err)? != Path::new(&link.target) {
+                    return Err(format!("Checkpoint mismatch: {}", link.path));
+                }
+            }
+            Ok(_) => return Err(format!("Checkpoint mismatch: {}", link.path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&link.target, &path).map_err(err)?;
+                #[cfg(not(unix))]
+                return Err("This computer cannot receive a workspace containing links".into());
+            }
+            Err(e) => return Err(err(e)),
+        }
     }
     Ok(())
 }
@@ -239,8 +450,25 @@ fn validate(m: &Manifest) -> Result<(), String> {
     if total != m.bytes {
         return Err("Manifest size mismatch".into());
     }
-    for f in &m.files {
-        let mut p = Path::new(&f.path);
+    if m.files.len() + m.links.len() > MAX_FILES || m.skipped.len() > MAX_FILES {
+        return Err("Too many files".into());
+    }
+    for l in &m.links {
+        relative(&l.path)?;
+        if l.path.split('/').any(excluded) {
+            return Err("Excluded path in manifest".into());
+        }
+        if !seen.insert(l.path.clone()) || !contained_target(&l.path, &l.target) {
+            return Err("Invalid manifest".into());
+        }
+    }
+    for path in m
+        .files
+        .iter()
+        .map(|f| &f.path)
+        .chain(m.links.iter().map(|l| &l.path))
+    {
+        let mut p = Path::new(path);
         while let Some(parent) = p.parent() {
             if seen.contains(parent.to_str().unwrap_or("")) {
                 return Err("Overlapping checkpoint paths".into());
@@ -336,10 +564,9 @@ pub fn operate(
             if manifest_path(area).exists() {
                 return Ok(serde_json::json!(load(area)?));
             }
-            let source = source
-                .ok_or("Source workspace unavailable")?
-                .canonicalize()
-                .map_err(err)?;
+            let given = source.ok_or("Source workspace unavailable")?;
+            let source = given.canonicalize().map_err(err)?;
+            let roots = [source.as_path(), given];
             if area.starts_with(&source) {
                 return Err("Checkpoint directory must be outside the workspace".into());
             }
@@ -347,12 +574,9 @@ pub fn operate(
                 fs::remove_dir_all(&root).map_err(err)?;
             }
             fs::create_dir_all(&root).map_err(err)?;
-            let mut m = Manifest {
-                files: vec![],
-                excluded: vec![],
-                bytes: 0,
-            };
-            inventory(&source, &source, &mut m)?;
+            measure(&source, MAX_BYTES, MAX_FILES)?;
+            let mut m = Manifest::default();
+            inventory(&roots, &source, &source, &mut m)?;
             if fs2::available_space(area).map_err(err)? < m.bytes.saturating_add(BLOCK as u64) {
                 return Err("Insufficient snapshot disk space".into());
             }
@@ -375,12 +599,8 @@ pub fn operate(
                     return Err(format!("File changed during snapshot: {}", f.path));
                 }
             }
-            let mut after = Manifest {
-                files: vec![],
-                excluded: vec![],
-                bytes: 0,
-            };
-            inventory(&source, &source, &mut after)?;
+            let mut after = Manifest::default();
+            inventory(&roots, &source, &source, &mut after)?;
             if after != m {
                 return Err("Workspace changed during snapshot; stop all writers and retry".into());
             }
@@ -429,24 +649,18 @@ pub fn operate(
             Ok(serde_json::json!(m))
         }
         Operation::CheckSource => {
-            let source = source
-                .ok_or("Source workspace unavailable")?
-                .canonicalize()
-                .map_err(err)?;
+            let given = source.ok_or("Source workspace unavailable")?;
+            let source = given.canonicalize().map_err(err)?;
             let expected = load(area)?;
-            let mut current = Manifest {
-                files: vec![],
-                excluded: vec![],
-                bytes: 0,
-            };
-            inventory(&source, &source, &mut current)?;
+            let mut current = Manifest::default();
+            inventory(&[source.as_path(), given], &source, &source, &mut current)?;
             let files: Vec<_> = expected
                 .files
                 .iter()
                 .filter(|f| !f.path.ends_with(".transfer-git.bundle"))
                 .cloned()
                 .collect();
-            if current.files != files {
+            if current.files != files || current.links != expected.links {
                 return Err(
                     "Source files changed after preparation; cancel and prepare again".into(),
                 );
@@ -596,6 +810,7 @@ pub fn operate(
                         .map_err(err)?;
                     }
                 }
+                restore_links(&root, &m.links)?;
                 for (i, f) in m.files.iter().enumerate().filter(|(_, f)| {
                     Path::new(&f.path)
                         .file_name()
@@ -630,7 +845,7 @@ pub fn operate(
                 marker.sync_all().map_err(err)?;
             }
             Ok(
-                serde_json::json!({"root":root,"digest":digest(&manifest_path(area))?,"bytes":m.bytes,"files":m.files.len()}),
+                serde_json::json!({"root":root,"digest":digest(&manifest_path(area))?,"bytes":m.bytes,"files":m.files.len(),"links":m.links.len()}),
             )
         }
     }
@@ -695,8 +910,7 @@ mod tests {
                 sha256: "0".repeat(64),
                 executable: false,
             }],
-            excluded: vec![],
-            bytes: 0,
+            ..Default::default()
         };
         assert!(operate(dir.path(), None, Operation::Stage { manifest: m }).is_err());
         assert!(relative("/absolute").is_err());
@@ -777,17 +991,14 @@ mod integrity_tests {
     }
     #[cfg(unix)]
     #[test]
-    fn machine_transfer_refuses_symlinks_and_preserves_executable_bits() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+    fn machine_transfer_preserves_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("src");
         fs::create_dir(&src).unwrap();
-        symlink("/etc/passwd", src.join("escape")).unwrap();
-        let a = temp.path().join("a");
-        assert!(operate(&a, Some(&src), Operation::Snapshot).is_err());
-        fs::remove_file(src.join("escape")).unwrap();
         fs::write(src.join("run.sh"), "#!/bin/sh\ntrue\n").unwrap();
         fs::set_permissions(src.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        let a = temp.path().join("a");
         let m: Manifest =
             serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
         let b = temp.path().join("b");
@@ -801,6 +1012,198 @@ mod integrity_tests {
                 & 0o111,
             0
         );
+    }
+    #[cfg(unix)]
+    fn linked_source(temp: &Path) -> PathBuf {
+        use std::os::unix::fs::symlink;
+        let src = temp.join("src");
+        fs::create_dir_all(src.join("bin")).unwrap();
+        fs::create_dir_all(src.join("pkg/deep")).unwrap();
+        fs::write(src.join("bin/rustup"), "tool").unwrap();
+        fs::write(src.join("pkg/deep/file"), "shared").unwrap();
+        symlink("rustup", src.join("bin/cargo")).unwrap();
+        symlink("../pkg/deep", src.join("bin/packages")).unwrap();
+        symlink("missing/doc.html", src.join("pkg/doc.html")).unwrap();
+        symlink(
+            src.canonicalize().unwrap().join("pkg/deep"),
+            src.join("pkg/deep/absolute"),
+        )
+        .unwrap();
+        symlink(src.canonicalize().unwrap(), src.join("root")).unwrap();
+        symlink("/etc/passwd", src.join("escape")).unwrap();
+        symlink("../../outside", src.join("bin/above")).unwrap();
+        symlink("pkg/../bin", src.join("detour")).unwrap();
+        let pipe = std::ffi::CString::new(src.join("pipe").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+        src
+    }
+    #[cfg(unix)]
+    #[test]
+    fn machine_transfer_recreates_links_and_leaves_external_ones_behind() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = linked_source(temp.path());
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        let link = |path: &str, target: &str| Link {
+            path: path.into(),
+            target: target.into(),
+        };
+        assert_eq!(
+            m.links,
+            vec![
+                link("bin/cargo", "rustup"),
+                link("bin/packages", "../pkg/deep"),
+                link("pkg/deep/absolute", "../../pkg/deep"),
+                link("pkg/doc.html", "missing/doc.html"),
+                link("root", "."),
+            ]
+        );
+        let skipped: Vec<_> = m
+            .skipped
+            .iter()
+            .map(|s| (s.path.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(
+            skipped,
+            vec![
+                ("bin/above", OUTSIDE_LINK),
+                ("detour", UNUSUAL_LINK),
+                ("escape", OUTSIDE_LINK),
+                ("pipe", SPECIAL_FILE),
+            ]
+        );
+        assert_eq!(m.files.len(), 2);
+        operate(&a, Some(&src), Operation::CheckSource).unwrap();
+        copy(&a, &b, &m);
+        // No link exists while blocks are written, so none can redirect a write.
+        assert!(fs::symlink_metadata(b.join("workspace/bin/cargo")).is_err());
+        // An interrupted verification may already have made some of them.
+        std::os::unix::fs::symlink("rustup", b.join("workspace/bin/cargo")).unwrap();
+        let receipt = operate(&b, None, Operation::Verify).unwrap();
+        assert_eq!(receipt["links"], 5);
+        assert_eq!(receipt, operate(&b, None, Operation::Verify).unwrap());
+        let root = b.join("workspace");
+        for l in &m.links {
+            assert_eq!(
+                fs::read_link(root.join(&l.path)).unwrap(),
+                Path::new(&l.target)
+            );
+        }
+        assert_eq!(fs::read_to_string(root.join("bin/cargo")).unwrap(), "tool");
+        assert_eq!(
+            fs::read_to_string(root.join("bin/packages/file")).unwrap(),
+            "shared"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("pkg/deep/absolute/file")).unwrap(),
+            "shared"
+        );
+        for absent in ["escape", "bin/above", "detour", "pipe"] {
+            assert!(fs::symlink_metadata(root.join(absent)).is_err());
+        }
+        // The moved workspace can move again, and a retargeted link is a change.
+        let c = temp.path().join("c");
+        let again: Manifest =
+            serde_json::from_value(operate(&c, Some(&root), Operation::Snapshot).unwrap()).unwrap();
+        assert_eq!(again.links, m.links);
+        fs::remove_file(root.join("bin/cargo")).unwrap();
+        std::os::unix::fs::symlink("packages", root.join("bin/cargo")).unwrap();
+        assert!(operate(&c, Some(&root), Operation::CheckSource).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn machine_transfer_refuses_a_conflicting_path_at_a_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = linked_source(temp.path());
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        copy(&a, &b, &m);
+        std::os::unix::fs::symlink("/etc", b.join("workspace/bin/cargo")).unwrap();
+        assert!(operate(&b, None, Operation::Verify).is_err());
+    }
+    #[test]
+    fn machine_transfer_refuses_links_that_leave_the_workspace() {
+        let manifest = |path: &str, target: &str| Manifest {
+            links: vec![Link {
+                path: path.into(),
+                target: target.into(),
+            }],
+            ..Default::default()
+        };
+        for (path, target) in [
+            ("a/b", "c"),
+            ("a/b", "../c/d"),
+            ("a/b", ".."),
+            ("a", "."),
+            ("a/b/c", "../../d"),
+        ] {
+            validate(&manifest(path, target)).unwrap();
+        }
+        for (path, target) in [
+            ("a", "../b"),
+            ("a/b", "../../c"),
+            ("a", "/etc/passwd"),
+            ("a", "b/../../c"),
+            ("a/b", "c/../d"),
+            ("a", ""),
+            ("a", "b\\c"),
+            ("../a", "b"),
+            (".ssh/config", "b"),
+            ("a/.env", "b"),
+        ] {
+            assert!(
+                validate(&manifest(path, target)).is_err(),
+                "{path} -> {target}"
+            );
+        }
+        // Nothing may be written beneath a link, and a path is either one or a file.
+        let file = |path: &str| Entry {
+            path: path.into(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+            executable: false,
+        };
+        let mut beneath = manifest("a", "b");
+        beneath.files = vec![file("a/c")];
+        assert!(validate(&beneath).is_err());
+        let mut nested = manifest("a", "b");
+        nested.links.push(Link {
+            path: "a/c".into(),
+            target: "d".into(),
+        });
+        assert!(validate(&nested).is_err());
+        let mut both = manifest("a", "b");
+        both.files = vec![file("a")];
+        assert!(validate(&both).is_err());
+    }
+    #[test]
+    fn manifests_without_links_keep_their_previous_encoding() {
+        let old = r#"{"files":[],"excluded":[".env"],"bytes":0}"#;
+        let m: Manifest = serde_json::from_str(old).unwrap();
+        assert!(m.links.is_empty() && m.skipped.is_empty());
+        assert_eq!(serde_json::to_string(&m).unwrap(), old);
+    }
+    #[test]
+    fn an_oversized_workspace_is_refused_with_its_totals() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("big/nested")).unwrap();
+        fs::create_dir_all(temp.path().join("target")).unwrap();
+        fs::write(temp.path().join("big/nested/a"), vec![0; 2 * BLOCK]).unwrap();
+        fs::write(temp.path().join("big/b"), "b").unwrap();
+        fs::write(temp.path().join("small"), "s").unwrap();
+        fs::write(temp.path().join("target/ignored"), vec![0; 4 * BLOCK]).unwrap();
+        measure(temp.path(), 3 * BLOCK as u64, 3).unwrap();
+        let bytes = measure(temp.path(), BLOCK as u64, 3).unwrap_err();
+        assert!(bytes.contains("2.0 MiB in 3 files"), "{bytes}");
+        assert!(
+            bytes.contains("Largest: big (2.0 MiB, 2 files), small"),
+            "{bytes}"
+        );
+        assert!(measure(temp.path(), 3 * BLOCK as u64, 2).is_err());
     }
     #[test]
     fn machine_transfer_preserves_git_history_and_uncommitted_work() {

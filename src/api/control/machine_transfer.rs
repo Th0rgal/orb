@@ -488,6 +488,18 @@ async fn adapter(
         }
     }
 }
+/// An adapter that predates transferable links verifies the files and silently
+/// leaves the links out; its receipt does not count them.
+fn check_links(manifest: &Manifest, receipt: &Value, machine: &Machine) -> Result<(), Error> {
+    if !manifest.links.is_empty() && receipt["links"].as_u64() != Some(manifest.links.len() as u64)
+    {
+        return Err(conflict(format!(
+            "Update {} to receive a workspace containing links",
+            machine.label()
+        )));
+    }
+    Ok(())
+}
 async fn validate_destination(
     state: &AppState,
     dest: &Machine,
@@ -714,6 +726,7 @@ pub async fn operate(
             {
                 return Err(conflict("Destination inventory differs"));
             }
+            check_links(manifest, &receipt, &a.destination)?;
             a.destination_root = Some(
                 receipt["root"]
                     .as_str()
@@ -746,6 +759,18 @@ pub async fn operate(
                 if a.manifest.as_ref() != Some(manifest) {
                     return Err(conflict("Manifest differs from source snapshot"));
                 }
+                // Refuse before copying rather than at the receipt.
+                if let (false, Machine::Node { id }) = (manifest.links.is_empty(), &a.destination) {
+                    let capabilities = node_transfer_capabilities(&state, id).await?;
+                    if !capabilities["features"]
+                        .as_array()
+                        .is_some_and(|f| f.iter().any(|f| f == "links"))
+                    {
+                        return Err(conflict(format!(
+                            "Update {id} to receive a workspace containing links"
+                        )));
+                    }
+                }
             }
             let snapshot = matches!(operation, Operation::Snapshot);
             let verify = matches!(operation, Operation::Verify);
@@ -756,6 +781,9 @@ pub async fn operate(
                 a.manifest = Some(manifest);
                 a.phase = "copying".into();
             } else if verify {
+                if let Some(manifest) = &a.manifest {
+                    check_links(manifest, &value, &a.destination)?;
+                }
                 a.destination_root = Some(
                     value["root"]
                         .as_str()
@@ -1049,8 +1077,8 @@ mod portable_context_tests {
         let a = action("historical context\n".to_owned() + &"é🕊<>".repeat(300_000));
         let mut manifest = Manifest {
             files: vec![],
-            excluded: vec![],
             bytes: 0,
+            ..Default::default()
         };
         include_context_file(&a, &mut manifest).unwrap();
         assert_eq!(manifest.bytes, a.context.len() as u64);
@@ -1096,8 +1124,8 @@ mod portable_context_tests {
             &a,
             &mut Manifest {
                 files: vec![],
-                excluded: vec![],
-                bytes: crate::machine_transfer::MAX_BYTES
+                bytes: crate::machine_transfer::MAX_BYTES,
+                ..Default::default()
             }
         )
         .is_err());
@@ -1108,8 +1136,8 @@ mod portable_context_tests {
         let a = action("short history".into());
         let mut manifest = Manifest {
             files: vec![],
-            excluded: vec![],
             bytes: 0,
+            ..Default::default()
         };
         include_context_file(&a, &mut manifest).unwrap();
         assert!(manifest.files.is_empty());

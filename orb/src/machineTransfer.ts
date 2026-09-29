@@ -3,7 +3,9 @@ import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, refreshLocalAgents, rememberBinding } from "./localAgents";
 export type Machine = { kind: "core" } | { kind: "node" | "client"; id: string };
 export interface TransferFile { path: string; bytes: number; sha256: string; executable: boolean }
-export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number }
+export interface TransferLink { path: string; target: string }
+export interface SkippedPath { path: string; reason: string }
+export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number; links?: TransferLink[]; skipped?: SkippedPath[] }
 export interface TransferAction {
   id: string; mission_id: string; phase: string; source: Machine; destination: Machine;
   backend: string; model?: string | null; effort?: string | null;

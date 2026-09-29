@@ -9,7 +9,7 @@ test("moves from the footer with an inventory and no automatic execution", async
     else {
       calls.push(body.op === "files" ? body.operation.op : body.op);
       if (body.op === "prepare") result = action;
-      else if (body.operation?.op === "snapshot") { action.manifest = { files: [{ path: "notes.txt", bytes: 3, executable: false, sha256: "hash" }], bytes: 3, excluded: [".env", "node_modules"] }; action.phase = "copying"; result = action; }
+      else if (body.operation?.op === "snapshot") { action.manifest = { files: [{ path: "notes.txt", bytes: 3, executable: false, sha256: "hash" }], bytes: 3, excluded: [".env", "node_modules"], links: [{ path: "bin/cargo", target: "rustup" }], skipped: [{ path: "context", reason: "link points outside the workspace" }] }; action.phase = "copying"; result = action; }
       else if (body.operation?.op === "read") result = { data: "YWJj" };
       else if (body.operation?.op === "stage") result = { received: {}, sealed: false };
       else if (body.operation?.op === "verify") { action.phase = "verified"; result = action; }
@@ -25,8 +25,10 @@ test("moves from the footer with an inventory and no automatic execution", async
   await page.getByRole("menuitem", { name: "Spark ›" }).click();
   await expect(page.getByRole("dialog", { name: "Change machine" })).toBeVisible();
   await page.getByRole("button", { name: "Prepare transfer" }).click();
-  await page.getByText("1 files · 0.0 MiB").click();
+  await page.getByText("1 files · 1 links · 0.0 MiB · 1 left behind").click();
   await expect(page.getByText("notes.txt")).toBeVisible();
+  await expect(page.getByText("bin/cargo → rustup")).toBeVisible();
+  await expect(page.getByText("context link points outside the workspace")).toBeVisible();
   await expect(page.getByText(".env", { exact: true })).toBeVisible();
   await page.screenshot({ path: "artifacts/machine-transfer-review.png" });
   await page.getByRole("button", { name: "Move to Spark" }).click();
