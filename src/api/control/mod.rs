@@ -23126,7 +23126,7 @@ async fn control_actor_loop(
                                                 // wait repeats the same message every time.
                                                 Some(previous)
                                                     if usage_limit_wait::is_waiting(&m)
-                                                        && usage_limit_wait::already_deferred(previous, &content) =>
+                                                        && usage_limit_wait::already_deferred(previous, source.as_deref(), &content) =>
                                                 {
                                                     previous.to_string()
                                                 }

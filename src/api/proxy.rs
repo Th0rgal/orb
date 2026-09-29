@@ -1394,14 +1394,23 @@ async fn native_protocol_proxy(
             .chain_store
             .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
             .await;
-        let subscriptions = state
-            .chain_store
-            .configured_subscription_keys(&chain_entries, &state.ai_providers)
-            .await;
-        if let Some(limit) = state
-            .health_tracker
-            .earliest_limit_reset(&candidate_ids, &subscriptions)
-        {
+        // Only when a usage limit keeps out every candidate: with one of
+        // them on a short cooldown the ordinary retry answer applies.
+        let mut candidates = Vec::with_capacity(candidate_ids.len());
+        for account_id in &candidate_ids {
+            let subscription = state
+                .ai_providers
+                .get(*account_id)
+                .await
+                .and_then(|account| {
+                    crate::provider_health::store_account_subscription_key(
+                        account.provider_type,
+                        &account,
+                    )
+                });
+            candidates.push((*account_id, subscription));
+        }
+        if let Some(limit) = state.health_tracker.usage_limit_blocking_all(&candidates) {
             return usage_limit_response(protocol, &chain_id, &limit);
         }
         let cooling = state

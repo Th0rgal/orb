@@ -287,13 +287,20 @@ pub(crate) fn is_waiting(mission: &Mission) -> bool {
         && mission.terminal_reason.as_deref() == Some(USAGE_LIMIT_WAIT_REASON)
 }
 
-/// True when `content` is already part of the prompt the mission will resume
-/// with. Messages that arrive during the wait are appended to that prompt;
-/// an automation firing on an interval would otherwise append the same text
-/// once per tick for hours.
-pub(crate) fn already_deferred(deferred_goal: &str, content: &str) -> bool {
+/// True when an automation's message is already one of the messages the
+/// mission will resume with. Messages that arrive during the wait are
+/// appended to the resume prompt; an automation firing on an interval would
+/// otherwise append the same text once per tick for hours. Only automation
+/// deliveries (no source) are deduplicated, and only on an exact match:
+/// whatever an operator sends is always kept.
+pub(crate) fn already_deferred(deferred_goal: &str, source: Option<&str>, content: &str) -> bool {
     let content = content.trim();
-    !content.is_empty() && super::deferred_messages::strip(deferred_goal).contains(content)
+    source.is_none()
+        && !content.is_empty()
+        && super::deferred_messages::decode(deferred_goal)
+            .1
+            .iter()
+            .any(|(_, message)| message.trim() == content)
 }
 
 /// Let a waiting mission run now (operator resume): the schedule is lifted
@@ -903,13 +910,19 @@ mod tests {
     }
 
     #[test]
-    fn a_message_repeated_during_the_wait_is_kept_once() {
+    fn an_automation_message_repeated_during_the_wait_is_kept_once() {
         let first = super::super::deferred_messages::encode(Uuid::new_v4(), "check the CI");
-        let goal = super::super::deferred_messages::join("resume prompt", &first);
-        assert!(already_deferred(&goal, "check the CI"));
-        assert!(already_deferred(&goal, "  check the CI\n"));
-        assert!(!already_deferred(&goal, "check the deploy"));
-        assert!(!already_deferred(&goal, "   "));
+        let goal = super::super::deferred_messages::join("resume prompt, then run tests", &first);
+        assert!(already_deferred(&goal, None, "check the CI"));
+        assert!(already_deferred(&goal, None, "  check the CI\n"));
+        assert!(!already_deferred(&goal, None, "check the deploy"));
+        assert!(!already_deferred(&goal, None, "   "));
+        // Words that merely occur in the stored prompt are not a repeat.
+        assert!(!already_deferred(&goal, None, "run tests"));
+        assert!(!already_deferred(&goal, None, "check"));
+        // An operator's message is never dropped, even repeated.
+        assert!(!already_deferred(&goal, Some("api:thomas"), "check the CI"));
+        assert!(!already_deferred(&goal, Some("telegram"), "check the CI"));
     }
 
     #[tokio::test]

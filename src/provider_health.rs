@@ -375,23 +375,40 @@ impl ProviderHealthTracker {
         })
     }
 
-    /// The soonest moment a usage limit on one of the given accounts or
-    /// subscriptions resets, when at least one is parked on such a limit.
-    pub fn earliest_limit_reset(
+    /// The usage limit that keeps an account from being selected: its own
+    /// or its shared subscription's, whichever ends last.
+    pub fn blocking_limit(
         &self,
-        account_ids: &[Uuid],
-        subscriptions: &[SubscriptionKey],
+        account_id: Uuid,
+        subscription: Option<&SubscriptionKey>,
     ) -> Option<crate::account_limits::LimitCooldown> {
-        let accounts = account_ids
-            .iter()
-            .map(|id| crate::account_limits::account_key(*id));
-        let subscriptions = subscriptions
-            .iter()
-            .map(|key| crate::account_limits::subscription_key(&key.0));
-        accounts
-            .chain(subscriptions)
+        let account = crate::account_limits::account_key(account_id);
+        let subscription = subscription.map(|key| crate::account_limits::subscription_key(&key.0));
+        std::iter::once(account)
+            .chain(subscription)
             .filter_map(|key| self.limits.active(&key))
-            .min_by_key(|cooldown| cooldown.until)
+            .max_by_key(|cooldown| cooldown.until)
+    }
+
+    /// When every candidate is kept out by a usage limit, the limit that
+    /// resets first. `None` as soon as one candidate is not: an account on a
+    /// short cooldown comes back within the caller's retry budget, and
+    /// announcing a usage limit would make a mission wait for hours.
+    pub fn usage_limit_blocking_all(
+        &self,
+        candidates: &[(Uuid, Option<SubscriptionKey>)],
+    ) -> Option<crate::account_limits::LimitCooldown> {
+        let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
+        for (account_id, subscription) in candidates {
+            let limit = self.blocking_limit(*account_id, subscription.as_ref())?;
+            if earliest
+                .as_ref()
+                .is_none_or(|current| limit.until < current.until)
+            {
+                earliest = Some(limit);
+            }
+        }
+        earliest
     }
 
     /// Return true when any of the given subscription keys has an active
@@ -3335,10 +3352,12 @@ mod tests {
             .await
             .iter()
             .any(|snapshot| snapshot.account_id == account && !snapshot.is_healthy));
-        let earliest = restarted
-            .earliest_limit_reset(&[account, sibling], &[])
+        let blocking = restarted
+            .blocking_limit(account, None)
             .expect("parked account");
-        assert_eq!(earliest.limit, "Claude session limit");
+        assert_eq!(blocking.limit, "Claude session limit");
+        assert!(restarted.blocking_limit(sibling, None).is_none());
+        assert!(restarted.blocking_limit(sibling, Some(&key)).is_some());
 
         // A served request releases the account and its subscription, on
         // disk too.
@@ -3360,7 +3379,7 @@ mod tests {
         cooldown.until = chrono::Utc::now() - chrono::Duration::seconds(1);
         tracker.record_usage_limit(account, None, cooldown).await;
         assert!(tracker.is_healthy(account).await);
-        assert!(tracker.earliest_limit_reset(&[account], &[]).is_none());
+        assert!(tracker.blocking_limit(account, None).is_none());
     }
 
     #[tokio::test]
@@ -3383,7 +3402,7 @@ mod tests {
             .with_limits(crate::account_limits::AccountCooldowns::load(path));
         assert!(!restarted.is_healthy(account).await);
         assert!(restarted.is_healthy(transient).await);
-        let parked = restarted.earliest_limit_reset(&[account], &[]).unwrap();
+        let parked = restarted.blocking_limit(account, None).unwrap();
         assert!(!parked.announced);
 
         restarted.clear_cooldown(account).await;
@@ -3480,5 +3499,42 @@ mod tests {
             resolved_anthropic_accounts(&store, &tracker).await,
             vec![id]
         );
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_is_announced_only_when_it_blocks_every_candidate() {
+        let tracker = ProviderHealthTracker::new();
+        let capped = Uuid::new_v4();
+        let capped_later = Uuid::new_v4();
+        let transient = Uuid::new_v4();
+        let sibling = Uuid::new_v4();
+        let shared = SubscriptionKey::new("openai", "org-shared");
+        tracker
+            .record_usage_limit(capped, Some(&shared), limit_cooldown(2))
+            .await;
+        tracker
+            .record_usage_limit(capped_later, None, limit_cooldown(30))
+            .await;
+        tracker
+            .record_failure(transient, CooldownReason::RateLimit, None)
+            .await;
+        assert!(!tracker.is_healthy(transient).await);
+
+        let all_capped = tracker
+            .usage_limit_blocking_all(&[
+                (capped_later, None),
+                (capped, Some(shared.clone())),
+                // Never failed itself, but shares the exhausted subscription.
+                (sibling, Some(shared.clone())),
+            ])
+            .expect("every candidate is at its usage limit");
+        assert!(all_capped.until < chrono::Utc::now() + chrono::Duration::hours(3));
+
+        // One candidate is only on a short cooldown: no usage limit is
+        // announced, the caller keeps its ordinary retry.
+        assert!(tracker
+            .usage_limit_blocking_all(&[(capped, Some(shared)), (transient, None)])
+            .is_none());
+        assert!(tracker.usage_limit_blocking_all(&[]).is_none());
     }
 }

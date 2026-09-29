@@ -3927,7 +3927,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         .await;
     }
 
-    note_claude_turn_for_limits(primary_limit_key.as_deref(), &result);
+    note_claude_turn_for_limits(app_working_dir, primary_limit_key.as_deref(), &result);
 
     // Account rotation: if rate-limited, or if auth still fails after
     // one refresh attempt, try alternate Anthropic credentials.
@@ -3960,7 +3960,6 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                 ?rotation_reason,
                 "Primary Anthropic credential failed; trying alternate credentials"
             );
-            let limits = crate::account_limits::shared();
             for (idx, alt_auth) in rotation_accounts.accounts.into_iter().enumerate() {
                 if cancel.is_cancelled() {
                     break;
@@ -3970,7 +3969,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                 let alt_limit_key = claude_auth_limit_key(app_working_dir, &alt_auth);
                 let already_limited = rotation_reason == Some(TerminalReason::RateLimited)
                     && primary_limit_key.as_deref() == Some(alt_limit_key.as_str());
-                if already_limited || limits.is_cooling(&alt_limit_key) {
+                if already_limited || limit_reset_of(app_working_dir, &alt_limit_key).is_some() {
                     tracing::info!(
                         mission_id = %mission_id,
                         rotation_attempt = idx + 1,
@@ -4008,7 +4007,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                     force_argv_prompt,
                 )
                 .await;
-                note_claude_turn_for_limits(Some(&alt_limit_key), &result);
+                note_claude_turn_for_limits(app_working_dir, Some(&alt_limit_key), &result);
                 // Continue rotating on account-specific failures.
                 // Other LLM errors (model errors, context limit, etc.)
                 // would fail on every account, so stop early to avoid

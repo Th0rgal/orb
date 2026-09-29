@@ -3046,6 +3046,31 @@ pub(crate) fn anthropic_store_account_for_credential(
     })
 }
 
+/// Usage-limit registry keys of a provider-store account: its own, and the
+/// one of the subscription it shares with sibling records (same organization
+/// or login). A limit hit through one record exhausts the allowance of all of
+/// them, so the harness rotation paths park and release both, like the proxy.
+pub(crate) fn store_account_limit_keys(working_dir: &Path, account_id: uuid::Uuid) -> Vec<String> {
+    let mut keys = vec![crate::account_limits::account_key(account_id)];
+    let subscription = std::fs::read_to_string(working_dir.join(AI_PROVIDERS_PATH))
+        .ok()
+        .and_then(|contents| {
+            serde_json::from_str::<Vec<crate::ai_providers::AIProvider>>(&contents).ok()
+        })
+        .and_then(|accounts| {
+            accounts
+                .into_iter()
+                .find(|account| account.id == account_id)
+        })
+        .and_then(|account| {
+            crate::provider_health::store_account_subscription_key(account.provider_type, &account)
+        });
+    if let Some(subscription) = subscription {
+        keys.push(crate::account_limits::subscription_key(&subscription.0));
+    }
+    keys
+}
+
 /// Get all available Anthropic credentials for Claude Code, in priority order.
 ///
 /// Collects credentials from all sources:
