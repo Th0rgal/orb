@@ -195,6 +195,8 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  /** The mission that launched this one through the MCP, if any. */
+  parent_mission_id?: string | null;
   execution_kind?: "hosted";
   cloud?: import("./cloudAgentApi").CloudExecution;
   local_sync_pending?: boolean;

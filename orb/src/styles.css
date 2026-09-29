@@ -2575,3 +2575,16 @@ select.orb-select-native:disabled { cursor: default; }
 .background-wake-body { margin: 6px 0 4px 19px; display: grid; gap: 6px; }
 .background-wake-body pre { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 8px 10px; border-radius: var(--radius-md, 8px); background: var(--hover-1); color: var(--fg-2); }
 .background-wake-body p { margin: 0; }
+
+/* Missions launched by a mission: the count opens them like a folder. */
+.tree-entry > .launched-toggle {
+  position: absolute; top: 5px; right: 6px; height: 20px; padding: 0 4px 0 6px;
+  display: inline-flex; align-items: center; gap: 2px;
+  border-radius: var(--radius-xs); color: var(--fg-4); font-size: 11px; font-family: var(--mono);
+}
+.tree-entry > .launched-toggle:hover { background: var(--bg-active); color: var(--fg); }
+.tree-entry > .launched-toggle.live .launched-count { color: var(--fg-2); }
+.tree-entry:has(> .launched-toggle) > .row { padding-right: 52px; }
+.launched-chevron { transition: transform 140ms ease; }
+.launched-chevron.open { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .launched-chevron { transition: none; } }
