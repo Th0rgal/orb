@@ -30,3 +30,31 @@ it("explains an oversized workspace with its largest folders", () => {
 it("names the machine that cannot receive links", () => {
   expect(describeError("409 Update old-agent to receive a workspace containing links").title).toBe("old-agent needs an update");
 });
+
+import { blocked, selectionRequest, selectionTotals } from "../src/TransferSelection";
+import type { InventoryRow } from "../src/machineTransfer";
+const row = (path: string, state: InventoryRow["state"], bytes: number, files: number, folder = true): InventoryRow => ({ path, folder, state, bytes, files });
+const rows = [row("work", "moved", 100, 10), row("work/cache", "moved", 60, 6), row("work/cache/x/target", "rebuildable", 500, 50), row("work/run.log", "ignored", 5, 1, false), row(".cargo", "rebuildable", 1000, 100), row("top.txt", "moved", 1, 1, false), row("scratch/.lake", "rebuildable", 70, 7)];
+it("moves everything but ignored and rebuildable paths by default", () => {
+  expect(selectionTotals({ rows, bytes: 101, files: 11 }, {})).toEqual({ bytes: 101, files: 11 });
+  expect(selectionRequest(rows, {})).toEqual({ omit: [], include: [] });
+});
+it("subtracts an unticked folder and adds a ticked left-behind path", () => {
+  const choice = { "work/cache": false, ".cargo": true, "work/run.log": true, "scratch/.lake": true };
+  expect(selectionTotals({ rows, bytes: 101, files: 11 }, choice)).toEqual({ bytes: 100 - 60 + 1000 + 5 + 70 + 1, files: 10 - 6 + 100 + 1 + 7 + 1 });
+  expect(selectionRequest(rows, choice)).toEqual({ omit: ["work/cache"], include: ["work/run.log", ".cargo", "scratch/.lake"] });
+});
+it("lets an unticked folder decide for everything beneath it", () => {
+  const choice = { work: false, "work/cache": false, "work/cache/x/target": true };
+  expect(rows.filter(r => blocked(r, rows, choice)).map(r => r.path)).toEqual(["work/cache", "work/cache/x/target", "work/run.log"]);
+  expect(selectionTotals({ rows, bytes: 101, files: 11 }, choice)).toEqual({ bytes: 1, files: 1 });
+  expect(selectionRequest(rows, choice)).toEqual({ omit: ["work"], include: [] });
+  expect(selectionRequest(rows, { "work/cache": false, "work/cache/x/target": true })).toEqual({ omit: ["work/cache"], include: [] });
+});
+it("counts moved entries a long listing left out", () => {
+  expect(selectionTotals({ rows: rows.slice(0, 2), bytes: 900, files: 90 }, { "work/cache": false })).toEqual({ bytes: 840, files: 84 });
+});
+it("reserves room for Git history and the archived conversation", () => {
+  expect(selectionTotals({ rows: [], bytes: 0, files: 0 }, {})).toEqual({ bytes: 0, files: 0 });
+  expect(selectionTotals({ rows, bytes: 101, files: 11, reserved: { bytes: 40, files: 2 } }, { "work/cache": false })).toEqual({ bytes: 81, files: 7 });
+});

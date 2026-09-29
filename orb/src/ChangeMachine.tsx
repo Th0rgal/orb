@@ -10,7 +10,8 @@ import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal 
 import { appendClientTranscript, setClientMissionStatus } from "./api";
 import { MachineLoadBadge, byLeastLoaded, machineLoadTitle } from "./machineLoad";
 import { TransferInventory, formatBytes } from "./TransferInventory";
-import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, machineLabel, sameMachine, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView } from "./machineTransfer";
+import { TransferSelection, selectionRequest, selectionTotals, type Choice } from "./TransferSelection";
+import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, inventoryTransfer, machineLabel, sameMachine, selectTransfer, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView, type WorkspaceInventory } from "./machineTransfer";
 
 type Loaded = { view: TransferView; rows: Destination[]; client?: string };
 const loads = new Map<string, Promise<Loaded>>();
@@ -57,6 +58,8 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   const [stage, setStage] = createSignal("");
   const [progress, setProgress] = createSignal(0);
   const [error, setError] = createSignal("");
+  const [inventory, setInventory] = createSignal<WorkspaceInventory>();
+  const [choice, setChoice] = createSignal<Choice>({});
   let cancelled = false;
   let alive = true;
   let root!: HTMLDivElement;
@@ -133,7 +136,21 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
       if (current().kind === "client" && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer before moving it.");
       if (running()) await stopSource();
       let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", destination: target.machine, client_id: client, client_root: localBinding(p.mission.id)?.cwd, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
-      setAction(a); a = await snapshotTransfer(a); setAction(a); setStage("");
+      setAction(a);
+      // A source that cannot list its folders yet snapshots everything, as before.
+      const found = await inventoryTransfer(a);
+      if (found) { setChoice({}); setInventory(found); }
+      else { a = await snapshotTransfer(a); setAction(a); }
+      setStage("");
+    } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
+  };
+  const fits = () => { const found = inventory(); if (!found) return true; const t = selectionTotals(found, choice()); return t.bytes <= found.limits.bytes && t.files <= found.limits.files; };
+  const snapshot = async () => {
+    let a = action(); const found = inventory(); if (!a || !found || busy()) return;
+    cancelled = false; setBusy(true); setError(""); setStage("Reading workspace…");
+    try {
+      await selectTransfer(a, selectionRequest(found.rows, choice()));
+      a = await snapshotTransfer(a); setAction(a); setInventory(undefined); setStage("");
     } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
   };
   const move = async () => {
@@ -188,7 +205,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
       <div class="transfer-body">
         <Show when={loading()}><p role="status">{destinations().length?"Updating machines…":"Checking machines…"}</p></Show>
         <Show when={selected()?.reason}><p role="status">{selected()!.reason}</p></Show>
-        <Show when={!action()?.manifest}><p>The conversation and its workspace files move together. The agent waits for your next message.</p></Show>
+        <Show when={!action()?.manifest && !inventory()}><p>The conversation and its workspace files move together. The agent waits for your next message.</p></Show>
         <Show when={!action()}>
           <div class="transfer-options">
             <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
@@ -199,14 +216,15 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
           </div>
           <Show when={!compatible()}><p>Choose a harness available on this machine.</p></Show>
         </Show>
+        <Show when={!action()?.manifest && inventory()}>{found => <TransferSelection inventory={found()} choice={choice()} disabled={busy()} onChoice={setChoice} />}</Show>
         <Show when={action()?.manifest}>{m => <TransferInventory manifest={m()} />}</Show>
         <Show when={error()}><ErrorNotice error={error()} /></Show>
       </div>
       <footer class="transfer-foot">
-        <Show when={busy()}><div class="transfer-status" role="status"><span>{stage()}</span><Show when={stage().startsWith("Copying")}><span>{Math.round(progress() * 100)}% of {formatBytes(action()?.manifest?.bytes ?? 0)}</span><progress max="1" value={progress()} /></Show></div></Show>
+        <Show when={busy() && stage()}><div class="transfer-status" role="status"><span>{stage()}</span><Show when={stage().startsWith("Copying")}><span>{Math.round(progress() * 100)}% of {formatBytes(action()?.manifest?.bytes ?? 0)}</span><progress max="1" value={progress()} /></Show></div></Show>
         <div class="transfer-actions">
           <button class="pill" disabled={stage() === "Activating destination…" && busy()} onClick={() => busy() ? cancelled = true : void cancel()}>Cancel</button>
-          <Show when={action()?.manifest} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}>
+          <Show when={action()?.manifest} fallback={<Show when={inventory()} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}><button class="pill on" disabled={busy() || !fits()} onClick={() => void snapshot()}>Continue</button></Show>}>
             <Show when={!busy()}><button class="pill on" onClick={() => void move()}>Move to {selected()!.label}</button></Show>
           </Show>
         </div>

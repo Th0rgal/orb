@@ -272,9 +272,10 @@ async fn node_request(
         .await
         .map_err(|_| conflict("Machine unreachable; retry when it reconnects"))?;
     if !response.status().is_success() {
-        return Err(conflict(
-            "Machine transfer unavailable on this node; check its version and workspace",
-        ));
+        return Err(conflict(node_refusal(
+            response.status(),
+            &response.text().await.unwrap_or_default(),
+        )));
     }
     response
         .json()
@@ -284,6 +285,21 @@ async fn node_request(
 // Version 1 nodes omitted Claude from transfer discovery. Their authenticated
 // software inventory lets a rolling upgrade repair that omission without
 // restarting nodes that still own jobs. Version 2 is authoritative.
+pub(crate) const UNSUPPORTED_OPERATION: &str =
+    "Machine does not support this transfer operation; update it";
+/// What a node answered when it refused. Its own reason for a conflict is the
+/// one the user can act on; a request it cannot parse is an operation it
+/// predates.
+fn node_refusal(status: StatusCode, body: &str) -> String {
+    let reason = body.trim();
+    if status == StatusCode::UNPROCESSABLE_ENTITY {
+        UNSUPPORTED_OPERATION.into()
+    } else if status == StatusCode::CONFLICT && !reason.is_empty() {
+        reason.chars().take(2_000).collect()
+    } else {
+        "Machine transfer unavailable on this node; check its version and workspace".into()
+    }
+}
 fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
     if capabilities["version"].as_u64() != Some(1) {
         return;
@@ -322,6 +338,31 @@ async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value,
 #[cfg(test)]
 mod claude_capability_tests {
     use super::*;
+    #[test]
+    fn a_node_refusal_keeps_its_reason_and_names_an_unknown_operation() {
+        let limit = "Workspace exceeds transfer limit (10 GiB / 50,000 files): 28.9 GiB in 408581 files. Largest: rvb (7.1 GiB, 126454 files)";
+        assert_eq!(node_refusal(StatusCode::CONFLICT, limit), limit);
+        assert_eq!(
+            node_refusal(StatusCode::CONFLICT, &"é".repeat(5_000))
+                .chars()
+                .count(),
+            2_000
+        );
+        assert_eq!(
+            node_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown variant `inventory`"
+            ),
+            UNSUPPORTED_OPERATION
+        );
+        for (status, body) in [
+            (StatusCode::CONFLICT, " "),
+            (StatusCode::UNAUTHORIZED, "token"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "panic"),
+        ] {
+            assert!(node_refusal(status, body).starts_with("Machine transfer unavailable"));
+        }
+    }
     #[test]
     fn legacy_inventory_is_evidence_not_a_blanket_allowlist() {
         let installed = json!({"components":[{"id":"claudecode","installed":true,"path":"/usr/local/bin/claude","version":"2.1.283"}]});
@@ -422,7 +463,7 @@ pub async fn inspect(
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"features":["links"],"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"features":["links","selection"],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
@@ -757,7 +798,11 @@ pub async fn operate(
                 (&*side, &operation),
                 (
                     "source",
-                    Operation::Snapshot | Operation::Read { .. } | Operation::CheckSource
+                    Operation::Inventory
+                        | Operation::Select { .. }
+                        | Operation::Snapshot
+                        | Operation::Read { .. }
+                        | Operation::CheckSource
                 ) | (
                     "destination",
                     Operation::Stage { .. } | Operation::Write { .. } | Operation::Verify
@@ -771,21 +816,45 @@ pub async fn operate(
                     return Err(conflict("Manifest differs from source snapshot"));
                 }
                 // Refuse before copying rather than at the receipt.
-                if let (false, Machine::Node { id }) = (manifest.links.is_empty(), &a.destination) {
-                    let capabilities = node_transfer_capabilities(&state, id).await?;
-                    if !capabilities["features"]
-                        .as_array()
-                        .is_some_and(|f| f.iter().any(|f| f == "links"))
-                    {
-                        return Err(conflict(format!(
-                            "Update {id} to receive a workspace containing links"
-                        )));
+                if let Machine::Node { id } = &a.destination {
+                    let needed: Vec<_> = [
+                        ("links", !manifest.links.is_empty(), "containing links"),
+                        (
+                            "selection",
+                            crate::machine_transfer::carries_rebuildable(manifest),
+                            "with selected build folders",
+                        ),
+                    ]
+                    .into_iter()
+                    .filter(|(_, needed, _)| *needed)
+                    .collect();
+                    if !needed.is_empty() {
+                        let capabilities = node_transfer_capabilities(&state, id).await?;
+                        for (feature, _, what) in needed {
+                            if !capabilities["features"]
+                                .as_array()
+                                .is_some_and(|f| f.iter().any(|f| f == feature))
+                            {
+                                return Err(conflict(format!(
+                                    "Update {id} to receive a workspace {what}"
+                                )));
+                            }
+                        }
                     }
                 }
             }
             let snapshot = matches!(operation, Operation::Snapshot);
             let verify = matches!(operation, Operation::Verify);
-            let value = adapter(&state, &a, &side, operation).await?;
+            let inventory = matches!(operation, Operation::Inventory);
+            let mut value = adapter(&state, &a, &side, operation).await?;
+            // The archived conversation joins the snapshot and counts in its limits.
+            if inventory && a.context.len() > INLINE_CONTEXT_BYTES {
+                let reserved = &mut value["reserved"];
+                *reserved = json!({
+                    "bytes": reserved["bytes"].as_u64().unwrap_or(0) + a.context.len() as u64,
+                    "files": reserved["files"].as_u64().unwrap_or(0) + 1,
+                });
+            }
             if snapshot {
                 let mut manifest = serde_json::from_value(value).map_err(internal_error)?;
                 include_context_file(&a, &mut manifest)?;

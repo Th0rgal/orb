@@ -26,8 +26,8 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
     const folders = found && [...found[3].matchAll(/(.+?) \(([\d.]+ [MG]iB), (\d+) files\)(?:, |$)/g)].map(f => `${f[1]}  ·  ${f[2]}, ${Number(f[3]).toLocaleString("en-US")} files`);
     return { title: "Workspace too large to move", message: `${found ? `It holds ${found[1]} in ${Number(found[2]).toLocaleString("en-US")} files. ` : ""}A move carries at most 10 GiB and 50,000 files.${folders?.length ? `\n\nLargest folders\n${folders.join("\n")}` : ""}` };
   }
-  const outdated = raw.match(/Update (.+) to receive a workspace containing links/);
-  if (outdated) return { title: `${outdated[1]} needs an update`, message: "This workspace contains links, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved." };
+  const outdated = raw.match(/Update (.+) to receive a workspace (containing links|with selected build folders)/);
+  if (outdated) return { title: `${outdated[1]} needs an update`, message: `This workspace ${outdated[2] === "containing links" ? "contains links" : "includes build folders you selected"}, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved.` };
   const technical = raw.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(raw);
   return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : raw };
 }

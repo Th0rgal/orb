@@ -138,6 +138,17 @@ Git credentials, hooks and runtime configuration are excluded. The index is
 rebuilt from HEAD, so staged changes become unstaged. Empty directories and
 repositories without any refs are not recreated as Git repositories.
 
+Before the snapshot, the source lists what it would move (`inventory`): the
+top-level entries and the folders directly beneath them, with sizes, plus every
+path left behind by default. Left behind by default are paths a repository's
+own rules ignore, build output (`target`, `node_modules`, `.lake`, …) and, at
+the workspace root only, toolchain homes (`.cargo`, `.rustup`, `.elan`, …). The
+user may untick a moved folder or tick one of those; the choice is recorded
+with `select` and applied by the snapshot and by the source recheck.
+Credentials and generated harness configuration never move, whatever is
+ticked. A source that predates the inventory snapshots with the defaults. A
+node must advertise the `selection` feature to receive a ticked build folder.
+
 Symbolic links travel as links and are never followed. A relative target that
 stays inside the workspace is kept as written; an absolute target inside the
 workspace becomes relative. Links pointing outside the workspace, targets with

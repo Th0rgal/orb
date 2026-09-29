@@ -5,7 +5,10 @@ export type Machine = { kind: "core" } | { kind: "node" | "client"; id: string }
 export interface TransferFile { path: string; bytes: number; sha256: string; executable: boolean }
 export interface TransferLink { path: string; target: string }
 export interface SkippedPath { path: string; reason: string }
-export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number; links?: TransferLink[]; skipped?: SkippedPath[] }
+export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number; links?: TransferLink[]; skipped?: SkippedPath[]; /** Left-behind paths `excluded` does not name. */ unlisted?: number }
+export interface InventoryRow { path: string; folder: boolean; state: "moved" | "omitted" | "ignored" | "rebuildable" | "protected"; bytes: number; files: number }
+/** `bytes` and `files` total everything moved by default, including rows a long listing left out. */
+export interface WorkspaceInventory { rows: InventoryRow[]; bytes: number; files: number; /** Git history and the archived conversation, which always travel. */ reserved?: { bytes: number; files: number }; truncated: boolean; protected: number; limits: { bytes: number; files: number } }
 export interface TransferAction {
   id: string; mission_id: string; phase: string; source: Machine; destination: Machine;
   backend: string; model?: string | null; effort?: string | null;
@@ -60,6 +63,16 @@ export async function transferFiles<T>(action: TransferAction, side: "source" | 
   }
   return remoteTransferFiles<T>(action, side, operation);
 }
+/** Resolves to nothing when the source predates the inventory; any other failure is thrown. */
+export async function inventoryTransfer(action: TransferAction): Promise<WorkspaceInventory | undefined> {
+  try { return await transferFiles<WorkspaceInventory>(action, "source", { op: "inventory" }); }
+  catch (error) {
+    // An older backend cannot parse the operation (422); an older node is reported by Core.
+    if (error instanceof ApiError && (error.status === 422 || error.detail.includes("does not support this transfer operation"))) return undefined;
+    throw error;
+  }
+}
+export const selectTransfer = (action: TransferAction, selection: { omit: string[]; include: string[] }) => transferFiles(action, "source", { op: "select", ...selection });
 export async function snapshotTransfer(action: TransferAction): Promise<TransferAction> {
   if (action.manifest) return action;
   if (action.source.kind !== "client") return transferFiles(action, "source", { op: "snapshot" });
