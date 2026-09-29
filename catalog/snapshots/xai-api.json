@@ -7,9 +7,19 @@
   "completeness": "partial",
   "models": [
     {
+      "id": "grok-4.7",
+      "name": "Grok 4.7",
+      "description": "Latest flagship Grok model"
+    },
+    {
+      "id": "grok-4.7-build-fast",
+      "name": "Grok 4.7 Build (Fast)",
+      "description": "Faster Grok 4.7 variant for coding agents"
+    },
+    {
       "id": "grok-4.6",
       "name": "Grok 4.6",
-      "description": "Latest flagship Grok model"
+      "description": "Previous flagship Grok model"
     },
     {
       "id": "grok-4.6-latest",
