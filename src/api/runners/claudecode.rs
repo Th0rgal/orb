@@ -3444,6 +3444,19 @@ pub fn run_claudecode_turn<'a>(
     }) // end Box::pin(async move { ... })
 }
 
+/// Whether rotation moves on to the next account after this result. A
+/// rate limit or an auth failure belongs to the account. So does an alternate
+/// that died before emitting any event: it says nothing about the accounts
+/// after it, and stopping there failed a mission whose second alternate had
+/// quota (mission f0fbffbb, 2026-09-29). Any other error would repeat on
+/// every account.
+fn rotation_continues_after(result: &AgentResult) -> bool {
+    matches!(
+        result.terminal_reason,
+        Some(TerminalReason::RateLimited | TerminalReason::AuthError)
+    ) || (!result.success && claudecode_result_is_startup_transport_failure(result))
+}
+
 fn claudecode_result_is_startup_transport_failure(result: &AgentResult) -> bool {
     result
         .data
@@ -3940,6 +3953,9 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         Some(TerminalReason::RateLimited | TerminalReason::AuthError)
     ) {
         let rotation_reason = result.terminal_reason;
+        // Kept in case every alternate dies at startup: the turn then ends
+        // on what is known, the limit, not on a transport error.
+        let limited_result = result.clone();
         // An alternate account whose access token expired is refreshed, not
         // skipped: it may be the only one with quota left.
         let refreshed = crate::api::ai_providers::refresh_expired_anthropic_store_accounts().await;
@@ -4012,18 +4028,22 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
                 // Other LLM errors (model errors, context limit, etc.)
                 // would fail on every account, so stop early to avoid
                 // masking the real failure.
-                match result.terminal_reason {
-                    Some(TerminalReason::RateLimited | TerminalReason::AuthError) => {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            rotation_attempt = idx + 1,
-                            ?result.terminal_reason,
-                            "Anthropic credential failed; rotating to next account"
-                        );
-                        continue;
-                    }
-                    _ => break,
+                if !rotation_continues_after(&result) {
+                    break;
                 }
+                tracing::info!(
+                    mission_id = %mission_id,
+                    rotation_attempt = idx + 1,
+                    ?result.terminal_reason,
+                    startup_failure = claudecode_result_is_startup_transport_failure(&result),
+                    "Anthropic credential failed; rotating to next account"
+                );
+            }
+            if !result.success
+                && claudecode_result_is_startup_transport_failure(&result)
+                && rotation_reason == Some(TerminalReason::RateLimited)
+            {
+                result = limited_result;
             }
         }
     }
@@ -4332,5 +4352,37 @@ mod opus_55_tests {
             }
         }
         assert_eq!(claude_thinking_budget(Some("claude-opus-5"), "high"), 16000);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::rotation_continues_after;
+    use crate::agents::{AgentResult, TerminalReason};
+
+    fn failed(reason: TerminalReason) -> AgentResult {
+        AgentResult::failure("failed".to_string(), 0).with_terminal_reason(reason)
+    }
+
+    #[test]
+    fn rotation_moves_on_after_account_failures_and_dead_starts() {
+        assert!(rotation_continues_after(&failed(TerminalReason::RateLimited)));
+        assert!(rotation_continues_after(&failed(TerminalReason::AuthError)));
+        // The alternate exited before any event (mission f0fbffbb).
+        let dead_start = failed(TerminalReason::LlmError).with_data(serde_json::json!({
+            "claudecode_transport_failure": { "stage": "startup" }
+        }));
+        assert!(rotation_continues_after(&dead_start));
+    }
+
+    #[test]
+    fn rotation_stops_on_results_that_would_repeat_or_succeeded() {
+        assert!(!rotation_continues_after(&failed(TerminalReason::LlmError)));
+        assert!(!rotation_continues_after(&failed(TerminalReason::InfiniteLoop)));
+        assert!(!rotation_continues_after(&AgentResult::success("done", 0)));
+        let mid_turn = failed(TerminalReason::LlmError).with_data(serde_json::json!({
+            "claudecode_transport_failure": { "stage": "mid_turn" }
+        }));
+        assert!(!rotation_continues_after(&mid_turn));
     }
 }
