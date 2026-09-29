@@ -237,7 +237,7 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
   );
 }
 
-function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
+export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
   const [open, setOpen] = disclosure(`think:${p.item.key}`,true);
   return (
     <div class={`st-think ${open() ? "open" : ""}`}>

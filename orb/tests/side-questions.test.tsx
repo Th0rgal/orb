@@ -4,7 +4,8 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/App';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],stopBtw:async()=>{},watchBtw:async()=>{}};});
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{}};});
+const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
  readComposerDraft:async(key:string)=>storage.get('draft:'+key),
@@ -12,7 +13,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -95,4 +96,44 @@ it('offers @conversation in a side composer without a project',async()=>{
 });
 it('labels the live snapshot while excluding thinking and queued drafts',()=>{
  expect(sideContext([{kind:'think',key:'a',text:'private',done:true},{kind:'user',key:'b',text:'unsent',queued:true},{kind:'text',key:'c',text:'Current progress',live:true}],true)).toBe('Agent (in progress at send time): Current progress');
+});
+
+it('queues a side question asked while the agent answers, then sends it',async()=>{
+ const finish:((r:Response)=>void)[]=[];const fetched=vi.fn(()=>new Promise<Response>(resolve=>finish.push(resolve)));
+ vi.stubGlobal('fetch',fetched);let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="queue-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await handle.ask('First question')).toBe(true);
+ await waitFor(()=>expect(fetched).toHaveBeenCalledTimes(1));
+ // Accepted, not refused: the draft is cleared and the question waits.
+ expect(await handle.ask('Second question')).toBe(true);
+ expect(await handle.ask('Third question')).toBe(true);
+ const queued=await screen.findByLabelText('Queued side questions');
+ expect(queued.textContent).toContain('2 Queued');expect(queued.textContent).toContain('Second question');
+ expect(fetched).toHaveBeenCalledTimes(1);
+ fireEvent.click(screen.getByLabelText('Remove queued side question: Third question'));
+ finish[0](response([{type:'done',answer:'First answer'}]));
+ await screen.findByText('First answer');
+ await waitFor(()=>expect(fetched).toHaveBeenCalledTimes(2));
+ expect(screen.queryByLabelText('Queued side questions')).toBeNull();
+ finish[1](response([{type:'done',answer:'Second answer'}]));
+ await screen.findByText('Second answer');
+ expect(fetched).toHaveBeenCalledTimes(2);
+});
+it('keeps queued questions when the answer in progress fails',async()=>{
+ const finish:((r:Response)=>void)[]=[];const fetched=vi.fn(()=>new Promise<Response>(resolve=>finish.push(resolve)));
+ vi.stubGlobal('fetch',fetched);let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="queue-error-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('First question');await waitFor(()=>expect(fetched).toHaveBeenCalledTimes(1));
+ await handle.ask('Second question');
+ finish[0](response([{type:'delta',text:'partial'}]));
+ await screen.findByRole('alert');
+ expect(fetched).toHaveBeenCalledTimes(1);
+ expect((await screen.findByLabelText('Queued side questions')).textContent).toContain('Second question');
+});
+it('shows the thoughts of the side agent while it answers',async()=>{
+ thoughts.value=[{kind:'think',key:'t1',text:'Reading the ledger first.',done:false}];
+ vi.stubGlobal('fetch',vi.fn(()=>new Promise<Response>(()=>{})));let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="thought-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Status?');
+ expect(await screen.findByText('Reading the ledger first.')).toBeTruthy();
 });
