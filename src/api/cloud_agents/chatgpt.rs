@@ -259,6 +259,10 @@ pub(super) async fn tick(
         e.turns[i].detail = Some(
             "The original ChatGPT conversation could not be opened; continuing in a new one".into(),
         );
+        // A receipt keeps identifiers it is not given. Removing the pointer to
+        // the lost conversation needs a full save.
+        worker::save(store, e).await?;
+        return Ok(());
     } else {
         e.turns[i].phase = if jobs::load_job(app_dir, e.mission_id)
             .is_some_and(|j| j.state == jobs::JobState::Submitted)
