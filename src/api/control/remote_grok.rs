@@ -28,8 +28,8 @@
 //! on the same node with `--resume`; other remote harnesses (and a node that
 //! is no longer configured) are reported as needing a replacement mission.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::http::StatusCode;
 use uuid::Uuid;
@@ -631,6 +631,25 @@ pub(crate) struct NativeGrokObserver {
     running_since: Option<std::time::Instant>,
 }
 
+/// Jobs that allocated their Claude session (`--session-id`) rather than
+/// resuming one. Process memory only: after a restart an eventless failure
+/// keeps the session, which is the safe direction.
+static ALLOCATED_CLAUDE_SESSIONS: LazyLock<Mutex<HashSet<Uuid>>> = LazyLock::new(Default::default);
+
+pub(crate) fn note_allocated_claude_session(job_id: Uuid) {
+    ALLOCATED_CLAUDE_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(job_id);
+}
+
+fn take_allocated_claude_session(job_id: Uuid) -> bool {
+    ALLOCATED_CLAUDE_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&job_id)
+}
+
 impl NativeGrokObserver {
     /// Attach to a native Grok job without a host goal driver.
     pub(crate) async fn attach(
@@ -933,13 +952,14 @@ impl NativeGrokObserver {
     /// list too long") left every follow-up failing with "No conversation
     /// found with session ID". Forget such a session so the next turn starts
     /// fresh with the conversation replayed as context.
-    async fn forget_unstarted_claude_session(&mut self) {
+    /// A resumed session that fails silently (wrapper, timeout) is kept.
+    async fn forget_unstarted_claude_session(&mut self, allocated: bool) {
         let missing = self
             .stream
             .error
             .as_deref()
             .is_some_and(|error| error.contains("No conversation found with session ID"));
-        if self.stream.json_events > 0 && !missing {
+        if !missing && !(allocated && self.stream.json_events == 0) {
             return;
         }
         let Some(session_id) = self.mission.session_id.clone() else {
@@ -1016,8 +1036,9 @@ impl NativeGrokObserver {
             && self.stream.error.is_none()
             && (!self.mission.goal_mode || legacy_claude || native_end)
             && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
+        let allocated = take_allocated_claude_session(self.job_id);
         if self.stream.claude && !success {
-            self.forget_unstarted_claude_session().await;
+            self.forget_unstarted_claude_session(allocated).await;
         }
         let mut content = self.stream.text.trim().to_string();
         if legacy_claude && success {

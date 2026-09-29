@@ -8807,9 +8807,24 @@ async fn remote_claude_allocates_and_resumes_native_session() {
     assert!(!command.contains("--session-id"));
     assert!(command.contains("--output-format stream-json"));
     assert!(command.contains("--include-partial-messages"));
-    *fixture.log.lock().unwrap() =
-        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done\"}\n".into();
-    fixture.set_state("succeeded");
+    // A resumed job that dies silently (wrapper, timeout) keeps the session
+    // Claude did create.
+    fixture.set_state("failed");
+    wait_until("silent resume failure settles", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status != MissionStatus::Active
+    })
+    .await;
+    wait_until("resume ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        store.get_mission(id).await.unwrap().unwrap().session_id,
+        Some(session)
+    );
 }
 
 #[tokio::test]

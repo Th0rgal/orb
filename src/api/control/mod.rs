@@ -13876,6 +13876,7 @@ async fn submit_leased_remote_job(
                 "native Claude session allocation rejected by run generation fence".into()
             }));
         }
+        remote_grok::note_allocated_claude_session(job_id);
     }
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
