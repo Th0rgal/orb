@@ -7,6 +7,9 @@
 //! (`ProviderHealthTracker`), the Codex lease pool and Claude rotation all
 //! consult. The registry is written to disk next to the provider store, so a
 //! backend restart does not send missions back to an exhausted account.
+//!
+//! It also keeps the remaining quota the usage endpoints last reported, so
+//! that among healthy accounts the one with the most quota left goes first.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -641,6 +644,129 @@ pub fn shared() -> Arc<AccountCooldowns> {
     Arc::clone(&SHARED)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Remaining quota
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Usage older than this no longer orders accounts: the allowance may have
+/// reset or been spent since.
+pub const QUOTA_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Accounts whose remaining quota differs by less than this many points keep
+/// their configured order, so selection does not flap between two accounts
+/// that are about as full (each switch costs the provider-side prompt cache).
+const QUOTA_STEP_PERCENT: f64 = 10.0;
+
+/// Remaining quota per account, as last reported by the usage endpoints the
+/// Providers page reads. Filled when that data is fetched; selection only
+/// reads it, it never calls a provider.
+#[derive(Debug, Default)]
+pub struct QuotaHints {
+    entries: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+}
+
+impl QuotaHints {
+    pub fn in_memory() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Record that `key` has `remaining_percent` (0-100) of its most
+    /// constrained usage window left.
+    pub fn record(&self, key: &str, remaining_percent: f64) {
+        self.record_at(key, remaining_percent, std::time::Instant::now());
+    }
+
+    fn record_at(&self, key: &str, remaining_percent: f64, at: std::time::Instant) {
+        if !remaining_percent.is_finite() {
+            return;
+        }
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.insert(key.to_string(), (remaining_percent.clamp(0.0, 100.0), at));
+    }
+
+    /// Remaining quota of `key`, when it was reported recently enough.
+    pub fn remaining(&self, key: &str) -> Option<f64> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .get(key)
+            .filter(|(_, at)| at.elapsed() < QUOTA_MAX_AGE)
+            .map(|(remaining, _)| *remaining)
+    }
+
+    pub fn forget(&self, key: &str) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.remove(key);
+    }
+}
+
+static SHARED_QUOTA: LazyLock<Arc<QuotaHints>> = LazyLock::new(QuotaHints::in_memory);
+
+/// The process-wide remaining-quota hints.
+pub fn shared_quota() -> Arc<QuotaHints> {
+    Arc::clone(&SHARED_QUOTA)
+}
+
+/// Remaining quota (0-100) of a subscription account, from the usage payload
+/// the Providers page shows: the most constrained of its subscription windows
+/// (Claude 5-hour and 7-day, Codex primary and secondary). Per-minute request
+/// and token windows are not quota and are ignored.
+pub fn remaining_quota_from_usage(usage: &serde_json::Value) -> Option<f64> {
+    const SUBSCRIPTION_WINDOWS: [&str; 4] = [
+        "anthropic_5h",
+        "anthropic_7d",
+        "codex_primary",
+        "codex_secondary",
+    ];
+    usage
+        .get("optimize")?
+        .get("windows")?
+        .as_array()?
+        .iter()
+        .filter(|window| {
+            window
+                .get("key")
+                .and_then(|key| key.as_str())
+                .is_some_and(|key| SUBSCRIPTION_WINDOWS.contains(&key))
+        })
+        .filter_map(|window| window.get("pct_remaining")?.as_f64())
+        .filter(|remaining| remaining.is_finite())
+        .min_by(|a, b| a.total_cmp(b))
+}
+
+/// Put the accounts with the most remaining quota first. Only the accounts
+/// whose quota is known move, and only among the positions they already hold:
+/// with no usage data, or a single account, the order is unchanged.
+pub fn prefer_most_remaining_quota<T>(
+    items: Vec<T>,
+    remaining: impl Fn(&T) -> Option<f64>,
+) -> Vec<T> {
+    let steps: Vec<Option<i64>> = items
+        .iter()
+        .map(|item| remaining(item).map(|left| (left / QUOTA_STEP_PERCENT).floor() as i64))
+        .collect();
+    if steps.iter().flatten().count() < 2 {
+        return items;
+    }
+    let mut known = Vec::new();
+    let mut slots: Vec<Option<T>> = Vec::with_capacity(items.len());
+    for (item, step) in items.into_iter().zip(&steps) {
+        match step {
+            Some(step) => {
+                known.push((*step, item));
+                slots.push(None);
+            }
+            None => slots.push(Some(item)),
+        }
+    }
+    // Stable: equally full accounts keep their configured order.
+    known.sort_by_key(|(step, _)| std::cmp::Reverse(*step));
+    let mut known = known.into_iter().map(|(_, item)| item);
+    slots
+        .into_iter()
+        .filter_map(|slot| slot.or_else(|| known.next()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,5 +1142,106 @@ mod tests {
         let key = account_key(Uuid::new_v4());
         registry.set(&key, cooldown(Utc::now() + Duration::hours(1)));
         assert!(AccountCooldowns::load(path).is_cooling(&key));
+    }
+
+    #[test]
+    fn most_remaining_quota_comes_first() {
+        let quota = HashMap::from([("a", 53.0), ("b", 96.0), ("c", 12.0)]);
+        let ordered =
+            prefer_most_remaining_quota(vec!["a", "b", "c"], |account| quota.get(account).copied());
+        assert_eq!(ordered, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn order_is_unchanged_without_usage_data_or_with_one_account() {
+        let none = |_: &&str| None;
+        assert_eq!(
+            prefer_most_remaining_quota(vec!["a", "b", "c"], none),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(
+            prefer_most_remaining_quota(vec!["a"], |_| Some(3.0)),
+            vec!["a"]
+        );
+        // One account with data has nothing to be compared with.
+        assert_eq!(
+            prefer_most_remaining_quota(vec!["a", "b"], |account| {
+                (*account == "b").then_some(99.0)
+            }),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            prefer_most_remaining_quota(Vec::<&str>::new(), |_| Some(1.0)),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn accounts_without_usage_data_keep_their_position() {
+        let quota = HashMap::from([("a", 20.0), ("c", 90.0)]);
+        let ordered = prefer_most_remaining_quota(vec!["a", "b", "c", "d"], |account| {
+            quota.get(account).copied()
+        });
+        assert_eq!(ordered, vec!["c", "b", "a", "d"]);
+    }
+
+    #[test]
+    fn about_equally_full_accounts_keep_their_configured_order() {
+        let quota = HashMap::from([("a", 61.0), ("b", 68.9), ("c", 70.0)]);
+        let ordered =
+            prefer_most_remaining_quota(vec!["a", "b", "c"], |account| quota.get(account).copied());
+        assert_eq!(ordered, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn quota_hints_expire() {
+        let hints = QuotaHints::default();
+        hints.record("fresh", 40.0);
+        hints.record("clamped", 140.0);
+        hints.record("nan", f64::NAN);
+        assert_eq!(hints.remaining("fresh"), Some(40.0));
+        assert_eq!(hints.remaining("clamped"), Some(100.0));
+        assert_eq!(hints.remaining("nan"), None);
+        assert_eq!(hints.remaining("unknown"), None);
+
+        let Some(long_ago) = std::time::Instant::now()
+            .checked_sub(QUOTA_MAX_AGE + std::time::Duration::from_secs(1))
+        else {
+            // The machine booted less than QUOTA_MAX_AGE ago.
+            return;
+        };
+        hints.record_at("old", 40.0, long_ago);
+        assert_eq!(hints.remaining("old"), None);
+        hints.forget("fresh");
+        assert_eq!(hints.remaining("fresh"), None);
+    }
+
+    #[test]
+    fn remaining_quota_is_the_most_constrained_subscription_window() {
+        let usage = serde_json::json!({
+            "optimize": { "windows": [
+                { "key": "anthropic_5h", "pct_remaining": 96.0 },
+                { "key": "anthropic_7d", "pct_remaining": 53.0 },
+                { "key": "requests", "pct_remaining": 2.0 }
+            ]}
+        });
+        assert_eq!(remaining_quota_from_usage(&usage), Some(53.0));
+        let codex = serde_json::json!({
+            "optimize": { "windows": [
+                { "key": "codex_primary", "pct_remaining": 80.0 },
+                { "key": "codex_secondary", "pct_remaining": 0.0 }
+            ]}
+        });
+        assert_eq!(remaining_quota_from_usage(&codex), Some(0.0));
+        for no_quota in [
+            serde_json::json!({}),
+            serde_json::json!({ "optimize": { "windows": [] } }),
+            serde_json::json!({ "optimize": { "windows": [
+                { "key": "tokens", "pct_remaining": 10.0 },
+                { "key": "anthropic_5h", "pct_remaining": null }
+            ]}}),
+        ] {
+            assert_eq!(remaining_quota_from_usage(&no_quota), None);
+        }
     }
 }

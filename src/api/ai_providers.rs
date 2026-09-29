@@ -9529,6 +9529,16 @@ async fn live_fetch_and_cache(
         obj.insert("optimize".to_string(), optimize);
     }
 
+    // Account selection orders accounts by this, without calling a provider.
+    if let (Ok(account_id), Some(remaining)) = (
+        uuid::Uuid::parse_str(&id),
+        crate::account_limits::remaining_quota_from_usage(&value),
+    ) {
+        state
+            .health_tracker
+            .record_remaining_quota(account_id, remaining);
+    }
+
     state.provider_usage_cache.insert(id, value.clone()).await;
     Ok(value)
 }

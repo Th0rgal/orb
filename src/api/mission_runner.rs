@@ -1481,6 +1481,13 @@ fn order_codex_lease_candidates<T>(
             && candidate.0.limit_reset().is_none()
     });
     fresh.sort_by_key(|candidate| Reverse(candidate.2));
+    // The account with the most quota left goes first when usage data is
+    // recent; a lease still falls to the next account when it has no free
+    // slot.
+    let quota = crate::account_limits::shared_quota();
+    let fresh = crate::account_limits::prefer_most_remaining_quota(fresh, |candidate| {
+        quota.remaining(&candidate.0.limit_key()?)
+    });
     // Among parked accounts, the one whose usage limit resets first is the
     // most likely to work; accounts on a short cooldown only come before it.
     cooled.sort_by_key(|candidate| (candidate.0.limit_reset(), Reverse(candidate.2)));
@@ -4865,6 +4872,10 @@ pub(crate) fn claude_override_around_usage_limit(
         .into_iter()
         .map(|auth| (claude_auth_limit_key(app_working_dir, &auth), auth))
         .collect();
+    let quota = crate::account_limits::shared_quota();
+    let candidates = crate::account_limits::prefer_most_remaining_quota(candidates, |(key, _)| {
+        quota.remaining(key)
+    });
     first_uncapped_credential(&default_key, candidates, &limits)
 }
 
@@ -4904,6 +4915,12 @@ pub(crate) fn anthropic_rotation_accounts(
             }
         })
         .collect();
+    // Rotate to the account with the most quota left first, when usage data
+    // is recent.
+    let quota = crate::account_limits::shared_quota();
+    let accounts = crate::account_limits::prefer_most_remaining_quota(accounts, |account| {
+        quota.remaining(&claude_auth_limit_key(app_working_dir, account))
+    });
 
     AnthropicRotationAccounts {
         total_accounts,
@@ -14444,5 +14461,46 @@ mod tests {
             super::first_uncapped_credential("default", candidates(), &limits),
             None
         );
+    }
+
+    #[test]
+    fn codex_lease_order_prefers_the_account_with_the_most_quota() {
+        let first = codex_oauth_credential("first");
+        let second = codex_oauth_credential("second");
+        let unknown = codex_oauth_credential("unknown");
+        let candidates = || {
+            vec![
+                (first.clone(), (), 10),
+                (second.clone(), (), 10),
+                (unknown.clone(), (), 10),
+            ]
+        };
+        let order = |ordered: Vec<(super::CodexCredential, (), usize)>| {
+            ordered
+                .into_iter()
+                .map(|candidate| candidate.0.fingerprint())
+                .collect::<Vec<_>>()
+        };
+        let configured = order(candidates());
+        assert_eq!(
+            order(super::order_codex_lease_candidates(candidates())),
+            configured,
+            "no usage data: unchanged"
+        );
+
+        let quota = crate::account_limits::shared_quota();
+        quota.record(&first.limit_key().unwrap(), 21.0);
+        quota.record(&second.limit_key().unwrap(), 79.0);
+        assert_eq!(
+            order(super::order_codex_lease_candidates(candidates())),
+            vec![
+                second.fingerprint(),
+                first.fingerprint(),
+                unknown.fingerprint()
+            ]
+        );
+        for credential in [&first, &second] {
+            quota.forget(&credential.limit_key().unwrap());
+        }
     }
 }

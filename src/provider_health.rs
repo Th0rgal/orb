@@ -252,6 +252,9 @@ pub struct ProviderHealthTracker {
     /// the harness rotation paths. An account parked there is unhealthy here
     /// even when this tracker never saw it fail.
     limits: Arc<crate::account_limits::AccountCooldowns>,
+    /// Remaining quota per account from cached usage data, used to order
+    /// healthy accounts.
+    quota: Arc<crate::account_limits::QuotaHints>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,6 +312,11 @@ impl ProviderHealthTracker {
             } else {
                 crate::account_limits::shared()
             },
+            quota: if cfg!(test) {
+                crate::account_limits::QuotaHints::in_memory()
+            } else {
+                crate::account_limits::shared_quota()
+            },
         }
     }
 
@@ -317,6 +325,22 @@ impl ProviderHealthTracker {
     pub fn with_limits(mut self, limits: Arc<crate::account_limits::AccountCooldowns>) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Record the remaining quota (0-100) a usage fetch reported for an
+    /// account.
+    pub fn record_remaining_quota(&self, account_id: Uuid, remaining_percent: f64) {
+        self.quota.record(
+            &crate::account_limits::account_key(account_id),
+            remaining_percent,
+        );
+    }
+
+    /// Remaining quota of an account, when usage data is recent enough to
+    /// order accounts by.
+    pub fn remaining_quota(&self, account_id: Uuid) -> Option<f64> {
+        self.quota
+            .remaining(&crate::account_limits::account_key(account_id))
     }
 
     fn account_limit_is_active(&self, account_id: Uuid) -> bool {
@@ -421,6 +445,8 @@ impl ProviderHealthTracker {
         self.accounts.write().await.remove(&account_id);
         self.limits
             .clear(&crate::account_limits::account_key(account_id));
+        self.quota
+            .forget(&crate::account_limits::account_key(account_id));
     }
 
     /// Record a successful request for an account.
@@ -1705,6 +1731,12 @@ impl ModelChainStore {
                     store_accounts = ai_providers.get_all_by_type(provider_type).await;
                 }
             }
+            // Among the accounts of a provider, the one with the most quota
+            // left goes first. Cached usage only: no usage data, no change.
+            let store_accounts =
+                crate::account_limits::prefer_most_remaining_quota(store_accounts, |account| {
+                    health_tracker.remaining_quota(account.id)
+                });
             let mut store_contributed_entry = false;
 
             for account in &store_accounts {
@@ -3379,5 +3411,74 @@ mod tests {
             .await;
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].account_id, healthy_id);
+    }
+
+    async fn resolved_anthropic_accounts(
+        store: &AIProviderStore,
+        tracker: &ProviderHealthTracker,
+    ) -> Vec<Uuid> {
+        store_with_chain("unused", vec![])
+            .await
+            .resolve_entries(&[anthropic_entry()], store, &[], tracker)
+            .await
+            .into_iter()
+            .map(|entry| entry.account_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resolve_prefers_the_account_with_the_most_remaining_quota() {
+        let mut first = anth_oauth_account("a@example.com", Some("org-a"), future_ms(4));
+        first.priority = 0;
+        let mut second = anth_oauth_account("b@example.com", Some("org-b"), future_ms(4));
+        second.priority = 1;
+        let mut third = anth_oauth_account("c@example.com", Some("org-c"), future_ms(4));
+        third.priority = 2;
+        let (a, b, c) = (first.id, second.id, third.id);
+        let store = store_with(vec![first, second, third]).await;
+        let tracker = ProviderHealthTracker::new();
+
+        // No usage data: configured order.
+        let configured = resolved_anthropic_accounts(&store, &tracker).await;
+        assert_eq!(configured, vec![a, b, c]);
+
+        // Usage for a single account changes nothing.
+        tracker.record_remaining_quota(b, 96.0);
+        assert_eq!(
+            resolved_anthropic_accounts(&store, &tracker).await,
+            configured
+        );
+
+        tracker.record_remaining_quota(a, 53.0);
+        assert_eq!(
+            resolved_anthropic_accounts(&store, &tracker).await,
+            vec![b, a, c]
+        );
+
+        // The account with the most quota is skipped while it is parked.
+        tracker
+            .record_usage_limit(
+                b,
+                Some(&SubscriptionKey::new("anthropic", "org-b")),
+                limit_cooldown(2),
+            )
+            .await;
+        assert_eq!(
+            resolved_anthropic_accounts(&store, &tracker).await,
+            vec![a, c]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_order_with_one_account_is_unchanged_by_usage_data() {
+        let only = anth_oauth_account("a@example.com", Some("org-a"), future_ms(4));
+        let id = only.id;
+        let store = store_with(vec![only]).await;
+        let tracker = ProviderHealthTracker::new();
+        tracker.record_remaining_quota(id, 1.0);
+        assert_eq!(
+            resolved_anthropic_accounts(&store, &tracker).await,
+            vec![id]
+        );
     }
 }
