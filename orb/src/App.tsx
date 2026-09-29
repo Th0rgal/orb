@@ -2132,7 +2132,9 @@ function MissionDock(p: {
   // created before an effort was offered simply has none.
   const effort = () => normalizeEffort(p.mission?.model_effort, p.mission?.backend);
   const efforts = () => supportedEfforts(p.mission?.backend);
-  const canChangeEffort = () => idle() && efforts().length > 0 && !saving();
+  // Effort can change during a turn: a running Claude session applies it at
+  // once, any other mission from its next turn.
+  const canChangeEffort = () => !!p.mission && efforts().length > 0 && !saving();
   const close = (e: PointerEvent) => {
     if (!(e.target instanceof Node)) return;
     const el = e.target as HTMLElement;
@@ -2225,14 +2227,14 @@ function MissionDock(p: {
             <Show
               when={canChangeEffort()}
               fallback={
-                <span class="under-model" title={idle() ? `Effort: ${effortLabel(effort())}` : "Stop the current turn to switch effort"}>
+                <span class="under-model" title={`Effort: ${effortLabel(effort())}`}>
                   {effortLabel(effort())}
                 </span>
               }
             >
               <button
                 class={`under-model ${effortOpen() ? "on" : ""}`}
-                title="Reasoning effort for the next turn"
+                title={idle() ? "Reasoning effort for the next turn" : p.mission?.backend === "claudecode" ? "Reasoning effort · applies to the running session" : "Reasoning effort · applies from the next turn"}
                 aria-label={`Reasoning effort: ${effortLabel(effort())}`}
                 onClick={() => setEffortOpen(!effortOpen())}
               >
