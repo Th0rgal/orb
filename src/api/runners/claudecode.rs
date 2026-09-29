@@ -1787,6 +1787,9 @@ pub fn run_claudecode_turn<'a>(
 
         let mut saw_non_init_event = false;
         let mut saw_assistant_activity = false;
+        // The init event proves the CLI started: what follows waits on the
+        // model, which the idle timeout bounds, not the startup timeout.
+        let mut saw_init = false;
         let mut first_stale_result_at: Option<Instant> = None;
         // A result ends one turn, not the session: while the CLI still has
         // background tasks the process is kept and the runner parks.
@@ -1904,7 +1907,7 @@ pub fn run_claudecode_turn<'a>(
                     cancelled = true;
                     break;
                 }
-                _ = tokio::time::sleep_until(startup_deadline), if !saw_non_init_event => {
+                _ = tokio::time::sleep_until(startup_deadline), if !saw_non_init_event && !saw_init => {
                     tracing::warn!(
                         mission_id = %mission_id,
                         use_resume = use_resume,
@@ -1946,7 +1949,7 @@ pub fn run_claudecode_turn<'a>(
                             &[],
                         ));
                 }
-                _ = tokio::time::sleep_until(idle_deadline), if saw_non_init_event => {
+                _ = tokio::time::sleep_until(idle_deadline), if saw_non_init_event || saw_init => {
                     if parked {
                         tracing::info!(
                             mission_id = %mission_id,
@@ -2346,6 +2349,7 @@ pub fn run_claudecode_turn<'a>(
 
                             match claude_event {
                                 ClaudeEvent::System(sys) => {
+                                    saw_init = true;
                                     if let Some(m) = sys.model {
                                         observed_model = Some(m);
                                     }
