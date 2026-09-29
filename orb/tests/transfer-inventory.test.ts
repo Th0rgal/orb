@@ -54,3 +54,7 @@ it("lets an unticked folder decide for everything beneath it", () => {
 it("counts moved entries a long listing left out", () => {
   expect(selectionTotals({ rows: rows.slice(0, 2), bytes: 900, files: 90 }, { "work/cache": false })).toEqual({ bytes: 840, files: 84 });
 });
+it("reserves room for Git history and the archived conversation", () => {
+  expect(selectionTotals({ rows: [], bytes: 0, files: 0 }, {})).toEqual({ bytes: 0, files: 0 });
+  expect(selectionTotals({ rows, bytes: 101, files: 11, reserved: { bytes: 40, files: 2 } }, { "work/cache": false })).toEqual({ bytes: 81, files: 7 });
+});

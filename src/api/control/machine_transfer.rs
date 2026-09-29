@@ -422,7 +422,7 @@ pub async fn inspect(
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"features":["links"],"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"features":["links","selection"],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
@@ -804,7 +804,16 @@ pub async fn operate(
             }
             let snapshot = matches!(operation, Operation::Snapshot);
             let verify = matches!(operation, Operation::Verify);
-            let value = adapter(&state, &a, &side, operation).await?;
+            let inventory = matches!(operation, Operation::Inventory);
+            let mut value = adapter(&state, &a, &side, operation).await?;
+            // The archived conversation joins the snapshot and counts in its limits.
+            if inventory && a.context.len() > INLINE_CONTEXT_BYTES {
+                let reserved = &mut value["reserved"];
+                *reserved = json!({
+                    "bytes": reserved["bytes"].as_u64().unwrap_or(0) + a.context.len() as u64,
+                    "files": reserved["files"].as_u64().unwrap_or(0) + 1,
+                });
+            }
             if snapshot {
                 let mut manifest = serde_json::from_value(value).map_err(internal_error)?;
                 include_context_file(&a, &mut manifest)?;

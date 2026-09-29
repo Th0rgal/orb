@@ -12,8 +12,8 @@ export const blocked = (row: InventoryRow, rows: InventoryRow[], choice: Choice)
 const top = (row: InventoryRow) => !row.path.includes("/");
 
 /** What the snapshot would carry: the default totals, less what was unticked, plus what was ticked. */
-export function selectionTotals(inventory: Pick<WorkspaceInventory, "rows" | "bytes" | "files">, choice: Choice) {
-  let { bytes, files } = inventory;
+export function selectionTotals(inventory: Pick<WorkspaceInventory, "rows" | "bytes" | "files" | "reserved">, choice: Choice) {
+  let bytes = inventory.bytes + (inventory.reserved?.bytes ?? 0), files = inventory.files + (inventory.reserved?.files ?? 0);
   for (const row of inventory.rows) {
     if (blocked(row, inventory.rows, choice) || ticked(row, choice) === moves(row)) continue;
     const sign = moves(row) ? -1 : 1;
@@ -59,7 +59,7 @@ export function TransferSelection(p: { inventory: WorkspaceInventory; choice: Ch
         </details>
       </Show>}</For>
     </div>
-    <p class="transfer-note">Unticked folders stay on the source. Build output and toolchains can be rebuilt on the destination.
+    <p class="transfer-note"><Show when={p.inventory.reserved?.bytes}>The totals include about {formatBytes(p.inventory.reserved!.bytes)} of Git history and conversation. </Show>Unticked folders stay on the source. Build output and toolchains can be rebuilt on the destination.
       <Show when={p.inventory.protected}> {formatCount(p.inventory.protected, "credential or configuration path")} never move{p.inventory.protected === 1 ? "s" : ""}.</Show>
       <Show when={p.inventory.truncated}> Only the largest folders are listed.</Show></p>
   </section>;

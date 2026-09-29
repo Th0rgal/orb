@@ -144,7 +144,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
       setStage("");
     } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
   };
-  const fits = () => { const found = inventory(); if (!found) return true; const t = selectionTotals(found, choice()); return t.bytes <= found.limits.bytes && t.files <= found.limits.files && t.files > 0; };
+  const fits = () => { const found = inventory(); if (!found) return true; const t = selectionTotals(found, choice()); return t.bytes <= found.limits.bytes && t.files <= found.limits.files; };
   const snapshot = async () => {
     let a = action(); const found = inventory(); if (!a || !found || busy()) return;
     cancelled = false; setBusy(true); setError(""); setStage("Reading workspace…");

@@ -473,6 +473,17 @@ fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
     }
     total
 }
+/// Bytes stored beneath a path, whatever the names.
+fn weigh_all(path: &Path, m: &fs::Metadata) -> u64 {
+    if !m.is_dir() {
+        return if m.is_file() { m.len() } else { 0 };
+    }
+    let entries = fs::read_dir(path).into_iter().flatten().flatten();
+    entries.fold(0u64, |sum, item| {
+        let stored = fs::symlink_metadata(item.path()).map(|m| weigh_all(&item.path(), &m));
+        sum.saturating_add(stored.unwrap_or(0))
+    })
+}
 /// Counts what a snapshot would carry without reading file contents, so an
 /// oversized workspace is refused with its totals before anything is hashed.
 fn measure(
@@ -521,6 +532,9 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
     let mut moved = std::collections::BTreeMap::<String, Row>::new();
     let mut left = Vec::new();
     let mut hidden = 0usize;
+    // Git history travels as one bundle per repository, about the size of its
+    // object store. Reserved here so the choice is made against the real total.
+    let mut history = (0u64, 0usize);
     Walk {
         root,
         selection: &Selection::default(),
@@ -538,7 +552,13 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
             }
             Found::Other(_) => return Ok(()),
             Found::Left(State::Protected, _) => {
-                hidden += 1;
+                if rel == ".git" || rel.ends_with("/.git") {
+                    let objects = path.join("objects");
+                    let stored = fs::symlink_metadata(&objects).map(|m| weigh_all(&objects, &m));
+                    history = (history.0.saturating_add(stored.unwrap_or(0)), history.1 + 1);
+                } else {
+                    hidden += 1;
+                }
                 return Ok(());
             }
             Found::Left(state, m) => {
@@ -593,6 +613,7 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
         "rows": rows,
         "bytes": bytes,
         "files": files,
+        "reserved": {"bytes": history.0, "files": history.1},
         "truncated": truncated,
         "protected": hidden,
         "limits": {"bytes": MAX_BYTES, "files": MAX_FILES},
@@ -864,9 +885,16 @@ pub fn operate(
                 .map_err(err)?,
         ),
         Operation::Select { omit, include } => {
+            let selection = Selection { omit, include };
             if manifest_path(area).exists() {
-                return Err("Workspace snapshot already taken; cancel to choose again".into());
+                // Repeating the recorded choice is a retry, not a change.
+                return if selected(area)? == selection {
+                    Ok(serde_json::json!({"ok":true}))
+                } else {
+                    Err("Workspace snapshot already taken; cancel to choose again".into())
+                };
             }
+            let Selection { omit, include } = selection;
             if omit.len() + include.len() > MAX_ROWS {
                 return Err("Too many selected paths".into());
             }
@@ -1666,6 +1694,16 @@ mod integrity_tests {
         fs::write(src.join("repo/out/deep/artifact"), "edited and carried").unwrap();
         assert!(operate(&a, Some(&src), Operation::CheckSource).is_err());
         assert!(operate(&a, Some(&src), select(&[], &[])).is_err());
+        // A retry after the snapshot repeats the same choice.
+        operate(
+            &a,
+            Some(&src),
+            select(
+                &["plain/data", "top.txt", "notes"],
+                &["repo/out", "repo/target", ".cargo"],
+            ),
+        )
+        .unwrap();
         let b = temp.path().join("b");
         copy(&a, &b, &m);
         operate(&b, None, Operation::Verify).unwrap();
@@ -1708,7 +1746,14 @@ mod integrity_tests {
             (76.into(), 8.into())
         );
         assert_eq!(found["truncated"], false);
-        assert_eq!(found["protected"], 1);
+        // The repository's history is reserved, its `.git` is not a hidden path.
+        assert_eq!(found["protected"], 0);
+        assert_eq!(found["reserved"]["files"], 1);
+        let objects = src.join("repo/.git/objects");
+        assert_eq!(
+            found["reserved"]["bytes"],
+            weigh_all(&objects, &fs::metadata(&objects).unwrap())
+        );
         assert_eq!(found["limits"]["files"], MAX_FILES);
         assert!(!manifest_path(&a).exists());
     }

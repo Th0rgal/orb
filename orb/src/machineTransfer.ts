@@ -8,7 +8,7 @@ export interface SkippedPath { path: string; reason: string }
 export interface Manifest { files: TransferFile[]; excluded: string[]; bytes: number; links?: TransferLink[]; skipped?: SkippedPath[] }
 export interface InventoryRow { path: string; folder: boolean; state: "moved" | "omitted" | "ignored" | "rebuildable" | "protected"; bytes: number; files: number }
 /** `bytes` and `files` total everything moved by default, including rows a long listing left out. */
-export interface WorkspaceInventory { rows: InventoryRow[]; bytes: number; files: number; truncated: boolean; protected: number; limits: { bytes: number; files: number } }
+export interface WorkspaceInventory { rows: InventoryRow[]; bytes: number; files: number; /** Git history and the archived conversation, which always travel. */ reserved?: { bytes: number; files: number }; truncated: boolean; protected: number; limits: { bytes: number; files: number } }
 export interface TransferAction {
   id: string; mission_id: string; phase: string; source: Machine; destination: Machine;
   backend: string; model?: string | null; effort?: string | null;
