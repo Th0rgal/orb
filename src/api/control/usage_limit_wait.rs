@@ -72,7 +72,25 @@ pub(crate) fn wait_for_result(
     {
         return None;
     }
-    let announced = account_limits::limit_reset(&result.output, now, zone);
+    Some(wait_until_reset(
+        provider,
+        account_kind,
+        &result.output,
+        limits,
+        now,
+        zone,
+    ))
+}
+
+fn wait_until_reset(
+    provider: &str,
+    account_kind: &str,
+    message: &str,
+    limits: &AccountCooldowns,
+    now: DateTime<Utc>,
+    zone: Zone,
+) -> UsageLimitWait {
+    let announced = account_limits::limit_reset(message, now, zone);
     let recorded = limits
         .all_active_at(now)
         .into_iter()
@@ -85,12 +103,12 @@ pub(crate) fn wait_for_result(
         }
         _ => (announced.at, announced.announced),
     };
-    Some(UsageLimitWait {
-        limit: account_limits::describe_limit(account_kind, &result.output),
+    UsageLimitWait {
+        limit: account_limits::describe_limit(account_kind, message),
         resume_at: (reset + Duration::seconds(RESUME_MARGIN_SECS))
             .max(now + Duration::seconds(MIN_WAIT_SECS)),
         announced: was_announced,
-    })
+    }
 }
 
 fn resume_time(wait: &UsageLimitWait) -> String {
@@ -292,6 +310,276 @@ pub(crate) async fn release(
         .await?;
     mission_store.set_deferred_goal(mission.id, None).await?;
     Ok(prompt)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remote-node jobs
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A remote mission cannot go back to the local scheduler: `Pending` means
+// "its node job is still owned" there, and the scheduler would start a local
+// harness. It waits as `Interrupted` (resumable, not failed) and the replayer
+// continues it on its node through the same path as an operator resume.
+
+/// Waits of remote missions, next to the remote job ledger.
+const REMOTE_WAITS_FILE: &str = ".sandboxed-sh/remote_usage_limit_waits.json";
+
+/// Replays of one mission before a usage limit fails it like any other error.
+const MAX_REMOTE_REPLAYS: u32 = 12;
+
+/// Attempts to continue a mission whose node refuses for a passing reason.
+const MAX_REPLAY_RETRIES: u32 = 6;
+const REPLAY_RETRY_SECS: i64 = 5 * 60;
+
+/// Delay before replaying on another account that is not at its limit.
+const IMMEDIATE_REPLAY_SECS: i64 = 30;
+
+/// One remote mission waiting for a usage limit, or replayed after one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RemoteWait {
+    /// When to replay; `None` once replayed (the record keeps the count).
+    pub resume_at: Option<DateTime<Utc>>,
+    pub limit: String,
+    /// Replays already made for this mission since its last served job.
+    #[serde(default)]
+    pub replays: u32,
+    /// Failed attempts to start the pending replay.
+    #[serde(default)]
+    pub retries: u32,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct RemoteWaitsFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    waits: std::collections::HashMap<Uuid, RemoteWait>,
+}
+
+static REMOTE_WAITS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn read_remote_waits(working_dir: &std::path::Path) -> RemoteWaitsFile {
+    let path = working_dir.join(REMOTE_WAITS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|error| {
+            tracing::warn!(path = %path.display(), %error, "Ignoring unreadable remote usage-limit waits");
+            RemoteWaitsFile::default()
+        }),
+        Err(_) => RemoteWaitsFile::default(),
+    }
+}
+
+fn write_remote_waits(working_dir: &std::path::Path, file: &RemoteWaitsFile) {
+    let path = working_dir.join(REMOTE_WAITS_FILE);
+    let written = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(error) = written {
+        tracing::warn!(path = %path.display(), %error, "Could not persist remote usage-limit waits");
+    }
+}
+
+/// Change the record of `mission_id`; returning `None` removes it.
+pub(crate) async fn update_remote_wait(
+    working_dir: &std::path::Path,
+    mission_id: Uuid,
+    change: impl FnOnce(Option<RemoteWait>) -> Option<RemoteWait>,
+) {
+    let _guard = REMOTE_WAITS_LOCK.lock().await;
+    let mut file = read_remote_waits(working_dir);
+    let previous = file.waits.remove(&mission_id);
+    let had_record = previous.is_some();
+    match change(previous) {
+        Some(wait) => {
+            file.waits.insert(mission_id, wait);
+        }
+        None if !had_record => return,
+        None => {}
+    }
+    file.version = 1;
+    write_remote_waits(working_dir, &file);
+}
+
+pub(crate) async fn remote_wait(
+    working_dir: &std::path::Path,
+    mission_id: Uuid,
+) -> Option<RemoteWait> {
+    let _guard = REMOTE_WAITS_LOCK.lock().await;
+    read_remote_waits(working_dir).waits.remove(&mission_id)
+}
+
+/// The waits whose replay is due at `now`.
+pub(crate) async fn due_remote_waits(
+    working_dir: &std::path::Path,
+    now: DateTime<Utc>,
+) -> Vec<(Uuid, RemoteWait)> {
+    let _guard = REMOTE_WAITS_LOCK.lock().await;
+    read_remote_waits(working_dir)
+        .waits
+        .into_iter()
+        .filter(|(_, wait)| wait.resume_at.is_some_and(|at| at <= now))
+        .collect()
+}
+
+/// Classify a failed remote job: `Some` when it failed on a usage limit and
+/// is to be replayed. `failure` is the harness error when the job reported
+/// one, else the job report.
+///
+/// The first failure is replayed at once when another account of the
+/// provider is not at its limit (the proxy picks it); otherwise, and for
+/// every later failure, the mission waits for the reset.
+pub(crate) fn remote_wait_for_failure(
+    backend: &str,
+    failure: &str,
+    replays: u32,
+    another_account_is_available: bool,
+    limits: &AccountCooldowns,
+    now: DateTime<Utc>,
+    zone: Zone,
+) -> Option<UsageLimitWait> {
+    let (provider, account_kind) = accounts_of_backend(backend)?;
+    if !account_limits::is_usage_limit_message(failure) || replays >= MAX_REMOTE_REPLAYS {
+        return None;
+    }
+    if replays == 0 && another_account_is_available {
+        return Some(UsageLimitWait {
+            limit: account_limits::describe_limit(account_kind, failure),
+            resume_at: now + Duration::seconds(IMMEDIATE_REPLAY_SECS),
+            announced: false,
+        });
+    }
+    Some(wait_until_reset(
+        provider,
+        account_kind,
+        failure,
+        limits,
+        now,
+        zone,
+    ))
+}
+
+/// True when an enabled account of `provider` in the provider store is not
+/// parked on a usage limit, nor its shared subscription.
+pub(crate) fn provider_has_available_account(
+    working_dir: &std::path::Path,
+    provider: &str,
+    limits: &AccountCooldowns,
+) -> bool {
+    let path = working_dir.join(crate::util::AI_PROVIDERS_PATH);
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let accounts: Vec<crate::ai_providers::AIProvider> =
+        serde_json::from_str(&contents).unwrap_or_default();
+    accounts.iter().any(|account| {
+        account.enabled
+            && account.provider_type.id() == provider
+            && account.has_credentials()
+            && !limits.is_cooling(&account_limits::account_key(account.id))
+            && !crate::provider_health::store_account_subscription_key(
+                account.provider_type,
+                account,
+            )
+            .is_some_and(|key| limits.is_cooling(&account_limits::subscription_key(&key.0)))
+    })
+}
+
+/// Decide whether a failed remote job waits for a usage limit, and record
+/// the wait. Recording is idempotent, so a finalization that is retried does
+/// not count twice. A job that did not fail on a usage limit clears the
+/// record, which resets the replay count.
+pub(crate) async fn plan_remote(
+    working_dir: &std::path::Path,
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    success: bool,
+    failure: &str,
+) -> Option<UsageLimitWait> {
+    let planned = async {
+        if success {
+            return None;
+        }
+        let mission = mission_store.get_mission(mission_id).await.ok()??;
+        let (provider, _) = accounts_of_backend(&mission.backend)?;
+        let replays = remote_wait(working_dir, mission_id)
+            .await
+            .map_or(0, |wait| wait.replays);
+        let limits = account_limits::shared();
+        remote_wait_for_failure(
+            &mission.backend,
+            failure,
+            replays,
+            provider_has_available_account(working_dir, provider, &limits),
+            &limits,
+            Utc::now(),
+            Zone::system(),
+        )
+    }
+    .await;
+    update_remote_wait(working_dir, mission_id, |previous| {
+        planned.as_ref().map(|wait| RemoteWait {
+            resume_at: Some(wait.resume_at),
+            limit: wait.limit.clone(),
+            replays: previous.map_or(0, |previous| previous.replays),
+            retries: 0,
+        })
+    })
+    .await;
+    planned
+}
+
+/// What the operator reads under the failed remote job.
+pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> String {
+    format!(
+        "{}\n\n{} reached. This mission is waiting and its job will be replayed on the node \
+         automatically at {}.",
+        output.trim_end(),
+        wait.limit,
+        resume_time(wait),
+    )
+}
+
+/// The prompt a remote mission is continued with. Its native session on the
+/// node already holds the message it was handling.
+pub(crate) fn remote_resume_prompt(limit: &str) -> String {
+    format!(
+        "{RESUME_PROMPT_MARKER} The {limit} stopped your previous turn and has now reset. Resume \
+         your work where it stopped, and check the state of anything you had started."
+    )
+}
+
+/// True for a remote mission waiting for its replay.
+pub(crate) fn is_waiting_remote(mission: &Mission) -> bool {
+    mission.status == MissionStatus::Interrupted
+        && mission.terminal_reason.as_deref() == Some(USAGE_LIMIT_WAIT_REASON)
+}
+
+/// What to do after a replay could not be started.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReplayFailure {
+    /// Try again at this time.
+    Retry(DateTime<Utc>),
+    /// The mission cannot be continued on its node.
+    GiveUp,
+}
+
+pub(crate) fn after_replay_failure(
+    wait: &RemoteWait,
+    server_error: bool,
+    message: &str,
+    now: DateTime<Utc>,
+) -> ReplayFailure {
+    let passing = server_error || message.contains(super::remote_grok::REMOTE_JOB_STILL_RUNNING);
+    if passing && wait.retries < MAX_REPLAY_RETRIES {
+        ReplayFailure::Retry(now + Duration::seconds(REPLAY_RETRY_SECS))
+    } else {
+        ReplayFailure::GiveUp
+    }
 }
 
 #[cfg(test)]
@@ -646,5 +934,217 @@ mod tests {
         let prompt = resume_prompt(&mission, &wait, "  ");
         assert!(prompt.starts_with(RESUME_PROMPT_MARKER));
         assert!(!prompt.contains("in case it was not recorded"));
+    }
+
+    #[test]
+    fn remote_usage_limit_failures_are_classified() {
+        let now = utc("2026-09-29T14:00:00Z");
+        let limits = AccountCooldowns::default();
+        let codex = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
+            to purchase more credits or try again at Oct 3rd, 2026 6:58 PM.";
+        let classify = |backend: &str, failure: &str, replays: u32, available: bool| {
+            remote_wait_for_failure(
+                backend,
+                failure,
+                replays,
+                available,
+                &limits,
+                now,
+                Zone::UTC,
+            )
+        };
+
+        // Every account exhausted: wait for the announced reset.
+        let wait = classify("codex", codex, 0, false).expect("usage limit");
+        assert_eq!(wait.limit, "Codex usage limit");
+        assert_eq!(wait.resume_at, utc("2026-10-03T18:59:00Z"));
+        assert!(wait.announced);
+
+        // Another account is available: replay at once, but only once.
+        let wait = classify("codex", codex, 0, true).unwrap();
+        assert_eq!(wait.resume_at, now + Duration::seconds(30));
+        let wait = classify("codex", codex, 1, true).unwrap();
+        assert_eq!(wait.resume_at, utc("2026-10-03T18:59:00Z"));
+
+        let claude = "You've hit your session limit · resets 5:30pm (Europe/Berlin)";
+        let wait = classify("claudecode", claude, 0, false).unwrap();
+        assert_eq!(wait.limit, "Claude session limit");
+        assert_eq!(wait.resume_at, utc("2026-09-29T15:31:00Z"));
+
+        // Plain failures stay plain failures.
+        for failure in [
+            "command exited with Some(1)",
+            "Error: 429 Too Many Requests",
+            "overloaded_error",
+            "timed out after 14400s",
+            "",
+        ] {
+            assert_eq!(classify("codex", failure, 0, true), None, "{failure}");
+        }
+        // Harnesses that authenticate on the node are not replayed.
+        assert_eq!(classify("grok", codex, 0, true), None);
+        assert_eq!(classify("gemini", codex, 0, false), None);
+        // A mission that keeps hitting the limit ends up failing.
+        assert_eq!(classify("codex", codex, MAX_REMOTE_REPLAYS, false), None);
+    }
+
+    #[tokio::test]
+    async fn remote_waits_are_recorded_and_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mission_id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let due_at = Utc::now() - Duration::seconds(5);
+        let record = |resume_at, replays| RemoteWait {
+            resume_at,
+            limit: "Codex usage limit".to_string(),
+            replays,
+            retries: 0,
+        };
+        update_remote_wait(dir.path(), mission_id, |_| Some(record(Some(due_at), 0))).await;
+        update_remote_wait(dir.path(), other, |_| {
+            Some(record(Some(Utc::now() + Duration::hours(2)), 0))
+        })
+        .await;
+
+        // Read back from the file alone, as after a restart.
+        let due = due_remote_waits(dir.path(), Utc::now()).await;
+        assert_eq!(due, vec![(mission_id, record(Some(due_at), 0))]);
+
+        // Replayed: no longer due, and the count is kept for the next limit.
+        update_remote_wait(dir.path(), mission_id, |previous| {
+            previous.map(|wait| RemoteWait {
+                resume_at: None,
+                replays: wait.replays + 1,
+                ..wait
+            })
+        })
+        .await;
+        assert!(due_remote_waits(dir.path(), Utc::now()).await.is_empty());
+        assert_eq!(
+            remote_wait(dir.path(), mission_id).await,
+            Some(record(None, 1))
+        );
+
+        // A served job forgets the record.
+        update_remote_wait(dir.path(), mission_id, |_| None).await;
+        assert_eq!(remote_wait(dir.path(), mission_id).await, None);
+        assert!(remote_wait(dir.path(), other).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_remote_job_on_a_usage_limit_waits_instead_of_failing() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "codex").await;
+        let failure = "You've hit your usage limit. try again in 4 hours.";
+
+        let wait = plan_remote(dir.path(), &store, mission.id, false, failure)
+            .await
+            .expect("classified as a usage limit");
+        assert!(wait.resume_at > Utc::now() + Duration::minutes(235));
+        let recorded = remote_wait(dir.path(), mission.id).await.unwrap();
+        assert_eq!(recorded.resume_at, Some(wait.resume_at));
+        assert_eq!(recorded.replays, 0);
+        let text = annotate_remote_output("Remote codex job failed", &wait);
+        assert!(text.contains("Codex usage limit reached"));
+        assert!(text.contains("replayed on the node automatically at"));
+
+        // Planning again (a retried finalization) keeps a single record.
+        plan_remote(dir.path(), &store, mission.id, false, failure)
+            .await
+            .unwrap();
+        assert_eq!(
+            remote_wait(dir.path(), mission.id).await.unwrap().replays,
+            0
+        );
+
+        // A later plain failure, or a success, is not a wait and clears it.
+        assert!(plan_remote(dir.path(), &store, mission.id, false, "exit 1")
+            .await
+            .is_none());
+        assert_eq!(remote_wait(dir.path(), mission.id).await, None);
+        assert!(plan_remote(dir.path(), &store, mission.id, true, failure)
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn available_accounts_are_read_from_the_provider_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = AccountCooldowns::default();
+        assert!(!provider_has_available_account(
+            dir.path(),
+            "openai",
+            &limits
+        ));
+
+        let mut capped = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::OpenAI,
+            "capped".to_string(),
+        );
+        capped.api_key = Some("sk-a".to_string());
+        let mut disabled = capped.clone();
+        disabled.id = Uuid::new_v4();
+        disabled.enabled = false;
+        let mut healthy = capped.clone();
+        healthy.id = Uuid::new_v4();
+        let write = |accounts: &[&crate::ai_providers::AIProvider]| {
+            let path = dir.path().join(crate::util::AI_PROVIDERS_PATH);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec(accounts).unwrap()).unwrap();
+        };
+        limits.set(
+            &account_limits::account_key(capped.id),
+            parked("openai", Utc::now() + Duration::hours(2)),
+        );
+
+        write(&[&capped, &disabled]);
+        assert!(!provider_has_available_account(
+            dir.path(),
+            "openai",
+            &limits
+        ));
+        assert!(!provider_has_available_account(
+            dir.path(),
+            "anthropic",
+            &limits
+        ));
+        write(&[&capped, &disabled, &healthy]);
+        assert!(provider_has_available_account(
+            dir.path(),
+            "openai",
+            &limits
+        ));
+    }
+
+    #[test]
+    fn a_replay_that_cannot_start_is_retried_or_given_up() {
+        let now = utc("2026-09-29T14:00:00Z");
+        let mut wait = RemoteWait {
+            resume_at: Some(now),
+            limit: "Codex usage limit".to_string(),
+            replays: 0,
+            retries: 0,
+        };
+        let still_running = format!(
+            "{}: mission still owns job",
+            super::super::remote_grok::REMOTE_JOB_STILL_RUNNING
+        );
+        assert_eq!(
+            after_replay_failure(&wait, false, &still_running, now),
+            ReplayFailure::Retry(now + Duration::minutes(5))
+        );
+        assert_eq!(
+            after_replay_failure(&wait, true, "store unavailable", now),
+            ReplayFailure::Retry(now + Duration::minutes(5))
+        );
+        assert_eq!(
+            after_replay_failure(&wait, false, "no recorded native session", now),
+            ReplayFailure::GiveUp
+        );
+        wait.retries = MAX_REPLAY_RETRIES;
+        assert_eq!(
+            after_replay_failure(&wait, false, &still_running, now),
+            ReplayFailure::GiveUp
+        );
     }
 }

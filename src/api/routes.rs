@@ -662,6 +662,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Re-attach poll loops for async remote jobs that were in flight when
     // the previous process exited (durable handles in remote-jobs.json).
     super::control::spawn_remote_job_reconciler(Arc::clone(&state));
+    super::control::spawn_remote_usage_limit_replayer(Arc::clone(&state));
 
     // Start background OAuth token refresher task
     {
