@@ -54,19 +54,23 @@ fn successful_empty_terminal_result(
     !cancelled && !had_error && saw_terminal_result_event && final_result.trim().is_empty()
 }
 
+/// How long after its first stale result a resumed session may keep
+/// reporting leftovers before an empty result is taken as its answer.
+const STALE_RESULT_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A resumed session first settles what the previous process left behind
-/// (stopped background tasks) and reports it as an empty result of zero
-/// turns. The prompt has not run yet: the real turn and its own result
-/// follow. Only that leading result is skipped, so a later one still ends
-/// the turn.
+/// (stopped background tasks) and reports it as empty results of zero turns,
+/// one per batch of leftovers. The prompt has not run yet: the real turn and
+/// its own result follow. Leading results are skipped only inside
+/// `STALE_RESULT_WINDOW`, so a session with nothing to say still ends.
 fn stale_resumed_result(
     resumed: bool,
-    already_skipped: bool,
+    window_closed: bool,
     saw_assistant_activity: bool,
     res: &crate::backend::shared::ResultEvent,
 ) -> bool {
     resumed
-        && !already_skipped
+        && !window_closed
         && !saw_assistant_activity
         && res.num_turns == Some(0)
         && !res.is_error
@@ -1774,7 +1778,7 @@ pub fn run_claudecode_turn<'a>(
 
         let mut saw_non_init_event = false;
         let mut saw_assistant_activity = false;
-        let mut stale_result_skipped = false;
+        let mut first_stale_result_at: Option<Instant> = None;
         let startup_timeout = Duration::from_secs(
             std::env::var("SANDBOXED_SH_CLAUDECODE_STARTUP_TIMEOUT_SECS")
                 .ok()
@@ -2644,11 +2648,12 @@ pub fn run_claudecode_turn<'a>(
                                 ClaudeEvent::Result(res) => {
                                     if stale_resumed_result(
                                         use_resume,
-                                        stale_result_skipped,
+                                        first_stale_result_at
+                                            .is_some_and(|at| at.elapsed() >= STALE_RESULT_WINDOW),
                                         saw_assistant_activity,
                                         &res,
                                     ) {
-                                        stale_result_skipped = true;
+                                        first_stale_result_at.get_or_insert_with(Instant::now);
                                         tracing::info!(
                                             mission_id = %mission_id,
                                             "Skipping the stale empty result of a resumed Claude session; waiting for the real turn"
@@ -3741,13 +3746,14 @@ mod background_task_tests {
     }
 
     #[test]
-    fn resumed_session_skips_only_its_leading_empty_result() {
+    fn resumed_session_skips_its_leading_empty_results() {
         let stale = result_event(serde_json::json!({
             "subtype": "success", "session_id": "s", "is_error": false,
             "num_turns": 0, "result": ""
         }));
         assert!(stale_resumed_result(true, false, false, &stale));
-        // A second empty result ends the turn, or the run would wait forever.
+        // Past the window an empty result ends the turn, or the run would
+        // wait for the idle timeout.
         assert!(!stale_resumed_result(true, true, false, &stale));
         assert!(!stale_resumed_result(false, false, false, &stale));
         assert!(!stale_resumed_result(true, false, true, &stale));
