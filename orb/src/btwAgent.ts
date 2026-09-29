@@ -3,10 +3,20 @@ import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTra
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {localBinding,restoreLocalBindings,refreshLocalAgents,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun} from './localAgents';
-import {getMissionEvents,storedToStream,type StoredEvent} from './stream';
+import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
 export function btwItems(parent:string){const s=btwSession(parent);return s?agentItems()[s.id]??[]:[];}
+type Thought=Extract<StreamItem,{kind:'think'}>;
+const [liveThoughts,setLiveThoughts]=createSignal<Record<string,Thought[]>>({});
+const thoughtsOf=(items:StreamItem[])=>items.filter((item):item is Thought=>item.kind==='think');
+/** Thoughts of the current side turn. Stored events only hold finished
+ * thoughts, so while the agent is answering the live stream is ahead. */
+export function btwThoughts(parent:string):Thought[]{
+ const s=btwSession(parent);if(!s)return [];
+ const stored=thoughtsOf(agentItems()[s.id]??[]),live=liveThoughts()[s.id]??[];
+ return live.length>stored.length||(live.length===stored.length&&live.some(item=>!item.done))?live:stored;
+}
 import type {SideAttachment,SideEvent,SideExchange} from './sideQuestionClient';
 import {transferFile} from './uploads';
 import {createSignal} from 'solid-js';
@@ -46,6 +56,15 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  receive({type:'start',model:s.harness+' · '+s.model});
  if(s.local){await restoreLocalBindings();await reconcileLocalRun(s.id);const current=await getMission(s.id);if(['active','running','pending','queued','starting','resuming'].includes(current.status))follow(s.id);}
  let previous:string|undefined;
+ // Unfinished thoughts are never stored: only the live stream carries them.
+ const live=new TranscriptReducer();
+ setLiveThoughts(all=>({...all,[s.id]:[]}));
+ const stopStream=s.local?undefined:streamMission(s.id,event=>{
+  if(event.type!=='thinking')return;
+  live.apply(event);
+  setLiveThoughts(all=>({...all,[s.id]:thoughtsOf(live.items).map(item=>({...item}))}));
+ },()=>{});
+ try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
   const mission=await getMission(s.id);
@@ -64,6 +83,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   if(!active){s.active=false;save(parent,s);if(['failed','interrupted','cancelled'].includes(mission.status))throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);if(!text.trim())throw new Error('No response was captured from the side agent. Check its activity for tool errors, then retry.');receive({type:'done',answer:text});return;}
   await new Promise(resolve=>setTimeout(resolve,700));
  }
+ }finally{stopStream?.();}
 }
 export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[]){
  const version=connectionVersion();

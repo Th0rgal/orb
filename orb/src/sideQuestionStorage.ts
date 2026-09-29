@@ -9,7 +9,10 @@ export type SavedSideQuestion = {
   open: boolean;
   docked: boolean;
   pending?: { question: string; answer: string; error?: string; attachments?:SideAttachment[] };
+  /** Questions typed while the side agent was answering, oldest first. */
+  queue?: QueuedSideQuestion[];
 };
+export type QueuedSideQuestion = { id: string; question: string; attachments?: SideAttachment[] };
 export function sideQuestionKey(mission: string): string {
   let account = 'local';
   try {
@@ -32,6 +35,7 @@ export async function readSideQuestion(key: string): Promise<SavedSideQuestion |
       open: value.open === true,
       docked: value.docked === true,
       pending: typeof value.pending?.question === 'string' && typeof value.pending?.answer === 'string' ? value.pending : undefined,
+      queue: Array.isArray(value.queue) ? value.queue.filter((v: QueuedSideQuestion) => typeof v?.id === 'string' && typeof v?.question === 'string').slice(0, 20) : [],
     };
   } catch { return; }
 }
