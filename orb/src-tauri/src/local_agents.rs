@@ -1735,10 +1735,13 @@ impl Recheck {
                 continue;
             }
             // The answer is a turn of its own: the next delay counts from its end.
+            // Written under the lock, so that it names the tasks that run now:
+            // the reader cannot change them meanwhile. Only the send is outside,
+            // where a full pipe must not hold the reader.
             let (_, tasks) = state.waiting.take().unwrap();
             state.asked += 1;
-            drop(state);
             let question = background_question("These background tasks still run:", &tasks);
+            drop(state);
             let line = json!({"type":"user","message":{"role":"user","content":question}});
             if write_line(&mut *stdin.lock().unwrap(), &line.to_string()).is_err() {
                 return;
