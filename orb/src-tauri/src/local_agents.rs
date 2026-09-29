@@ -706,6 +706,10 @@ fn spawn_claude(
                     // question: what follows is the agent's own turn.
                     if !background.running() || event["type"] == "control_request" {
                         waiting(None);
+                    } else if event["type"] == "system" {
+                        // Tasks end and start during the wait: the next question
+                        // is about the ones that run then.
+                        recheck.refresh(background.list());
                     }
                     if implement_after_result
                         && event["type"] == "assistant"
@@ -1677,6 +1681,12 @@ impl Recheck {
         state.waiting = tasks.map(|tasks| (since.unwrap_or_else(Instant::now), tasks));
         self.1.notify_all();
     }
+    /// The tasks changed; how long the agent has waited did not.
+    fn refresh(&self, tasks: Vec<BackgroundTask>) {
+        if let Some((_, waiting)) = &mut self.0.lock().unwrap().waiting {
+            *waiting = tasks;
+        }
+    }
     /// New tasks start from the first delay.
     fn restart(&self) {
         self.0.lock().unwrap().asked = 0;
@@ -2571,6 +2581,7 @@ read -r first || exit 21
 printf '%s\n' "$first" > first.json
 printf '%s\n' '{"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"Still waiting."}]}}'
 printf '%s\n' '{"type":"result"}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"build","task_type":"local_bash","description":"Build the installers"}]}'
 read -r second || exit 22
 printf '%s\n' "$second" > second.json
 printf '%s\n' '{"type":"assistant","message":{"id":"c","content":[{"type":"text","text":"Stopped it."}]}}'
@@ -2622,7 +2633,8 @@ printf '%s\n' '{"type":"result"}'
             .unwrap()
             .to_owned();
         assert!(
-            second.contains("These background tasks still run:\n- Wait for release builds"),
+            second.contains("These background tasks still run:\n- Build the installers")
+                && !second.contains("Wait for release builds"),
             "{second}"
         );
         recheck_delays().lock().unwrap().remove(&id);
