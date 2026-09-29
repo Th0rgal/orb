@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 /// `MissionActivity::tool_name` the runner emits once each time it parks. The
@@ -52,6 +52,37 @@ pub(crate) fn deliver(mission_id: Uuid, content: String) -> Result<(), String> {
     slot.send(content)
 }
 
+static EFFORT: LazyLock<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Option<String>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Effort changes for a session that reads stream-json input arrive here and
+/// are applied to the running process.
+pub(crate) fn effort_changes(mission_id: Uuid) -> mpsc::UnboundedReceiver<Option<String>> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    EFFORT.lock().unwrap().insert(mission_id, tx);
+    rx
+}
+
+/// Change the effort of the mission's running session. False when no session
+/// can take it: the stored effort then applies from the next process.
+pub(crate) fn set_effort(mission_id: Uuid, effort: Option<String>) -> bool {
+    EFFORT
+        .lock()
+        .unwrap()
+        .get(&mission_id)
+        .is_some_and(|session| session.send(effort).is_ok())
+}
+
+/// The control request that sets the effort of a running CLI. `None` returns
+/// to the CLI's default.
+pub(crate) fn effort_request(effort: Option<&str>) -> Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": format!("orb-effort-{}", Uuid::new_v4()),
+        "request": { "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }
+    })
+}
+
 static ATTACHED: LazyLock<Mutex<HashSet<Uuid>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// True while a runner that keeps its session owns this mission. The CLI then
@@ -76,6 +107,7 @@ impl SessionGuard {
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         ATTACHED.lock().unwrap().remove(&self.0);
+        EFFORT.lock().unwrap().remove(&self.0);
         unpark(self.0);
     }
 }
@@ -163,6 +195,25 @@ mod tests {
         assert_eq!(deliver(mission, "first".into()), Ok(()));
         assert_eq!(deliver(mission, "second".into()), Err("second".into()));
         assert_eq!(slot.await.unwrap(), "first");
+    }
+
+    #[test]
+    fn effort_reaches_the_session_until_its_runner_leaves() {
+        let mission = Uuid::new_v4();
+        assert!(!set_effort(mission, Some("high".into())));
+        let guard = SessionGuard::attach(mission, false);
+        let mut changes = effort_changes(mission);
+        assert!(set_effort(mission, Some("high".into())));
+        assert!(set_effort(mission, None));
+        assert_eq!(changes.try_recv().unwrap().as_deref(), Some("high"));
+        assert_eq!(changes.try_recv().unwrap(), None);
+        drop(guard);
+        assert!(!set_effort(mission, Some("low".into())));
+
+        let request = effort_request(Some("xhigh"));
+        assert_eq!(request["request"]["subtype"], "apply_flag_settings");
+        assert_eq!(request["request"]["settings"]["effortLevel"], "xhigh");
+        assert!(effort_request(None)["request"]["settings"]["effortLevel"].is_null());
     }
 
     #[test]

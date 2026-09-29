@@ -24547,6 +24547,17 @@ async fn control_actor_loop(
                             .await;
 
                         if let Ok(updated) = result.as_ref() {
+                            // A running Claude session takes the new effort
+                            // now; any other mission reads it at its next turn.
+                            if model_effort.is_some()
+                                && updated.backend == "claudecode"
+                                && old_backend.as_deref() == Some("claudecode")
+                            {
+                                crate::api::runners::live_session::set_effort(
+                                    id,
+                                    updated.model_effort.clone(),
+                                );
+                            }
                             let _ = events_tx.send(AgentEvent::MissionSettingsUpdated {
                                 mission_id: id,
                                 backend: updated.backend.clone(),

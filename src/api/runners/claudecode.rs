@@ -1326,7 +1326,11 @@ pub fn run_claudecode_turn<'a>(
         // Set effort level via environment variable.
         // Claude Code reads CLAUDE_CODE_EFFORT_LEVEL to control adaptive reasoning depth.
         if let Some(effort) = model_effort {
-            env.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string());
+            // The variable outranks a later change of effort, so a session
+            // that takes input receives its effort over stdin instead.
+            if !stream_input || native_plan {
+                env.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string());
+            }
 
             // CLAUDE_CODE_EFFORT_LEVEL only nudges adaptive reasoning, which
             // leaves the Thoughts panel empty on tool-heavy turns. Pin an
@@ -1632,6 +1636,11 @@ pub fn run_claudecode_turn<'a>(
                     serde_json::json!({"type":"control_request","request_id":"orb-init","request":{"subtype":"initialize"}}),
                     prompt
                 )
+            } else if let Some(effort) = model_effort {
+                format!(
+                    "{}\n{prompt}\n",
+                    super::live_session::effort_request(Some(effort))
+                )
             } else {
                 format!("{prompt}\n")
             }
@@ -1798,6 +1807,8 @@ pub fn run_claudecode_turn<'a>(
         // background tasks the process is kept and the runner parks.
         let keep_alive = stream_input && !native_plan && super::live_session::enabled();
         let _session_guard = super::live_session::SessionGuard::attach(mission_id, keep_alive);
+        let mut effort_changes =
+            (stream_input && !native_plan).then(|| super::live_session::effort_changes(mission_id));
         let mut background = super::live_session::ClaudeBackground::default();
         let mut parked = false;
         let mut parked_slot: Option<tokio::sync::oneshot::Receiver<String>> = None;
@@ -2045,6 +2056,20 @@ pub fn run_claudecode_turn<'a>(
                 // immediately leaves the turn in AwaitingTerminalResult/
                 // AwaitingClaude (not this state), so those stalls remain subject
                 // to the watchdog as before.
+                Some(effort) = async { effort_changes.as_mut().expect("guarded by is_some").recv().await }, if effort_changes.is_some() => {
+                    let request = super::live_session::effort_request(effort.as_deref());
+                    // Before the prompt is written the request goes ahead of it.
+                    let applied = if let Some(prompt) = pending_initial_prompt.as_mut() {
+                        *prompt = format!("{prompt}{request}\n");
+                        true
+                    } else {
+                        stdin_writer.as_mut().is_some_and(|w| {
+                            use std::io::Write as _;
+                            writeln!(w, "{}", request).and_then(|_| w.flush()).is_ok()
+                        })
+                    };
+                    tracing::info!(mission_id = %mission_id, ?effort, applied, "Effort change for the running Claude session");
+                }
                 message = async { parked_slot.as_mut().expect("guarded by is_some").await }, if parked_slot.is_some() => {
                     parked_slot = None;
                     if let Ok(content) = message {
