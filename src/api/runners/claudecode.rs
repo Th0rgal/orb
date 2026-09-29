@@ -4366,7 +4366,9 @@ mod rotation_tests {
 
     #[test]
     fn rotation_moves_on_after_account_failures_and_dead_starts() {
-        assert!(rotation_continues_after(&failed(TerminalReason::RateLimited)));
+        assert!(rotation_continues_after(&failed(
+            TerminalReason::RateLimited
+        )));
         assert!(rotation_continues_after(&failed(TerminalReason::AuthError)));
         // The alternate exited before any event (mission f0fbffbb).
         let dead_start = failed(TerminalReason::LlmError).with_data(serde_json::json!({
@@ -4378,7 +4380,9 @@ mod rotation_tests {
     #[test]
     fn rotation_stops_on_results_that_would_repeat_or_succeeded() {
         assert!(!rotation_continues_after(&failed(TerminalReason::LlmError)));
-        assert!(!rotation_continues_after(&failed(TerminalReason::InfiniteLoop)));
+        assert!(!rotation_continues_after(&failed(
+            TerminalReason::InfiniteLoop
+        )));
         assert!(!rotation_continues_after(&AgentResult::success("done", 0)));
         let mid_turn = failed(TerminalReason::LlmError).with_data(serde_json::json!({
             "claudecode_transport_failure": { "stage": "mid_turn" }
