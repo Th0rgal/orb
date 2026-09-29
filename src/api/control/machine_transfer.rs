@@ -407,9 +407,20 @@ pub async fn inspect(
         .machine_transfers(id)
         .await
         .map_err(internal_error)?;
+    // Clients poll this view. The archived conversation of a transfer can be
+    // megabytes and is read through the file operations, never from here.
+    let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
         json!({"version":1,"actions":actions,"destinations":capabilities(&state).await}),
     ))
+}
+
+fn listed_action(action: &Transfer) -> Value {
+    let mut listed = serde_json::to_value(action).unwrap_or(Value::Null);
+    if let Some(fields) = listed.as_object_mut() {
+        fields.remove("context");
+    }
+    listed
 }
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
