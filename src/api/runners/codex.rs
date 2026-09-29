@@ -1449,6 +1449,9 @@ pub(crate) async fn consume_codex_events(
     let mut text_delta_pending = false;
     let mut success = false;
     let mut error_message: Option<String> = None;
+    // A usage limit reported after the reply is not an error of this turn,
+    // but the account is exhausted all the same.
+    let mut late_usage_limit: Option<String> = None;
     let mut pending_tools: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut thinking_emitted = false;
@@ -1698,6 +1701,9 @@ pub(crate) async fn consume_codex_events(
                                 assistant_message.len(),
                                 message
                             );
+                            if crate::account_limits::is_usage_limit_message(&message) {
+                                late_usage_limit = Some(message.clone());
+                            }
                         }
                     }
                     ExecutionEvent::MessageComplete { session_id: _ } => {
@@ -1902,6 +1908,9 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
     );
     result = result.with_turn_outcome(outcome);
     result = result.with_cost_source(cost_source);
+    if let Some(limit) = late_usage_limit.filter(|_| result.success) {
+        result = result.with_data(crate::api::mission_runner::late_usage_limit_data(&limit));
+    }
     if usage.has_usage() {
         result = result.with_usage(usage);
     }
