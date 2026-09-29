@@ -245,8 +245,8 @@ export function startLocalQueueWorker(){
      continue;
     }
     // A message that failed only because nothing could be reached was never sent: it waits again.
-    if(row.state==='error'&&!row.interrupted&&!row.receipt&&offline(row.error)){
-     await update(key,row.id,stored=>{if(stored.state==='error'&&!stored.receipt){stored.state='queued';stored.error='Waiting for the connection to come back.';}});
+    if(row.state==='error'&&!row.interrupted&&!row.receipt&&unreachable(row.error)&&(row.resumes??0)<RESUME_LIMIT){
+     await update(key,row.id,stored=>{if(stored.state==='error'&&!stored.receipt){stored.state='queued';stored.resumes=(stored.resumes??0)+1;stored.error='Waiting for the connection to come back.';}});
      again=true;continue;
     }
     if(row.interrupted&&row.state==='accepted'&&!row.autoResumed){
