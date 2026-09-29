@@ -37,6 +37,46 @@ fn failure_detail(result: &crate::agents::AgentResult) -> String {
     format!("ChatGPT requires account or submission reconciliation; reason={:?}; stage={stage}; no replacement conversation was created", result.terminal_reason)
 }
 
+/// Stored in `Turn::cursor`: this turn goes to a new conversation that starts
+/// with the recorded history, because the original can no longer be opened.
+const REPLACEMENT: &str = "replacement";
+/// Recorded history carried into a replacement conversation, in characters.
+const REPLACEMENT_HISTORY_LIMIT: usize = 60_000;
+
+/// What is typed into ChatGPT for this turn. It must be the same on every
+/// tick: the job ledger identifies a submission by this text.
+fn outgoing(e: &Execution, i: usize) -> String {
+    let turn = &e.turns[i];
+    if turn.cursor.as_deref() != Some(REPLACEMENT) {
+        return turn.prompt.clone();
+    }
+    // Most recent exchanges first, until the budget is spent.
+    let mut kept = Vec::new();
+    let mut budget = REPLACEMENT_HISTORY_LIMIT;
+    for earlier in e.turns[..i].iter().rev() {
+        let exchange = format!(
+            "User:\n{}\n\nAssistant:\n{}",
+            earlier.prompt.trim(),
+            earlier.result.as_deref().unwrap_or_default().trim()
+        );
+        let size = exchange.chars().count();
+        if size > budget {
+            if kept.is_empty() {
+                kept.push(exchange.chars().skip(size - budget).collect::<String>());
+            }
+            break;
+        }
+        budget -= size;
+        kept.push(exchange);
+    }
+    kept.reverse();
+    format!(
+        "This continues an earlier conversation that can no longer be opened. Its exchanges follow, oldest first. Treat them as the history of this conversation and answer only the new message.\n\n{}\n\nNew message:\n{}",
+        kept.join("\n\n"),
+        turn.prompt.trim()
+    )
+}
+
 pub(super) async fn tick(
     store: &Arc<dyn MissionStore>,
     mut e: Execution,
@@ -71,7 +111,7 @@ pub(super) async fn tick(
             r.state != jobs::JobState::Submitted
                 || r.prompt_sha256
                     != jobs::prompt_fingerprint(
-                        &e.turns[i].prompt,
+                        &outgoing(&e, i),
                         e.turns[i].model.as_deref().or(e.selection.model.as_deref()),
                     )
         })
@@ -81,14 +121,27 @@ pub(super) async fn tick(
         return Ok(());
     }
     if i > 0
+        && e.turns[i].cursor.as_deref() != Some(REPLACEMENT)
         && prior.as_ref().is_none_or(|r| {
             !jobs::continuable_conversation(r) && r.state != jobs::JobState::Submitted
         })
     {
-        e.turns[i].phase = Phase::SubmissionUncertain;
-        e.turns[i].detail = Some("The original ChatGPT conversation cannot be verified".into());
-        worker::receipt(store, e, i).await?;
-        return Ok(());
+        // Every earlier answer is on record: the conversation can go on in a
+        // new chat that starts with that history. Nothing was sent for this
+        // turn yet, so no submission can be duplicated.
+        let answered = e.turns[..i].iter().all(|t| {
+            t.phase == Phase::ResponseComplete
+                && t.result.as_deref().is_some_and(|r| !r.trim().is_empty())
+        });
+        if phase != Phase::Queued || !answered {
+            e.turns[i].phase = Phase::SubmissionUncertain;
+            e.turns[i].detail = Some("The original ChatGPT conversation cannot be verified".into());
+            worker::receipt(store, e, i).await?;
+            return Ok(());
+        }
+        e.turns[i].cursor = Some(REPLACEMENT.into());
+        e.external_id = None;
+        e.external_url = None;
     }
     e.turns[i].phase = Phase::Submitting;
     e = worker::save(store, e).await?;
@@ -100,7 +153,7 @@ pub(super) async fn tick(
         .await
         .map_err(|e| e.to_string())?;
     let (tx, mut rx) = broadcast::channel(256);
-    let message = e.turns[i].prompt.clone();
+    let message = outgoing(&e, i);
     let model = e.turns[i]
         .model
         .clone()
@@ -192,6 +245,72 @@ pub(super) async fn tick(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn execution(turns: Vec<Turn>) -> Execution {
+        serde_json::from_value(serde_json::json!({
+            "mission_id": uuid::Uuid::new_v4(),
+            "request_key": "k",
+            "request_signature": "s",
+            "revision": 1,
+            "selection": {"provider":"chatgpt","account":"a","model":"gpt-6-pro","repository":null,"git_ref":null},
+            "external_id": null,
+            "external_url": null,
+            "parent_mission_id": null,
+            "turns": turns,
+        }))
+        .unwrap()
+    }
+    fn answered(prompt: &str, result: &str) -> Turn {
+        let mut turn = Turn::new(prompt.into(), prompt.into());
+        turn.phase = Phase::ResponseComplete;
+        turn.result = Some(result.into());
+        turn
+    }
+
+    #[test]
+    fn a_replacement_conversation_starts_with_the_recorded_history() {
+        let mut next = Turn::new("n".into(), "And in Rust?".into());
+        let plain = execution(vec![answered("Hello", "Hi."), next.clone()]);
+        assert_eq!(outgoing(&plain, 1), "And in Rust?");
+        next.cursor = Some(REPLACEMENT.into());
+        let e = execution(vec![
+            answered("First question", "First answer"),
+            answered("Second question", "Second answer"),
+            next,
+        ]);
+        let sent = outgoing(&e, 2);
+        let order: Vec<_> = [
+            "First question",
+            "First answer",
+            "Second question",
+            "Second answer",
+            "New message:\nAnd in Rust?",
+        ]
+        .iter()
+        .map(|part| sent.find(part).expect(part))
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{sent}");
+        // The ledger identifies the submission by this text.
+        assert_eq!(sent, outgoing(&e, 2));
+    }
+
+    #[test]
+    fn a_replacement_keeps_the_most_recent_history_within_its_budget() {
+        let mut next = Turn::new("n".into(), "Next".into());
+        next.cursor = Some(REPLACEMENT.into());
+        let long = "x".repeat(REPLACEMENT_HISTORY_LIMIT);
+        let e = execution(vec![
+            answered("Oldest question", &long),
+            answered("Recent question", "Recent answer"),
+            next,
+        ]);
+        let sent = outgoing(&e, 2);
+        assert!(sent.contains("Recent question") && sent.contains("Recent answer"));
+        assert!(!sent.contains("Oldest question"));
+        assert!(sent.chars().count() < REPLACEMENT_HISTORY_LIMIT + 1_000);
+    }
+
     #[test]
     fn failure_receipt_preserves_stage_without_copying_browser_content() {
         let result = crate::agents::AgentResult::failure("private browser page content", 0)
