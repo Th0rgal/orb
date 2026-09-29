@@ -112,6 +112,27 @@ it("resolves context at the cursor token without consuming punctuation or copyin
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
 
+it("links mentioned project folders to the live context so the agent's writes sync back", async()=>{
+ const host=window as unknown as {__TAURI_INTERNALS__?:{invoke:ReturnType<typeof vi.fn>}};
+ const previous=host.__TAURI_INTERNALS__;
+ const chips: AttachChip[]=[{id:"c",kind:"folder",path:"Context",label:"Context"},{id:"f",kind:"file",path:"notes/foo.md",label:"foo"},{id:"s",kind:"file",path:".env",label:"env"}];
+ const read=vi.fn(async()=>"copied");
+ try{
+  host.__TAURI_INTERNALS__={invoke:vi.fn().mockResolvedValue({root:"/local/ctx",state:{},resolved_paths:["Context","notes/foo.md"]})};
+  const live=await materializeMentions("minecraft","Write the handover files in @Context and read @notes/foo.md",chips,read,async()=>[]);
+  expect(live.prompt).toBe("Write the handover files in /local/ctx/Context and read /local/ctx/notes/foo.md");
+  expect(live.files).toEqual([]);
+  expect(read).not.toHaveBeenCalled();
+  expect(host.__TAURI_INTERNALS__!.invoke.mock.calls[0][1].request.paths).toEqual(["Context","notes/foo.md"]);
+  await expect(materializeMentions("minecraft","read @.env",chips,read,async()=>[])).rejects.toThrow(/not copied/);
+  // Without the live replica the old copy still works; explicit @context still refuses.
+  host.__TAURI_INTERNALS__={invoke:vi.fn().mockRejectedValue(new Error("Context is not available on this computer"))};
+  const copied=await materializeMentions("minecraft","read @notes/foo.md",chips,read,async()=>[]);
+  expect(copied.files).toEqual([{rel:".paloma/attach/notes/foo.md",content:"copied"}]);
+  await expect(materializeMentions("minecraft","read @context",chips,read,async()=>[])).rejects.toThrow(/not available/);
+ }finally{host.__TAURI_INTERNALS__=previous;}
+});
+
 it('waits for this window’s recovery before launching instead of racing its native lock', async () => {
   const {recoverLocalLaunch,startLocal} = await import('../src/localAgents');
   const host=window as unknown as {__TAURI_INTERNALS__?:{invoke:(command:string)=>Promise<unknown>}};
