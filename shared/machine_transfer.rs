@@ -292,7 +292,7 @@ fn measure(root: &Path, max_bytes: u64, max_files: usize) -> Result<(), String> 
         return Ok(());
     }
     let mut rows: Vec<_> = tally.into_iter().collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
     let largest: Vec<_> = rows
         .iter()
         .take(5)

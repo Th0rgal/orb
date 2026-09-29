@@ -26,7 +26,18 @@ fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Err
     }
     use sha2::{Digest, Sha256};
     let path = context_path(a.id);
-    if manifest.files.iter().any(|f| f.path == path) {
+    // A link at the archive's path, or at one of its folders, would make the
+    // destination refuse the manifest after the transfer is recorded.
+    let beneath = |link: &str| {
+        path.strip_prefix(link)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    if manifest.files.iter().any(|f| f.path == path)
+        || manifest
+            .links
+            .iter()
+            .any(|l| l.path == path || beneath(&l.path))
+    {
         return Err(conflict(
             "Workspace contains the reserved transfer conversation path",
         ));
@@ -36,7 +47,7 @@ fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Err
         .checked_add(a.context.len() as u64)
         .ok_or_else(|| conflict("Transfer size overflow"))?;
     if manifest.bytes > crate::machine_transfer::MAX_BYTES
-        || manifest.files.len() >= crate::machine_transfer::MAX_FILES
+        || manifest.files.len() + manifest.links.len() >= crate::machine_transfer::MAX_FILES
     {
         return Err(conflict(
             "Workspace plus conversation exceeds checkpoint limits",
@@ -1129,6 +1140,32 @@ mod portable_context_tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn archive_refuses_a_link_in_its_way_and_counts_links() {
+        let a = action("historical context\n".repeat(20_000));
+        let link = |path: &str| crate::machine_transfer::Link {
+            path: path.into(),
+            target: "elsewhere".into(),
+        };
+        for path in [".paloma", ".paloma/transfers", &context_path(a.id)] {
+            let mut manifest = Manifest {
+                links: vec![link(path)],
+                ..Default::default()
+            };
+            assert!(include_context_file(&a, &mut manifest).is_err(), "{path}");
+        }
+        let mut beside = Manifest {
+            links: vec![link(".paloma-notes"), link("other")],
+            ..Default::default()
+        };
+        include_context_file(&a, &mut beside).unwrap();
+        let mut full = Manifest {
+            links: vec![link("l"); crate::machine_transfer::MAX_FILES],
+            ..Default::default()
+        };
+        assert!(include_context_file(&a, &mut full).is_err());
     }
 
     #[test]
