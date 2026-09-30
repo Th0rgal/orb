@@ -50,7 +50,7 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
       await action();
       if (disposed || version !== connectionVersion()) return;
       setDraft(undefined); setImporting(false); await refresh();
-    } catch (e) { if (!disposed && version === connectionVersion()) { setError(String(e)); if (e instanceof ApiError && [404,409].includes(e.status)) setReady(false); } }
+    } catch (e) { if (!disposed && version === connectionVersion()) { setError(String(e)); if (e instanceof ApiError && [404,409].includes(e.status)) { setReady(false); setDraft(undefined); setEditing(undefined); setConfirmDelete(false); } } }
     finally { if (!disposed && version === connectionVersion()) setBusy(false); }
   }
   const start = (host?: SshHost) => { setConfirmDelete(false); setEditing(host); setDraft(host ? {...host} : {name:"",host:"",user:"ubuntu",port:22,note:""}); };

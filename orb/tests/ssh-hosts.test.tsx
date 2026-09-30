@@ -35,15 +35,23 @@ describe("shared SSH address book", () => {
     expect(writes).toHaveLength(1); expect(JSON.parse(writes[0][1].body)).toEqual(second);
     expect(JSON.parse(localStorage.getItem(legacySshKey)!)).toHaveLength(2);
   });
-  it("retains a failed draft and blocks stale writes until refresh", async () => {
+  it("closes a conflicted draft and uses the refreshed revision on retry", async () => {
     render(() => <SshAddressBook onUnsupported={() => {}} />);
     await fireEvent.click(await screen.findByText("Edit"));
     mocks.api.mockRejectedValueOnce(new ApiError(409,"Reload before editing"));
     await fireEvent.click(screen.getByText("Save"));
-    await waitFor(() => expect((screen.getByText("Save") as HTMLButtonElement).disabled).toBe(true));
-    expect(screen.getByDisplayValue("Spark")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Save")).toBeNull());
+    expect((screen.getByText("Edit") as HTMLButtonElement).disabled).toBe(true);
     const write = mocks.api.mock.calls.find(([,o]) => o?.method === "PUT");
     expect(JSON.parse(write![1].body).revision).toBe(2);
+    mocks.api.mockResolvedValue([{...host,revision:3,name:"Updated elsewhere"}]);
+    await fireEvent.click(screen.getByText("Refresh"));
+    await screen.findByText("Updated elsewhere");
+    await fireEvent.click(screen.getByText("Edit"));
+    await fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mocks.api.mock.calls.filter(([,o]) => o?.method === "PUT")).toHaveLength(2));
+    const retry = mocks.api.mock.calls.filter(([,o]) => o?.method === "PUT")[1];
+    expect(JSON.parse(retry[1].body).revision).toBe(3);
   });
   it("shows an offline snapshot as read-only", async () => {
     localStorage.setItem("orb.sshHosts:https://core.test",JSON.stringify([host]));
