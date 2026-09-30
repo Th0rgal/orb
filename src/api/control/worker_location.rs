@@ -176,9 +176,14 @@ pub async fn inherit(
     if req.remote_node_id.is_some() || req.placement.is_some() {
         return Ok(());
     }
-    if req.workspace_id.is_some_and(|id| id != parent.workspace_id) {
-        return Err(
-            "Changing a worker workspace requires an explicit execution destination".into(),
+    // Callers such as assistant-mcp always send their default workspace; a
+    // child runs where its parent runs unless a destination says otherwise.
+    if let Some(requested) = req.workspace_id.filter(|id| *id != parent.workspace_id) {
+        tracing::info!(
+            parent = %id,
+            requested_workspace = %requested,
+            inherited_workspace = %parent.workspace_id,
+            "worker inherits its parent's workspace"
         );
     }
     req.workspace_id = Some(parent.workspace_id);
@@ -248,26 +253,13 @@ pub async fn inherit(
             tags.push(source);
         }
     } else {
+        // A parent in its own generated directory keeps it to itself: each
+        // child gets its own, as before. Only a directory the parent was
+        // given explicitly is shared, and the occupancy check then applies.
         req.working_directory = req
             .working_directory
             .take()
             .or(parent.working_directory.clone());
-        if req.working_directory.is_none() {
-            let workspace = workspace::resolve_workspace(
-                &state.workspaces,
-                &state.config,
-                Some(parent.workspace_id),
-            )
-            .await;
-            req.working_directory = Some(
-                workspace::configured_project_dir(
-                    &workspace,
-                    &workspace::mission_workspace_dir_for_workspace(&workspace, id),
-                )
-                .to_string_lossy()
-                .into_owned(),
-            );
-        }
     }
     Ok(())
 }

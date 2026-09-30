@@ -11460,6 +11460,15 @@ pub(super) async fn create_mission_inner(
         if let Some(directory) = req.working_directory.as_deref() {
             let workspace =
                 workspace::resolve_workspace(&state.workspaces, &state.config, workspace_id).await;
+            if workspace.workspace_type == crate::workspace::WorkspaceType::Host {
+                let tags = req.tags.get_or_insert_with(Vec::new);
+                if !tags
+                    .iter()
+                    .any(|tag| tag == super::mission_runner::HOST_STATE_TAG)
+                {
+                    tags.push(super::mission_runner::HOST_STATE_TAG.to_string());
+                }
+            }
             req.working_directory = Some(
                 super::mission_runner::resolve_mission_working_directory(
                     &workspace.path,

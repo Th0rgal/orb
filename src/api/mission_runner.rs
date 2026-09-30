@@ -45,6 +45,12 @@ use super::library::SharedLibrary;
 /// consumed by [`WorkspaceExec`]. Container callers naturally refer to guest
 /// paths (for example `/workspace/verity/base`), while the API process must
 /// validate the corresponding path below the container rootfs.
+/// A host mission created with this tag keeps its harness state (generated
+/// config, session databases, staged credentials) in its own mission
+/// directory instead of the source directory it was given. Missions created
+/// before the tag existed keep their state where their sessions already are.
+pub const HOST_STATE_TAG: &str = "host-state:own";
+
 pub(crate) fn resolve_mission_working_directory(
     workspace_root: &Path,
     workspace_type: WorkspaceType,
@@ -93,11 +99,41 @@ pub(crate) fn resolve_mission_working_directory(
     }
 
     if workspace_type == WorkspaceType::Host {
-        return resolved
-            .canonicalize()
-            .map_err(|error| format!("failed to resolve working_directory: {error}"));
+        return canonicalize_existing_prefix(&resolved);
     }
     Ok(resolved)
+}
+
+/// Canonicalize a path that may not exist yet (a worktree prepared later):
+/// the longest existing ancestor is resolved, the rest is kept as written.
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, String> {
+    let mut missing = Vec::new();
+    let mut existing = path.to_path_buf();
+    loop {
+        if existing.exists() {
+            break;
+        }
+        let Some(name) = existing.file_name().map(|name| name.to_owned()) else {
+            return Err(format!(
+                "failed to resolve working_directory: no existing ancestor for {}",
+                path.display()
+            ));
+        };
+        missing.push(name);
+        if !existing.pop() {
+            return Err(format!(
+                "failed to resolve working_directory: no existing ancestor for {}",
+                path.display()
+            ));
+        }
+    }
+    let mut out = existing
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve working_directory: {error}"))?;
+    for name in missing.into_iter().rev() {
+        out.push(name);
+    }
+    Ok(out)
 }
 
 /// Refuse a turn whose model this deployment no longer runs.
@@ -3993,8 +4029,22 @@ async fn run_mission_turn(
 
     // Host cwd is source, not harness state. Never share generated config or
     // session databases merely because two workers edit the same directory.
+    // Missions created before this split keep their state in the source
+    // directory, where their sessions already live.
     workspace.env_vars.remove("SANDBOXED_SH_MISSION_CWD");
-    if workspace.workspace_type == WorkspaceType::Host {
+    let own_state = match (
+        workspace.workspace_type,
+        explicit_worktree.as_ref(),
+        mission_store.as_ref(),
+    ) {
+        (WorkspaceType::Host, Some(_), Some(store)) => match store.get_mission(mission_id).await {
+            Ok(Some(mission)) => mission.project.tags.iter().any(|tag| tag == HOST_STATE_TAG),
+            _ => false,
+        },
+        (WorkspaceType::Host, Some(_), None) => false,
+        _ => true,
+    };
+    if workspace.workspace_type == WorkspaceType::Host && own_state {
         if let Some(path) = explicit_worktree.as_ref() {
             // A generated mission tree retains its recorded source identity.
             // Ordinary host directories do not require a workspace owner.
@@ -4085,7 +4135,7 @@ async fn run_mission_turn(
     };
 
     // Override with mission-specific working_directory (e.g. git worktree for orchestrated workers)
-    let mission_work_dir = if workspace.workspace_type == WorkspaceType::Host {
+    let mission_work_dir = if workspace.workspace_type == WorkspaceType::Host && own_state {
         mission_work_dir
     } else if let Some(ref wd) = mission_working_directory {
         match resolve_mission_working_directory(&workspace.path, workspace.workspace_type, wd) {

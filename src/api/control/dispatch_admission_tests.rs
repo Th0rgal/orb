@@ -9045,6 +9045,61 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
     fixture.set_state("succeeded");
 }
 
+async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
+    let harness = Harness::new().await;
+    let host = crate::workspace::DEFAULT_WORKSPACE_ID;
+    let parent = harness
+        .control
+        .mission_store
+        .create_mission(
+            Some("parent"),
+            Some(host),
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    // assistant-mcp always sends a workspace; a different one is not a refusal.
+    let mut request: CreateMissionRequest = serde_json::from_value(
+        json!({"parent_mission_id": parent.id, "workspace_id": Uuid::new_v4()}),
+    )
+    .unwrap();
+    worker_location::inherit(&harness.state, &harness.control, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.workspace_id, Some(host));
+    // The parent works in its generated directory: the child gets its own.
+    assert_eq!(request.working_directory, None);
+
+    let explicit = harness
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("parent in a repo"),
+            Some(host),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some("/repo"),
+        )
+        .await
+        .unwrap();
+    let mut request: CreateMissionRequest =
+        serde_json::from_value(json!({"parent_mission_id": explicit.id})).unwrap();
+    worker_location::inherit(&harness.state, &harness.control, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.working_directory.as_deref(), Some("/repo"));
+}
+
+#[tokio::test]
 #[tokio::test]
 async fn relocated_worker_keeps_parent_metadata_without_inheriting_location() {
     let harness = Harness::new().await;

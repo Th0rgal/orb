@@ -950,7 +950,20 @@ pub async fn client_run(
             if owners.get(&target).and_then(|owner| owner.as_deref())
                 == Some(req.client_id.as_str())
             {
-                let candidate = mission(&control, target).await?;
+                // A target that no longer exists must not hold up delivery
+                // for the computer's other workers; its rows are retired.
+                let candidate = match control.mission_store.get_mission(target).await {
+                    Ok(Some(candidate)) => candidate,
+                    Ok(None) => {
+                        tracing::warn!(target = %target, "client delivery target is gone; retiring its message");
+                        let _ = control
+                            .mission_store
+                            .acknowledge_board_outbox(&item.idempotency_key)
+                            .await;
+                        continue;
+                    }
+                    Err(error) => return Err(internal_error(error)),
+                };
                 if worker_location::board_allows_client_run(&control.mission_store, &candidate)
                     .await
                     .map_err(internal_error)?

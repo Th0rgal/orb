@@ -1395,21 +1395,29 @@ fn external_tasks_share_directory(boss: &Mission, task: &BoardTask, other: &Boar
     }
 }
 
+/// Tasks whose worker the actor snapshot cannot see: a create in flight, or
+/// a running task whose worker is not a local runner.
+fn external_worker_candidates<'a>(
+    tasks: &'a [BoardTask],
+    running_ids: &'a HashSet<Uuid>,
+    inflight: &'a HashSet<Uuid>,
+) -> impl Iterator<Item = &'a BoardTask> + 'a {
+    tasks.iter().filter(move |task| {
+        inflight.contains(&task.id)
+            || (task.status == BoardTaskStatus::Running
+                && task
+                    .worker_mission_id
+                    .is_some_and(|id| !running_ids.contains(&id)))
+    })
+}
+
+#[cfg(test)]
 fn external_worker_slots(
     tasks: &[BoardTask],
     running_ids: &HashSet<Uuid>,
     inflight: &HashSet<Uuid>,
 ) -> usize {
-    tasks
-        .iter()
-        .filter(|task| {
-            inflight.contains(&task.id)
-                || (task.status == BoardTaskStatus::Running
-                    && task
-                        .worker_mission_id
-                        .is_some_and(|id| !running_ids.contains(&id)))
-        })
-        .count()
+    external_worker_candidates(tasks, running_ids, inflight).count()
 }
 
 /// Spawn workers for ready tasks while capacity allows, and sweep zombies.
@@ -1457,10 +1465,23 @@ pub async fn scheduler_pass(
         }
     }
     let inflight = external_worker_inflight().lock().unwrap().clone();
-    let external_running: usize = board_tasks
-        .iter()
-        .map(|(_, tasks)| external_worker_slots(tasks, &snapshot.running_ids, &inflight))
-        .sum();
+    // A worker that is not executing anywhere (a client worker whose computer
+    // is away, a run that ended) holds no slot: only a live mission does.
+    let mut external_running = 0usize;
+    for (_, tasks) in &board_tasks {
+        for task in external_worker_candidates(tasks, &snapshot.running_ids, &inflight) {
+            let live = match task.worker_mission_id {
+                Some(id) if !inflight.contains(&task.id) => matches!(
+                    mission_store.get_mission(id).await,
+                    Ok(Some(mission)) if mission.status == MissionStatus::Active
+                ),
+                _ => true,
+            };
+            if live {
+                external_running += 1;
+            }
+        }
+    }
     let total_running =
         snapshot.running_count + usize::from(snapshot.main_running) + external_running;
     let spawnable_cap = max_parallel.saturating_sub(RESERVED_BOSS_SLOTS);
