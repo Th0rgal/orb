@@ -83,6 +83,26 @@ pub fn client_owner(mission: &Mission) -> Option<&str> {
         .find_map(|tag| tag.strip_prefix(CLIENT_TAG))
 }
 
+/// External board creation is asynchronous. Do not deliver or start a client
+/// worker until the board has adopted it; cancellation before adoption wins.
+pub async fn board_allows_client_run(
+    store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+) -> Result<bool, String> {
+    let Some(task_id) = mission
+        .project
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("board-task:"))
+    else {
+        return Ok(true);
+    };
+    let task_id = Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
+    Ok(store.get_board_task(task_id).await?.is_some_and(|task| {
+        task.worker_mission_id == Some(mission.id) && task.status == BoardTaskStatus::Running
+    }))
+}
+
 pub async fn resolved_client_owner(
     store: &Arc<dyn MissionStore>,
     id: Uuid,

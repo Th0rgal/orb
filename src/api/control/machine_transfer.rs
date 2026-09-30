@@ -950,7 +950,13 @@ pub async fn client_run(
             if owners.get(&target).and_then(|owner| owner.as_deref())
                 == Some(req.client_id.as_str())
             {
-                messages.push(item.payload);
+                let candidate = mission(&control, target).await?;
+                if worker_location::board_allows_client_run(&control.mission_store, &candidate)
+                    .await
+                    .map_err(internal_error)?
+                {
+                    messages.push(item.payload);
+                }
             }
         }
         return Ok(Json(json!({"messages":messages})));
@@ -1000,6 +1006,15 @@ pub async fn client_run(
         .is_some_and(|owner| owner != req.client_id)
     {
         return Err(conflict("Open this conversation on its owning computer"));
+    }
+    if matches!(req.op.as_str(), "begin" | "inbox")
+        && !worker_location::board_allows_client_run(&control.mission_store, &m)
+            .await
+            .map_err(internal_error)?
+    {
+        return Err(conflict(
+            "This board task has not assigned this worker or is no longer running",
+        ));
     }
     if matches!(req.op.as_str(), "inbox" | "received") {
         if designated.is_none() {

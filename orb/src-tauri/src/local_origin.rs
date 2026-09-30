@@ -329,6 +329,14 @@ pub async fn local_origin_launch(
         return Ok(result);
     }
 
+    // Serialize check-through-spawn for new origins. Same-draft replay above
+    // remains idempotent; different drafts cannot reserve the same directory.
+    static LAUNCH: OnceLock<Mutex<()>> = OnceLock::new();
+    let _launch = LAUNCH.get_or_init(|| Mutex::new(())).lock().await;
+    if local_agents::workspace_busy(Path::new(&request.cwd))? {
+        return Err("This directory already has a running local mission. Choose a separate directory or worktree.".into());
+    }
+
     // Execution stays in the chosen directory; the journal above remains private.
     let snapshot = Snapshot {
         origin: Origin {

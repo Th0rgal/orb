@@ -1696,12 +1696,13 @@ async fn schedule_external_worker(
             "backend":task.backend,"model_override":task.model_override.as_deref().or_else(|| role_default_model(&task)),
             "model_effort":task.model_effort,"working_directory":task.working_directory,
             "idempotency_key":format!("board:{}:attempt:{}",task.id,task.attempts+1),
+            "tags":[format!("board-task:{}",task.id)],
             "prompt":format!("{}{}",retry_prompt(&task,&preflight),worker_contract(&task)),
         }));
         let result = match request {
             Ok(request) => super::create_mission_inner(
-                super::State(state),
-                super::Extension(user),
+                super::State(state.clone()),
+                super::Extension(user.clone()),
                 Some(super::Json(request)),
                 true,
             )
@@ -1723,7 +1724,34 @@ async fn schedule_external_worker(
                         {
                             current
                         }
+                        Ok(Some(current)) if current.worker_mission_id == Some(id) => {
+                            // A replay may observe a worker already adopted by the task.
+                            INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+                            return;
+                        }
                         _ => {
+                            let control = super::control_for_user(&state, &user).await;
+                            if super::mission_is_client_placed(&control, id)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                // Client inbox/begin are gated on task adoption, so this
+                                // unassigned worker cannot have acquired a local run.
+                                super::interrupt_new_mission(
+                                    &control,
+                                    id,
+                                    "board_task_changed_during_launch",
+                                )
+                                .await;
+                            } else if let Err((_, error)) = super::cancel_mission(
+                                super::State(state.clone()),
+                                super::Extension(user.clone()),
+                                super::Path(id),
+                            )
+                            .await
+                            {
+                                tracing::error!(mission=%id, task=%task.id, %error, "could not cancel unassigned board worker");
+                            }
                             INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
                             return;
                         }
@@ -2420,6 +2448,59 @@ mod tests {
         .await
         .expect("outbox acknowledgement persisted");
         assert!(inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_worker_waits_for_board_adoption_and_rejects_cancelled_task() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let mut worker = store
+            .create_mission(Some("worker"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let boss = Uuid::new_v4();
+        store
+            .upsert_board_tasks(
+                boss,
+                vec![NewBoardTask {
+                    task_key: "test".into(),
+                    title: "test".into(),
+                    prompt: "test".into(),
+                    backend: "codex".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        let mut task = store.list_board_tasks(boss).await.unwrap().remove(0);
+        worker.project.tags.push(format!("board-task:{}", task.id));
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.worker_mission_id = Some(worker.id);
+        task.status = BoardTaskStatus::Running;
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.status = BoardTaskStatus::Cancelled;
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.status = BoardTaskStatus::Running;
+        task.worker_mission_id = Some(Uuid::new_v4());
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

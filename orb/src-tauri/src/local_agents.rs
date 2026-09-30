@@ -157,7 +157,8 @@ pub fn local_agents_directory(path: String) -> Result<String, String> {
     if !requested.is_absolute() {
         return Err("Use an absolute working directory path".into());
     }
-    let resolved = requested.canonicalize()
+    let resolved = requested
+        .canonicalize()
         .map_err(|e| format!("Working directory is unavailable: {e}"))?;
     if !resolved.is_dir() {
         return Err("Working directory is not a folder".into());
@@ -260,6 +261,14 @@ pub(crate) fn start_with_env(
         if !previous.done.load(Ordering::SeqCst) {
             return Err("This mission is still running locally. Wait for it to finish or stop it before sending another message.".into());
         }
+    }
+    let canonical_cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
+    if map.iter().any(|(id, run)| {
+        id != &request.id
+            && !run.done.load(Ordering::SeqCst)
+            && run.cwd.canonicalize().ok().as_ref() == Some(&canonical_cwd)
+    }) {
+        return Err("This directory already has a running local mission. Choose a separate directory or worktree.".into());
     }
     // Completed handles are retained for reconnect snapshots until the next turn.
     // Retire the old app-server before resuming its thread in a fresh process.
@@ -3102,15 +3111,60 @@ pub fn clear_subscriptions() {
 
 #[cfg(test)]
 mod directory_tests {
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_local_runs_cannot_share_a_directory() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("gemini-fixture");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let first = uuid::Uuid::new_v4().to_string();
+        let request = StartRequest {
+            id: first.clone(),
+            harness: "gemini".into(),
+            bin: bin.to_string_lossy().into(),
+            cwd: root.path().to_string_lossy().into(),
+            prompt: "test".into(),
+            model: None,
+            session_id: None,
+            image_paths: vec![],
+        };
+        start_with_env(request.clone(), &[]).unwrap();
+        let second = start_with_env(
+            StartRequest {
+                id: uuid::Uuid::new_v4().to_string(),
+                cwd: root.path().join(".").to_string_lossy().into(),
+                ..request
+            },
+            &[],
+        );
+        local_agents_stop(first.clone()).unwrap();
+        runs().lock().unwrap().remove(&first);
+        assert!(second
+            .unwrap_err()
+            .contains("directory already has a running local mission"));
+    }
     #[test]
     fn plain_directory_is_valid_without_git() {
-        let root = std::env::temp_dir().join(format!("orb-directory-{}",uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("orb-directory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        assert_eq!(super::local_agents_directory(root.to_string_lossy().into()).unwrap(),root.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(
+            super::local_agents_directory(root.to_string_lossy().into()).unwrap(),
+            root.canonicalize().unwrap().to_string_lossy()
+        );
         assert!(super::local_agents_directory("relative".into()).is_err());
-        let file=root.join("file"); std::fs::write(&file,"hello").unwrap();
+        let file = root.join("file");
+        std::fs::write(&file, "hello").unwrap();
         assert!(super::local_agents_directory(file.to_string_lossy().into()).is_err());
-        assert!(super::local_agents_directory(root.join("absent").to_string_lossy().into()).is_err());
+        assert!(
+            super::local_agents_directory(root.join("absent").to_string_lossy().into()).is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
