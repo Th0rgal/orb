@@ -15,6 +15,6 @@ test('dropping a PDF into an empty nested folder preserves bytes, refreshes @ an
  const empty=page.getByText('Empty folder',{exact:true});await expect(empty).toBeVisible();
  async function drop(large=false){const rect=await (large?page.locator('.row.folder[data-drop-folder="PPL"]'):empty).boundingBox();const transfer=await page.evaluateHandle(large=>{const dt=new DataTransfer();dt.items.add(new File([large?new Uint8Array(10*1024*1024+1):new Uint8Array([37,80,68,70,0,255])],large?'large.pdf':'guide.pdf',{type:'application/pdf'}));return dt;},large);await page.locator('.row.folder[data-drop-folder="PPL"]').dispatchEvent('drop',{dataTransfer:transfer,clientX:rect!.x+10,clientY:rect!.y+5});}
  await drop();await expect.poll(()=>paths).toEqual(['PPL/guide.pdf']);expect([...blob!]).toEqual([37,80,68,70,0,255]);await expect(page.getByRole('button',{name:'guide.pdf',exact:true})).toBeVisible();
- const composer=page.locator('.composer textarea').first();await composer.fill('@guide');await expect(page.getByRole('option',{name:'context/PPL/guide.pdf',exact:true})).toBeVisible();
+ const composer=page.locator('.composer textarea').first();await composer.fill('@guide');await expect(page.getByRole('option',{name:'PPL/guide.pdf',exact:true})).toBeVisible();
  await drop(true);await expect(page.getByRole('alert')).toContainText('10 MiB');expect(paths).toHaveLength(1);
 });

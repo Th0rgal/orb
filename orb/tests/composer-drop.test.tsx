@@ -52,14 +52,14 @@ it('uploads Finder files to shared project context before sending context refere
   handlers.get('orb-upload-drop')!({payload:{paths:['/Users/test/a file.txt','/Users/test/image.png'],x:100,y:100}});
   const input=screen.getByPlaceholderText('Remote drop') as HTMLTextAreaElement;
   await waitFor(()=>expect(input.value).toContain('image.png'));
-  expect(input.value).toContain('@"context/attachments/');
+  expect(input.value).toContain('@"attachments/');
   expect(input.value).not.toContain('/Users/');
   expect(requests.filter(r=>r.url.endsWith('/blobs'))).toHaveLength(2);
   expect(requests.some(r=>r.url.endsWith('/api/uploads'))).toBe(false);
   expect(invoke.mock.calls.every(call=>call[0]==='read_upload_file')).toBe(true);
   fireEvent.click(screen.getByTitle('Send'));
   await waitFor(()=>expect(send).toHaveBeenCalledOnce());
-  expect(attachments).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({kind:'context'})]));
+  expect(attachments).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({kind:'context',project:'drop-test',path:expect.stringMatching(/^attachments\//)})]));
 });
 
 it('keeps typed text and reports a failed shared-context upload without sending', async () => {

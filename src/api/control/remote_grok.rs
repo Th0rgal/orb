@@ -972,7 +972,7 @@ impl NativeGrokObserver {
         // read from offset zero and the terminal fetch itself reached its end
         // (a failed fetch leaves stale offsets that look caught up).
         let complete_log = self.streaming == LogStreaming::Supported && self.pumped_to_end;
-        if !missing && !(allocated && complete_log && self.stream.json_events == 0) {
+        if !(missing || allocated && complete_log && self.stream.json_events == 0) {
             return;
         }
         let Some(session_id) = self.mission.session_id.clone() else {
@@ -1350,6 +1350,18 @@ pub(crate) async fn continue_on_node(
                 format!("Mission {mission_id} not found"),
             )
         })?;
+    if let Some(id) = message_id {
+        let expected = id.to_string();
+        if store
+            .get_events(mission_id, Some(&["user_message"]), None, None)
+            .await
+            .map_err(internal)?
+            .iter()
+            .any(|event| event.event_id.as_deref() == Some(expected.as_str()))
+        {
+            return Ok(mission);
+        }
+    }
     // A live job must never produce a replacement hint, even for a harness
     // or track that cannot resume. Clients act on that hint by creating a job.
     if placement.live

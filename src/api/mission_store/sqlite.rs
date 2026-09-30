@@ -11792,18 +11792,19 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|error| format!("Task join error: {error}"))?
     }
 
-    async fn list_pending_board_outbox(
+    async fn list_pending_board_outbox_filtered(
         &self,
         limit: usize,
+        client: Option<bool>,
     ) -> Result<Vec<BoardOutboxItem>, String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut statement = conn.prepare(
                 "SELECT id, boss_mission_id, task_id, delivery_kind, idempotency_key, payload, state, attempts, \
-                 created_at, acknowledged_at FROM board_outbox WHERE state != 'acknowledged' ORDER BY created_at LIMIT ?1"
+                 created_at, acknowledged_at FROM board_outbox WHERE state != 'acknowledged' AND (?2 IS NULL OR (delivery_kind = 'client_message') = ?2) ORDER BY created_at LIMIT ?1"
             ).map_err(|error| error.to_string())?;
-            let rows = statement.query_map(params![limit.min(1000) as i64], parse_board_outbox_row)
+            let rows = statement.query_map(params![limit.min(1000) as i64, client], parse_board_outbox_row)
                 .map_err(|error| error.to_string())?
                 .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
             Ok(rows)
@@ -17012,6 +17013,62 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_outbox_backlog_does_not_starve_server_deliveries() {
+        use crate::api::mission_store::BoardOutboxItem;
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp.path().to_path_buf(), "outbox-lanes")
+            .await
+            .unwrap();
+        let boss = Uuid::new_v4();
+        for index in 0..1001 {
+            store
+                .enqueue_board_outbox(BoardOutboxItem {
+                    id: Uuid::new_v4(),
+                    boss_mission_id: boss,
+                    task_id: None,
+                    delivery_kind: "client_message".into(),
+                    idempotency_key: format!("client:{index}"),
+                    payload: serde_json::json!({}),
+                    state: "pending".into(),
+                    attempts: 0,
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    acknowledged_at: None,
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .enqueue_board_outbox(BoardOutboxItem {
+                id: Uuid::new_v4(),
+                boss_mission_id: boss,
+                task_id: None,
+                delivery_kind: "controller_notification".into(),
+                idempotency_key: "server:wake".into(),
+                payload: serde_json::json!({}),
+                state: "pending".into(),
+                attempts: 0,
+                created_at: "2026-01-02T00:00:00Z".into(),
+                acknowledged_at: None,
+            })
+            .await
+            .unwrap();
+        let server = store
+            .list_pending_board_outbox_filtered(1000, Some(false))
+            .await
+            .unwrap();
+        assert_eq!(server.len(), 1);
+        assert_eq!(server[0].idempotency_key, "server:wake");
+        let client = store
+            .list_pending_board_outbox_filtered(1000, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(client.len(), 1000);
+        assert!(client
+            .iter()
+            .all(|item| item.delivery_kind == "client_message"));
     }
 
     /// FLEET-001: deferred goals round-trip and the scheduled-pending query

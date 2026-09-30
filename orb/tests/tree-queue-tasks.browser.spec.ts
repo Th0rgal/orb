@@ -39,6 +39,7 @@ async function setup(page: Page, mixed = false) {
     if(path==="/api/control/stream") return route.fulfill({contentType:"text/event-stream",body:`event: text_delta\ndata: ${JSON.stringify({content:"Review in progress",sequence:6})}\n\n${extraFrames}`});
     if(path.endsWith("/events")) return route.fulfill(eventPage(route,events));
     if(path==="/api/control/missions/active") return route.fulfill({json:mission});
+    if(path==="/api/projects/test/context/manifest") return route.fulfill({json:{revision:1,entries:mixed?{"README.md":{directory:false,size:24,revision:1,hash:"readme"}}:{}}});
     if(path==="/api/projects/test/files") {
       const dir=url.searchParams.get("path")??"";
       if(dir==="slow") await slow;
@@ -117,7 +118,7 @@ test("combined queue and checklist survives failure, identical sends, reload and
   state.setReject(false);
   for(let i=0;i<2;i++){await field.fill("same text @README.md");await field.press("Escape");await field.press("Enter");await expect(field).toHaveValue("");}
   await expect(page.locator('.queued-messages li')).toHaveCount(2);
-  expect(state.posts[1].attachments).toEqual([{kind:"file",path:"README.md"}]);
+  expect(state.posts[1].attachments).toEqual([{kind:"path",path:"README.md"}]);
   await expect(page.locator('.queued-messages')).toContainText("Attached context");
   await expect(page.locator('.queued-messages')).not.toContainText(".paloma");
   expect(state.posts.slice(-2).map(p=>p.client_message_id)[0]).not.toBe(state.posts.at(-1)!.client_message_id);

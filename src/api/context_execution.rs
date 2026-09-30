@@ -1,13 +1,13 @@
 use crate::project_context::Manifest;
 use std::path::Path;
 pub fn has_mentions(text: &str) -> bool {
-    regex::Regex::new(r#"(^|[\s(])@(?:\")?context(?:[/\s\"),.;!?]|$)"#)
+    regex::Regex::new(r#"(^|[\s(\[{])@(?:\")?(?:context|__orb_path__)(?:[/\s\"),.;!?]|$)"#)
         .unwrap()
         .is_match(text)
 }
 pub fn resolve(text: &str, root: &Path, manifest: &Manifest) -> Result<String, String> {
     let pattern =
-        regex::Regex::new(r#"(^|[\s(])@(?:\"(context(?:/[^\"]*)?)\"|(context(?:/[^\s)\]},;]*)?))"#)
+        regex::Regex::new(r#"(^|[\s(\[{])@(?:\"((?:context|__orb_path__)(?:/[^\"]*)?)\"|((?:context|__orb_path__)(?:/[^\s)\]},;]*)?))"#)
             .unwrap();
     let mut result = String::new();
     let mut last = 0;
@@ -31,9 +31,18 @@ pub fn resolve(text: &str, root: &Path, manifest: &Manifest) -> Result<String, S
         } else {
             raw.trim_end_matches(['.', ',', ';', ':', '!', '?'])
         };
-        let relative = crate::project_context::resolve_reference(value, |path| {
-            manifest.entries.contains_key(path)
-        })?;
+        let relative = if let Some(path) = value.strip_prefix("__orb_path__/") {
+            let path = path.trim_end_matches('/');
+            crate::project_context::valid_path(path)?;
+            if !manifest.entries.contains_key(path) {
+                return Err(format!("Context path does not exist: {path}"));
+            }
+            path.to_owned()
+        } else {
+            crate::project_context::resolve_reference(value, |path| {
+                manifest.entries.contains_key(path)
+            })?
+        };
         result.push_str(&text[last..whole.start()]);
         result.push_str(&captures[1]);
         result.push_str(
@@ -119,6 +128,39 @@ mod tests {
             "Read \"/project/context/AGENTS.md\""
         );
     }
+    #[test]
+    fn literal_attachment_does_not_fall_back_to_namespace_alias() {
+        let mut manifest = Manifest::default();
+        for path in ["notes.md", "context/notes.md", "context/context/notes.md"] {
+            manifest.entries.insert(
+                path.into(),
+                crate::project_context::Entry {
+                    hash: None,
+                    directory: false,
+                    revision: 1,
+                    size: 1,
+                },
+            );
+        }
+        let text = "Read @\"__orb_path__/context/notes.md\".";
+        assert!(has_mentions(text));
+        assert_eq!(
+            resolve(text, Path::new("/project"), &manifest).unwrap(),
+            "Read \"/project/context/notes.md\"."
+        );
+        assert_eq!(
+            resolve(
+                "[@\"__orb_path__/context/notes.md\"]",
+                Path::new("/project"),
+                &manifest
+            )
+            .unwrap(),
+            "[\"/project/context/notes.md\"]"
+        );
+        manifest.entries.remove("context/notes.md");
+        assert!(resolve(text, Path::new("/project"), &manifest).is_err());
+    }
+
     #[test]
     fn resolution_is_bound_to_context_tokens() {
         let m = Manifest::default();

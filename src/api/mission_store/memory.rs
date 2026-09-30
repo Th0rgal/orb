@@ -1364,16 +1364,21 @@ impl MissionStore for InMemoryMissionStore {
         Ok(())
     }
 
-    async fn list_pending_board_outbox(
+    async fn list_pending_board_outbox_filtered(
         &self,
         limit: usize,
+        client: Option<bool>,
     ) -> Result<Vec<BoardOutboxItem>, String> {
         let mut items: Vec<_> = self
             .board_outbox
             .read()
             .await
             .values()
-            .filter(|item| item.state != "acknowledged")
+            .filter(|item| {
+                item.state != "acknowledged"
+                    && client
+                        .is_none_or(|client| (item.delivery_kind == "client_message") == client)
+            })
             .cloned()
             .collect();
         items.sort_by(|a, b| a.created_at.cmp(&b.created_at));

@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::agents::TerminalReason;
 use crate::api::mission_store::{
     now_string, BoardOutboxItem, BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus,
-    MissionHistoryEntry, MissionProjectPatch, MissionStore, TaskAttempt,
+    Mission, MissionHistoryEntry, MissionProjectPatch, MissionStore, TaskAttempt,
 };
 
 use super::{ControlCommand, MissionStatus, UserMessageAck};
@@ -1061,7 +1061,36 @@ async fn replay_pending_board_outbox(
     cmd_tx: &mpsc::Sender<ControlCommand>,
     inflight: &BoardOutboxInflight,
 ) {
-    let pending = match mission_store.list_pending_board_outbox(1000).await {
+    // Retire stale client intents without consuming the server delivery
+    // budget. Leave pre-adoption and temporarily offline clients pending.
+    if let Ok(items) = mission_store
+        .list_pending_board_outbox_filtered(1000, Some(true))
+        .await
+    {
+        for item in items {
+            let obsolete = match mission_store.get_mission(item.boss_mission_id).await {
+                Ok(Some(mission)) => {
+                    super::worker_location::board_client_delivery_obsolete(mission_store, &mission)
+                        .await
+                        .unwrap_or(false)
+                }
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if obsolete {
+                if let Err(error) = mission_store
+                    .acknowledge_board_outbox(&item.idempotency_key)
+                    .await
+                {
+                    tracing::warn!(%error, "board: could not retire obsolete client delivery");
+                }
+            }
+        }
+    }
+    let pending = match mission_store
+        .list_pending_board_outbox_filtered(1000, Some(false))
+        .await
+    {
         Ok(items) => items,
         Err(error) => {
             tracing::warn!("board: failed to load pending outbox: {error}");
@@ -1335,6 +1364,62 @@ fn seconds_since(rfc3339: &str) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+fn external_worker_inflight() -> &'static std::sync::Mutex<HashSet<Uuid>> {
+    static INFLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<Uuid>>> =
+        std::sync::OnceLock::new();
+    INFLIGHT.get_or_init(Default::default)
+}
+
+fn external_admission_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
+async fn release_external_reservation(id: Uuid) {
+    let _admission = external_admission_lock().lock().await;
+    external_worker_inflight().lock().unwrap().remove(&id);
+}
+
+fn external_tasks_share_directory(boss: &Mission, task: &BoardTask, other: &BoardTask) -> bool {
+    let directory = |task: &BoardTask| {
+        task.working_directory
+            .clone()
+            .or_else(|| boss.working_directory.clone())
+    };
+    match (directory(task), directory(other)) {
+        (Some(a), Some(b)) => {
+            super::same_directory(std::path::Path::new(&a), std::path::Path::new(&b))
+        }
+        // An unresolved inherited directory is not evidence of isolation.
+        _ => true,
+    }
+}
+
+/// Tasks whose worker the actor snapshot cannot see: a create in flight, or
+/// a running task whose worker is not a local runner.
+fn external_worker_candidates<'a>(
+    tasks: &'a [BoardTask],
+    running_ids: &'a HashSet<Uuid>,
+    inflight: &'a HashSet<Uuid>,
+) -> impl Iterator<Item = &'a BoardTask> + 'a {
+    tasks.iter().filter(move |task| {
+        inflight.contains(&task.id)
+            || (task.status == BoardTaskStatus::Running
+                && task
+                    .worker_mission_id
+                    .is_some_and(|id| !running_ids.contains(&id)))
+    })
+}
+
+#[cfg(test)]
+fn external_worker_slots(
+    tasks: &[BoardTask],
+    running_ids: &HashSet<Uuid>,
+    inflight: &HashSet<Uuid>,
+) -> usize {
+    external_worker_candidates(tasks, running_ids, inflight).count()
+}
+
 /// Spawn workers for ready tasks while capacity allows, and sweep zombies.
 /// Called from the control actor's tick, throttled by the caller (~2s).
 pub async fn scheduler_pass(
@@ -1367,19 +1452,42 @@ pub async fn scheduler_pass(
         return;
     }
 
-    let total_running = snapshot.running_count + usize::from(snapshot.main_running);
+    // The actor snapshot only sees local runners. Reserve slots across every
+    // board for external workers and creates still awaiting adoption.
+    let mut board_tasks = Vec::new();
+    for boss_id in boards {
+        match mission_store.list_board_tasks(boss_id).await {
+            Ok(tasks) => board_tasks.push((boss_id, tasks)),
+            Err(error) => {
+                tracing::warn!(boss = %boss_id, %error, "board: cannot determine worker occupancy");
+                return;
+            }
+        }
+    }
+    let inflight = external_worker_inflight().lock().unwrap().clone();
+    // A worker that is not executing anywhere (a client worker whose computer
+    // is away, a run that ended) holds no slot: only a live mission does.
+    let mut external_running = 0usize;
+    for (_, tasks) in &board_tasks {
+        for task in external_worker_candidates(tasks, &snapshot.running_ids, &inflight) {
+            let live = match task.worker_mission_id {
+                Some(id) if !inflight.contains(&task.id) => matches!(
+                    mission_store.get_mission(id).await,
+                    Ok(Some(mission)) if mission.status == MissionStatus::Active
+                ),
+                _ => true,
+            };
+            if live {
+                external_running += 1;
+            }
+        }
+    }
+    let total_running =
+        snapshot.running_count + usize::from(snapshot.main_running) + external_running;
     let spawnable_cap = max_parallel.saturating_sub(RESERVED_BOSS_SLOTS);
     let mut available = spawnable_cap.saturating_sub(total_running);
 
-    for boss_id in boards {
-        let tasks = match mission_store.list_board_tasks(boss_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(boss = %boss_id, "board: failed to list tasks: {}", e);
-                continue;
-            }
-        };
-
+    for (boss_id, tasks) in board_tasks {
         // --- Dead-boss teardown: `list_active_board_missions` keys only on task
         // status, so a boss whose own mission has terminated (failed, completed,
         // interrupted, …) with tasks still in flight would otherwise keep
@@ -1559,6 +1667,24 @@ pub async fn scheduler_pass(
                         }
                         continue;
                     }
+                    if super::client_placement::is_tagged(&boss.project.tags)
+                        || !boss.requires_local_disk
+                    {
+                        if let Some(hub) = control_hub {
+                            if schedule_external_worker(
+                                hub,
+                                mission_store,
+                                &boss,
+                                &task,
+                                &preflight,
+                            )
+                            .await
+                            {
+                                available -= 1;
+                            }
+                        }
+                        continue;
+                    }
                     match spawn_task_worker(
                         control_hub,
                         mission_store,
@@ -1638,6 +1764,167 @@ fn append_note(notes: &Option<String>, line: &str) -> Option<String> {
     }
 }
 
+/// API creation may wait on this actor. Run it outside the scheduler turn,
+/// retaining the task key as the durable dispatch identity across retries.
+async fn schedule_external_worker(
+    hub: &super::ControlHub,
+    store: &Arc<dyn MissionStore>,
+    boss: &Mission,
+    task: &BoardTask,
+    preflight: &RetryPreflight,
+) -> bool {
+    let Some(state) = hub.admission_state.get().and_then(std::sync::Weak::upgrade) else {
+        return false;
+    };
+    let user = hub
+        .sessions
+        .read()
+        .await
+        .iter()
+        .find(|(_, session)| Arc::ptr_eq(&session.mission_store, store))
+        .map(|(id, _)| super::AuthUser {
+            id: id.clone(),
+            username: id.clone(),
+        });
+    let Some(user) = user else {
+        return false;
+    };
+    // Serialize the read/reserve boundary with completion removing its
+    // reservation. Otherwise a stale Pending snapshot can miss a worker
+    // that was adopted immediately before the reservation was removed.
+    let _admission = external_admission_lock().lock().await;
+    let Ok(tasks) = store.list_board_tasks(boss.id).await else {
+        return false;
+    };
+    {
+        let mut inflight = external_worker_inflight().lock().unwrap();
+        if inflight.contains(&task.id)
+            || tasks.iter().any(|other| {
+                other.id != task.id
+                    && (other.status == BoardTaskStatus::Running || inflight.contains(&other.id))
+                    && external_tasks_share_directory(boss, task, other)
+            })
+        {
+            return false;
+        }
+        inflight.insert(task.id);
+    }
+    let store = store.clone();
+    let task = task.clone();
+    let preflight = preflight.clone();
+    tokio::spawn(async move {
+        let request = serde_json::from_value::<super::CreateMissionRequest>(serde_json::json!({
+            "title":format!("[{}] {}",task.task_key,task.title),
+            "parent_mission_id":task.boss_mission_id,
+            "backend":task.backend,"model_override":task.model_override.as_deref().or_else(|| role_default_model(&task)),
+            "model_effort":task.model_effort,"working_directory":task.working_directory,
+            "idempotency_key":format!("board:{}:attempt:{}",task.id,task.attempts+1),
+            "tags":[format!("board-task:{}",task.id)],
+            "prompt":format!("{}{}",retry_prompt(&task,&preflight),worker_contract(&task)),
+        }));
+        let result = match request {
+            Ok(request) => super::create_mission_inner(
+                super::State(state.clone()),
+                super::Extension(user.clone()),
+                Some(super::Json(request)),
+                true,
+            )
+            .await
+            .map_err(|(_, error)| error),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok((_, super::Json(value))) => {
+                if let Some(id) = value
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    let mut updated = match store.get_board_task(task.id).await {
+                        Ok(Some(current))
+                            if current.status == task.status
+                                && current.worker_mission_id == task.worker_mission_id =>
+                        {
+                            current
+                        }
+                        Ok(Some(current)) if current.worker_mission_id == Some(id) => {
+                            // A replay may observe a worker already adopted by the task.
+                            release_external_reservation(task.id).await;
+                            return;
+                        }
+                        _ => {
+                            let control = super::control_for_user(&state, &user).await;
+                            if super::mission_is_client_placed(&control, id)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                // Client inbox/begin are gated on task adoption, so this
+                                // unassigned worker cannot have acquired a local run.
+                                super::interrupt_new_mission(
+                                    &control,
+                                    id,
+                                    "board_task_changed_during_launch",
+                                )
+                                .await;
+                            } else if let Err((_, error)) = super::cancel_mission(
+                                super::State(state.clone()),
+                                super::Extension(user.clone()),
+                                super::Path(id),
+                            )
+                            .await
+                            {
+                                tracing::error!(mission=%id, task=%task.id, %error, "could not cancel unassigned board worker");
+                            }
+                            release_external_reservation(task.id).await;
+                            return;
+                        }
+                    };
+                    updated.worker_mission_id = Some(id);
+                    updated.status = BoardTaskStatus::Running;
+                    updated.attempts += 1;
+                    if let Err(error) = store.save_board_task(&updated).await {
+                        tracing::error!(task=%task.id,%error,"could not record external worker; dispatch key retained for retry");
+                    } else {
+                        let _ = store
+                            .create_task_attempt(TaskAttempt {
+                                id: Uuid::new_v4(),
+                                task_id: task.id,
+                                attempt_number: updated.attempts,
+                                mission_id: id,
+                                backend: task.backend.clone(),
+                                model: task.model_override.clone(),
+                                role: task.role,
+                                run_id: None,
+                                commit_sha: None,
+                                changed_files: vec![],
+                                verification_evidence: serde_json::json!({}),
+                                cost_cents: None,
+                                terminal_class: None,
+                                started_at: now_string(),
+                                finished_at: None,
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                if let Ok(Some(mut updated)) = store.get_board_task(task.id).await {
+                    let note = format!("Worker remains queued: {error}");
+                    if updated.status == task.status
+                        && !updated.notes.as_deref().unwrap_or("").contains(&note)
+                    {
+                        updated.notes = append_note(&updated.notes, &note);
+                        let _ = store.save_board_task(&updated).await;
+                    }
+                }
+                tracing::warn!(task=%task.id,%error,"external worker remains queued on its selected machine");
+            }
+        }
+        release_external_reservation(task.id).await;
+    });
+    true
+}
+
 async fn spawn_task_worker(
     control_hub: Option<&super::ControlHub>,
     mission_store: &Arc<dyn MissionStore>,
@@ -1682,6 +1969,36 @@ async fn spawn_task_worker(
     } else {
         None
     };
+    let parent = mission_store.get_mission(task.boss_mission_id).await?;
+    let mut working_directory = task
+        .working_directory
+        .clone()
+        .or_else(|| parent.as_ref().and_then(|p| p.working_directory.clone()));
+    if let Some(hub) = control_hub {
+        let workspace =
+            crate::workspace::resolve_workspace(&hub.workspaces, &hub.config, Some(workspace_id))
+                .await;
+        let requested = working_directory.unwrap_or_else(|| {
+            crate::workspace::configured_project_dir(
+                &workspace,
+                &crate::workspace::mission_workspace_dir_for_workspace(
+                    &workspace,
+                    task.boss_mission_id,
+                ),
+            )
+            .to_string_lossy()
+            .into_owned()
+        });
+        working_directory = Some(
+            crate::api::mission_runner::resolve_mission_working_directory(
+                &workspace.path,
+                workspace.workspace_type,
+                &requested,
+            )?
+            .to_string_lossy()
+            .into_owned(),
+        );
+    }
     let assigned_id = Uuid::new_v4();
     let mut admission_guard = None;
     if let Some((guard, mut reservation, workspace)) = admission {
@@ -1712,9 +2029,9 @@ async fn spawn_task_worker(
             task.model_effort.as_deref(),
             false,
             Some(&task.backend),
-            None,
+            parent.as_ref().and_then(|p| p.config_profile.as_deref()),
             Some(task.boss_mission_id),
-            task.working_directory.as_deref(),
+            working_directory.as_deref(),
             true,
             Some(assigned_id),
         )
@@ -2254,6 +2571,109 @@ mod tests {
         .await
         .expect("outbox acknowledgement persisted");
         assert!(inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_worker_directories_require_explicit_isolation() {
+        let store = InMemoryMissionStore::new();
+        let mut boss = store
+            .create_mission(Some("remote boss"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        boss.working_directory = Some("/work/repo".into());
+        let a = mk("a", &[], BoardTaskStatus::Pending, None);
+        let mut b = mk("b", &[], BoardTaskStatus::Running, None);
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+        b.working_directory = Some("/work/repo/./src".into());
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+        b.working_directory = Some("/work/worktree-b".into());
+        assert!(!external_tasks_share_directory(&boss, &a, &b));
+        boss.working_directory = None;
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+    }
+
+    #[test]
+    fn external_worker_capacity_survives_scheduler_passes() {
+        let mut external = mk("external", &[], BoardTaskStatus::Running, None);
+        external.worker_mission_id = Some(Uuid::new_v4());
+        let mut local = mk("local", &[], BoardTaskStatus::Running, None);
+        local.worker_mission_id = Some(Uuid::new_v4());
+        let launching = mk("launching", &[], BoardTaskStatus::Pending, None);
+        let running = HashSet::from([local.worker_mission_id.unwrap()]);
+        let inflight = HashSet::from([launching.id, external.id]);
+        let tasks = vec![external, local, launching];
+        // A worker present both in-flight and adopted occupies one slot;
+        // a local worker already in the snapshot is not counted twice.
+        assert_eq!(external_worker_slots(&tasks, &running, &inflight), 2);
+        assert_eq!(external_worker_slots(&tasks, &running, &HashSet::new()), 1);
+        let capacity = 3usize.saturating_sub(RESERVED_BOSS_SLOTS);
+        assert_eq!(
+            capacity.saturating_sub(1 + external_worker_slots(&tasks, &running, &HashSet::new())),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn client_worker_waits_for_board_adoption_and_rejects_cancelled_task() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let mut worker = store
+            .create_mission(Some("worker"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let boss = Uuid::new_v4();
+        store
+            .upsert_board_tasks(
+                boss,
+                vec![NewBoardTask {
+                    task_key: "test".into(),
+                    title: "test".into(),
+                    prompt: "test".into(),
+                    backend: "codex".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        let mut task = store.list_board_tasks(boss).await.unwrap().remove(0);
+        worker.project.tags.push(format!("board-task:{}", task.id));
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !super::super::worker_location::board_client_delivery_obsolete(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.worker_mission_id = Some(worker.id);
+        task.status = BoardTaskStatus::Running;
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.status = BoardTaskStatus::Cancelled;
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            super::super::worker_location::board_client_delivery_obsolete(&store, &worker)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
+        task.status = BoardTaskStatus::Running;
+        task.worker_mission_id = Some(Uuid::new_v4());
+        store.save_board_task(&task).await.unwrap();
+        assert!(
+            !super::super::worker_location::board_allows_client_run(&store, &worker)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

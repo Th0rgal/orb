@@ -223,11 +223,11 @@ export async function materializeMentions(
   const mentions = scanMentions(text).map(m=>{
     if(m.raw.startsWith('@"'))return m;
     const value=m.value.replace(/[.,;:!?]+$/,"");
-    return (value==="context"||value.startsWith("context/"))?{...m,value,raw:m.raw.slice(0,m.raw.length-(m.value.length-value.length))}:m;
+    return {...m,value,raw:m.raw.slice(0,m.raw.length-(m.value.length-value.length))};
   });
   const files: LocalFile[] = [];
   const replacements: Array<{ raw: string; absolute: string }> = [];
-  const explicitContext = (value: string) => value === "context" || value.startsWith("context/");
+  const explicitContext = (value: string) => chips.some(c => c.kind === "context" && c.path?.replace(/\/$/, "") === value.replace(/\/$/, ""));
   // Project files and folders are the synced project context. Point the agent
   // at that live replica so what it writes there syncs to the sidebar; a copy
   // under .paloma/attach never came back (mission 49660417 wrote @Context).
@@ -238,6 +238,7 @@ export async function materializeMentions(
   for (const mention of mentions) if (projectPath(mention.value) && isSecretPath(mention.value.replace(/\/$/, ""))) throw new Error(`${mention.value} is not copied. Your draft is kept.`);
   const contextMentions = mentions.filter(m => explicitContext(m.value) || projectPath(m.value));
   const required = contextMentions.some(m => explicitContext(m.value));
+  if (chips.some(c => c.project && c.project !== slug)) throw new Error("The referenced files belong to another project. Select them again.");
   let contextRoot: string | undefined;
   const contextPaths=new Map<string,string>();
   if (contextMentions.length) {
@@ -247,6 +248,9 @@ export async function materializeMentions(
       if (invoke) {
         const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value)}}) as {root:string;state:{error?:string};resolved_paths:string[]};
         if(!Array.isArray(result.resolved_paths)||result.resolved_paths.length!==contextMentions.length)throw Error("Restart Orb to load the updated context resolver. Your draft is kept.");
+        for (const [index, mention] of contextMentions.entries()) {
+          if (explicitContext(mention.value) && result.resolved_paths[index] !== mention.value.replace(/\/$/, "")) throw Error("The referenced path no longer exists. Select it again; your draft is kept.");
+        }
         contextRoot=result.root;
         contextMentions.forEach((mention,index)=>contextPaths.set(mention.value.replace(/\/$/,""),result.resolved_paths[index]));
       }
@@ -330,6 +334,13 @@ export async function materializeMentions(
 /** Swap the placeholder root for the workspace Tauri created. */
 export function bindWorkspace(prompt: string, root: string): string {
   return prompt.replaceAll("__ROOT__", root.replace(/\/$/, ""));
+}
+
+/** Validate an explicit host folder before copying attachments or claiming a run. */
+export async function localDirectory(path: string): Promise<string> {
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Local folders require Orb desktop.");
+  return await invoke("local_agents_directory", {path}) as string;
 }
 
 export async function localWorkspace(slug: string): Promise<string> {

@@ -18,6 +18,7 @@ pub mod fork;
 pub(crate) mod machine_transfer;
 pub(crate) mod remote_grok;
 pub(crate) mod usage_limit_wait;
+pub(crate) mod worker_location;
 #[cfg(test)]
 use dispatch_admission::admit_dispatch;
 pub use dispatch_admission::DispatchAdmission;
@@ -1498,7 +1499,7 @@ mod campaign_guard_tests {
             .update_mission_status(writer.id, MissionStatus::Active)
             .await
             .expect("active");
-        let occupant = live_mission_on_workspace(&store, writer.workspace_id, None)
+        let occupant = live_mission_on_workspace(&store, writer.workspace_id, None, None)
             .await
             .expect("occupant");
         assert_eq!(occupant.id, writer.id);
@@ -1507,7 +1508,7 @@ mod campaign_guard_tests {
             .await
             .expect("complete");
         assert!(
-            live_mission_on_workspace(&store, writer.workspace_id, None)
+            live_mission_on_workspace(&store, writer.workspace_id, None, None)
                 .await
                 .is_none(),
             "a finished writer frees the worktree"
@@ -1536,7 +1537,7 @@ mod campaign_guard_tests {
                 .await
                 .unwrap();
         }
-        assert!(live_mission_on_workspace(&store, workspace, None)
+        assert!(live_mission_on_workspace(&store, workspace, None, None)
             .await
             .is_none());
         let native = store
@@ -1556,7 +1557,7 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         assert_eq!(
-            live_mission_on_workspace(&store, workspace, None)
+            live_mission_on_workspace(&store, workspace, None, None)
                 .await
                 .unwrap()
                 .id,
@@ -1594,11 +1595,11 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         let source_dir = format!("/root/workspaces/mission-{}", &ids[1].to_string()[..8]);
-        assert!(live_mission_on_workspace(&store, host, None)
+        assert!(live_mission_on_workspace(&store, host, None, None)
             .await
             .is_none());
         assert!(
-            live_mission_on_workspace(&store, host, Some(&source_dir))
+            live_mission_on_workspace(&store, host, Some(&source_dir), None)
                 .await
                 .is_none(),
             "forking a blocked mission must not collide with unrelated host chats"
@@ -1608,7 +1609,7 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         assert_eq!(
-            live_mission_on_workspace(&store, host, Some(&source_dir))
+            live_mission_on_workspace(&store, host, Some(&source_dir), None)
                 .await
                 .unwrap()
                 .id,
@@ -1616,12 +1617,65 @@ mod campaign_guard_tests {
             "a live source still owns its directory"
         );
         assert_eq!(
-            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")))
+            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")), None)
                 .await
                 .unwrap()
                 .id,
             ids[1],
             "a directory below the mission root is the same worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_directory_occupancy_excludes_only_its_parent() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let host = workspace::DEFAULT_WORKSPACE_ID;
+        let parent = store
+            .create_mission_with_parent(
+                Some("parent"),
+                Some(host),
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                Some("/repo"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            live_mission_on_workspace(&store, host, Some("/repo"), Some(parent.id))
+                .await
+                .is_none()
+        );
+        let unrelated = store
+            .create_mission_with_parent(
+                Some("unrelated"),
+                Some(host),
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                Some("/repo"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            live_mission_on_workspace(&store, host, Some("/repo"), Some(parent.id))
+                .await
+                .unwrap()
+                .id,
+            unrelated.id
+        );
+        assert!(
+            live_mission_on_workspace(&store, host, Some("/other-worktree"), Some(parent.id))
+                .await
+                .is_none()
         );
     }
 
@@ -5334,10 +5388,27 @@ pub async fn post_message(
             .await
             .map_err(internal_error)?
         {
-            return Err((
-                StatusCode::CONFLICT,
-                "this mission runs on the Orb client; the backend will not execute it".into(),
-            ));
+            if req
+                .attachments
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Attach files from the owning Orb computer".into(),
+                ));
+            }
+            worker_location::enqueue(&control.mission_store, mid, id, content)
+                .await
+                .map_err(internal_error)?;
+            return Ok(Json(ControlMessageResponse {
+                id,
+                queued: true,
+                message_accepted: true,
+                mission_id: Some(mid),
+                previous_execution: None,
+                warnings,
+            }));
         }
         if let Some(placement) =
             remote_grok::placement(&state.config.working_dir, &control.mission_store, mid)
@@ -5345,8 +5416,13 @@ pub async fn post_message(
                 .map_err(internal_error)?
         {
             if req.attachments.as_ref().is_some_and(|a| {
-                a.iter()
-                    .any(|item| item.kind != crate::api::mission_payload::AttachmentKind::Context)
+                a.iter().any(|item| {
+                    !matches!(
+                        item.kind,
+                        crate::api::mission_payload::AttachmentKind::Context
+                            | crate::api::mission_payload::AttachmentKind::Path
+                    )
+                })
             }) {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -5361,6 +5437,31 @@ pub async fn post_message(
             {
                 return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
             }
+            let content =
+                if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
+                    let mission = control
+                        .mission_store
+                        .get_mission(mid)
+                        .await
+                        .map_err(internal_error)?
+                        .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+                    let payload = crate::api::mission_payload::MissionPayload {
+                        attachments: attachments.clone(),
+                        project: mission.project.project,
+                        controller_md: None,
+                    };
+                    crate::api::mission_payload::stage_message(
+                        &state.config.working_dir,
+                        mid,
+                        id,
+                        &content,
+                        &payload,
+                    )
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("attachments: {e}")))?
+                    .0
+                } else {
+                    content
+                };
             // Public follow-ups can continue the native session on its node.
             // Internal actor routes retain their fence against local execution.
             remote_grok::continue_on_node(
@@ -10357,6 +10458,7 @@ async fn live_mission_on_workspace(
     mission_store: &Arc<dyn MissionStore>,
     workspace_id: Uuid,
     working_directory: Option<&str>,
+    excluded_parent: Option<Uuid>,
 ) -> Option<Mission> {
     const PAGE: usize = 200;
     let shared = workspace_id == workspace::DEFAULT_WORKSPACE_ID;
@@ -10364,20 +10466,27 @@ async fn live_mission_on_workspace(
         return None;
     }
     let directory = working_directory.map(std::path::Path::new);
-    mission_store
-        .list_missions(PAGE, 0)
-        .await
-        .ok()?
-        .into_iter()
-        .find(|mission| {
-            mission.workspace_id == workspace_id
+    let mut offset = 0;
+    loop {
+        let page = mission_store.list_missions(PAGE, offset).await.ok()?;
+        let count = page.len();
+        if let Some(mission) = page.into_iter().find(|mission| {
+            Some(mission.id) != excluded_parent
+                && mission.workspace_id == workspace_id
                 && !matches!(
                     mission.backend.as_str(),
                     "cloud_chatgpt" | "cloud_grok_bot" | "cloud_cursor"
                 )
                 && campaign_slot_held_by(mission.status)
                 && (!shared || directory.is_some_and(|dir| mission_uses_directory(mission, dir)))
-        })
+        }) {
+            return Some(mission);
+        }
+        if count < PAGE {
+            return None;
+        }
+        offset += count;
+    }
 }
 
 /// The directory as the runner reaches it. An absolute path is walked one
@@ -10725,6 +10834,11 @@ pub(super) async fn create_mission_inner(
         extra: Default::default(),
     });
 
+    let parent_control = control_for_user(&state, &user).await;
+    worker_location::inherit(&state, &parent_control, &mut req)
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+
     if let Some(prompt) = req.prompt.as_deref() {
         crate::api::mission_payload::validate_user_content(prompt)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -10732,9 +10846,13 @@ pub(super) async fn create_mission_inner(
 
     if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
         if req.remote_node_id.is_some()
-            && attachments
-                .iter()
-                .any(|item| item.kind != crate::api::mission_payload::AttachmentKind::Context)
+            && attachments.iter().any(|item| {
+                !matches!(
+                    item.kind,
+                    crate::api::mission_payload::AttachmentKind::Context
+                        | crate::api::mission_payload::AttachmentKind::Path
+                )
+            })
         {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -10780,6 +10898,76 @@ pub(super) async fn create_mission_inner(
     // a client bug (typo, field sent to the wrong endpoint) is observable
     // instead of silently changing behavior.
     let mut headers = axum::http::HeaderMap::new();
+    // Serialize keyed child dispatches through persistence and initial delivery.
+    // The receipt is stored on the mission, so response loss survives restarts.
+    let dispatch_tag = req
+        .parent_mission_id
+        .zip(req.idempotency_key.as_deref())
+        .filter(|(_, key)| !key.trim().is_empty())
+        .map(|(parent, key)| {
+            format!(
+                "worker-dispatch:{}",
+                Uuid::new_v5(&parent, key.trim().as_bytes())
+            )
+        });
+    let _dispatch_guard = match dispatch_tag.as_deref() {
+        Some(key) => Some(
+            worker_location::dispatch_lock(&format!("{}:{key}", user.id))
+                .lock_owned()
+                .await,
+        ),
+        None => None,
+    };
+    if let Some(tag) = dispatch_tag.as_ref() {
+        let existing = parent_control
+            .mission_store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    tag: Some(tag.clone()),
+                    ..Default::default()
+                },
+                1,
+                0,
+            )
+            .await
+            .map_err(internal_error)?;
+        if let Some(existing) = existing.into_iter().next() {
+            worker_location::require_initialized(&existing)?;
+            verify_coalesced_attachments(&state.config, &req, &existing)?;
+            // Recover a crash between mission persistence and initial delivery.
+            // Orb's durable receipt makes a repeated initial message harmless.
+            if existing.status == MissionStatus::Pending
+                && worker_location::client_owner(&existing).is_some()
+            {
+                if let Some(prompt) = req.prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let prompt =
+                        canonical_goal_message(prompt).unwrap_or_else(|| prompt.to_owned());
+                    worker_location::enqueue(
+                        &parent_control.mission_store,
+                        existing.id,
+                        worker_location::initial_delivery_id(existing.id),
+                        prompt,
+                    )
+                    .await
+                    .map_err(internal_error)?;
+                }
+            }
+            return Ok((
+                headers,
+                Json(mission_create_response(&state, &parent_control, existing).await?),
+            ));
+        }
+        req.tags.get_or_insert_with(Vec::new).push(tag.clone());
+        // Track leases share a store; two different parents may both name
+        // their first task "task-1" without coalescing onto one another.
+        req.idempotency_key = req.idempotency_key.take().map(|key| {
+            format!(
+                "worker:{}:{}",
+                req.parent_mission_id.expect("worker key has parent"),
+                key.trim()
+            )
+        });
+    }
     if !req.extra.is_empty() {
         let ignored: Vec<&str> = req.extra.keys().map(String::as_str).collect();
         let joined = ignored.join(",");
@@ -10837,7 +11025,11 @@ pub(super) async fn create_mission_inner(
     // mission instead of running the work twice. The response carries a header
     // so the caller can tell a coalesced answer from a fresh create; a client
     // that genuinely wants a parallel duplicate retitles it.
-    if let Some(title) = req.title.as_deref().filter(|t| !t.trim().is_empty()) {
+    if let Some(title) = req
+        .title
+        .as_deref()
+        .filter(|t| !t.trim().is_empty() && req.parent_mission_id.is_none())
+    {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = find_recent_identical_mission(
             &control_state.mission_store,
@@ -11025,6 +11217,8 @@ pub(super) async fn create_mission_inner(
             &control_state.mission_store,
             ws_id,
             req.working_directory.as_deref(),
+            req.parent_mission_id
+                .filter(|_| ws_id == workspace::DEFAULT_WORKSPACE_ID),
         )
         .await
         {
@@ -11262,6 +11456,31 @@ pub(super) async fn create_mission_inner(
             .as_deref()
             .map(str::trim)
             .is_none_or(str::is_empty);
+    if runs_locally {
+        if let Some(directory) = req.working_directory.as_deref() {
+            let workspace =
+                workspace::resolve_workspace(&state.workspaces, &state.config, workspace_id).await;
+            if workspace.workspace_type == crate::workspace::WorkspaceType::Host {
+                let tags = req.tags.get_or_insert_with(Vec::new);
+                if !tags
+                    .iter()
+                    .any(|tag| tag == super::mission_runner::HOST_STATE_TAG)
+                {
+                    tags.push(super::mission_runner::HOST_STATE_TAG.to_string());
+                }
+            }
+            req.working_directory = Some(
+                super::mission_runner::resolve_mission_working_directory(
+                    &workspace.path,
+                    workspace.workspace_type,
+                    directory,
+                )
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?
+                .to_string_lossy()
+                .into_owned(),
+            );
+        }
+    }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
         if matches!(backend_id, "codex" | "claudecode" | "gemini" | "grok") {
@@ -11314,11 +11533,12 @@ pub(super) async fn create_mission_inner(
     // Writer creation is checked once before actor creation and again while
     // tagging the returned mission. Never hold this mutex while waiting on the
     // control actor: actor commands also acquire it when resuming writers.
-    let local_mission = req
-        .remote_node_id
-        .as_deref()
-        .map(str::trim)
-        .is_none_or(str::is_empty);
+    let local_mission = !client_placement
+        && req
+            .remote_node_id
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
     let effective_estimated_disk_gib = req
         .estimated_disk_gib
         .or_else(|| local_mission.then(mission_disk_default_estimate_gib));
@@ -11352,6 +11572,9 @@ pub(super) async fn create_mission_inner(
         }
     }
     let mut normalized_request_tags = normalize_mission_tags(req.tags.as_deref());
+    if let Some(tags) = normalized_request_tags.as_mut() {
+        tags.retain(|tag| tag != worker_location::INITIALIZED_TAG);
+    }
     if normalized_request_tags
         .as_deref()
         .is_some_and(contains_internal_disk_reservation_tag)
@@ -11543,7 +11766,7 @@ pub(super) async fn create_mission_inner(
             },
             requires_local_disk: local_mission,
             estimated_disk_gib: effective_estimated_disk_gib,
-            admission_tags: Vec::new(),
+            admission_tags: normalized_request_tags.clone().unwrap_or_default(),
             respond: tx,
         })
         .await
@@ -11978,7 +12201,11 @@ pub(super) async fn create_mission_inner(
         // deferred goal is later re-injected verbatim, and the backend goal
         // drivers only recognise `/goal <objective>` with a space.
         let prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
-        let prompt_event_id = Uuid::new_v4();
+        let prompt_event_id = if worker_location::client_owner(&mission).is_some() {
+            worker_location::initial_delivery_id(mission.id)
+        } else {
+            Uuid::new_v4()
+        };
         // Client placements keep the prompt out of the scheduler ticket.
         // `get_scheduled_pending_missions` only returns rows that still have
         // a deferred goal, and the stores also exclude `placement:client`.
@@ -12046,7 +12273,10 @@ pub(super) async fn create_mission_inner(
             Err(message) => Err(message),
         };
         match dispatch {
-            Ok(updated) => {
+            Ok(mut updated) => {
+                worker_location::mark_initialized(&control.mission_store, &mut updated)
+                    .await
+                    .map_err(internal_error)?;
                 let value = mission_create_response(&state, &control, updated).await?;
                 return Ok((headers, Json(value)));
             }
@@ -12072,13 +12302,28 @@ pub(super) async fn create_mission_inner(
     }
 
     if client_placement {
-        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.take())
+        // Persist history and the completion receipt before exposing a delivery.
+        // A retry may replay delivery only after all initialization is durable.
+        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.clone())
             .await
             .map_err(internal_error)?;
+        worker_location::mark_initialized(&control.mission_store, &mut mission)
+            .await
+            .map_err(internal_error)?;
+        if worker_location::client_owner(&mission).is_some() {
+            if let Some((id, prompt)) = &initial_prompt {
+                worker_location::enqueue(&control.mission_store, mission.id, *id, prompt.clone())
+                    .await
+                    .map_err(internal_error)?;
+            }
+        }
         let value = mission_create_response(&state, &control, mission).await?;
         return Ok((headers, Json(value)));
     }
 
+    worker_location::mark_initialized(&control.mission_store, &mut mission)
+        .await
+        .map_err(internal_error)?;
     let value = mission_create_response(&state, &control, mission).await?;
     Ok((headers, Json(value)))
 }
@@ -13662,6 +13907,11 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Raw { .. } => None,
     };
     if let Some(prompt) = prompt {
+        *prompt = super::mission_payload::prepare_remote_turn(
+            &state.config.working_dir,
+            mission.id,
+            prompt,
+        )?;
         if super::context_execution::has_mentions(prompt) {
             let project = mission
                 .project
@@ -13676,6 +13926,11 @@ async fn submit_leased_remote_job(
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
             let root = t.destination_root.ok_or("Transferred workspace missing")?;
             format!("cd -- {} || exit 78; ", shell_single_quote(&root))
+        } else if let Some(directory) = mission.working_directory.as_deref() {
+            if !std::path::Path::new(directory).is_absolute() {
+                return Err("Remote working_directory must be absolute".into());
+            }
+            format!("cd -- {} || exit 78; ", shell_single_quote(directory))
         } else {
             fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
         };
@@ -22778,12 +23033,42 @@ async fn control_actor_loop(
                     _ => None,
                 };
                 if let Some(mid) = message_target {
+                    if mission_store.get_mission(mid).await.ok().flatten().is_some_and(|m| client_placement::is_tagged(&m.project.tags)) {
+                        let command = match cmd { ControlCommand::AdmitDispatch { command, .. } => *command, command => command };
+                        if let ControlCommand::UserMessage { id, content, respond, .. } = command {
+                            let ack = match worker_location::enqueue(&mission_store, mid, id, content).await {
+                                Ok(()) => UserMessageAck::Queued,
+                                Err(error) => UserMessageAck::Rejected(error),
+                            };
+                            let _ = respond.send(ack);
+                        }
+                        continue;
+                    }
+                }
+                if let Some(mid) = message_target {
                     if let Err(error) = remote_grok::reject_local_followup(&config.working_dir, &mission_store, mid).await {
                         let rejected = match cmd {
                             ControlCommand::AdmitDispatch { command, .. } => *command,
                             command => command,
                         };
-                        if let ControlCommand::UserMessage { respond, .. } = rejected {
+                        if let ControlCommand::UserMessage { id, content, source, respond, .. } = rejected {
+                            if source.as_deref() == Some("task-board") {
+                                if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                    let user = AuthUser { id:session_user_id.clone(), username:session_user_id.clone() };
+                                    tokio::spawn(async move {
+                                        let control=control_for_user(&state,&user).await;
+                                        let result=async {
+                                            let placement=remote_grok::placement(&state.config.working_dir,&control.mission_store,mid).await?
+                                                .ok_or("Remote placement disappeared")?;
+                                            remote_grok::continue_on_node(&state,&control,&user.id,mid,placement,Some(content),Some(id)).await
+                                                .map_err(|(_,message)|message)?;
+                                            Ok::<(),String>(())
+                                        }.await;
+                                        let _=respond.send(match result { Ok(())=>UserMessageAck::Delivered, Err(error)=>UserMessageAck::Rejected(error) });
+                                    });
+                                    continue;
+                                }
+                            }
                             let _ = respond.send(UserMessageAck::Rejected(error));
                         }
                         continue;

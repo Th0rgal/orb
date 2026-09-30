@@ -355,3 +355,28 @@ it('keeps an uncertain launch fenced while the previous agent cannot be confirme
  expect(mocks.launch).toHaveBeenCalledTimes(1);
  expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'dispatching',error:expect.stringContaining('uncertain')});
 });
+
+it('does not replay a delegated message after completion when its server acknowledgement was lost',async()=>{
+ mocks.active=false;
+ const id=crypto.randomUUID();
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage(request,'delegated',{id,delegated:true,waiting:false});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+ await enqueueLocalMessage(request,'delegated',{id,delegated:true,waiting:false});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+
+it('keeps a busy-directory child queued and retries after the directory is released',async()=>{
+ mocks.active=false;mocks.launch.mockRejectedValueOnce(new Error('Local launch deferred: directory busy'));
+ await enqueueLocalMessage(request,'first',{delegated:true});
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(100);
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'queued',error:expect.stringContaining('release this directory')});
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ await vi.advanceTimersByTimeAsync(31000);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
