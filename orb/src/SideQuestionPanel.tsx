@@ -25,7 +25,13 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  let scroll:HTMLDivElement|undefined;
- createEffect(()=>{answer();history();if(scroll&&scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<120)queueMicrotask(()=>{if(scroll)scroll.scrollTop=scroll.scrollHeight;});});
+ // The thread opens at its end, like the conversation, and follows new
+ // text only while the reader is near the end.
+ let shown='';
+ createEffect(()=>{answer();history();const now=open()?loadedKey():'';const opened=now!==shown;shown=now;
+  if(!scroll)return;const toEnd=()=>{if(scroll)scroll.scrollTop=scroll.scrollHeight;};
+  if(opened)requestAnimationFrame(toEnd);
+  else if(scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<120)queueMicrotask(toEnd);});
  const [storageError,setStorageError]=createSignal(false);
  const [pendingAttachments,setPendingAttachments]=createSignal<SideAttachment[]>([]);
  // Questions asked while the side agent answers wait here and are sent in

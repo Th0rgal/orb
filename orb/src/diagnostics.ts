@@ -47,7 +47,9 @@ export function timed<T>(name: string, run: () => T): T {
 
 export function requestDone(path: string, ms: number, ok: boolean, detail?: string): void {
   requests.count++; requests.ms += ms;
-  const route = path.split("?")[0].replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, ":id");
+  // Ids are kept for single-mission reads: which missions are re-read, and
+  // by what, is the question that route alone cannot answer.
+  const route = path.split("?")[0].replace(/[0-9a-f]{8}-[0-9a-f-]{27}(?!\/)/g, id => id.slice(0, 8)).replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, ":id");
   const row = routes.get(route) ?? { count: 0, ms: 0 };
   row.count++; row.ms += ms;
   routes.set(route, row);
