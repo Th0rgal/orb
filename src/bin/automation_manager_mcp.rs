@@ -193,6 +193,8 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Deserialize)]
 struct ScheduleWakeupParams {
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(rename = "delaySeconds", alias = "delay_seconds")]
     delay_seconds: u64,
     prompt: String,
@@ -201,6 +203,8 @@ struct ScheduleWakeupParams {
 
 #[derive(Debug, Deserialize)]
 struct ScheduleJobWakeupParams {
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(rename = "jobId", alias = "job_id")]
     job_id: String,
     prompt: String,
@@ -394,6 +398,7 @@ impl AutomationManagerMcp {
                     "type": "object",
                     "required": ["delaySeconds", "prompt", "reason"],
                     "properties": {
+                        "request_id": { "type": "string", "description": "Stable unique request ID; reuse for retries of this same request." },
                         "delaySeconds": {
                             "type": "integer",
                             "minimum": WAKEUP_MIN_SECONDS,
@@ -425,6 +430,7 @@ impl AutomationManagerMcp {
                     "type": "object",
                     "required": ["jobId", "prompt", "reason"],
                     "properties": {
+                        "request_id": { "type": "string", "description": "Stable unique request ID; reuse for retries of this same request." },
                         "jobId": {
                             "type": "string",
                             "description": "Durable job UUID returned by the durable job launcher."
@@ -627,6 +633,12 @@ impl AutomationManagerMcp {
         );
 
         let mut variables = HashMap::new();
+        variables.insert(
+            "__wakeup_request_id".to_string(),
+            params
+                .request_id
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        );
         variables.insert("__wakeup_reason".to_string(), params.reason.clone());
         variables.insert(
             "__wakeup_source".to_string(),
@@ -679,6 +691,12 @@ impl AutomationManagerMcp {
             self.api_url, self.mission_id
         );
         let mut variables = HashMap::new();
+        variables.insert(
+            "__wakeup_request_id".to_string(),
+            params
+                .request_id
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        );
         variables.insert("__wakeup_reason".to_string(), params.reason.clone());
         variables.insert(
             "__wakeup_source".to_string(),

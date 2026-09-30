@@ -2998,6 +2998,66 @@ pub trait MissionStore: Send + Sync {
         Err("Automation executions not supported by this store".to_string())
     }
 
+    /// Atomically save a replayable scheduled occurrence and advance its schedule.
+    async fn stage_scheduled_delivery(
+        &self,
+        automation: &Automation,
+        execution: AutomationExecution,
+    ) -> Result<bool, String> {
+        let _ = (automation, execution);
+        Err("Durable scheduled delivery is not supported by this store".into())
+    }
+
+    /// Includes queued and accepted occurrences for the read projection.
+    async fn list_scheduled_deliveries(&self) -> Result<Vec<AutomationExecution>, String> {
+        Ok(vec![])
+    }
+
+    /// Cancel undelivered occurrences atomically with disabling the schedule.
+    async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
+        self.update_automation_active(id, false).await
+    }
+    /// Recheck a queued scheduled command immediately before actor admission.
+    async fn can_admit_scheduled_delivery(&self, mission: Uuid, id: Uuid) -> Result<bool, String> {
+        Ok(self
+            .list_scheduled_deliveries()
+            .await?
+            .iter()
+            .any(|e| e.mission_id == mission && e.id == id))
+    }
+
+    /// Persist Stop against the current generation, including an idle generation zero.
+    async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
+        let _ = mission;
+        Ok(())
+    }
+    async fn wakeup_creation_allowed(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<bool, String> {
+        let _ = (mission, generation);
+        Ok(true)
+    }
+
+    async fn cancel_mission_continuations_through(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<(), String> {
+        let _ = (mission, generation);
+        Err("Generation-scoped cancellation requires a persistent store".into())
+    }
+
+    async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
+        for a in self.get_mission_automations(mission).await? {
+            if a.variables.contains_key("__wakeup_source") {
+                self.cancel_scheduled_delivery(a.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Get execution history for an automation.
     async fn get_automation_executions(
         &self,
@@ -3018,15 +3078,62 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
-    /// Complete all running automation executions for a mission, setting them
-    /// to either Success or Failed based on the agent outcome.
-    async fn complete_running_executions_for_mission(
+    /// Settle legacy mission executions and only the matching durable occurrence.
+    /// Pass no occurrence while closing a local process that will be retried.
+    async fn complete_turn_executions_for_mission(
         &self,
         mission_id: Uuid,
+        occurrence: Option<Uuid>,
         success: bool,
         error: Option<String>,
     ) -> Result<u32, String> {
-        let _ = (mission_id, success, error);
+        let _ = (mission_id, occurrence, success, error);
+        Ok(0)
+    }
+
+    /// Persist remote job ownership without replacing the delivery message identity.
+    async fn bind_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        message: Option<Uuid>,
+        previous_job: Uuid,
+        job: Uuid,
+    ) -> Result<u32, String> {
+        let _ = (mission, message, previous_job, job);
+        Ok(0)
+    }
+
+    /// A persisted remote binding and whether admission has already been confirmed.
+    async fn scheduled_remote_delivery(
+        &self,
+        mission: Uuid,
+        message: Uuid,
+    ) -> Result<Option<(Uuid, bool)>, String> {
+        let _ = (mission, message);
+        Ok(None)
+    }
+
+    /// Settle only occurrences owned by this terminal remote job receipt.
+    /// None confirms admission for a quota wait without settling execution.
+    async fn complete_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        job: Uuid,
+        success: Option<bool>,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let _ = (mission, job, success, error);
+        Ok(0)
+    }
+
+    /// Move a running scheduled occurrence to the message that continues it.
+    async fn handoff_scheduled_executions(
+        &self,
+        mission: Uuid,
+        from: Vec<Uuid>,
+        to: Uuid,
+    ) -> Result<u32, String> {
+        let _ = (mission, from, to);
         Ok(0)
     }
 
@@ -4019,6 +4126,16 @@ pub trait MissionStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<BoardOutboxItem>, String> {
         self.list_pending_board_outbox_filtered(limit, None).await
+    }
+
+    /// IDs only, without the board delivery page limit, for continuation projection.
+    async fn pending_client_delivery_ids(&self) -> Result<Vec<Uuid>, String> {
+        Ok(self
+            .list_pending_board_outbox_filtered(1000, Some(true))
+            .await?
+            .into_iter()
+            .map(|item| item.id)
+            .collect())
     }
 
     /// Filter the delivery lane before applying the limit, so an offline

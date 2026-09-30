@@ -27,6 +27,7 @@ mod file_browser;
 mod interactions;
 mod local_agents;
 mod local_stream;
+mod local_wakeups;
 mod machine_metrics;
 mod routed_opencode;
 mod session_preview;
@@ -186,6 +187,9 @@ fn main() {
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
             local_agents::local_agents_poll,
+            local_wakeups::local_wakeups_sync,
+            local_wakeups::local_wakeups_cancel,
+            local_wakeups::local_wakeups_discard,
             local_agents::local_agents_subscribe,
             local_agents::local_agents_unsubscribe,
             local_agents::local_agents_stop

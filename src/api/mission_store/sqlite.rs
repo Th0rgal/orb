@@ -653,6 +653,11 @@ CREATE TABLE IF NOT EXISTS automations (
 CREATE INDEX IF NOT EXISTS idx_automations_mission ON automations(mission_id);
 CREATE INDEX IF NOT EXISTS idx_automations_active ON automations(mission_id, active);
 
+CREATE TABLE IF NOT EXISTS mission_wakeup_fences (
+    mission_id TEXT PRIMARY KEY NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    stopped_generation INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS automation_executions (
     id TEXT PRIMARY KEY NOT NULL,
     automation_id TEXT NOT NULL,
@@ -7373,7 +7378,8 @@ impl MissionStore for SqliteMissionStore {
 
         let a = automation.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction()?;
             let stop_policy_str = match &a.stop_policy {
                 StopPolicy::Never => "never".to_string(),
                 StopPolicy::WhenMissionTerminal => "when_mission_terminal".to_string(),
@@ -7390,7 +7396,7 @@ impl MissionStore for SqliteMissionStore {
                 super::AutomationDriver::Scheduler => "scheduler",
                 super::AutomationDriver::HarnessLoop => "harness_loop",
             };
-            conn.execute(
+            tx.execute(
                 "INSERT INTO automations (id, mission_id, command_source_type, command_source_data,
                                          trigger_type, trigger_data, variables, active, stop_policy,
                                          fresh_session, driver, created_at, last_triggered_at, retry_max_retries,
@@ -7415,7 +7421,25 @@ impl MissionStore for SqliteMissionStore {
                     a.retry_config.backoff_multiplier,
                 ],
             )
-            .map(|_| ())
+            ?;
+            if let Some(key) = a.active.then(|| crate::api::control::wakeup_supersession_key(a.variables.get("__wakeup_source").map(String::as_str), &a.trigger)).flatten() {
+                let priors: Vec<(String, String, String, String)> = {
+                    let mut stmt = tx.prepare("SELECT id, variables, trigger_type, trigger_data FROM automations WHERE mission_id = ? AND id != ?")?;
+                    let rows = stmt.query_map(params![a.mission_id.to_string(), a.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+                    rows
+                };
+                for (id, vars, kind, data) in priors {
+                    let vars: std::collections::HashMap<String, String> = serde_json::from_str(&vars).unwrap_or_default();
+                    let mut trigger: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+                    trigger["type"] = serde_json::Value::String(kind);
+                    let Ok(trigger) = serde_json::from_value::<TriggerType>(trigger) else { continue };
+                    if crate::api::control::wakeup_supersession_key(vars.get("__wakeup_source").map(String::as_str), &trigger).as_ref() == Some(&key) {
+                        tx.execute("UPDATE automations SET active = 0 WHERE id = ?", [&id])?;
+                        tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled','skipped') AND COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true'", params![now_string(), id])?;
+                    }
+                }
+            }
+            tx.commit()
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
@@ -7767,9 +7791,9 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE automation_executions SET status = ?, webhook_payload = ?, variables_used = ?,
-                                                 completed_at = ?, error = ?, retry_count = ?
-                 WHERE id = ?",
+                "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND (status IN ('success', 'failed') OR (json_extract(variables_used, '$.__delivery_accepted') = 'true' AND ?1 = 'pending')) THEN status ELSE ?1 END, webhook_payload = ?, variables_used = json_patch(json_patch(json_patch(?3, CASE WHEN json_type(variables_used, '$.__continuation_message_id') = 'text' THEN json_object('__continuation_message_id', json_extract(variables_used, '$.__continuation_message_id')) ELSE '{}' END), CASE WHEN json_type(variables_used, '$.__remote_job_id') = 'text' THEN json_object('__remote_job_id', json_extract(variables_used, '$.__remote_job_id')) ELSE '{}' END), CASE WHEN json_extract(variables_used, '$.__delivery_accepted') = 'true' THEN json_object('__delivery_accepted', 'true') ELSE '{}' END),
+                                                 completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = CASE WHEN trigger_source = 'durable_schedule' AND (status IN ('success','failed') OR (json_extract(variables_used, '$.__delivery_accepted') = 'true' AND ?1 IN ('pending','running'))) THEN error ELSE ? END, retry_count = ?
+                 WHERE id = ? AND (trigger_source != 'durable_schedule' OR status NOT IN ('cancelled', 'skipped'))",
                 params![
                     status_str,
                     webhook_payload_json,
@@ -7785,6 +7809,119 @@ impl MissionStore for SqliteMissionStore {
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())
+    }
+
+    async fn stage_scheduled_delivery(
+        &self,
+        automation: &Automation,
+        execution: AutomationExecution,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        let automation = automation.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let current: Option<(bool, Option<String>)> = tx.query_row(
+                "SELECT active, last_triggered_at FROM automations WHERE id = ?",
+                [automation.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))
+            ).optional().map_err(|e| e.to_string())?;
+            if current != Some((true, automation.last_triggered_at.clone())) { return Ok(false); }
+            let pending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM automation_executions WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND status IN ('pending','running'))",
+                [automation.id.to_string()], |r| r.get(0)
+            ).map_err(|e| e.to_string())?;
+            if pending { return Ok(false); }
+            tx.execute("INSERT INTO automation_executions (id, automation_id, mission_id, triggered_at, trigger_source, status, variables_used, retry_count) VALUES (?, ?, ?, ?, 'durable_schedule', 'pending', ?, 0)",
+                params![execution.id.to_string(), automation.id.to_string(), automation.mission_id.to_string(), execution.triggered_at,
+                    serde_json::to_string(&execution.variables_used).map_err(|e| e.to_string())?]
+            ).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE automations SET last_triggered_at = ?, active = ? WHERE id = ?", params![
+                execution.triggered_at, !matches!(automation.stop_policy, StopPolicy::AfterFirstFire), automation.id.to_string()
+            ]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn list_scheduled_deliveries(&self) -> Result<Vec<AutomationExecution>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn.prepare("SELECT id, automation_id, mission_id, triggered_at, trigger_source, status, webhook_payload, variables_used, completed_at, error, retry_count FROM automation_executions WHERE trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped') AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true') ORDER BY triggered_at, id").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], Self::parse_execution_row).map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+            Ok(rows)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn can_admit_scheduled_delivery(&self, mission: Uuid, id: Uuid) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().query_row("SELECT EXISTS (SELECT 1 FROM automation_executions WHERE id = ?1 AND mission_id = ?2 AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped'))",
+                params![id.to_string(), mission.to_string()], |row| row.get(0)).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("INSERT INTO mission_wakeup_fences (mission_id, stopped_generation)
+                VALUES (?1, COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id = ?1), 0))
+                ON CONFLICT(mission_id) DO UPDATE SET stopped_generation = MAX(stopped_generation, excluded.stopped_generation)", [mission.to_string()])
+                .map(|_| ()).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn wakeup_creation_allowed(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().query_row("SELECT
+                COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id = ?1), 0) = ?2
+                AND NOT EXISTS (SELECT 1 FROM mission_wakeup_fences WHERE mission_id = ?1 AND stopped_generation >= ?2)",
+                params![mission.to_string(), generation as i64], |row| row.get(0)).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock(); let tx = conn.transaction()?;
+            tx.execute("UPDATE automations SET active = 0 WHERE mission_id = ? AND json_extract(variables, '$.__wakeup_source') IS NOT NULL", [mission.to_string()])?;
+            tx.execute("UPDATE board_outbox SET state = 'acknowledged', acknowledged_at = ? WHERE id IN (SELECT id FROM automation_executions WHERE mission_id = ? AND trigger_source = 'durable_schedule') AND state = 'pending'", params![now_string(),mission.to_string()])?;
+            tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true')", params![now_string(),mission.to_string()])?;
+            tx.commit()
+        }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
+    }
+
+    async fn cancel_mission_continuations_through(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock(); let tx = conn.transaction()?;
+            tx.execute("INSERT INTO mission_wakeup_fences (mission_id, stopped_generation) VALUES (?1, ?2) ON CONFLICT(mission_id) DO UPDATE SET stopped_generation = MAX(stopped_generation, excluded.stopped_generation)", params![mission.to_string(), generation as i64])?;
+            tx.execute("UPDATE automations SET active = 0 WHERE mission_id = ? AND json_extract(variables, '$.__wakeup_source') IS NOT NULL AND CAST(COALESCE(json_extract(variables, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?", params![mission.to_string(),generation as i64])?;
+            tx.execute("UPDATE board_outbox SET state = 'acknowledged', acknowledged_at = ? WHERE id IN (SELECT id FROM automation_executions WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND CAST(COALESCE(json_extract(variables_used, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?) AND state = 'pending'", params![now_string(),mission.to_string(),generation as i64])?;
+            tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND CAST(COALESCE(json_extract(variables_used, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ? AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true')", params![now_string(),mission.to_string(),generation as i64])?;
+            tx.commit()
+        }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
+    }
+
+    async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("UPDATE automations SET active = 0 WHERE id = ?", [id.to_string()]).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND (status = 'pending' OR (status IN ('success','failed') AND COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true'))", params![now_string(), id.to_string()]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
     }
 
     async fn get_automation_executions(
@@ -7859,31 +7996,86 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    async fn complete_running_executions_for_mission(
+    async fn complete_turn_executions_for_mission(
         &self,
         mission_id: Uuid,
+        occurrence: Option<Uuid>,
         success: bool,
         error: Option<String>,
     ) -> Result<u32, String> {
         let conn = self.conn.clone();
-        let mission_id_str = mission_id.to_string();
-        let new_status = if success { "success" } else { "failed" };
-        let completed_at = now_string();
-
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-            let updated = conn
-                .execute(
-                    "UPDATE automation_executions
-                     SET status = ?, completed_at = ?, error = ?
-                     WHERE mission_id = ? AND status IN ('running', 'pending')",
-                    params![new_status, completed_at, error, mission_id_str],
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(updated as u32)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
+            conn.execute("UPDATE automation_executions SET status = ?, completed_at = ?, error = ?
+                WHERE mission_id = ? AND ((trigger_source != 'durable_schedule' AND status IN ('pending','running'))
+                  OR (trigger_source = 'durable_schedule' AND status = 'running' AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?))",
+                params![if success { "success" } else { "failed" }, now_string(), error, mission_id.to_string(), occurrence.map(|id| id.to_string())])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn bind_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        message: Option<Uuid>,
+        previous_job: Uuid,
+        job: Uuid,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET variables_used = json_set(variables_used, '$.__remote_job_id', ?1)
+                WHERE mission_id = ?2 AND trigger_source = 'durable_schedule' AND status = 'running'
+                AND (COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?3 OR json_extract(variables_used, '$.__remote_job_id') = ?4)",
+                params![job.to_string(), mission.to_string(), message.map(|id| id.to_string()), previous_job.to_string()])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn scheduled_remote_delivery(
+        &self,
+        mission: Uuid,
+        message: Uuid,
+    ) -> Result<Option<(Uuid, bool)>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let row = conn.blocking_lock().query_row("SELECT json_extract(variables_used, '$.__remote_job_id'), COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') = 'true'
+                FROM automation_executions WHERE mission_id = ?1 AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?2
+                AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped') AND json_type(variables_used, '$.__remote_job_id') = 'text' LIMIT 1",
+                params![mission.to_string(), message.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))).optional().map_err(|e| e.to_string())?;
+            row.map(|(id, accepted)| Uuid::parse_str(&id).map(|id| (id, accepted)).map_err(|e| e.to_string())).transpose()
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn complete_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        job: Uuid,
+        success: Option<bool>,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET status = COALESCE(?1, 'running'), completed_at = CASE WHEN ?1 IS NULL THEN completed_at ELSE ?2 END, error = ?3, variables_used = json_set(variables_used, '$.__delivery_accepted', 'true')
+                WHERE mission_id = ?4 AND trigger_source = 'durable_schedule' AND status IN ('pending', 'running') AND json_extract(variables_used, '$.__remote_job_id') = ?5",
+                params![success.map(|success| if success {"success"} else {"failed"}), now_string(), error, mission.to_string(), job.to_string()])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn handoff_scheduled_executions(
+        &self,
+        mission: Uuid,
+        from: Vec<Uuid>,
+        to: Uuid,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET variables_used = json_set(variables_used, '$.__continuation_message_id', ?)
+                WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND status = 'running'
+                AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) IN (SELECT value FROM json_each(?))",
+                params![to.to_string(), mission.to_string(), serde_json::to_string(&from).map_err(|e| e.to_string())?])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
     }
 
     async fn update_mission_mode(&self, id: Uuid, mode: MissionMode) -> Result<(), String> {
@@ -11790,6 +11982,17 @@ impl MissionStore for SqliteMissionStore {
                 params![now_string(), key],
             ).map(|_| ()).map_err(|error| error.to_string())
         }).await.map_err(|error| format!("Task join error: {error}"))?
+    }
+
+    async fn pending_client_delivery_ids(&self) -> Result<Vec<Uuid>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut statement = conn.prepare("SELECT id FROM board_outbox WHERE state != 'acknowledged' AND delivery_kind = 'client_message'").map_err(|e| e.to_string())?;
+            let ids = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+            ids.into_iter().map(|id| Uuid::parse_str(&id).map_err(|e| e.to_string())).collect()
+        }).await.map_err(|e| format!("Task join error: {e}"))?
     }
 
     async fn list_pending_board_outbox_filtered(

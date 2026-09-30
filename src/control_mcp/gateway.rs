@@ -18,6 +18,9 @@ pub struct Principal {
     pub mission_id: Option<Uuid>,
     #[serde(default)]
     pub project: Option<String>,
+    /// Captured at action acceptance, persisted with queued wake-up intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_run_generation: Option<u64>,
     pub session_id: Uuid,
     pub exp: usize,
 }
@@ -126,6 +129,7 @@ pub async fn session(
         role: req.role,
         mission_id: req.mission_id,
         project: req.project,
+        action_run_generation: None,
         session_id: Uuid::new_v4(),
         exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
     };
@@ -174,11 +178,22 @@ fn empty_object() -> Value {
     json!({})
 }
 
-pub async fn capabilities(Extension(p): Extension<Principal>) -> Json<Value> {
-    Json(capabilities_value(&p))
+pub async fn capabilities(
+    State(state): State<Arc<AppState>>,
+    Extension(p): Extension<Principal>,
+) -> Json<Value> {
+    Json(capabilities_value(&p, state.config.automations_enabled))
 }
-fn capabilities_value(p: &Principal) -> Value {
-    json!({"contract_version":CONTRACT_VERSION,"build":env!("SOFTWARE_BUILD_ID"),"identity":{"user_id":p.sub,"mission_id":p.mission_id,"project":p.project,"role":p.role},"tools":wire_catalog(p.role),"limits":{"concurrent_calls":8,"session_expires_at":p.exp},"cloud_discovery":"list_cloud_accounts"})
+fn capabilities_value(p: &Principal, scheduling_enabled: bool) -> Value {
+    let tools: Vec<_> = wire_catalog(p.role)
+        .into_iter()
+        .filter(|t| scheduling_enabled || !is_wakeup(t["name"].as_str().unwrap_or("")))
+        .collect();
+    json!({"contract_version":CONTRACT_VERSION,"build":env!("SOFTWARE_BUILD_ID"),"identity":{"user_id":p.sub,"mission_id":p.mission_id,"project":p.project,"role":p.role},"tools":tools,"limits":{"concurrent_calls":8,"session_expires_at":p.exp},"cloud_discovery":"list_cloud_accounts"})
+}
+
+fn is_wakeup(name: &str) -> bool {
+    matches!(name, "schedule_wakeup" | "schedule_job_wakeup")
 }
 
 async fn authorize(
@@ -187,6 +202,11 @@ async fn authorize(
     tool: &Tool,
     args: &mut Value,
 ) -> Result<(), ToolError> {
+    if is_wakeup(&tool.definition.name) && !state.config.automations_enabled {
+        return Err(ToolError::denied(
+            "Durable scheduling is disabled on this server",
+        ));
+    }
     if !tool.visible_to(p.role) {
         return Err(ToolError::denied("Tool is not authorized for this role"));
     }
@@ -536,10 +556,11 @@ async fn call_inner(
         .map_err(|e| ToolError::invalid(&e))?;
     authorize(&state, p, &tool, &mut call.arguments).await?;
     if call.name == "get_capabilities" {
-        let mut value = capabilities_value(p);
+        let mut value = capabilities_value(p, state.config.automations_enabled);
         value["tools"] = json!(registry()
             .into_iter()
-            .filter(|t| t.visible_to(p.role))
+            .filter(|t| t.visible_to(p.role)
+                && (state.config.automations_enabled || !is_wakeup(&t.definition.name)))
             .map(|t| json!({"name":t.definition.name,"mutation":t.mutation}))
             .collect::<Vec<_>>());
         return Ok(value);
@@ -602,13 +623,27 @@ async fn call_inner(
     .0;
     let api_url = format!("http://127.0.0.1:{}", state.config.port);
     if tool.mutation {
+        let mut issuer = p.clone();
+        if is_wakeup(&call.name) {
+            let mission = p
+                .mission_id
+                .ok_or_else(|| ToolError::denied("Wake-ups require a mission"))?;
+            let store = state.control.get_or_spawn(&user).await.mission_store;
+            issuer.action_run_generation = Some(
+                store
+                    .get_latest_mission_run(mission)
+                    .await
+                    .map_err(|_| ToolError::denied("Mission run unavailable"))?
+                    .map_or(0, |run| run.generation),
+            );
+        }
         return super::actions::reserve(
             &*state
                 .projects
                 .connection
                 .lock()
                 .map_err(|_| ToolError::denied("Action store unavailable"))?,
-            p,
+            &issuer,
             call,
         )
         .map_err(|e| ToolError::invalid(&e));
@@ -742,6 +777,11 @@ async fn run_accepted(
     if !session_valid {
         return Err(ToolError::denied(
             "Session revoked or expired before dispatch",
+        ));
+    }
+    if is_wakeup(&call.name) && p.action_run_generation.is_none() {
+        return Err(ToolError::denied(
+            "Queued wake-up has no originating run; submit a fresh request",
         ));
     }
     let mut arguments = call.arguments.clone();

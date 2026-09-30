@@ -6,7 +6,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;delegated?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -51,11 +51,38 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;replace?:boolean}={}){
+export type WakeupFence={token:string;blocked:boolean};
+export async function captureWakeupFences(){const key=storageKey();return locked(key,async()=>await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{});}
+export async function replayWakeupStops(replay:(mission:string,token:string)=>Promise<unknown>,valid:()=>boolean){
+ const key=storageKey();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};
+  for(const [mission,fence] of Object.entries(fences)){
+   if(!valid()||key!==storageKey())return;
+   if(fence.blocked)await replay(mission,fence.token);
+  }
+ });
+}
+export async function confirmWakeupStops(confirmations:{mission:string;token:string}[]){
+ const key=storageKey();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};let changed=false;
+  for(const {mission,token} of confirmations)if(fences[mission]?.token===token&&fences[mission].blocked){fences[mission].blocked=false;changed=true;}
+  if(changed)await saveSideThread(`${key}:wake-stops`,fences);
+ });
+}
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{wakeupFence?:WakeupFence;id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
  await locked(key,async()=>{
   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
   if(seen.includes(id))return;
+  if(options.scheduled){
+   const current=(await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`))?.[request.id];
+   if(current?.blocked||options.wakeupFence?.blocked||current?.token!==options.wakeupFence?.token){
+    if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
+    return; // Stop invalidated this inbox snapshot, even if it arrived late.
+   }
+  }
   const rows=await read(key),existing=rows.find(row=>row.id===id);
   if(options.replace){
    // An edit keeps the message's place in the queue and releases its hold.
@@ -63,7 +90,7 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
    // Images stay attached while their marker is still in the edited text.
    const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
    existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
-  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated});
+  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled});
   await write(key,rows);
   if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
  });
@@ -149,7 +176,7 @@ export async function sendQueuedNow(mission:string){
   let running = false;
   try { running = !(await pollLocal(mission)).done; }
   catch (error) { if (!/no local run/i.test(String(error))) throw error; }
-  if (running) await stopLocal(mission);
+  if (running) await stopLocal(mission, { cancelWakeups: false });
   // The follower saves the partial answer before closing its run receipt.
   const follower=settling.get(runKey);
   if(follower)await follower;else await recoverLocalLaunch(mission);
@@ -172,7 +199,9 @@ export function startLocalQueueWorker(){
    // A turn cut by the connection is continued once the connection is back.
    const resume=!row.resultStatus&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;
    recordLocalFailure(row.mission,failed&&!resume?(row.result.error||`Local process exited with code ${row.result.exit_code}`):null);
-   await setClientMissionStatus(row.mission,row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user'),row.receipt);
+   const status=row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user');
+   if(row.scheduled&&!resume)await setClientMissionStatus(row.mission,status,row.receipt,row.id);
+   else await setClientMissionStatus(row.mission,status,row.receipt);
    if(!valid())return;
    if(resume){
     await saveSideThread(`${key}:recovered:${row.id}:${row.receipt.run_id??'unknown'}`,row);
@@ -328,7 +357,15 @@ export function startLocalQueueWorker(){
       }
       if(!valid())return;
      }
-     const receipt=await startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId});
+     // Stop may remove the claim while reopening the mission. Start the IPC
+     // invocation under the queue lock, but never hold that lock for its network work.
+     const launch=await locked(key,async()=>{
+      const stored=(await read(key)).find(r=>r.id===row.id);
+      if(!stored||stored.state!=='dispatching'||!valid()||stopping.has(runKey))return;
+      return {pending:startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
+     });
+     if(!launch)continue;
+     const receipt=await launch.pending;
      row.state='accepted';row.receipt=receipt;
      await update(key,row.id,stored=>{stored.state='accepted';stored.receipt=receipt;delete stored.error;});
      follow(row);
@@ -344,4 +381,15 @@ export function startLocalQueueWorker(){
  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.
  const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
  return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
+}
+
+/** Stop removes automatic continuations still waiting on this computer. */
+export async function cancelQueuedWakeups(mission:string) {
+ const key=storageKey(),token=crypto.randomUUID();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};
+  fences[mission]={token,blocked:true};await saveSideThread(`${key}:wake-stops`,fences);
+  const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='accepted'));
+ });
+ wake();return token;
 }

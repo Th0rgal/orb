@@ -1058,6 +1058,8 @@ pub fn run_claudecode_turn<'a>(
         // Build CLI arguments
         let mut args = vec![
             "--print".to_string(),
+            "--disallowedTools".to_string(),
+            "CronCreate,CronDelete,CronList".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
@@ -2822,9 +2824,14 @@ pub fn run_claudecode_turn<'a>(
                                                 pending_wakeups.remove(&tool_use_id)
                                             {
                                                 if !is_error {
-                                                    spawn_claude_builtin_wakeup_automation(
-                                                        mission_id, delay, prompt, reason,
-                                                    );
+                                                    if let Err(error) = register_claude_builtin_wakeup(
+                                                        mission_id, tool_use_id.clone(), delay, prompt, reason,
+                                                    ).await {
+                                                        had_error = true;
+                                                        let _ = events_tx.send(AgentEvent::Error {
+                                                            message: error, mission_id: Some(mission_id), resumable: true,
+                                                        });
+                                                    }
                                                 } else {
                                                     tracing::warn!(
                                                         mission_id = %mission_id,

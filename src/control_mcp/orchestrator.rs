@@ -2439,6 +2439,31 @@ impl OrchestratorMcp {
     }
 
     pub(super) async fn handle_call(&self, method: &str, params: Value) -> Result<Value, String> {
+        if matches!(method, "schedule_wakeup" | "schedule_job_wakeup") {
+            let mut body = super::scheduling::body(method, &params)?;
+            let generation = self
+                .principal
+                .action_run_generation
+                .ok_or("Wake-up action has no originating run")?;
+            body["variables"]["__wakeup_run_generation"] = json!(generation.to_string());
+            let response = self
+                .api_post(
+                    &format!("/api/control/missions/{}/automations", self.mission_id),
+                    body,
+                )
+                .await?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Wake-up registration failed ({})",
+                    response.status()
+                ));
+            }
+            return response
+                .json()
+                .await
+                .map_err(|e| format!("Invalid wake-up receipt: {e}"));
+        }
+
         match method {
             "get_workspace_layout" => Ok(self.get_workspace_layout()),
             "get_backend_auth_status" => {

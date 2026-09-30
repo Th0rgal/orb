@@ -371,13 +371,15 @@ export interface StartLocal {
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
+const pendingLaunches = new Map<string, Promise<unknown>>();
 
 export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   if (localRunActive(req.id)) throw new Error("This mission is still running locally. Stop it before sending another message.");
   const invoke = tauriInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   launching.add(req.id);
-  runVersions.set(req.id,(runVersions.get(req.id) ?? 0)+1);
+  const version=(runVersions.get(req.id) ?? 0)+1;
+  runVersions.set(req.id,version);
   recordLocalFailure(req.id, null);
   setRunning((prev) => ({ ...prev, [req.id]: true }));
   setLiveText((prev) => ({ ...prev, [req.id]: "" }));
@@ -385,10 +387,14 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   try {
     // Let this window's in-flight reconciliation release its native lock first.
     await nativeRecoveries.get(req.id);
-    const receipt = await invoke("local_run_launch", {
+    await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
+    if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
+    const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
       request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
-    }) as ClientRunReceipt;
+    });
+    pendingLaunches.set(req.id,launch);
+    const receipt = await launch as ClientRunReceipt;
     rememberClientRunReceipt(req.id, receipt);
     return receipt;
   } catch (e) {
@@ -398,6 +404,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     recordLocalFailure(req.id, e);
     throw e;
   } finally {
+    pendingLaunches.delete(req.id);
     launching.delete(req.id);
   }
 }
@@ -453,11 +460,30 @@ async function reconcileRun(id: string): Promise<void> {
   }
 }
 
-export async function stopLocal(id: string): Promise<void> {
+export async function stopLocal(id: string, options: { cancelWakeups?: boolean } = {}): Promise<void> {
   runVersions.set(id,(runVersions.get(id) ?? 0)+1);
   const invoke = tauriInvoke();
   if (invoke) {
+    const connection = { api_url: getApiUrl(), token: getJwt() };
+    const sameConnection = () => connection.api_url === getApiUrl() && connection.token === getJwt();
+    // Persist the fence before stopping: a previously fetched inbox can arrive late.
+    const queue = options.cancelWakeups !== false ? await import("./localMessageQueue") : undefined;
+    if (!sameConnection()) throw new Error("Connection changed. Stop the mission from its original connection.");
+    const cancelToken = await queue?.cancelQueuedWakeups(id);
+    const pending=pendingLaunches.get(id);
     await invoke("local_agents_stop", { id });
+    // A native command already sent to IPC may enter after the first Stop.
+    // Drain that invocation and stop again before acknowledging cancellation.
+    if(pending){await pending.catch(()=>{});await invoke("local_agents_stop",{id});}
+    // Queue advancement and machine transfer stop a process, not the mission.
+    if (queue) {
+      try { await invoke("local_wakeups_cancel", { mission: id, connection, cancelToken }); }
+      catch (error) { if (!/unknown command|command .*not found/i.test(String(error))) throw error; }
+      try {
+        const synced = await invoke("local_wakeups_sync", { connection }) as { cancelled?: {mission:string;token:string}[] };
+        if (sameConnection()) await queue.confirmWakeupStops(synced.cancelled ?? []);
+      } catch { /* Offline Stop stays fenced until its durable cancellation syncs. */ }
+    }
   }
   setRunning((prev) => ({ ...prev, [id]: false }));
 }
@@ -491,6 +517,7 @@ export async function localSessionGit(cwd: string): Promise<{ repository: string
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
  const invoke=tauriInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
+ await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
