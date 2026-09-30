@@ -239,6 +239,7 @@ export interface CreateMissionBody {
   github_pr?: string;
   writer?: boolean;
   workspace_id?: string;
+  working_directory?: string;
   agent?: string;
   fast_mode?: boolean;
   tags?: string[];
@@ -263,7 +264,7 @@ export interface CreateMissionBody {
   placement?: "client";
 }
 
-export type MissionAttachmentKind = "file" | "folder" | "controller" | "context";
+export type MissionAttachmentKind = "file" | "folder" | "controller" | "context" | "path";
 export interface MissionAttachment {
   kind: MissionAttachmentKind;
   path?: string;

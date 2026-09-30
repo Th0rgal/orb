@@ -501,7 +501,13 @@ pub async fn run_opencode_turn(
         }
     }
     inner_cmd.push_str(" --dir ");
-    inner_cmd.push_str(&shell_escape(&work_dir_arg));
+    inner_cmd.push_str(&shell_escape(
+        &workspace_path_for_env(
+            workspace,
+            &crate::workspace::configured_project_dir(workspace, work_dir),
+        )
+        .to_string_lossy(),
+    ));
     inner_cmd.push_str(" \"$(cat ");
     inner_cmd.push_str(&shell_escape(&prompt_file_arg));
     inner_cmd.push_str(")\"");
@@ -777,7 +783,12 @@ pub async fn run_opencode_turn(
     // We invoke /bin/sh -c '...' so the prompt file is read via $(cat ...)
     // and passed as a single argument regardless of workspace type.
     let mut child = match workspace_exec
-        .spawn_streaming(work_dir, &cli_runner_shell, &args, env)
+        .spawn_streaming(
+            &crate::workspace::configured_project_dir(workspace, work_dir),
+            &cli_runner_shell,
+            &args,
+            env,
+        )
         .await
     {
         Ok(child) => child,

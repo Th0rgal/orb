@@ -345,7 +345,7 @@ test("typed-capable server that still answers remote_command required is explain
  expect(state.posts[0]).not.toHaveProperty("remote_command");
 });
 
-test("@ file and controller mentions are sent as structured attachments",async({page})=>{
+test("@ file paths are attached and controller aliases stay plain text",async({page})=>{
  const state=await setup(page,{files:[{name:"notes",kind:"dir"}]});
  state.releasePost();state.releaseHistory();
  const input=composerInput(page);
@@ -357,15 +357,15 @@ test("@ file and controller mentions are sent as structured attachments",async({
  await expect(page.getByRole("listbox",{name:"Context"})).toBeVisible();
  await page.getByRole("option",{name:"notes/foo.md",exact:true}).click();
  await input.pressSequentially("and check @controller");
- await page.getByRole("option",{name:"Test controller",exact:true}).click();
- await expect(input).toHaveValue("Read @notes/foo.md and check @controller ");
+ await expect(page.getByRole("option",{name:"Test controller",exact:true})).toHaveCount(0);
+ await expect(input).toHaveValue("Read @notes/foo.md and check @controller");
  await page.screenshot({path:"artifacts/orb-attachments.png", fullPage:true});
  await input.press("Enter");
  await expect.poll(()=>state.posts.length).toBe(1);
  expect(state.posts[0].attachments).toEqual(expect.arrayContaining([
   {kind:"file",path:"notes/foo.md"},
-  {kind:"controller"},
  ]));
+ expect(state.posts[0].attachments).toHaveLength(1);
  expect(state.posts[0].prompt).toBe("Read @notes/foo.md and check @controller");
  expect(JSON.stringify(state.posts[0])).not.toContain("hello notes");
 });

@@ -211,7 +211,9 @@ pub async fn run_gemini_turn(
     // Create session
     let session = match backend
         .create_session(SessionConfig {
-            directory: mission_work_dir.to_string_lossy().to_string(),
+            directory: crate::workspace::configured_project_dir(workspace, mission_work_dir)
+                .to_string_lossy()
+                .to_string(),
             title: Some(format!("Mission {}", mission_id)),
             model: resolved_model.clone(),
             agent: agent.map(|s| s.to_string()),

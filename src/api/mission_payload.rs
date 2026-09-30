@@ -202,6 +202,8 @@ pub const FILE_BYTE_CAP: usize = 512 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
+    /// A literal project-relative path from Orb. Context is the legacy namespace.
+    Path,
     Context,
     File,
     Folder,
@@ -349,11 +351,18 @@ fn prepare(
 
     for attachment in &payload.attachments {
         match attachment.kind {
-            AttachmentKind::Context => {
+            AttachmentKind::Path | AttachmentKind::Context => {
                 let written = attachment.path.as_deref().unwrap_or("context");
-                crate::project_context::resolve_reference(written, |path| {
-                    project_files_root.join(path).exists()
-                })?;
+                if attachment.kind == AttachmentKind::Path {
+                    crate::project_context::valid_path(written.trim_end_matches('/'))?;
+                    if !project_files_root.join(written).exists() {
+                        return Err(format!("context path does not exist: {written}"));
+                    }
+                } else {
+                    crate::project_context::resolve_reference(written, |path| {
+                        project_files_root.join(path).exists()
+                    })?;
+                }
                 manifest.push_str(
                     "- Shared context paths in the message are writable and synchronized.\n",
                 );
@@ -789,6 +798,62 @@ pub fn materialize_turn(
     Ok(content)
 }
 
+/// Translate only explicitly attached literal paths into the legacy internal
+/// context protocol. Stored/user-visible messages keep their original paths.
+/// Keeping this at the execution boundary also supports older node replicas.
+pub fn qualify_path_mentions(
+    working_dir: &Path,
+    mission_id: Uuid,
+    content: &str,
+) -> Result<String, String> {
+    let mut payloads = Vec::new();
+    if let Some(payload) = read_sidecar(working_dir, mission_id)? {
+        payloads.push(payload);
+    }
+    for part in content.split(SNAPSHOT_MARKER).skip(1) {
+        let id = part
+            .split_once(" -->")
+            .ok_or("invalid attachment reference")?
+            .0;
+        let id = Uuid::parse_str(id).map_err(|_| "invalid attachment ID")?;
+        payloads.push(read_message_snapshot(working_dir, mission_id, id)?.payload);
+    }
+    let paths: std::collections::HashSet<&str> = payloads
+        .iter()
+        .flat_map(|payload| &payload.attachments)
+        .filter(|item| item.kind == AttachmentKind::Path)
+        .filter_map(|item| item.path.as_deref())
+        .map(|path| path.trim_end_matches('/'))
+        .collect();
+    let pattern =
+        regex::Regex::new(r#"(^|[\s(\[{])@(?:"((?:[^"\\]|\\.)*)"|([^\s)\]},;]+))"#).unwrap();
+    Ok(pattern
+        .replace_all(content, |caps: &regex::Captures| {
+            let quoted = caps.get(2).is_some();
+            let raw = caps.get(2).or_else(|| caps.get(3)).unwrap().as_str();
+            let decoded = if quoted {
+                serde_json::from_str::<String>(&format!("\"{raw}\"")).unwrap_or_else(|_| raw.into())
+            } else {
+                raw.into()
+            };
+            let value = if quoted {
+                decoded.as_str()
+            } else {
+                decoded.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            };
+            if !paths.contains(value.trim_end_matches('/')) {
+                return caps[0].to_owned();
+            }
+            format!(
+                "{}@{}{}",
+                &caps[1],
+                serde_json::to_string(&format!("__orb_path__/{value}")).unwrap(),
+                &decoded[value.len()..]
+            )
+        })
+        .into_owned())
+}
+
 fn rewrite_context(content: &str, root: &Path, payload: &MissionPayload) -> Result<String, String> {
     let mut resolved = BTreeMap::new();
     for item in payload
@@ -937,6 +1002,33 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), temp.path().join("redirect")).unwrap();
         assert!(safe_write(&temp.path().join("redirect/escaped.md"), b"no").is_err());
         assert!(!outside.path().join("escaped.md").exists());
+    }
+
+    #[test]
+    fn literal_paths_are_qualified_only_when_attached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let payload = MissionPayload {
+            project: Some("demo".into()),
+            controller_md: None,
+            attachments: vec![
+                MissionAttachment {
+                    kind: AttachmentKind::Path,
+                    path: Some("context/notes.md".into()),
+                },
+                MissionAttachment {
+                    kind: AttachmentKind::Path,
+                    path: Some("a b.md".into()),
+                },
+            ],
+        };
+        write_sidecar(tmp.path(), id, &payload).unwrap();
+        let text =
+            r#"Read @context/notes.md. and @"a b.md"; leave @unknown and @controller alone."#;
+        assert_eq!(
+            qualify_path_mentions(tmp.path(), id, text).unwrap(),
+            r#"Read @"__orb_path__/context/notes.md". and @"__orb_path__/a b.md"; leave @unknown and @controller alone."#
+        );
     }
 
     #[test]

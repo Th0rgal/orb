@@ -6,7 +6,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;delegated?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -51,9 +51,11 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;replace?:boolean}={}){
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
  await locked(key,async()=>{
+  const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
+  if(seen.includes(id))return;
   const rows=await read(key),existing=rows.find(row=>row.id===id);
   if(options.replace){
    // An edit keeps the message's place in the queue and releases its hold.
@@ -61,8 +63,9 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
    // Images stay attached while their marker is still in the edited text.
    const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
    existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
-  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});
+  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated});
   await write(key,rows);
+  if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
  });
  wake();return id;
 }
@@ -310,7 +313,7 @@ export function startLocalQueueWorker(){
      await reconcileLocalRun(row.mission);if(!valid())return;
      const mission=await getMission(row.mission);
      if(!mission.tags?.includes('placement:client')||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
-     if(['active','running','pending','starting','resuming'].includes(mission.status))continue;
+     if(['active','running','starting','resuming'].includes(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;
      // Only the durable claim is locked: enqueue/cancel never waits for the network.
      const claimed=await locked(key,async()=>{const current=await read(key);const first=current.find(r=>r.mission===row.mission);if(first?.id!==row.id||first.state!=='queued'||current.some(r=>r.mission===row.mission&&held(r))||!valid()||stopping.has(runKey))return false;first.state='dispatching';first.claimedAt=Date.now();await write(key,current);return true;});

@@ -103,10 +103,10 @@ it("serializes local sends through native recovery and retains the exact receipt
 it("resolves context at the cursor token without consuming punctuation or copying snapshots", async()=>{
  const host=window as unknown as {__TAURI_INTERNALS__?:{invoke:ReturnType<typeof vi.fn>}};
  const previous=host.__TAURI_INTERNALS__;
- const invoke=vi.fn().mockResolvedValue({root:"/local/shared context",state:{},resolved_paths:["notes.md","a b.md",""]});host.__TAURI_INTERNALS__={invoke};
+ const invoke=vi.fn().mockResolvedValue({root:"/local/shared context",state:{},resolved_paths:["context/notes.md","context/a b.md","context"]});host.__TAURI_INTERNALS__={invoke};
  try{
-  const result=await materializeMentions("demo",'Read @context/notes.md. Then @"context/a b.md" and @context.',[]);
-  expect(result.prompt).toBe('Read "/local/shared context/notes.md". Then "/local/shared context/a b.md" and "/local/shared context".');
+  const result=await materializeMentions("demo",'Read @context/notes.md. Then @"context/a b.md" and @context.', ['context/notes.md','context/a b.md','context'].map(path=>({id:path,kind:'context' as const,path,label:path,project:'demo'})));
+  expect(result.prompt).toBe('Read "/local/shared context/context/notes.md". Then "/local/shared context/context/a b.md" and "/local/shared context/context".');
   expect(result.files).toEqual([]);
   expect(invoke.mock.calls[0][1].request.paths).toEqual(['context/notes.md','context/a b.md','context']);
  }finally{host.__TAURI_INTERNALS__=previous;}
@@ -125,11 +125,11 @@ it("links mentioned project folders to the live context so the agent's writes sy
   expect(read).not.toHaveBeenCalled();
   expect(host.__TAURI_INTERNALS__!.invoke.mock.calls[0][1].request.paths).toEqual(["Context","notes/foo.md"]);
   await expect(materializeMentions("minecraft","read @.env",chips,read,async()=>[])).rejects.toThrow(/not copied/);
-  // Without the live replica the old copy still works; explicit @context still refuses.
+  // Without the live replica the old file copy still works; unknown mentions remain text.
   host.__TAURI_INTERNALS__={invoke:vi.fn().mockRejectedValue(new Error("Context is not available on this computer"))};
   const copied=await materializeMentions("minecraft","read @notes/foo.md",chips,read,async()=>[]);
   expect(copied.files).toEqual([{rel:".paloma/attach/notes/foo.md",content:"copied"}]);
-  await expect(materializeMentions("minecraft","read @context",chips,read,async()=>[])).rejects.toThrow(/not available/);
+  expect((await materializeMentions("minecraft","read @context",chips,read,async()=>[])).prompt).toBe("read @context");
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
 

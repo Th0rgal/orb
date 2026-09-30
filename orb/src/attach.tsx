@@ -1,5 +1,5 @@
 import { contextManifest } from "./projectContext";
-import { getProjectController, listProjectFiles, type MissionAttachment } from "./api";
+import { listProjectFiles, type MissionAttachment } from "./api";
 
 export type AttachKind = "file" | "folder" | "controller" | "context";
 
@@ -8,6 +8,8 @@ export interface AttachChip {
   kind: AttachKind;
   path?: string;
   label: string;
+  /** Project owning this path; never inferred from its basename. */
+  project?: string;
 }
 
 export interface AttachItem {
@@ -16,6 +18,8 @@ export interface AttachItem {
   section: "Files" | "Folders" | "Controller" | "Context";
   path?: string;
   label: string;
+  /** Project owning this path; never inferred from its basename. */
+  project?: string;
 }
 
 /** `@` plus a query at the start of the current token. */
@@ -28,13 +32,14 @@ export function atQuery(text: string, caret: number): { open: boolean; query: st
 }
 
 export function filterAttach(items: AttachItem[], query: string): AttachItem[] {
+  items = items.filter(item => item.kind !== "controller");
   if (!query) return items.slice(0,100);
   const q = query.replace(/^@/, "");
   return items.filter((it) => it.label.toLowerCase().includes(q) || (it.path ?? "").toLowerCase().includes(q)).slice(0,100);
 }
 
 export function chipToAttachment(chip: AttachChip): MissionAttachment {
-  return chip.kind === "controller" ? { kind: "controller" } : { kind: chip.kind, path: chip.path };
+  return chip.kind === "controller" ? { kind: "controller" } : { kind: chip.kind === "context" ? "path" : chip.kind, path: chip.path };
 }
 
 export function consumeAtToken(text: string, caret: number): string {
@@ -62,26 +67,6 @@ export function mentionText(item: { kind: AttachKind; path?: string }): string {
   // A folder keeps its trailing slash so it reads as a folder in the sentence.
   const written = item.kind === "folder" && !path.endsWith("/") ? `${path}/` : path;
   return /[\s"]/.test(written) ? `@"${written.replace(/"/g, '\\"')}"` : `@${written}`;
-}
-
-/**
- * Rewrite `@context/X` to `@context/context/X` when only a real `context/`
- * folder holds X, so drafts written before the picker qualified them resolve.
- */
-export function qualifyContextMentions(text: string, items: AttachItem[]): string {
-  const known = new Set(items.filter(i => i.kind === "context" && i.path).map(i => i.path!.replace(/\/$/, "")));
-  if (!known.size) return text;
-  let out = "", last = 0;
-  for (const m of scanMentions(text)) {
-    const quoted = m.raw.startsWith('@"');
-    const value = quoted ? m.value : trimBare(m.value);
-    const bare = value.replace(/\/$/, "");
-    if (!/^context(\/|$)/.test(bare) || known.has(bare) || !known.has(`context/${bare}`)) continue;
-    const tail = quoted ? "" : m.value.slice(value.length);
-    out += text.slice(last, m.index) + mentionText({ kind: "context", path: `context/${value}` }) + tail;
-    last = m.index + m.raw.length;
-  }
-  return out + text.slice(last);
 }
 
 /** Every mention written in a draft, in the order they appear. */
@@ -113,27 +98,18 @@ function trimBare(value: string): string {
  * Order follows the sentence, and a file mentioned twice is sent once.
  */
 export function mentionedChips(text: string, items: AttachItem[]): AttachChip[] {
-  const byPath = new Map<string, AttachItem>();
-  for (const item of items) {
-    if (item.path) byPath.set(item.path.replace(/\/$/, ""), item);
-  }
-  const controller = items.find((it) => it.kind === "controller");
   const chips: AttachChip[] = [];
   const seen = new Set<string>();
   for (const mention of scanMentions(text)) {
     const bare = (mention.raw.startsWith('@"') ? mention.value : trimBare(mention.value)).replace(/\/$/, "");
-    const item =
-      bare.toLowerCase() === CONTROLLER_MENTION && controller
-        ? controller
-        : byPath.get(bare) ?? byPath.get(trimBare(bare).replace(/\/$/, ""));
-    if (bare === "context" || bare.startsWith("context/")) {
-      if (!seen.has(bare)) { seen.add(bare); chips.push({id:`context:${bare}`,kind:"context",path:bare,label:bare}); }
-      continue;
-    }
+    const matches = items.filter(item => item.kind !== "controller" && item.path?.replace(/\/$/, "") === bare);
+    // Ambiguous roots must never silently resolve to the last item in a map.
+    const roots = new Set(matches.map(item => item.project ?? ""));
+    const item = roots.size === 1 ? matches[0] : undefined;
     // An unknown `@word` is ordinary prose, not a silent attachment.
     if (!item || seen.has(item.id)) continue;
     seen.add(item.id);
-    chips.push({ id: item.id, kind: item.kind, path: item.path, label: item.label });
+    chips.push({ id: item.id, kind: item.kind, path: item.path, label: item.label, ...(item.project ? {project:item.project} : {}) });
   }
   return chips;
 }
@@ -150,10 +126,7 @@ export function insertMention(
 ): { text: string; caret: number } {
   const q = atQuery(text, caret);
   const start = q.open && q.start >= 0 ? q.start : caret;
-  // Project files live in the context store, so a picked file under a real
-  // `context/` folder would otherwise read as the `@context/` namespace itself.
-  const picked = (item.kind === "file" || item.kind === "folder") && /^context(\/|$)/.test(item.path ?? "") ? { ...item, path: `context/${item.path}` } : item;
-  const token = `${mentionText(picked)} `;
+  const token = `${mentionText(item)} `;
   return {
     text: `${text.slice(0, start)}${token}${text.slice(caret)}`,
     caret: start + token.length,
@@ -161,27 +134,19 @@ export function insertMention(
 }
 
 export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
-  const items: AttachItem[] = [];
-  let context: AttachItem[] = [];
   try {
-    const manifest=await contextManifest(slug);
-    context=[{id:"context:root",kind:"context",path:"context",label:"context/",section:"Context"},...Object.entries(manifest.entries).map(([path,entry])=>({id:`context:${path}`,kind:"context" as const,path:path.startsWith("context/")||path==="context"?path:`context/${path}`,label:`${path.startsWith("context/")||path==="context"?path:`context/${path}`}${entry.directory?"/":""}`,section:"Context" as const}))];
-  } catch { /* Older servers do not advertise synchronized context. */ }
-  try {
-    const controller = await getProjectController(slug, 1);
-    if (controller.job) {
-      items.push({
-        id: `controller:${slug}`,
-        kind: "controller",
-        section: "Controller",
-        label: controller.job.name || `${slug} controller`,
-      });
-    }
+    const manifest = await contextManifest(slug);
+    return Object.entries(manifest.entries).map(([path, entry]) => ({
+      id: `context:${slug}:${path}`, kind: "context", project: slug, path,
+      label: `${path}${entry.directory ? "/" : ""}`,
+      section: entry.directory ? "Folders" : "Files",
+    }));
   } catch {
-    /* no cron */
+    // Older servers only expose the project file listing.
+    const items: AttachItem[] = [];
+    await walkFiles(slug, "", items, 0);
+    return items.map(item => ({...item, project: slug}));
   }
-  await walkFiles(slug, "", items, 0);
-  return [...context,...items.filter(item=>!context.some(entry=>entry.path===item.path)&&!(/\.(pdf|png|jpe?g|gif|webp|heic|zip)$/i.test(item.path??"")&&context.some(entry=>entry.path===`context/${item.path}`)))];
 }
 
 async function walkFiles(slug: string, path: string, items: AttachItem[], depth: number) {

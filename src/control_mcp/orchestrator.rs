@@ -24,6 +24,12 @@ use super::ToolDefinition;
 struct CreateWorkerParams {
     title: String,
     #[serde(default)]
+    remote_node_id: Option<String>,
+    #[serde(default)]
+    placement: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
     agent: Option<String>,
     /// Backend to use: "claudecode", "codex", "gemini", "opencode"
     #[serde(default)]
@@ -607,11 +613,14 @@ impl OrchestratorMcp {
             },
             ToolDefinition {
                 name: "create_worker_mission".to_string(),
-                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and runs in the same workspace as the boss by default, so it sees the boss's container, mounts, and installed tooling. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, gemini, grok, opencode). If omitted, defaults to the workspace default (usually claudecode).".to_string(),
+                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, gemini, grok, opencode). If omitted, inherits the parent harness.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
                     "properties": {
+                        "remote_node_id": { "type": "string", "description": "Explicitly run on another node. Omit to inherit the parent machine." },
+                        "placement": { "type": "string", "enum": ["core"], "description": "Explicitly run on Core instead of the parent machine." },
+                        "idempotency_key": { "type": "string", "description": "Stable dispatch key; reuse it when retrying the same task." },
                         "title": {
                             "type": "string",
                             "description": "Descriptive title for the worker mission"
@@ -640,7 +649,7 @@ impl OrchestratorMcp {
                         },
                         "working_directory": {
                             "type": "string",
-                            "description": "Working directory for the worker (e.g. a git worktree path). If omitted, uses the boss mission's repo directory."
+                            "description": "Existing working directory on the selected machine. Omit to inherit the parent directory. For concurrent Git writers, first create separate worktrees and pass their paths; ordinary folders work too."
                         },
                         "estimated_disk_gib": {
                             "type": "integer",
@@ -680,6 +689,9 @@ impl OrchestratorMcp {
                                     "agent": { "type": "string" },
                                     "config_profile": { "type": "string" },
                                     "working_directory": { "type": "string" },
+                                    "remote_node_id": { "type": "string" },
+                                    "placement": { "type": "string", "enum": ["core"] },
+                                    "idempotency_key": { "type": "string" },
                                     "estimated_disk_gib": { "type": "integer", "minimum": 1, "maximum": 512 },
                                     "workspace_id": { "type": "string" },
                                     "prompt": { "type": "string" }
@@ -1068,22 +1080,26 @@ impl OrchestratorMcp {
         // workspace mount: the worker container will not be able to see paths
         // outside the bind-mounted workspace root, so accepting the request
         // would silently produce a worker that fails on first cd/Read.
-        if let Some(wd) = params.working_directory.as_deref() {
-            validate_working_directory_visible_to_worker(wd)?;
+        if params.remote_node_id.is_none()
+            && params.placement.is_none()
+            && params.workspace_id.is_none()
+        {
+            if let Some(wd) = params.working_directory.as_deref() {
+                validate_working_directory_visible_to_worker(wd)?;
+            }
         }
 
-        // If the caller didn't specify a workspace, inherit the boss's so the
-        // worker runs in the same container the boss is in. Falling back to the
-        // host workspace (Uuid::nil) was surprising: the boss's installed
-        // tooling/symlinks aren't visible there, and a stale host environment
-        // could leave the worker unable to spawn its CLI.
+        // The server resolves the parent's current machine and directory.
         let workspace_id = match params.workspace_id {
             Some(ref id) if !id.trim().is_empty() => Some(id.trim().to_string()),
-            _ => self.boss_workspace_id().await,
+            _ => None,
         };
 
         let body = json!({
             "title": params.title,
+            "remote_node_id": params.remote_node_id,
+            "placement": params.placement,
+            "idempotency_key": params.idempotency_key,
             "agent": params.agent,
             "backend": params.backend,
             "model_override": params.model_override,
@@ -1302,6 +1318,9 @@ impl OrchestratorMcp {
             "awaiting_kind": mission.get("awaiting_kind"),
             "terminal_reason": mission.get("terminal_reason"),
             "working_directory": mission.get("working_directory"),
+            "parent_mission_id": mission.get("parent_mission_id"),
+            "remote_node_id": mission.get("remote_node_id"),
+            "tags": mission.get("tags"),
             "last_assistant_message": last_assistant_message(&mission)
                 .map(|s| truncate_chars(&s, 2000)),
             "last_error": last_error,

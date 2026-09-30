@@ -653,7 +653,10 @@ pub async fn run_grok_turn(
     let session_id = saved_session.as_deref();
     let is_continuation = session_id.is_some();
 
-    if workspace.id == crate::workspace::DEFAULT_WORKSPACE_ID && !work_dir.join(".git").exists() {
+    if workspace.id == crate::workspace::DEFAULT_WORKSPACE_ID
+        && !workspace.env_vars.contains_key("SANDBOXED_SH_MISSION_CWD")
+        && !work_dir.join(".git").exists()
+    {
         let file_count = std::fs::read_dir(work_dir)
             .map(|mut d| {
                 d.by_ref()
@@ -812,7 +815,9 @@ async fn run_grok_streaming_json_turn(
     args.push("streaming-json".to_string());
     args.push("--always-approve".to_string());
     args.push("--cwd".to_string());
-    args.push(workspace_exec.translate_path_for_container(work_dir));
+    args.push(workspace_exec.translate_path_for_container(
+        &crate::workspace::configured_project_dir(workspace, work_dir),
+    ));
     if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
         args.push("--model".to_string());
         args.push(model.to_string());
@@ -836,7 +841,12 @@ async fn run_grok_streaming_json_turn(
     };
 
     let child = match workspace_exec
-        .spawn_streaming(work_dir, &cli_path, &args, env)
+        .spawn_streaming(
+            &crate::workspace::configured_project_dir(workspace, work_dir),
+            &cli_path,
+            &args,
+            env,
+        )
         .await
     {
         Ok(child) => child,
@@ -1504,14 +1514,21 @@ async fn run_grok_acp_turn(
     // the session/new params.
     let args = vec!["agent".to_string(), "stdio".to_string()];
     let child = workspace_exec
-        .spawn_streaming(work_dir, &cli_path, &args, env)
+        .spawn_streaming(
+            &crate::workspace::configured_project_dir(workspace, work_dir),
+            &cli_path,
+            &args,
+            env,
+        )
         .await
         .map_err(|e| format!("failed to spawn grok agent stdio: {e}"))?;
 
     run_grok_acp_process(
         Some(mission_store),
         child,
-        &workspace_exec.translate_path_for_container(work_dir),
+        &workspace_exec.translate_path_for_container(&crate::workspace::configured_project_dir(
+            workspace, work_dir,
+        )),
         message,
         model,
         mission_id,
