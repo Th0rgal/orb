@@ -417,6 +417,15 @@ pub fn bound_session_from_projects_db(working_dir: &Path, slug: &str) -> Option<
 
 /// Shipped wake decision for a mission-status webhook: project binding,
 /// then origin, else isolated.
+/// A worker started by another mission reports to that mission. It wakes a
+/// Hermes conversation only when it has one of its own or its project has one
+/// bound; an isolated webhook session acting on its own is never wanted.
+pub fn reports_to_parent_mission(mission: &Mission, wake: Option<&WakeTarget>) -> bool {
+    mission.parent_mission_id.is_some()
+        && mission.origin_session_id.is_none()
+        && wake.is_none_or(|target| target.session.is_none())
+}
+
 pub fn wake_fields_for_mission(mission: &Mission, working_dir: &Path) -> WakeTarget {
     let bound = mission
         .project
@@ -430,6 +439,51 @@ pub fn wake_fields_for_mission(mission: &Mission, working_dir: &Path) -> WakeTar
 mod tests {
     use super::*;
     use crate::api::mission_store::{InMemoryMissionStore, MissionStore};
+
+    #[tokio::test]
+    async fn a_worker_without_a_conversation_reports_only_to_its_parent() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let parent = store
+            .create_mission(Some("boss"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let mut worker = store
+            .create_mission_with_parent(
+                Some("worker"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(parent.id),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(reports_to_parent_mission(
+            &worker,
+            Some(&WakeTarget::isolated())
+        ));
+        assert!(reports_to_parent_mission(&worker, None));
+        // A bound project conversation or an origin of its own still wakes Hermes.
+        let bound = WakeTarget {
+            session: Some("s1".into()),
+            source: "project",
+        };
+        assert!(!reports_to_parent_mission(&worker, Some(&bound)));
+        worker.origin_session_id = Some("hermes-session".into());
+        assert!(!reports_to_parent_mission(
+            &worker,
+            Some(&WakeTarget::isolated())
+        ));
+        // A mission without a parent is not a worker.
+        assert!(!reports_to_parent_mission(
+            &parent,
+            Some(&WakeTarget::isolated())
+        ));
+    }
     use crate::api::projects_store::ProjectsStore;
     use std::sync::Arc;
 
