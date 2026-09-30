@@ -215,11 +215,39 @@ pub async fn local_wakeups_cancel(
     mission: String,
     cancel_token: Option<String>,
 ) -> Result<(), String> {
-    use std::io::Write;
     let _guard = SYNC_LOCK.lock().await;
     uuid::Uuid::parse_str(&mission).map_err(|_| "Invalid mission ID")?;
-    let root = account(&connection)?.join(&mission);
+    cancel_at(account(&connection)?.join(&mission), mission, cancel_token)
+}
+
+fn cancel_at(root: PathBuf, mission: String, cancel_token: Option<String>) -> Result<(), String> {
+    use std::io::Write;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let token = cancel_token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // A replay of an acknowledged Stop must not revoke a later run/timer.
+    for file in std::fs::read_dir(&root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        if !file.file_name().to_string_lossy().starts_with("cancel-")
+            || !file
+                .path()
+                .extension()
+                .is_some_and(|e| e == "json" || e == "acked" || e == "cancelled")
+        {
+            continue;
+        }
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(file.path()).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        if saved["cancel_token"].as_str() == Some(&token) {
+            return Ok(());
+        }
+    }
+    // A missing receipt means Stop may have crashed before stopping its runner.
+    // Replay it before capturing the cancellation boundary. Existing receipts
+    // return above, so a later user-started run is never stopped by replay.
+    crate::local_agents::local_agents_stop(mission.clone())?;
     for file in std::fs::read_dir(&root)
         .map_err(|e| e.to_string())?
         .flatten()
@@ -237,7 +265,6 @@ pub async fn local_wakeups_cancel(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos() as u64;
-    let token = cancel_token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let value =
         json!({"mission":mission,"created_ns":now,"cancel":true,"cancel_token":token,"body":{}});
     let path = root.join(format!("cancel-{now}.tmp"));
@@ -275,6 +302,39 @@ fn discard_rejected(root: &std::path::Path, request_id: &str) -> Result<(), Stri
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    #[test]
+    fn cancellation_replay_preserves_later_requests_and_does_not_stop_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mission = uuid::Uuid::new_v4().to_string();
+        let root = dir.path().join(&mission);
+        cancel_at(root.clone(), mission.clone(), Some("first-stop".into())).unwrap();
+        let generation = *crate::local_agents::launch_fence(&mission).lock().unwrap();
+        let receipt = std::fs::read_dir(&root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let later = root.join("later.json");
+        std::fs::write(&later, "{}").unwrap();
+        cancel_at(root.clone(), mission.clone(), Some("first-stop".into())).unwrap();
+        assert!(later.exists());
+        assert_eq!(
+            *crate::local_agents::launch_fence(&mission).lock().unwrap(),
+            generation
+        );
+        std::fs::rename(&receipt, receipt.with_extension("acked")).unwrap();
+        cancel_at(root.clone(), mission.clone(), Some("first-stop".into())).unwrap();
+        assert!(later.exists());
+        assert_eq!(
+            *crate::local_agents::launch_fence(&mission).lock().unwrap(),
+            generation
+        );
+        cancel_at(root, mission.clone(), Some("next-stop".into())).unwrap();
+        assert!(!later.exists());
+        assert!(*crate::local_agents::launch_fence(&mission).lock().unwrap() > generation);
+    }
+
     #[tokio::test]
     async fn cancellation_confirmation_survives_a_lost_frontend_response() {
         let dir = tempfile::tempdir().unwrap();

@@ -53,6 +53,16 @@ async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
 export type WakeupFence={token:string;blocked:boolean};
 export async function captureWakeupFences(){const key=storageKey();return locked(key,async()=>await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{});}
+export async function replayWakeupStops(replay:(mission:string,token:string)=>Promise<unknown>,valid:()=>boolean){
+ const key=storageKey();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};
+  for(const [mission,fence] of Object.entries(fences)){
+   if(!valid()||key!==storageKey())return;
+   if(fence.blocked)await replay(mission,fence.token);
+  }
+ });
+}
 export async function confirmWakeupStops(confirmations:{mission:string;token:string}[]){
  const key=storageKey();
  await locked(key,async()=>{

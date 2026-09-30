@@ -74,11 +74,9 @@ pub async fn summaries(
     store: &Arc<dyn MissionStore>,
 ) -> Result<HashMap<Uuid, serde_json::Value>, String> {
     let client_pending: std::collections::HashSet<_> = store
-        .list_pending_board_outbox(10000)
+        .pending_client_delivery_ids()
         .await?
         .into_iter()
-        .filter(|r| r.delivery_kind == "client_message")
-        .map(|r| r.id)
         .collect();
     let mut groups: HashMap<Uuid, Vec<serde_json::Value>> = HashMap::new();
     for a in store.list_active_automations().await? {
@@ -1068,6 +1066,54 @@ mod tests {
         assert_eq!(saved.error, failed.error);
         assert_eq!(saved.completed_at, failed.completed_at);
         assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn continuation_client_projection_survives_large_outbox_backlogs() {
+        let (_dir, store, a) = fixture().await;
+        for kind in ["controller_notification", "client_message"] {
+            for index in 0..1001 {
+                store
+                    .enqueue_board_outbox(mission_store::BoardOutboxItem {
+                        id: Uuid::new_v4(),
+                        boss_mission_id: a.mission_id,
+                        task_id: None,
+                        delivery_kind: kind.into(),
+                        idempotency_key: format!("{kind}:{index}"),
+                        payload: serde_json::json!({}),
+                        state: "pending".into(),
+                        attempts: 0,
+                        created_at: "2026-01-01T00:00:00Z".into(),
+                        acknowledged_at: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        stage(&store, &a, "continue".into()).await.unwrap();
+        let mut execution = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        execution.status = ExecutionStatus::Running;
+        execution
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(execution.clone())
+            .await
+            .unwrap();
+        worker_location::enqueue_with_source(
+            &store,
+            a.mission_id,
+            execution.id,
+            "continue".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        let projection = summaries(&store).await.unwrap();
+        assert_eq!(
+            projection[&a.mission_id]["items"][0]["state"],
+            "waiting_for_client"
+        );
     }
 
     #[tokio::test]

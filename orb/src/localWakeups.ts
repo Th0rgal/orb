@@ -16,7 +16,13 @@ export function startLocalWakeups() {
     if (stopped || busy || !getJwt() || version !== connectionVersion()) return;
     busy = true;
     try {
-      const result = await invoke("local_wakeups_sync", { connection: { api_url: getApiUrl(), token: getJwt() } }) as { pending: (Continuation & { mission: string })[]; changed: boolean; cancelled?: {mission:string;token:string}[] };
+      const connection={api_url:getApiUrl(),token:getJwt()};
+      const queue=await import("./localMessageQueue");
+      // Serialize replay with new Stop fences so an old snapshot cannot cancel
+      // work started after a newer Stop completed.
+      await queue.replayWakeupStops((mission,cancelToken)=>invoke("local_wakeups_cancel",{mission,connection,cancelToken}),()=>!stopped&&version===connectionVersion());
+      if(stopped||version!==connectionVersion())return;
+      const result = await invoke("local_wakeups_sync", { connection }) as { pending: (Continuation & { mission: string })[]; changed: boolean; cancelled?: {mission:string;token:string}[] };
       if (stopped || version !== connectionVersion()) return;
       await import("./localMessageQueue").then(m => { if (!stopped && version === connectionVersion()) return m.confirmWakeupStops(result.cancelled ?? []); });
       if (stopped || version !== connectionVersion()) return;

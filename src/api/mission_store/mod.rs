@@ -4119,6 +4119,16 @@ pub trait MissionStore: Send + Sync {
         self.list_pending_board_outbox_filtered(limit, None).await
     }
 
+    /// IDs only, without the board delivery page limit, for continuation projection.
+    async fn pending_client_delivery_ids(&self) -> Result<Vec<Uuid>, String> {
+        Ok(self
+            .list_pending_board_outbox_filtered(1000, Some(true))
+            .await?
+            .into_iter()
+            .map(|item| item.id)
+            .collect())
+    }
+
     /// Filter the delivery lane before applying the limit, so an offline
     /// client's backlog cannot starve server-side board notifications.
     async fn list_pending_board_outbox_filtered(

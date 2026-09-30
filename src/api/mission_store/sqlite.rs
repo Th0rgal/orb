@@ -11968,6 +11968,17 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|error| format!("Task join error: {error}"))?
     }
 
+    async fn pending_client_delivery_ids(&self) -> Result<Vec<Uuid>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut statement = conn.prepare("SELECT id FROM board_outbox WHERE state != 'acknowledged' AND delivery_kind = 'client_message'").map_err(|e| e.to_string())?;
+            let ids = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+            ids.into_iter().map(|id| Uuid::parse_str(&id).map_err(|e| e.to_string())).collect()
+        }).await.map_err(|e| format!("Task join error: {e}"))?
+    }
+
     async fn list_pending_board_outbox_filtered(
         &self,
         limit: usize,
