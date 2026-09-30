@@ -536,9 +536,14 @@ pub(crate) fn codex_final_message_looks_like_progress_update(assistant_message: 
 }
 
 fn current_user_request_for_tool_activity(prompt: &str) -> &str {
-    let Some((_, after_user)) = prompt.rsplit_once("User:\n") else {
-        return prompt;
-    };
+    // Match the current history framing before the legacy User: delimiter.
+    // Earlier tool requests are context, not requirements of a scheduled reply.
+    let current = "## Current user request (your task for this turn)\n\n";
+    let after_user = prompt
+        .rsplit_once(current)
+        .or_else(|| prompt.rsplit_once("User:\n"))
+        .map(|(_, request)| request)
+        .unwrap_or(prompt);
     after_user
         .split_once("\n\nInstructions:")
         .map(|(current, _)| current)
@@ -2075,5 +2080,24 @@ mod tests {
         ] {
             assert!(!codex_transport_reason_is_retryable(Some(reason)));
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduled_reply_tests {
+    use super::codex_turn_requires_tool_activity;
+
+    #[test]
+    fn continuation_reply_does_not_inherit_tools_from_previous_turn() {
+        let history = "User:\nRun a scheduling integration test and modify a file.\n\nAssistant:\nWAKE_ARMED\n\n";
+        let request = "Reply exactly WAKE_FIRED. Do not call tools or schedule another wake-up.";
+        let prompt = format!(
+            "{}\n\nInstructions:\n- Use tools to gather information or make changes.",
+            crate::util::frame_turn_prompt(history, request)
+        );
+        assert!(!codex_turn_requires_tool_activity(&prompt, "WAKE_FIRED"));
+        let actionable =
+            crate::util::frame_turn_prompt(history, "Run cargo test and report failures.");
+        assert!(codex_turn_requires_tool_activity(&actionable, "All done."));
     }
 }

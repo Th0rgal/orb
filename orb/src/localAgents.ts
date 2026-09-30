@@ -453,14 +453,17 @@ async function reconcileRun(id: string): Promise<void> {
   }
 }
 
-export async function stopLocal(id: string): Promise<void> {
+export async function stopLocal(id: string, options: { cancelWakeups?: boolean } = {}): Promise<void> {
   runVersions.set(id,(runVersions.get(id) ?? 0)+1);
   const invoke = tauriInvoke();
   if (invoke) {
     await invoke("local_agents_stop", { id });
-    await import("./localMessageQueue").then(m => m.cancelQueuedWakeups(id));
-    try { await invoke("local_wakeups_cancel", { mission: id, connection: { api_url: getApiUrl(), token: getJwt() } }); }
-    catch (error) { if (!/unknown command|command .*not found/i.test(String(error))) throw error; }
+    // Queue advancement and machine transfer stop a process, not the mission.
+    if (options.cancelWakeups !== false) {
+      await import("./localMessageQueue").then(m => m.cancelQueuedWakeups(id));
+      try { await invoke("local_wakeups_cancel", { mission: id, connection: { api_url: getApiUrl(), token: getJwt() } }); }
+      catch (error) { if (!/unknown command|command .*not found/i.test(String(error))) throw error; }
+    }
   }
   setRunning((prev) => ({ ...prev, [id]: false }));
 }

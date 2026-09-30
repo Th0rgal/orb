@@ -322,7 +322,7 @@ it('a turn that only waits for a background task yields to a waiting message aft
  expect(mocks.stopNative).not.toHaveBeenCalled();
  mocks.poll.mockImplementation(async()=>({done:!mocks.active,waiting_since:mocks.active?Date.now()-11*60_000:null}));
  await vi.advanceTimersByTimeAsync(31000);
- expect(mocks.stopNative).toHaveBeenCalledWith('mission');
+ expect(mocks.stopNative).toHaveBeenCalledWith('mission',{cancelWakeups:false});
  expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
 it('a followed turn that only waits for a background task yields to the message behind it',async()=>{
@@ -332,7 +332,7 @@ it('a followed turn that only waits for a background task yields to the message 
  mocks.active=true;mocks.stopNative.mockImplementation(async()=>{mocks.active=false;finish({text:'Partial',done:true,exit_code:0,resumed:true});});
  mocks.poll.mockImplementation(async()=>({done:!mocks.active,waiting_since:mocks.active?Date.now()-11*60_000:null}));
  await enqueueLocalMessage({...request,prompt:'second'},'second');await vi.advanceTimersByTimeAsync(31000);
- expect(mocks.stopNative).toHaveBeenCalledWith('mission');
+ expect(mocks.stopNative).toHaveBeenCalledWith('mission',{cancelWakeups:false});
  expect(mocks.launch.mock.calls.map(call=>call[0].prompt)).toEqual(['first','second']);
 });
 it('sends again a message that failed only because nothing could be reached',async()=>{
@@ -379,4 +379,17 @@ it('keeps a busy-directory child queued and retries after the directory is relea
  await vi.advanceTimersByTimeAsync(31000);
  expect(mocks.launch).toHaveBeenCalledTimes(2);
  expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+
+it('Send now preserves a scheduled continuation while stopping the preceding process',async()=>{
+ await enqueueLocalMessage({...request,prompt:'scheduled continuation'},'scheduled continuation',{scheduled:true,delegated:true});
+ mocks.stopNative.mockImplementation(async(mission,options)=>{
+  mocks.active=false;
+  if(options?.cancelWakeups!==false)await import('../src/localMessageQueue').then(m=>m.cancelQueuedWakeups(mission));
+ });
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(100);
+ await sendQueuedNow('mission');await vi.advanceTimersByTimeAsync(1500);
+ expect(mocks.stopNative).toHaveBeenCalledWith('mission',{cancelWakeups:false});
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.launch.mock.calls[0][0].prompt).toBe('scheduled continuation');
 });

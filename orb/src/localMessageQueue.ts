@@ -149,7 +149,7 @@ export async function sendQueuedNow(mission:string){
   let running = false;
   try { running = !(await pollLocal(mission)).done; }
   catch (error) { if (!/no local run/i.test(String(error))) throw error; }
-  if (running) await stopLocal(mission);
+  if (running) await stopLocal(mission, { cancelWakeups: false });
   // The follower saves the partial answer before closing its run receipt.
   const follower=settling.get(runKey);
   if(follower)await follower;else await recoverLocalLaunch(mission);
