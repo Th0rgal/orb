@@ -19466,6 +19466,27 @@ async fn paloma_webhook_forwarder_loop(
                 in_flight.lock().await.remove(&(mission_id, status));
                 return;
             }
+            let wake = mission
+                .as_ref()
+                .map(|m| super::mission_horizon::wake_fields_for_mission(m, &working_dir));
+            // A worker of another mission reports to that mission. Without a
+            // conversation of its own or a bound project conversation, waking
+            // Hermes would only open a throwaway session that acts on its own
+            // (289 such sessions in two days started review missions nobody
+            // asked for). The transition is recorded as handled.
+            if let Some(m) = mission.as_ref() {
+                if super::mission_horizon::reports_to_parent_mission(m, wake.as_ref()) {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        parent = ?m.parent_mission_id,
+                        ?status,
+                        "status callback not sent: the mission reports to its parent mission"
+                    );
+                    markers.lock().await.set(mission_id, status);
+                    in_flight.lock().await.remove(&(mission_id, status));
+                    return;
+                }
+            }
             let mut remote_jobs = crate::remote_node::job_ledger::load(&working_dir)
                 .await
                 .unwrap_or_default()
@@ -19564,9 +19585,6 @@ async fn paloma_webhook_forwarder_loop(
             } else {
                 None
             };
-            let wake = mission
-                .as_ref()
-                .map(|m| super::mission_horizon::wake_fields_for_mission(m, &working_dir));
             let body = serde_json::json!({
                 // Idempotency / ordering (P#6): consumers dedupe on
                 // `event_id` and may order by `sequence`.
