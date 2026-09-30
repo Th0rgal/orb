@@ -459,6 +459,65 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn continuation_replacement_cancels_rejected_running_delivery() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "obsolete".into()).await.unwrap();
+        let mut stale = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        stale.status = ExecutionStatus::Running;
+        stale.error = Some("Admission rejected".into());
+        stale
+            .variables_used
+            .insert("__delivery_retry_at".into(), "9999999999".into());
+        store
+            .update_automation_execution(stale.clone())
+            .await
+            .unwrap();
+        let mut replacement = a.clone();
+        replacement.id = Uuid::new_v4();
+        store.create_automation(replacement).await.unwrap();
+        // A late delivery snapshot cannot resurrect the superseded occurrence.
+        store.update_automation_execution(stale).await.unwrap();
+        assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_ack_preserves_fast_failure_reason() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "continue".into()).await.unwrap();
+        let mut stale = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        stale.status = ExecutionStatus::Running;
+        store
+            .update_automation_execution(stale.clone())
+            .await
+            .unwrap();
+        let mut failed = stale.clone();
+        failed.status = ExecutionStatus::Failed;
+        failed.error = Some("Provider failed".into());
+        failed.completed_at = Some(mission_store::now_string());
+        store
+            .update_automation_execution(failed.clone())
+            .await
+            .unwrap();
+        stale
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store.update_automation_execution(stale).await.unwrap();
+        let saved = store
+            .get_automation_executions(a.id, None)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(saved.status, ExecutionStatus::Failed);
+        assert_eq!(saved.error, failed.error);
+        assert_eq!(saved.completed_at, failed.completed_at);
+        assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn continuation_stop_cancels_outbox_and_rejects_late_ack() {
         let (_dir, store, a) = fixture().await;
         stage(&store, &a, "continue".into()).await.unwrap();

@@ -16316,11 +16316,8 @@ pub async fn set_client_mission_status(
     }
     let run =
         machine_transfer::check_client_receipt(&control, id, req.run_id, req.generation).await?;
-    if status == MissionStatus::Interrupted {
-        continuations::cancel_for_mission(&control.mission_store, id)
-            .await
-            .map_err(internal_error)?;
-    }
+    // A stopped process also represents queue advancement or machine transfer.
+    // Explicit user Stop revokes wake-ups through continuations/cancel instead.
     control
         .mission_store
         .update_mission_status_with_reason(id, status, Some("client_runner"))

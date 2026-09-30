@@ -7430,7 +7430,7 @@ impl MissionStore for SqliteMissionStore {
                     let Ok(trigger) = serde_json::from_value::<TriggerType>(trigger) else { continue };
                     if crate::api::control::wakeup_supersession_key(vars.get("__wakeup_source").map(String::as_str), &trigger).as_ref() == Some(&key) {
                         tx.execute("UPDATE automations SET active = 0 WHERE id = ?", [&id])?;
-                        tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND status = 'pending'", params![now_string(), id])?;
+                        tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled','skipped') AND COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true'", params![now_string(), id])?;
                     }
                 }
             }
@@ -7787,7 +7787,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             conn.execute(
                 "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success', 'failed') THEN status ELSE ? END, webhook_payload = ?, variables_used = ?,
-                                                 completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = ?, retry_count = ?
+                                                 completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN error ELSE ? END, retry_count = ?
                  WHERE id = ? AND (trigger_source != 'durable_schedule' OR status NOT IN ('cancelled', 'skipped'))",
                 params![
                     status_str,

@@ -18,7 +18,9 @@ integration's transport and native support; it is not a probe of the installed C
 `{"action":"cancel"}` for one-shot wake-ups. A cancel that loses the race to
 delivery returns 409. `POST /api/control/missions/:id/continuations/cancel`
 revokes future wake-ups and undelivered server outbox entries for that mission.
-Stopping a hosted mission or reporting a stopped local run invokes this revocation.
+Stopping a hosted mission or explicitly stopping a local mission invokes this
+revocation. Reporting an interrupted local process preserves its wake-ups so
+queue advancement and machine transfer can continue safely.
 An ordinary follow-up does not cancel the next wake-up.
 
 Requests may include `variables.__wakeup_request_id`. Its mission-scoped UUID is
