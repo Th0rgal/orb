@@ -7864,6 +7864,12 @@ pub async fn get_mission(
                 let mut value = serde_json::to_value(&mission).map_err(internal_error)?;
                 value["execution_kind"] = serde_json::json!("hosted");
                 value["cloud"] = serde_json::to_value(execution).map_err(internal_error)?;
+                continuations::attach_capabilities(&mut value);
+                value["continuation"] = continuations::summaries(&control.mission_store)
+                    .await
+                    .map_err(internal_error)?
+                    .remove(&id)
+                    .unwrap_or(serde_json::Value::Null);
                 return Ok(Json(value));
             }
 
@@ -12334,7 +12340,15 @@ pub(super) async fn create_mission_inner(
         .await
         {
             Ok(()) => {
-                dispatch_remote_job(&state, &control, &mission, remote_node_id, remote_plan).await
+                dispatch_remote_job(
+                    &state,
+                    &control,
+                    &mission,
+                    remote_node_id,
+                    remote_plan,
+                    None,
+                )
+                .await
             }
             Err(message) => Err(message),
         };
@@ -13889,6 +13903,7 @@ async fn dispatch_remote_job(
     mission: &Mission,
     remote_node_id: &str,
     plan: &RemoteHarnessPlan,
+    scheduled_origin: Option<(Option<Uuid>, Uuid)>,
 ) -> Result<Mission, String> {
     let node = crate::remote_node::placement_for_selected_node(
         &state.config.remote_nodes,
@@ -13922,7 +13937,16 @@ async fn dispatch_remote_job(
             ));
         }
     }
-    let dispatched = submit_leased_remote_job(state, control, mission, node, job_id, plan).await;
+    let dispatched = async {
+        if let Some((message, previous_job)) = scheduled_origin {
+            control
+                .mission_store
+                .bind_scheduled_remote_job(mission.id, message, previous_job, job_id)
+                .await?;
+        }
+        submit_leased_remote_job(state, control, mission, node, job_id, plan).await
+    }
+    .await;
     if dispatched.is_err() {
         if let Err(error) = finish_remote_job_lease(
             control.mission_store.as_ref(),
@@ -15331,6 +15355,23 @@ async fn poll_remote_job(
                             content = usage_limit_wait::annotate_remote_output(&content, &wait);
                             status_reason = usage_limit_wait::USAGE_LIMIT_WAIT_REASON;
                         }
+                    }
+                    // A terminal node receipt proves admission, even if its ACK
+                    // was lost. Quota waits remain running until their replay ends.
+                    let settled = (status_reason != usage_limit_wait::USAGE_LIMIT_WAIT_REASON)
+                        .then_some(success);
+                    if let Err(error) = owner
+                        .mission_store
+                        .complete_scheduled_remote_job(
+                            mission_id,
+                            job_id,
+                            settled,
+                            (settled == Some(false)).then(|| status_reason.to_string()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%mission_id, %job_id, %error, "Remote scheduled receipt persistence failed; retaining handle and retrying");
+                        continue;
                     }
                     if should_finalize_remote_job(inactive_status) {
                         if let Err(error) = finalize_remote_mission(

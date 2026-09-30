@@ -118,3 +118,11 @@ Hosted and local turn completion uses the delivered message/occurrence ID, inclu
 Hosted transport retries reuse the completed message identity and postpone settlement until recovery succeeds or is exhausted. A parked remote build hands its occurrence to the stable terminal-receipt message ID; the stored alias survives admission races and restarts. Deferred terminal receipts retain that logical execution ID when no control actor is running; their scheduler dispatch keeps a separate outer ID to avoid self-deduplication during admission.
 
 When capacity coalesces several deferred messages, every constituent execution is atomically bound to the actual turn before completion. The whole batch follows transport retries or a remote-build handoff together; unrelated occurrences are excluded.
+
+Native remote-node continuations persist their owning job before submission. Only a
+terminal node receipt settles that occurrence; poll loss does not. Quota replays
+transfer the job binding while preserving the delivery identity and late ACKs.
+Cloud mission details expose the same pending continuation projection as lists.
+Lost remote admission ACKs are deduplicated against the persisted job binding and
+accepted node handle. Terminal receipts acknowledge delivery durably; a quota wait
+keeps the occurrence running, and a stale rejection cannot undo that acceptance.

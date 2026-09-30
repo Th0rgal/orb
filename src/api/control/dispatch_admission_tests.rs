@@ -9286,3 +9286,213 @@ async fn continuation_parent_stop_revokes_child_and_rejects_late_creation() {
     .await;
     assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn continuation_cloud_detail_includes_pending_wakeup() {
+    use crate::api::cloud_agents::{Execution, Phase, Provider, Selection, Turn};
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let id = Uuid::new_v4();
+    let mut turn = Turn::new("initial".into(), "test".into());
+    turn.phase = Phase::ResponseComplete;
+    store
+        .save_cloud_execution(
+            Execution {
+                parent_mission_id: None,
+                mission_id: id,
+                request_key: id.to_string(),
+                request_signature: "test".into(),
+                revision: 0,
+                selection: Selection {
+                    provider: Provider::CursorCloud,
+                    account: "test".into(),
+                    repository: None,
+                    git_ref: None,
+                    model: None,
+                    model_params: vec![],
+                },
+                external_id: None,
+                external_url: None,
+                turns: vec![turn],
+            },
+            None,
+            Some("cloud wake".into()),
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"cloud-wake"}})).unwrap();
+    let automation = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(req),
+    )
+    .await
+    .unwrap()
+    .0;
+    let detail = get_mission(State(h.state.clone()), Extension(h.user.clone()), Path(id))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(detail["execution_kind"], "hosted");
+    assert_eq!(detail["scheduling"]["owner"], "sandboxed");
+    assert_eq!(detail["scheduling"]["transport"], "unavailable");
+    assert_eq!(detail["continuation"]["count"], 1);
+    assert_eq!(
+        detail["continuation"]["items"][0]["id"],
+        automation.id.to_string()
+    );
+}
+
+#[tokio::test]
+async fn continuation_remote_node_terminal_receipt_settles_execution() {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let fixture = spawn_fixture_node(
+        "scheduled-native",
+        "REMOTE_SCHEDULED_NATIVE_TEST_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    h.state.fleet.record_heartbeat(
+        "scheduled-native",
+        serde_json::from_value(json!({
+            "node_id":"scheduled-native", "online":true, "capacity_total":1, "capacity_available":1,
+            "active_leases":0, "version":"test", "managed_auth":["grok"]
+        }))
+        .unwrap(),
+    );
+    let response = h.state.http_client.post(format!("{}/missions", h.url)).json(&json!({
+        "project":"lido", "writer":false, "backend":"grok", "model_override":"grok-4.6", "remote_node_id":"scheduled-native", "prompt":"ready"
+    })).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = &h.control.mission_store;
+    let sid = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    let end = format!("{{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"{sid}\"}}\n");
+    // Reconstruct the durable state after node acceptance but before the
+    // process persisted the scheduled prompt or scheduler ACK.
+    let lost_req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"lost ACK"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"lost-remote-ack"}})).unwrap();
+    let lost = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(lost_req),
+    )
+    .await
+    .unwrap()
+    .0;
+    continuations::stage(store, &lost, "lost ACK".into())
+        .await
+        .unwrap();
+    let mut unacked = store
+        .get_automation_executions(lost.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    unacked.status = mission_store::ExecutionStatus::Running;
+    store
+        .update_automation_execution(unacked.clone())
+        .await
+        .unwrap();
+    let accepted_job = Uuid::parse_str(
+        fixture.submissions.lock().unwrap()[0]["job_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    store
+        .bind_scheduled_remote_job(id, Some(unacked.id), Uuid::new_v4(), accepted_job)
+        .await
+        .unwrap();
+    continuations::deliver(store, &h.control.cmd_tx, &h.control.events_tx, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.submissions.lock().unwrap().len(),
+        1,
+        "lost ACK must not submit another job"
+    );
+    assert_eq!(
+        store
+            .get_automation_executions(lost.id, None)
+            .await
+            .unwrap()[0]
+            .variables_used["__delivery_accepted"],
+        "true"
+    );
+    *fixture.log.lock().unwrap() = end.clone();
+    fixture.set_state("succeeded");
+    wait_until("initial remote receipt", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
+    assert_eq!(
+        store
+            .get_automation_executions(lost.id, None)
+            .await
+            .unwrap()[0]
+            .status,
+        mission_store::ExecutionStatus::Success
+    );
+    let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"scheduled wake"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"remote-wake"}})).unwrap();
+    let automation = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(req),
+    )
+    .await
+    .unwrap()
+    .0;
+    continuations::stage(store, &automation, "scheduled wake".into())
+        .await
+        .unwrap();
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    continuations::deliver(store, &h.control.cmd_tx, &h.control.events_tx, None)
+        .await
+        .unwrap();
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    let job = fixture.submissions.lock().unwrap()[1]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let execution = store
+        .get_automation_executions(automation.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(execution.status, mission_store::ExecutionStatus::Running);
+    assert_eq!(execution.variables_used["__remote_job_id"], job);
+    *fixture.log.lock().unwrap() = end;
+    fixture.set_state("succeeded");
+    wait_until("scheduled remote terminal receipt", 20, || async {
+        store
+            .get_automation_executions(automation.id, None)
+            .await
+            .unwrap()[0]
+            .status
+            == mission_store::ExecutionStatus::Success
+    })
+    .await;
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+}

@@ -3082,6 +3082,41 @@ pub trait MissionStore: Send + Sync {
         Ok(0)
     }
 
+    /// Persist remote job ownership without replacing the delivery message identity.
+    async fn bind_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        message: Option<Uuid>,
+        previous_job: Uuid,
+        job: Uuid,
+    ) -> Result<u32, String> {
+        let _ = (mission, message, previous_job, job);
+        Ok(0)
+    }
+
+    /// A persisted remote binding and whether admission has already been confirmed.
+    async fn scheduled_remote_delivery(
+        &self,
+        mission: Uuid,
+        message: Uuid,
+    ) -> Result<Option<(Uuid, bool)>, String> {
+        let _ = (mission, message);
+        Ok(None)
+    }
+
+    /// Settle only occurrences owned by this terminal remote job receipt.
+    /// None confirms admission for a quota wait without settling execution.
+    async fn complete_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        job: Uuid,
+        success: Option<bool>,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let _ = (mission, job, success, error);
+        Ok(0)
+    }
+
     /// Move a running scheduled occurrence to the message that continues it.
     async fn handoff_scheduled_executions(
         &self,

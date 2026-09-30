@@ -7791,8 +7791,8 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success', 'failed') THEN status ELSE ? END, webhook_payload = ?, variables_used = CASE WHEN json_type(variables_used, '$.__continuation_message_id') = 'text' THEN json_set(?3, '$.__continuation_message_id', json_extract(variables_used, '$.__continuation_message_id')) ELSE ?3 END,
-                                                 completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN error ELSE ? END, retry_count = ?
+                "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND (status IN ('success', 'failed') OR (json_extract(variables_used, '$.__delivery_accepted') = 'true' AND ?1 = 'pending')) THEN status ELSE ?1 END, webhook_payload = ?, variables_used = json_patch(json_patch(json_patch(?3, CASE WHEN json_type(variables_used, '$.__continuation_message_id') = 'text' THEN json_object('__continuation_message_id', json_extract(variables_used, '$.__continuation_message_id')) ELSE '{}' END), CASE WHEN json_type(variables_used, '$.__remote_job_id') = 'text' THEN json_object('__remote_job_id', json_extract(variables_used, '$.__remote_job_id')) ELSE '{}' END), CASE WHEN json_extract(variables_used, '$.__delivery_accepted') = 'true' THEN json_object('__delivery_accepted', 'true') ELSE '{}' END),
+                                                 completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = CASE WHEN trigger_source = 'durable_schedule' AND (status IN ('success','failed') OR (json_extract(variables_used, '$.__delivery_accepted') = 'true' AND ?1 IN ('pending','running'))) THEN error ELSE ? END, retry_count = ?
                  WHERE id = ? AND (trigger_source != 'durable_schedule' OR status NOT IN ('cancelled', 'skipped'))",
                 params![
                     status_str,
@@ -7994,6 +7994,54 @@ impl MissionStore for SqliteMissionStore {
                 WHERE mission_id = ? AND ((trigger_source != 'durable_schedule' AND status IN ('pending','running'))
                   OR (trigger_source = 'durable_schedule' AND status = 'running' AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?))",
                 params![if success { "success" } else { "failed" }, now_string(), error, mission_id.to_string(), occurrence.map(|id| id.to_string())])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn bind_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        message: Option<Uuid>,
+        previous_job: Uuid,
+        job: Uuid,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET variables_used = json_set(variables_used, '$.__remote_job_id', ?1)
+                WHERE mission_id = ?2 AND trigger_source = 'durable_schedule' AND status = 'running'
+                AND (COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?3 OR json_extract(variables_used, '$.__remote_job_id') = ?4)",
+                params![job.to_string(), mission.to_string(), message.map(|id| id.to_string()), previous_job.to_string()])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn scheduled_remote_delivery(
+        &self,
+        mission: Uuid,
+        message: Uuid,
+    ) -> Result<Option<(Uuid, bool)>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let row = conn.blocking_lock().query_row("SELECT json_extract(variables_used, '$.__remote_job_id'), COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') = 'true'
+                FROM automation_executions WHERE mission_id = ?1 AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?2
+                AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped') AND json_type(variables_used, '$.__remote_job_id') = 'text' LIMIT 1",
+                params![mission.to_string(), message.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))).optional().map_err(|e| e.to_string())?;
+            row.map(|(id, accepted)| Uuid::parse_str(&id).map(|id| (id, accepted)).map_err(|e| e.to_string())).transpose()
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn complete_scheduled_remote_job(
+        &self,
+        mission: Uuid,
+        job: Uuid,
+        success: Option<bool>,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET status = COALESCE(?1, 'running'), completed_at = CASE WHEN ?1 IS NULL THEN completed_at ELSE ?2 END, error = ?3, variables_used = json_set(variables_used, '$.__delivery_accepted', 'true')
+                WHERE mission_id = ?4 AND trigger_source = 'durable_schedule' AND status IN ('pending', 'running') AND json_extract(variables_used, '$.__remote_job_id') = ?5",
+                params![success.map(|success| if success {"success"} else {"failed"}), now_string(), error, mission.to_string(), job.to_string()])
                 .map(|n| n as u32).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string())?
     }

@@ -723,6 +723,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_remote_node_binding_survives_ack_restart_and_quota_replay() {
+        for success in [true, false] {
+            let (dir, store, a) = fixture().await;
+            stage(&store, &a, "remote wake".into()).await.unwrap();
+            let mut occurrence = store
+                .get_automation_executions(a.id, None)
+                .await
+                .unwrap()
+                .remove(0);
+            occurrence.status = ExecutionStatus::Running;
+            store
+                .update_automation_execution(occurrence.clone())
+                .await
+                .unwrap();
+            let job = Uuid::new_v4();
+            assert_eq!(
+                store
+                    .bind_scheduled_remote_job(
+                        a.mission_id,
+                        Some(occurrence.id),
+                        Uuid::new_v4(),
+                        job
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            occurrence.status = ExecutionStatus::Pending;
+            store
+                .update_automation_execution(occurrence.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .complete_scheduled_remote_job(a.mission_id, job, None, None)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+                ExecutionStatus::Running
+            );
+            assert_eq!(
+                store
+                    .scheduled_remote_delivery(a.mission_id, occurrence.id)
+                    .await
+                    .unwrap(),
+                Some((job, true))
+            );
+            // Admission wrote its snapshot before the job binding existed.
+            occurrence
+                .variables_used
+                .insert("__delivery_accepted".into(), "true".into());
+            store
+                .update_automation_execution(occurrence.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+                ExecutionStatus::Running
+            );
+            drop(store);
+            let store: Arc<dyn MissionStore> = Arc::new(
+                SqliteMissionStore::new(dir.path().to_owned(), "test")
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(
+                store.get_automation_executions(a.id, None).await.unwrap()[0].variables_used
+                    ["__remote_job_id"],
+                job.to_string()
+            );
+            let replay = Uuid::new_v4();
+            assert_eq!(
+                store
+                    .bind_scheduled_remote_job(a.mission_id, None, job, replay)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store
+                    .complete_scheduled_remote_job(
+                        a.mission_id,
+                        job,
+                        Some(false),
+                        Some("stale quota receipt".into())
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+                ExecutionStatus::Running
+            );
+            let error = (!success).then(|| "node failed".to_string());
+            assert_eq!(
+                store
+                    .complete_scheduled_remote_job(
+                        a.mission_id,
+                        replay,
+                        Some(success),
+                        error.clone()
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            occurrence.variables_used.remove("__delivery_accepted");
+            store.update_automation_execution(occurrence).await.unwrap();
+            let saved = store
+                .get_automation_executions(a.id, None)
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                saved.status,
+                if success {
+                    ExecutionStatus::Success
+                } else {
+                    ExecutionStatus::Failed
+                }
+            );
+            assert_eq!(saved.error, error);
+            assert_eq!(saved.variables_used["__delivery_accepted"], "true");
+            assert_eq!(saved.variables_used["__remote_job_id"], replay.to_string());
+        }
+    }
+
+    #[tokio::test]
     async fn continuation_stop_filters_revoked_main_queue_delivery() {
         let (_dir, store, a) = fixture().await;
         stage(&store, &a, "scheduled".into()).await.unwrap();

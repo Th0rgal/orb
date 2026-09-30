@@ -1351,6 +1351,29 @@ pub(crate) async fn continue_on_node(
             )
         })?;
     if let Some(id) = message_id {
+        // The process may have died after accepted dispatch but before writing
+        // the prompt event or replying to the scheduler. The persisted binding
+        // plus node acceptance is enough to acknowledge that same delivery.
+        if let Some((job, accepted)) = store
+            .scheduled_remote_delivery(mission_id, id)
+            .await
+            .map_err(internal)?
+        {
+            let accepted = accepted
+                || crate::remote_node::job_ledger::load(&state.config.working_dir)
+                    .await
+                    .map_err(internal)?
+                    .iter()
+                    .any(|handle| {
+                        handle.mission_id == mission_id
+                            && handle.job_id == job
+                            && handle.kind == crate::remote_node::job_ledger::JobHandleKind::Mission
+                            && handle.accepted_at.is_some()
+                    });
+            if accepted {
+                return Ok(mission);
+            }
+        }
         let expected = id.to_string();
         if store
             .get_events(mission_id, Some(&["user_message"]), None, None)
@@ -1630,18 +1653,25 @@ pub(crate) async fn continue_on_node(
         .update_mission_status(mission.id, MissionStatus::Pending)
         .await
         .map_err(internal)?;
-    let resumed =
-        match super::dispatch_remote_job(state, control, &mission, &placement.node_id, &plan).await
-        {
-            Ok(resumed) => resumed,
-            Err(message) => {
-                store
-                    .restore_mission_status(mission.id, &previous)
-                    .await
-                    .map_err(internal)?;
-                return Err((StatusCode::CONFLICT, message));
-            }
-        };
+    let resumed = match super::dispatch_remote_job(
+        state,
+        control,
+        &mission,
+        &placement.node_id,
+        &plan,
+        Some((message_id, placement.job_id)),
+    )
+    .await
+    {
+        Ok(resumed) => resumed,
+        Err(message) => {
+            store
+                .restore_mission_status(mission.id, &previous)
+                .await
+                .map_err(internal)?;
+            return Err((StatusCode::CONFLICT, message));
+        }
+    };
     persist_turn_prompt(&owner, mission.id, &history_prompt, &source, message_id).await;
     Ok(resumed)
 }
