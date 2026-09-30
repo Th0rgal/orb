@@ -36,6 +36,7 @@ final class OrbSettingsTests: XCTestCase {
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
     }
     func testKimiUsesNativeDeviceFlowAndAPIKeysRemainEditable() {
+        XCTAssertFalse(OrbProviderKeyEditor.apiKeyTypes.contains("kimi"))
         XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("kimi").proxy)
         XCTAssertTrue(OrbProvidersSettings.subscriptionTypes.contains("google"))
         XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("google").proxy)

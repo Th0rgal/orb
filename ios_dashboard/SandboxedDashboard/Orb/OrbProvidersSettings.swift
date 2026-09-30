@@ -171,7 +171,7 @@ struct OrbProviderKeyEditor: View {
     @State private var baseURL = ""
     @State private var error = ""
     @State private var busy = false
-    private let types = ["anthropic", "openai", "google", "xai", "kimi", "open-router", "groq", "mistral", "minimax", "zai", "custom"]
+    static let apiKeyTypes = ["anthropic", "openai", "google", "xai", "open-router", "groq", "mistral", "minimax", "zai", "custom"]
     private var valid: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         && (provider != nil || type != "custom" || (URL(string: baseURL)?.host != nil && ["http", "https"].contains(URL(string: baseURL)?.scheme ?? "")))
@@ -180,7 +180,7 @@ struct OrbProviderKeyEditor: View {
         NavigationStack {
             Form {
                 OrbSettingsError(message: error)
-                if provider == nil { Picker("Provider", selection: $type) { ForEach(types, id: \.self) { Text($0).tag($0) } } }
+                if provider == nil { Picker("Provider", selection: $type) { ForEach(Self.apiKeyTypes, id: \.self) { Text($0).tag($0) } } }
                 TextField("Name", text: $name)
                 SecureField("API key", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
                 if provider == nil && type == "custom" { TextField("Base URL", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled() }
