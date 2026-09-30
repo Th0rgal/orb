@@ -89,7 +89,19 @@ export function refreshTranscript(id:string):Promise<TranscriptSnap>{return tran
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);return cached?Promise.resolve(cached):transcriptJob(id,'initial',()=>fetchTranscript(id));
 }
-export function prefetchTranscript(id:string){if(peekReadyTranscript(id)||jobs.has(key(id)))return;void loadTranscript(id).catch(()=>{});}
+// A transcript the cache cannot hold (too large) or could not load is not
+// fetched again at every list refresh: that re-read whole event logs of large
+// live missions every 5 s.
+const prefetchPaused=new Map<string,number>();
+const PREFETCH_PAUSE_MS=10*60_000,PREFETCH_RETRY_MS=60_000;
+export function prefetchTranscript(id:string){
+ const scope=key(id);
+ if(peekReadyTranscript(id)||jobs.has(scope))return;
+ const until=prefetchPaused.get(scope);if(until!==undefined&&until>Date.now())return;
+ void loadTranscript(id).then(()=>{if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);})
+  .catch(()=>{prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);});
+}
+export function forgetPrefetchPauses(){prefetchPaused.clear();}
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
   const previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);
