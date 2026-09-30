@@ -653,6 +653,11 @@ CREATE TABLE IF NOT EXISTS automations (
 CREATE INDEX IF NOT EXISTS idx_automations_mission ON automations(mission_id);
 CREATE INDEX IF NOT EXISTS idx_automations_active ON automations(mission_id, active);
 
+CREATE TABLE IF NOT EXISTS mission_wakeup_fences (
+    mission_id TEXT PRIMARY KEY NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    stopped_generation INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS automation_executions (
     id TEXT PRIMARY KEY NOT NULL,
     automation_id TEXT NOT NULL,
@@ -7846,6 +7851,30 @@ impl MissionStore for SqliteMissionStore {
             let rows = stmt.query_map([], Self::parse_execution_row).map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
             Ok(rows)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("INSERT INTO mission_wakeup_fences (mission_id, stopped_generation)
+                VALUES (?1, COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id = ?1), 0))
+                ON CONFLICT(mission_id) DO UPDATE SET stopped_generation = MAX(stopped_generation, excluded.stopped_generation)", [mission.to_string()])
+                .map(|_| ()).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn wakeup_creation_allowed(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().query_row("SELECT
+                COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id = ?1), 0) = ?2
+                AND NOT EXISTS (SELECT 1 FROM mission_wakeup_fences WHERE mission_id = ?1 AND stopped_generation >= ?2)",
+                params![mission.to_string(), generation as i64], |row| row.get(0)).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string())?
     }
 

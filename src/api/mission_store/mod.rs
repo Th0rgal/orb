@@ -3017,6 +3017,20 @@ pub trait MissionStore: Send + Sync {
     async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
         self.update_automation_active(id, false).await
     }
+    /// Persist Stop against the current generation, including an idle generation zero.
+    async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
+        let _ = mission;
+        Ok(())
+    }
+    async fn wakeup_creation_allowed(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<bool, String> {
+        let _ = (mission, generation);
+        Ok(true)
+    }
+
     async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
         for a in self.get_mission_automations(mission).await? {
             if a.variables.contains_key("__wakeup_source") {

@@ -9162,3 +9162,90 @@ async fn relocated_worker_keeps_parent_metadata_without_inheriting_location() {
         assert_eq!(request.backend.as_deref(), Some("grok"));
     }
 }
+
+#[tokio::test]
+async fn continuation_parent_stop_revokes_child_and_rejects_late_creation() {
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let parent = store
+        .create_mission(
+            Some("wake parent"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    let child = store
+        .create_mission_with_parent(
+            Some("wake child"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut timers = Vec::new();
+    for mission in [parent.id, child.id] {
+        let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"stop_policy":{"type":"after_first_fire"},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":Uuid::new_v4().to_string()}})).unwrap();
+        timers.push(
+            create_automation(
+                State(h.state.clone()),
+                Extension(h.user.clone()),
+                Path(mission),
+                Json(req),
+            )
+            .await
+            .unwrap()
+            .0,
+        );
+    }
+    cancel_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+    )
+    .await
+    .unwrap();
+    for timer in timers {
+        assert!(
+            !store
+                .get_automation(timer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert!(!store
+            .wakeup_creation_allowed(timer.mission_id, 0)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_mission(timer.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Interrupted
+        );
+    }
+    let late = serde_json::from_value(json!({"command_source":{"type":"inline","content":"late"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"late"}})).unwrap();
+    let result = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(child.id),
+        Json(late),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+}

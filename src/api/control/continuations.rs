@@ -387,6 +387,15 @@ pub async fn action(
 }
 
 /// Stop revokes future automatic work, including an unfired outbox item.
+/// Called inside the actor only after cancellation admission (including min_idle).
+/// Registration uses the same lock and cannot recreate work from a stopped generation.
+pub async fn stop_for_mission(store: &Arc<dyn MissionStore>, mission: Uuid) -> Result<(), String> {
+    let mutex = lock(mission);
+    let _guard = mutex.lock().await;
+    store.fence_mission_wakeups(mission).await?;
+    store.cancel_mission_continuations(mission).await
+}
+
 pub async fn cancel_for_mission(
     store: &Arc<dyn MissionStore>,
     mission: Uuid,
@@ -711,6 +720,53 @@ mod tests {
                 ExecutionStatus::Success
             );
         }
+    }
+
+    #[tokio::test]
+    async fn continuation_stop_fences_cancelled_generation_through_restart() {
+        let (dir, store, a) = fixture().await;
+        let run = store
+            .begin_mission_run(a.mission_id, "hosted", None)
+            .await
+            .unwrap();
+        assert!(store
+            .wakeup_creation_allowed(a.mission_id, run.generation)
+            .await
+            .unwrap());
+        stop_for_mission(&store, a.mission_id).await.unwrap();
+        assert!(!store
+            .wakeup_creation_allowed(a.mission_id, run.generation)
+            .await
+            .unwrap());
+        store
+            .finish_mission_run(run.run_id, run.generation, Some("cancelled"))
+            .await
+            .unwrap();
+        assert!(!store
+            .wakeup_creation_allowed(a.mission_id, run.generation)
+            .await
+            .unwrap());
+        drop(store);
+        let store = SqliteMissionStore::new(dir.path().to_owned(), "test")
+            .await
+            .unwrap();
+        assert!(!store
+            .wakeup_creation_allowed(a.mission_id, run.generation)
+            .await
+            .unwrap());
+        let resumed = store
+            .begin_mission_run(a.mission_id, "hosted", None)
+            .await
+            .unwrap();
+        assert!(store
+            .wakeup_creation_allowed(a.mission_id, resumed.generation)
+            .await
+            .unwrap());
+        assert!(!store
+            .wakeup_creation_allowed(a.mission_id, run.generation)
+            .await
+            .unwrap());
+        assert!(!store.get_automation(a.id).await.unwrap().unwrap().active);
     }
 
     #[tokio::test]

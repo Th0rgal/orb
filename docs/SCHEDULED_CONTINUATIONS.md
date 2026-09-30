@@ -20,7 +20,10 @@ delivery returns 409. `POST /api/control/missions/:id/continuations/cancel`
 revokes future wake-ups and undelivered server outbox entries for that mission.
 Stopping a hosted mission or explicitly stopping a local mission invokes this
 revocation. Reporting an interrupted local process preserves its wake-ups so
-queue advancement and machine transfer can continue safely.
+queue advancement and machine transfer can continue safely. Hosted Stop also persists
+a run-generation fence before terminating the runner, including each child in the
+cancellation cascade. Late wake-up registrations from that generation are rejected,
+even after a Core restart; a new mission run can register wake-ups again.
 An ordinary follow-up does not cancel the next wake-up. Reading/acknowledging
 the preceding response also preserves automatic delivery of its wake-up.
 

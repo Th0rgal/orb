@@ -17749,9 +17749,6 @@ pub async fn cancel_mission(
     machine_transfer::guard(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
-    continuations::cancel_for_mission(&control.mission_store, mission_id)
-        .await
-        .map_err(internal_error)?;
     control
         .cmd_tx
         .send(ControlCommand::CancelMission {
@@ -25154,6 +25151,10 @@ async fn control_actor_loop(
                                 }
                             }
                         }
+                        if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
+                            let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
+                            continue;
+                        }
                         // Helper: cascade-cancel all child missions of the given parent.
                         async fn cancel_child_missions(
                             parent_id: Uuid,
@@ -25172,6 +25173,9 @@ async fn control_actor_loop(
                             for child in children {
                                 if matches!(child.status, MissionStatus::Completed | MissionStatus::Failed | MissionStatus::Interrupted | MissionStatus::NotFeasible) {
                                     continue;
+                                }
+                                if let Err(error) = continuations::stop_for_mission(mission_store, child.id).await {
+                                    tracing::error!(mission_id = %child.id, %error, "Failed to revoke child wake-ups during cascade cancellation");
                                 }
                                 // Cancel runner if running
                                 if let Some(runner) = parallel_runners.get_mut(&child.id) {
@@ -29289,6 +29293,19 @@ pub async fn create_automation(
         ));
     }
 
+    // Capture the originating generation before waiting behind Stop.
+    let wakeup_generation = if req.variables.contains_key("__wakeup_source") {
+        Some(
+            control
+                .mission_store
+                .get_latest_mission_run(mission_id)
+                .await
+                .map_err(internal_error)?
+                .map_or(0, |run| run.generation),
+        )
+    } else {
+        None
+    };
     let continuation_lock = continuations::lock(mission_id);
     let _continuation_guard = continuation_lock.lock().await;
     let automation_id = req
@@ -29303,6 +29320,16 @@ pub async fn create_automation(
         .map_err(internal_error)?
     {
         return Ok(Json(existing));
+    }
+    if let Some(generation) = wakeup_generation {
+        if !control
+            .mission_store
+            .wakeup_creation_allowed(mission_id, generation)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err((StatusCode::CONFLICT, "Wake-up creation belongs to a stopped or superseded mission generation; resume the mission first".into()));
+        }
     }
     // Validate the command exists in the library if CommandSource::Library
     if let mission_store::CommandSource::Library { ref name } = req.command_source {
