@@ -11,11 +11,18 @@ VALID_TOKEN = "orb-fixture-" + str(uuid.uuid4())
 LOCK = threading.Lock()
 MISSIONS = {}
 RECEIPTS = {}
+SSH_HOSTS = {}
+PROVIDERS = {}
+CORDONED = False
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
-    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear()
+    global CORDONED
+    CORDONED = False
+    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); SSH_HOSTS.clear(); PROVIDERS.clear()
+    SSH_HOSTS['fixture-host'] = dict(id='fixture-host', revision=1, name='Fixture SSH', host='fixture.test', user='ubuntu', port=22, note='Shared address')
+    PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
     MISSIONS['long-chat']=dict(id='long-chat',title='Long conversation',status='awaiting_user',project='orb-test',backend='codex',tags=[],model_override='test-model',history=[dict(role='user',content=f'Message {i:03d} — conversation history') for i in range(1,81)])
@@ -37,6 +44,10 @@ class Handler(BaseHTTPRequestHandler):
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
             return self.send({'error':'invalid or expired token'},401)
+        if p=='/api/settings/ssh-hosts': return self.send(list(SSH_HOSTS.values()))
+        if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
+        if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
+        if p=='/api/cloud/usage': return self.send({'accounts':{}})
         if p=='/api/projects': return self.send({'projects':PROJECTS})
         if p=='/api/control/missions':
             time.sleep(LIST_DELAY)
@@ -44,7 +55,7 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
         if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'chatgpt_ui','name':'ChatGPT UI'}])
         if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
-        if p=='/api/remote-nodes': return self.send({'nodes':[{'id':'test-node','name':'Test node','status':'online'}]})
+        if p=='/api/remote-nodes': return self.send({'nodes':[{'id':'test-node','name':'Test node','status':'online','cordoned':CORDONED,'active_jobs':2,'mem_total_bytes':8589934592,'mem_available_bytes':4294967296}]})
         if p=='/api/cloud/accounts': return self.send([{'id':p+'-test','provider':p,'label':p+' account','available':True,'capabilities':{'cancel':True,'follow_up':True,'models':p!='grok_bot','attachments':False}} for p in ['chatgpt','cursor_cloud','grok_bot']])
         if p.endswith('/options'): return self.send({'models':{'items':[{'id':'test-cloud-model','displayName':'Test cloud model'}]},'repositories':{'items':[{'url':'https://github.com/example/orb-test'}]}})
         if p.endswith('/context/manifest'): return self.send({'revision':1,'entries':{'Design':{'directory':True},'Design/Images':{'directory':True}}})
@@ -68,10 +79,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(m)
         return self.send({'error':'Not found'},404)
     def do_PUT(self): self.do_POST()
+    def do_DELETE(self): self.do_POST()
     def do_POST(self):
         with LOCK: self.mutate()
     def mutate(self):
-        global VALID_TOKEN
+        global VALID_TOKEN, CORDONED
         p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0)); body=json.loads(self.rfile.read(size)) if size else {}
         if p=='/__expire':
             VALID_TOKEN = 'orb-fixture-' + str(uuid.uuid4())
@@ -81,6 +93,26 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p.startswith('/api/settings/ssh-hosts'):
+            if self.command == 'POST':
+                for existing in SSH_HOSTS.values():
+                    if all(existing[k] == body[k] for k in ['host','user','port']): return self.send(existing)
+                record = {k:body[k] for k in ['name','host','user','port','note']}
+                record.update(id=str(uuid.uuid4()), revision=1); SSH_HOSTS[record['id']]=record; return self.send(record)
+            key=p.split('/')[-1]; existing=SSH_HOSTS.get(key)
+            if not existing: return self.send({'error':'Not found'},404)
+            revision=int(parse_qs(urlparse(self.path).query).get('revision',[0])[0]) if self.command=='DELETE' else body.get('revision')
+            if revision != existing['revision']: return self.send({'error':'Conflict'},409)
+            if self.command=='DELETE': del SSH_HOSTS[key]; return self.send({})
+            existing.update({k:body[k] for k in ['name','host','user','port','note']}); existing['revision']+=1; return self.send(existing)
+        if p.startswith('/api/nodes/test-node/'):
+            CORDONED = p.endswith('/cordon'); return self.send({'cordoned':CORDONED})
+        if p.startswith('/api/ai/providers/'):
+            key=p.split('/')[-1]
+            if key in PROVIDERS:
+                PROVIDERS[key].update({k:v for k,v in body.items() if k != 'api_key'}); return self.send(PROVIDERS[key])
+        if p=='/api/ai/providers':
+            key=str(uuid.uuid4()); PROVIDERS[key]=dict(id=key,name=body['name'],provider_type=body['provider_type'],uses_oauth=False,enabled=True,status={'type':'connected'}); return self.send(PROVIDERS[key])
         if p=='/api/projects': PROJECTS.append(body); return self.send(body)
         if p.endswith('/file/mkdir'): return self.send({})
         if p.endswith('/file'):

@@ -3,6 +3,8 @@
 //! Persists user-configurable settings to disk at `{working_dir}/.sandboxed-sh/settings.json`.
 //! Environment variables are used as initial defaults when no settings file exists.
 
+pub mod ssh_hosts;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -150,6 +152,7 @@ pub struct Settings {
 /// In-memory store for global settings with disk persistence.
 #[derive(Debug)]
 pub struct SettingsStore {
+    pub ssh_hosts: ssh_hosts::Store,
     settings: RwLock<Settings>,
     storage_path: PathBuf,
 }
@@ -189,6 +192,7 @@ impl SettingsStore {
 
         Self {
             settings: RwLock::new(settings),
+            ssh_hosts: ssh_hosts::Store::new(working_dir),
             storage_path,
         }
     }

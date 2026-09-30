@@ -82,14 +82,39 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertLessThanOrEqual(file.frame.maxY, app.otherElements["conversation-composer"].frame.minY)
         capture(app, "rich-response-final-bottom")
     }
+    @MainActor func testSettingsNavigationAndSharedAddressCreation() throws {
+        let app = launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["settings.machines"].waitForExistence(timeout: 5))
+        capture(app, "settings-home")
+        app.buttons["settings.machines"].tap()
+        XCTAssertTrue(app.buttons["ssh.fixture-host"].waitForExistence(timeout: 10))
+        capture(app, "settings-machines")
+        app.buttons["ssh.add"].tap()
+        let name = app.textFields["ssh.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap(); name.typeText("iPhone address")
+        let host = app.textFields["ssh.host"]
+        host.tap(); host.typeText("phone-test.example")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts["iPhone address"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Settings"].tap()
+        app.buttons["settings.providers"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture provider"].waitForExistence(timeout: 10))
+        capture(app, "settings-providers")
+    }
     @MainActor func testCompactComposerKeyboardAndSettings() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
         capture(app, "compact-projects")
         app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["settings.backend"].waitForExistence(timeout: 5))
+        app.buttons["settings.backend"].tap()
         XCTAssertTrue(app.textFields["server-url"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.textFields["server-url"].value as? String, "http://127.0.0.1:18766")
         capture(app, "compact-server-settings")
+        app.navigationBars.buttons["Settings"].tap()
         app.buttons["Done"].tap()
         app.buttons["project.orb-test"].tap()
         capture(app, "compact-project-folders")
@@ -168,10 +193,13 @@ final class OrbFlowUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Not Now"].waitForNonExistence(timeout: 5))
         }
         app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["settings.backend"].waitForExistence(timeout: 5))
+        app.buttons["settings.backend"].tap()
         XCTAssertTrue(password.waitForExistence(timeout: 10))
         password.tap(); password.typeText("wrong")
         app.buttons["Connect"].tap()
         XCTAssertTrue(app.staticTexts["Incorrect password. Please try again."].waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Settings"].tap()
         app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["project.orb-test"].exists)
         if app.buttons["Not Now"].waitForExistence(timeout: 5) {
@@ -179,6 +207,8 @@ final class OrbFlowUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Not Now"].waitForNonExistence(timeout: 5))
         }
         app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["settings.backend"].waitForExistence(timeout: 5))
+        app.buttons["settings.backend"].tap()
         XCTAssertTrue(password.waitForExistence(timeout: 10))
         password.tap()
         password.typeText("orb-test-password")
