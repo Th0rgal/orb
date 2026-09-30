@@ -144,3 +144,18 @@ describe("emphasis around code spans", () => {
     expect(container.textContent).toContain("**not bold**");
   });
 });
+
+import { incrementalMarkdown } from "../src/Markdown";
+it("streaming keeps the identity of blocks that did not change", () => {
+  const parse = incrementalMarkdown();
+  const first = parse("# Title\n\nParagraph one\n\n```lean\ntheorem a");
+  const second = parse("# Title\n\nParagraph one\n\n```lean\ntheorem a := by\n  simp");
+  expect(second.length).toBe(first.length);
+  // Stable blocks (before the last blank line) and the unchanged tail blocks are the same objects.
+  expect(second[0]).toBe(first[0]);
+  expect(second[1]).toBe(first[1]);
+  expect(second[2]).not.toBe(first[2]);
+  const third = parse("# Title\n\nParagraph one\n\n```lean\ntheorem a := by\n  simp\n```\n\nDone");
+  expect(third[0]).toBe(first[0]);
+  expect(third.at(-1)).toMatchObject({ t: "p" });
+});

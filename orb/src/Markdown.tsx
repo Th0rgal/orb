@@ -257,10 +257,18 @@ export function markdownText(source:string):string{
  return parseMarkdown(source).map(block=>block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(plain).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text)).join('\n');
 }
 
+/** The same block again keeps its object, so the list keeps its DOM. */
+function reuseBlocks(previous: Block[], next: Block[]): Block[] {
+  return next.map((block, index) => {
+    const old = previous[index];
+    return old && JSON.stringify(old) === JSON.stringify(block) ? old : block;
+  });
+}
+
 export function incrementalMarkdown() {
-  let previous = "", boundary = 0, stable: Block[] = [];
+  let previous = "", boundary = 0, stable: Block[] = [], unstable: Block[] = [];
   return (text: string): Block[] => {
-    if (!text.startsWith(previous)) { boundary = 0; stable = []; }
+    if (!text.startsWith(previous)) { boundary = 0; stable = []; unstable = []; }
     previous = text;
     const tail = text.slice(boundary);
     let fenced = false, math = false, end = 0, offset = 0;
@@ -273,8 +281,12 @@ export function incrementalMarkdown() {
     if (end) {
       stable = [...stable, ...parseMarkdown(tail.slice(0, end))];
       boundary += end;
+      unstable = [];
     }
-    return [...stable, ...parseMarkdown(text.slice(boundary))];
+    // The unstable tail is re-parsed each time; blocks that did not change
+    // (everything but the last one, usually) keep their identity.
+    unstable = reuseBlocks(unstable, parseMarkdown(text.slice(boundary)));
+    return [...stable, ...unstable];
   };
 }
 
