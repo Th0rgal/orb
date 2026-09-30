@@ -3971,19 +3971,6 @@ async fn run_mission_turn(
         ""
     };
 
-    let mut convo = String::new();
-    convo.push_str(&crate::util::frame_turn_prompt(
-        &history_context,
-        &user_message,
-    ));
-    convo.push_str(&deliverable_reminder);
-    convo.push_str("\n\nInstructions:\n- Respond to the CURRENT user request. The conversation history is context only: do not resume or continue earlier tasks from it unless the current request asks you to.\n- Use available tools to gather information or make changes.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n- USE information already provided in the message - do not ask for URLs, paths, or details that were already given.\n- When you have fully completed the user's goal or determined it cannot be completed, state that clearly in your final response.");
-    if pr_readonly {
-        convo.push_str("\n\nPR READ-ONLY CAPABILITY (server-enforced): inspect and run verification only. Do not edit tracked files, commit, push, comment, resolve threads, approve, close, or merge. Report findings with an explicit terminal line `VERDICT: CLEAN`, `VERDICT: BLOCKED`, or `VERDICT: INFRA_BLOCKED`. Git/gh mutation commands are disabled for this mission.");
-    }
-    convo.push_str(multi_step_instructions);
-    convo.push('\n');
-
     // Ensure mission workspace exists and is configured for OpenCode.
     let mut workspace = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
     // Validate the requested source before config synchronization can create
@@ -4214,12 +4201,7 @@ async fn run_mission_turn(
         mission_id,
         &user_message,
     ) {
-        Ok(message) => {
-            if message != user_message {
-                convo.push_str("\nRead attached context in `.paloma/attach.md`.\n");
-            }
-            message
-        }
+        Ok(message) => message,
         Err(error) => return AgentResult::failure(format!("materialize attachments: {error}"), 0),
     };
 
@@ -4341,6 +4323,20 @@ async fn run_mission_turn(
             "Session rotated successfully"
         );
     }
+
+    // Frame only the final message, after paths, attachments and transfer context resolve.
+    let mut convo = String::new();
+    convo.push_str(&crate::util::frame_turn_prompt(
+        &history_context,
+        &user_message,
+    ));
+    convo.push_str(&deliverable_reminder);
+    convo.push_str("\n\nInstructions:\n- Respond to the CURRENT user request. The conversation history is context only: do not resume or continue earlier tasks from it unless the current request asks you to.\n- Use available tools to gather information or make changes.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n- USE information already provided in the message - do not ask for URLs, paths, or details that were already given.\n- When you have fully completed the user's goal or determined it cannot be completed, state that clearly in your final response.");
+    if pr_readonly {
+        convo.push_str("\n\nPR READ-ONLY CAPABILITY (server-enforced): inspect and run verification only. Do not edit tracked files, commit, push, comment, resolve threads, approve, close, or merge. Report findings with an explicit terminal line `VERDICT: CLEAN`, `VERDICT: BLOCKED`, or `VERDICT: INFRA_BLOCKED`. Git/gh mutation commands are disabled for this mission.");
+    }
+    convo.push_str(multi_step_instructions);
+    convo.push('\n');
 
     // Execute based on backend
     // For Claude Code, check if this is a continuation turn (has prior assistant response).

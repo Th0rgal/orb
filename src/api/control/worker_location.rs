@@ -74,6 +74,10 @@ pub async fn inherit(
         .get_mission(id)
         .await?
         .ok_or("Parent mission no longer exists")?;
+    // Placement overrides do not change the worker's project or harness defaults.
+    req.project = req.project.take().or(parent.project.project.clone());
+    req.config_profile = req.config_profile.take().or(parent.config_profile.clone());
+    req.backend = req.backend.take().or(Some(parent.backend.clone()));
     if req.remote_node_id.is_some() || req.placement.is_some() {
         return Ok(());
     }
@@ -83,9 +87,6 @@ pub async fn inherit(
         );
     }
     req.workspace_id = Some(parent.workspace_id);
-    req.project = req.project.take().or(parent.project.project.clone());
-    req.config_profile = req.config_profile.take().or(parent.config_profile.clone());
-    req.backend = req.backend.take().or(Some(parent.backend.clone()));
     let tags = req.tags.get_or_insert_with(Vec::new);
     machine_transfer::guard(&control.mission_store, id).await?;
     if let Some(transfer) = machine_transfer::committed(&control.mission_store, id).await? {

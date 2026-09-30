@@ -298,6 +298,7 @@ pub async fn local_origin_launch(
     let run_id = uuid::Uuid::new_v4();
     request.id = id.to_string();
     request.session_id = None;
+    request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let root = account(&connection)?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let key = uuid::Uuid::parse_str(&draft.key).map_err(|_| "Invalid draft identity")?;
@@ -319,6 +320,7 @@ pub async fn local_origin_launch(
             || record.snapshot.origin.project != draft.project
             || record.snapshot.origin.backend != request.harness
             || record.snapshot.origin.model != request.model
+            || record.snapshot.origin.cwd != request.cwd
         {
             return Err("Draft identity already used".into());
         }
@@ -327,13 +329,7 @@ pub async fn local_origin_launch(
         return Ok(result);
     }
 
-    // New offline work gets a private execution directory. A disconnected
-    // origin cannot consult Core's workspace writer fence.
-    let cwd = PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?)
-        .join(".orb/local-runs")
-        .join(id.to_string());
-    std::fs::create_dir_all(&cwd).map_err(|e| e.to_string())?;
-    request.cwd = cwd.to_string_lossy().into_owned();
+    // Execution stays in the chosen directory; the journal above remains private.
     let snapshot = Snapshot {
         origin: Origin {
             id,
