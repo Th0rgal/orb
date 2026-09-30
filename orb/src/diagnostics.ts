@@ -121,12 +121,13 @@ export function startDiagnostics(): void {
   (window as unknown as { orbDiagnostics?: unknown }).orbDiagnostics = { recent: () => recent.slice(), flush };
   note("started", { agent: navigator.userAgent.slice(0, 160) });
 
-  let expected = performance.now() + BEAT_MS;
+  let expected = performance.now() + BEAT_MS, shownAt = -Infinity;
   setInterval(() => {
     const now = performance.now(), late = now - expected;
     expected = now + BEAT_MS;
-    // A hidden page has its timers slowed to about one per second.
-    if (late < (document.hidden ? HIDDEN_STALL_MS : STALL_MS)) return;
+    // A hidden page has its timers slowed to about one per second, and the
+    // first beat after it shows again is late for that reason.
+    if (late < (document.hidden || now - shownAt < 1500 ? HIDDEN_STALL_MS : STALL_MS)) return;
     stalls.count++; stalls.ms += late; stalls.worst = Math.max(stalls.worst, late);
     note("stall", { ms: round(late), hidden: document.hidden });
     if (late >= 1000) void flush();
@@ -150,5 +151,5 @@ export function startDiagnostics(): void {
   window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(() => void checkWindow(), 1000); });
   window.addEventListener("error", event => note("error", { message: String(event.message).slice(0, 300), source: `${event.filename}:${event.lineno}` }));
   window.addEventListener("unhandledrejection", event => note("rejection", { message: String(event.reason).slice(0, 300) }));
-  document.addEventListener("visibilitychange", () => note("visibility", { hidden: document.hidden }));
+  document.addEventListener("visibilitychange", () => { shownAt = performance.now(); note("visibility", { hidden: document.hidden }); });
 }
