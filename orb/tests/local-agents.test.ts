@@ -184,7 +184,7 @@ it('Stop drains an already invoked launch before reporting the mission stopped',
  });host.__TAURI_INTERNALS__={invoke};
  try{
   const launch=startLocal({id:'stop-launch-race',harness:'codex',bin:'codex',cwd:'/work',prompt:'wake'});
-  await Promise.resolve();let stopped=false;
+  await vi.waitFor(()=>expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(true));let stopped=false;
   const stop=stopLocal('stop-launch-race',{cancelWakeups:false}).then(()=>{stopped=true;});
   await Promise.resolve();await Promise.resolve();expect(stopped).toBe(false);
   release({run_id:'late-run',generation:1});await launch;await stop;
@@ -205,4 +205,19 @@ it('Stop prevents a launch waiting for native recovery from reaching IPC',async(
   await stopLocal('stop-recovery-race',{cancelWakeups:false});release();await recovery;await rejected;
   expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(false);
  }finally{host.__TAURI_INTERNALS__=previous;}
+});
+
+it('new native launches wait for persisted Stop recovery',async()=>{
+ const wakeups=await import('../src/localWakeups');
+ let release!:()=>void;const recovery=new Promise<void>(resolve=>release=resolve);
+ const replay=vi.spyOn(wakeups,'replayLocalWakeupStops').mockReturnValue(recovery);
+ const {startLocal}=await import('../src/localAgents');
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ const invoke=vi.fn(async(command:string)=>command==='local_run_launch'?{run_id:'fresh',generation:2}:{done:true,text:''});host.__TAURI_INTERNALS__={invoke};
+ try{
+  const launch=startLocal({id:'startup-stop-replay',harness:'codex',bin:'codex',cwd:'/work',prompt:'new turn'});
+  await vi.waitFor(()=>expect(replay).toHaveBeenCalled());
+  expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(false);
+  release();await launch;expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(true);
+ }finally{replay.mockRestore();host.__TAURI_INTERNALS__=previous;}
 });

@@ -7,6 +7,16 @@ export function localContinuation(mission?: string): ContinuationSummary | undef
   const items = pending().filter(item => item.mission === mission);
   return items.length ? { count: items.length, items } : undefined;
 }
+/** A pending Stop is recovered before any new native launch is allowed. */
+export async function replayLocalWakeupStops(valid:()=>boolean=()=>true) {
+  const invoke=nativeInvoke(),version=connectionVersion();
+  if(!invoke||!getJwt())return;
+  const connection={api_url:getApiUrl(),token:getJwt()};
+  const queue=await import("./localMessageQueue");
+  await queue.replayWakeupStops((mission,cancelToken)=>invoke("local_wakeups_cancel",{mission,connection,cancelToken}),()=>valid()&&version===connectionVersion());
+  if(!valid()||version!==connectionVersion())throw new Error("Connection changed during Stop recovery");
+}
+
 export function startLocalWakeups() {
   const invoke = nativeInvoke(), version = connectionVersion();
   let stopped = false, busy = false;
@@ -17,10 +27,7 @@ export function startLocalWakeups() {
     busy = true;
     try {
       const connection={api_url:getApiUrl(),token:getJwt()};
-      const queue=await import("./localMessageQueue");
-      // Serialize replay with new Stop fences so an old snapshot cannot cancel
-      // work started after a newer Stop completed.
-      await queue.replayWakeupStops((mission,cancelToken)=>invoke("local_wakeups_cancel",{mission,connection,cancelToken}),()=>!stopped&&version===connectionVersion());
+      await replayLocalWakeupStops(()=>!stopped&&version===connectionVersion());
       if(stopped||version!==connectionVersion())return;
       const result = await invoke("local_wakeups_sync", { connection }) as { pending: (Continuation & { mission: string })[]; changed: boolean; cancelled?: {mission:string;token:string}[] };
       if (stopped || version !== connectionVersion()) return;

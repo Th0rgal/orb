@@ -387,6 +387,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   try {
     // Let this window's in-flight reconciliation release its native lock first.
     await nativeRecoveries.get(req.id);
+    await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
     if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
@@ -516,6 +517,7 @@ export async function localSessionGit(cwd: string): Promise<{ repository: string
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
  const invoke=tauriInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
+ await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}

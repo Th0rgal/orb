@@ -1174,16 +1174,16 @@ pub async fn cancel_all(
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
-pub fn attach_capabilities(value: &mut serde_json::Value) {
+pub fn attach_capabilities(value: &mut serde_json::Value, enabled: bool) {
     let backend = value["backend"].as_str().unwrap_or("");
     let local = value["tags"]
         .as_array()
         .is_some_and(|tags| tags.iter().any(|v| v.as_str() == Some("placement:client")));
     value["scheduling"] = serde_json::json!({
-        "owner":"sandboxed", "durable":true,
-        "native_schedule_wakeup":backend == "claudecode",
+        "owner":"sandboxed", "durable":enabled,
+        "native_schedule_wakeup":enabled && backend == "claudecode",
         "native_cron":false,
-        "transport":match (backend, local) { ("grok",true)=>"local_command", ("grok",false)=>"acp_mcp", ("codex"|"opencode"|"claudecode",_)=>"mcp", _=>"unavailable" },
+        "transport":if !enabled {"unavailable"} else {match (backend, local) { ("grok",true)=>"local_command", ("grok",false)=>"acp_mcp", ("codex"|"opencode"|"claudecode",_)=>"mcp", _=>"unavailable" }},
     });
 }
 

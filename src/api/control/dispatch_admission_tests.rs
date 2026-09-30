@@ -61,10 +61,19 @@ impl Harness {
         dir: FixtureDir,
         nodes: Vec<crate::remote_node::RemoteNodeConfig>,
     ) -> Self {
+        Self::with_directory_and_automations(dir, nodes, true).await
+    }
+
+    async fn with_directory_and_automations(
+        dir: FixtureDir,
+        nodes: Vec<crate::remote_node::RemoteNodeConfig>,
+        enabled: bool,
+    ) -> Self {
         let path = dir.path();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::new(path.to_path_buf());
         config.port = listener.local_addr().unwrap().port();
+        config.automations_enabled = enabled;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
@@ -181,6 +190,10 @@ impl Harness {
             .nest("/projects", crate::api::projects_overview::routes())
             .route("/missions", axum::routing::post(create_mission))
             .route("/missions/:id", axum::routing::get(get_mission))
+            .route(
+                "/missions/:id/automations",
+                axum::routing::post(create_automation),
+            )
             .route("/missions/:id/resume", axum::routing::post(resume_mission))
             .route(
                 "/missions/:id/board/tasks",
@@ -9495,4 +9508,204 @@ async fn continuation_remote_node_terminal_receipt_settles_execution() {
     })
     .await;
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn continuation_queued_mcp_action_keeps_origin_across_stop_and_resume() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "queued wake-up").await;
+    let store = &h.control.mission_store;
+    let run = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Executor,
+            mission_id: Some(mission.id),
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let call = |key: &str| gateway::Call {
+        name: "schedule_wakeup".into(),
+        arguments: json!({"prompt":"wake","reason":"test","delay_seconds":600,"idempotency_key":key}),
+    };
+    let accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call("old")),
+    )
+    .await
+    .0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let id = accepted["result"]["action_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Hold queued dispatch while the originating run stops and a new run starts.
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT principal FROM mcp_actions_v1 WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let saved: gateway::Principal = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved.action_run_generation, Some(run.generation));
+        assert_eq!(
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET state='test_held' WHERE id=?1 AND state='queued'",
+                [&id]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    continuations::stop_for_mission(store, mission.id)
+        .await
+        .unwrap();
+    store
+        .finish_mission_run(run.run_id, run.generation, Some("cancelled"))
+        .await
+        .unwrap();
+    let resumed = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    assert!(resumed.generation > run.generation);
+    h.state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mcp_actions_v1 SET state='queued' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":id}),
+            }),
+        )
+        .await
+        .0;
+        if !matches!(
+            receipt["result"]["state"].as_str(),
+            Some("queued" | "dispatching")
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_ne!(receipt["result"]["state"], "completed", "{receipt}");
+    assert!(store.list_active_automations().await.unwrap().is_empty());
+    let fresh = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call("fresh")),
+    )
+    .await
+    .0;
+    let id = fresh["result"]["action_id"].clone();
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":id}),
+            }),
+        )
+        .await
+        .0;
+        if receipt["result"]["state"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(receipt["result"]["state"], "completed", "{receipt}");
+    let timers = store.list_active_automations().await.unwrap();
+    assert_eq!(timers.len(), 1);
+    assert_eq!(
+        timers[0].variables["__wakeup_run_generation"],
+        resumed.generation.to_string()
+    );
+}
+
+#[tokio::test]
+async fn continuation_disabled_scheduler_is_not_advertised_or_accepted() {
+    use crate::control_mcp::{gateway, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let h = Harness::with_directory_and_automations(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        vec![],
+        false,
+    )
+    .await;
+    let mission = active_mission(&h, "disabled scheduling").await;
+    let detail = get_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(detail["scheduling"]["durable"], false);
+    assert_eq!(detail["scheduling"]["transport"], "unavailable");
+    let request=serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":60},"variables":{"__wakeup_source":"automation-manager"}})).unwrap();
+    assert_eq!(
+        create_automation(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(mission.id),
+            Json(request)
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Executor,
+            mission_id: Some(mission.id),
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let caps = gateway::capabilities(State(h.state.clone()), Extension(principal.clone()))
+        .await
+        .0;
+    assert!(!caps["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "schedule_wakeup" || t["name"] == "schedule_job_wakeup"));
+    let denied=gateway::call(State(h.state.clone()),Extension(principal),Json(gateway::Call{name:"schedule_wakeup".into(),arguments:json!({"prompt":"wake","reason":"test","delay_seconds":60,"idempotency_key":"disabled"})})).await.0;
+    assert_eq!(denied["ok"], false);
+    assert_eq!(denied["error"]["accepted"], "no");
 }

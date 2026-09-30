@@ -2440,7 +2440,12 @@ impl OrchestratorMcp {
 
     pub(super) async fn handle_call(&self, method: &str, params: Value) -> Result<Value, String> {
         if matches!(method, "schedule_wakeup" | "schedule_job_wakeup") {
-            let body = super::scheduling::body(method, &params)?;
+            let mut body = super::scheduling::body(method, &params)?;
+            let generation = self
+                .principal
+                .action_run_generation
+                .ok_or("Wake-up action has no originating run")?;
+            body["variables"]["__wakeup_run_generation"] = json!(generation.to_string());
             let response = self
                 .api_post(
                     &format!("/api/control/missions/{}/automations", self.mission_id),

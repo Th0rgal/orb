@@ -6872,7 +6872,10 @@ pub async fn list_missions(
         .collect();
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
-            continuations::attach_capabilities(value);
+            continuations::attach_capabilities(
+                value,
+                state.config.automations_enabled && control.mission_store.is_persistent(),
+            );
             value["continuation"] = continuation_summaries
                 .get(&id)
                 .cloned()
@@ -7864,7 +7867,10 @@ pub async fn get_mission(
                 let mut value = serde_json::to_value(&mission).map_err(internal_error)?;
                 value["execution_kind"] = serde_json::json!("hosted");
                 value["cloud"] = serde_json::to_value(execution).map_err(internal_error)?;
-                continuations::attach_capabilities(&mut value);
+                continuations::attach_capabilities(
+                    &mut value,
+                    state.config.automations_enabled && control.mission_store.is_persistent(),
+                );
                 value["continuation"] = continuations::summaries(&control.mission_store)
                     .await
                     .map_err(internal_error)?
@@ -7899,7 +7905,10 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
-            continuations::attach_capabilities(&mut value);
+            continuations::attach_capabilities(
+                &mut value,
+                state.config.automations_enabled && control.mission_store.is_persistent(),
+            );
             value["continuation"] = continuations::summaries(&control.mission_store)
                 .await
                 .map_err(internal_error)?
@@ -29381,16 +29390,29 @@ pub async fn create_automation(
         ));
     }
 
-    // Capture the originating generation before waiting behind Stop.
+    // Queued MCP actions carry the generation captured before durable acceptance.
+    // Direct requests capture it before waiting behind Stop's transaction.
     let wakeup_generation = if req.variables.contains_key("__wakeup_source") {
-        Some(
-            control
+        if !state.config.automations_enabled || !control.mission_store.is_persistent() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Durable scheduling is disabled on this server".into(),
+            ));
+        }
+        Some(match req.variables.get("__wakeup_run_generation") {
+            Some(value) => value.parse::<u64>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid originating wake-up generation".into(),
+                )
+            })?,
+            None => control
                 .mission_store
                 .get_latest_mission_run(mission_id)
                 .await
                 .map_err(internal_error)?
                 .map_or(0, |run| run.generation),
-        )
+        })
     } else {
         None
     };
