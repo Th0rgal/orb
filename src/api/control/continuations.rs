@@ -6,6 +6,28 @@ use crate::api::mission_store::{
 };
 use chrono::{DateTime, Utc};
 
+/// Bind all constituents to the executing turn before settlement or recovery.
+/// The stored alias is independent of the scheduler's outer admission identity.
+pub async fn bind_turn(
+    store: &Arc<dyn MissionStore>,
+    mission: Option<Uuid>,
+    message: Option<Uuid>,
+    ids: Vec<Uuid>,
+) {
+    let (Some(mission), Some(message)) = (mission, message) else {
+        return;
+    };
+    if ids.is_empty() || ids == [message] {
+        return;
+    }
+    if let Err(error) = store
+        .handoff_scheduled_executions(mission, ids, message)
+        .await
+    {
+        tracing::error!(%mission, %message, %error, "Failed to bind scheduled batch to its executing turn");
+    }
+}
+
 pub fn lock(mission: Uuid) -> Arc<tokio::sync::Mutex<()>> {
     worker_location::dispatch_lock(&format!("continuation:{mission}"))
 }
@@ -616,6 +638,79 @@ mod tests {
             store.get_automation_executions(a.id, None).await.unwrap()[0].status,
             ExecutionStatus::Success
         );
+    }
+
+    #[tokio::test]
+    async fn continuation_deferred_batch_settles_all_constituents_and_survives_handoff() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "first".into()).await.unwrap();
+        let mut first = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        first.status = ExecutionStatus::Running;
+        first
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(first.clone())
+            .await
+            .unwrap();
+        let mut other = a.clone();
+        other.id = Uuid::new_v4();
+        store.create_automation(other.clone()).await.unwrap();
+        stage(&store, &other, "second".into()).await.unwrap();
+        let mut second = store
+            .get_automation_executions(other.id, None)
+            .await
+            .unwrap()
+            .remove(0);
+        second.status = ExecutionStatus::Running;
+        second
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(second.clone())
+            .await
+            .unwrap();
+        let content = deferred_messages::join(
+            &deferred_messages::encode(first.id, "first"),
+            &deferred_messages::encode(second.id, "second"),
+        );
+        let outer = Uuid::new_v4();
+        let ids = deferred_messages::execution_ids(outer, &content, Some("scheduler"));
+        assert_eq!(ids, vec![first.id, second.id]);
+        bind_turn(&store, Some(a.mission_id), Some(outer), ids).await;
+        // A remote-build continuation can move the whole batch again.
+        let terminal = Uuid::new_v4();
+        assert_eq!(
+            store
+                .handoff_scheduled_executions(a.mission_id, vec![outer], terminal)
+                .await
+                .unwrap(),
+            2
+        );
+        store
+            .update_automation_execution(first.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .complete_turn_executions_for_mission(a.mission_id, Some(outer), false, None)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .complete_turn_executions_for_mission(a.mission_id, Some(terminal), true, None)
+                .await
+                .unwrap(),
+            2
+        );
+        for id in [a.id, other.id] {
+            assert_eq!(
+                store.get_automation_executions(id, None).await.unwrap()[0].status,
+                ExecutionStatus::Success
+            );
+        }
     }
 
     #[tokio::test]

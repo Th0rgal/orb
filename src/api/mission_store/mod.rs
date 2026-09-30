@@ -3060,10 +3060,10 @@ pub trait MissionStore: Send + Sync {
     }
 
     /// Move a running scheduled occurrence to the message that continues it.
-    async fn handoff_scheduled_execution(
+    async fn handoff_scheduled_executions(
         &self,
         mission: Uuid,
-        from: Uuid,
+        from: Vec<Uuid>,
         to: Uuid,
     ) -> Result<u32, String> {
         let _ = (mission, from, to);

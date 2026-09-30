@@ -6667,7 +6667,11 @@ async fn park_scheduled_remote_execution(
         return;
     };
     if let Err(error) = store
-        .handoff_scheduled_execution(mission, message, remote_build_terminal_delivery_id(job))
+        .handoff_scheduled_executions(
+            mission,
+            vec![message],
+            remote_build_terminal_delivery_id(job),
+        )
         .await
     {
         tracing::error!(%mission, %error, "Failed to preserve scheduled remote continuation identity");
@@ -22543,6 +22547,7 @@ async fn control_actor_loop(
     // This is different from `current_mission` which can change when user creates a new mission.
     let mut running_mission_id: Option<Uuid> = None;
     let mut running_message_id: Option<Uuid> = None;
+    let mut running_execution_ids = Vec::new();
     // Backend captured for the currently executing primary turn. Updating a
     // mission's settings while it runs must not change watchdog semantics for
     // that in-flight process.
@@ -24490,7 +24495,8 @@ async fn control_actor_loop(
                                 };
                                 let turn_mission_store = mission_store.clone();
                                 let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                                running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
+                                running_message_id = Some(mid);
+                                running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                                 running = Some(tokio::spawn(async move {
                                     let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                         turn_mission_store,
@@ -25982,7 +25988,8 @@ async fn control_actor_loop(
                                         };
                                         let turn_mission_store = mission_store.clone();
                                         let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                                        running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
+                                        running_message_id = Some(mid);
+                                        running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                                         running = Some(tokio::spawn(async move {
                                             let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                                 turn_mission_store,
@@ -26422,6 +26429,7 @@ async fn control_actor_loop(
                     // (current_mission can change if user clicks "New Mission" while task was running)
                     let completed_mission_id = running_mission_id;
                     let completed_message_id = running_message_id.take();
+                    continuations::bind_turn(&mission_store, completed_mission_id, completed_message_id, std::mem::take(&mut running_execution_ids)).await;
                     let completed_cancellation_requested = running_cancel
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled);
@@ -27122,7 +27130,8 @@ async fn control_actor_loop(
                     let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                     let turn_mission_store = mission_store.clone();
                     let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                    running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
+                    running_message_id = Some(mid);
+                    running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                     running = Some(tokio::spawn(async move {
                         let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                             turn_mission_store,
@@ -27230,8 +27239,10 @@ async fn control_actor_loop(
                 let mut completed_missions = Vec::new();
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
-                    let completed_message_id = runner.inflight_message().map(|message| deferred_messages::execution_id(message.id, &message.content, message.source.as_deref()));
+                    let completed_message_id = runner.inflight_message().map(|message| message.id);
+                    let completed_execution_ids = runner.inflight_message().map(|message| deferred_messages::execution_ids(message.id, &message.content, message.source.as_deref())).unwrap_or_default();
                     if runner.force_clear_cancelled_if_due() {
+                        continuations::bind_turn(&mission_store, Some(*mission_id), completed_message_id, completed_execution_ids).await;
                         tracing::warn!(
                             mission_id = %mission_id,
                             "Force-aborting stuck parallel runner after cancellation grace period"
@@ -27294,6 +27305,7 @@ async fn control_actor_loop(
                         continue;
                     }
                     if runner.check_finished() {
+                        continuations::bind_turn(&mission_store, Some(*mission_id), completed_message_id, completed_execution_ids).await;
                         if let Some((_msg_id, user_msg, mut result)) = runner.poll_completion().await {
                             maybe_recover_soft_llm_error(&mut result);
                             // Same as the main runner: a usage limit on every
@@ -27953,6 +27965,7 @@ async fn control_actor_loop(
                         continue;
                     }
                 }
+                continuations::bind_turn(&mission_store, stuck_mid, running_message_id, std::mem::take(&mut running_execution_ids)).await;
                 running = None;
                 runner_force_abort_requested = false;
                 running_cancel = None;

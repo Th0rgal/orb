@@ -38,16 +38,15 @@ pub(crate) fn decode(content: &str) -> (String, Vec<(Uuid, String)>) {
         _ => (content.into(), vec![]),
     }
 }
-/// Attribute completion to the persisted logical message, while the scheduler
-/// keeps a distinct outer dispatch ID so admission does not dedupe its own goal.
-pub(crate) fn execution_id(outer: Uuid, content: &str, source: Option<&str>) -> Uuid {
+/// Keep every logical message in a deferred batch; dispatch retains its own ID.
+pub(crate) fn execution_ids(outer: Uuid, content: &str, source: Option<&str>) -> Vec<Uuid> {
     if source == Some("scheduler") {
         let messages = decode(content).1;
-        if messages.len() == 1 {
-            return messages[0].0;
+        if !messages.is_empty() {
+            return messages.into_iter().map(|(id, _)| id).collect();
         }
     }
-    outer
+    vec![outer]
 }
 pub(crate) fn strip(content: &str) -> String {
     decode(content).0
@@ -94,9 +93,12 @@ mod tests {
         let id = Uuid::new_v4();
         let outer = Uuid::new_v4();
         let wrapped = encode(id, "remote receipt");
-        assert_eq!(execution_id(outer, &wrapped, Some("scheduler")), id);
-        assert_eq!(execution_id(outer, &wrapped, Some("user")), outer);
-        assert_eq!(execution_id(outer, "plain goal", Some("scheduler")), outer);
+        assert_eq!(execution_ids(outer, &wrapped, Some("scheduler")), vec![id]);
+        assert_eq!(execution_ids(outer, &wrapped, Some("user")), vec![outer]);
+        assert_eq!(
+            execution_ids(outer, "plain goal", Some("scheduler")),
+            vec![outer]
+        );
         assert_eq!(strip(&wrapped), "remote receipt");
     }
     #[test]

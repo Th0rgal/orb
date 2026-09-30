@@ -7961,18 +7961,18 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|e| e.to_string())?
     }
 
-    async fn handoff_scheduled_execution(
+    async fn handoff_scheduled_executions(
         &self,
         mission: Uuid,
-        from: Uuid,
+        from: Vec<Uuid>,
         to: Uuid,
     ) -> Result<u32, String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             conn.blocking_lock().execute("UPDATE automation_executions SET variables_used = json_set(variables_used, '$.__continuation_message_id', ?)
                 WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND status = 'running'
-                AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?",
-                params![to.to_string(), mission.to_string(), from.to_string()])
+                AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) IN (SELECT value FROM json_each(?))",
+                params![to.to_string(), mission.to_string(), serde_json::to_string(&from).map_err(|e| e.to_string())?])
                 .map(|n| n as u32).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string())?
     }
