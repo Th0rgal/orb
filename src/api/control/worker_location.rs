@@ -103,6 +103,33 @@ pub async fn board_allows_client_run(
     }))
 }
 
+/// A not-yet-adopted worker must remain deliverable. Only retire a board
+/// delivery when its task is gone, settled, or assigned to a different run.
+pub async fn board_client_delivery_obsolete(
+    store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+) -> Result<bool, String> {
+    let Some(task_id) = mission
+        .project
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("board-task:"))
+    else {
+        return Ok(false);
+    };
+    let task_id = Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
+    let Some(task) = store.get_board_task(task_id).await? else {
+        return Ok(true);
+    };
+    Ok(matches!(
+        task.status,
+        crate::api::mission_store::BoardTaskStatus::Settled
+            | crate::api::mission_store::BoardTaskStatus::Accepted
+            | crate::api::mission_store::BoardTaskStatus::Cancelled
+    ) || (task.status == crate::api::mission_store::BoardTaskStatus::Running
+        && task.worker_mission_id != Some(mission.id)))
+}
+
 pub async fn resolved_client_owner(
     store: &Arc<dyn MissionStore>,
     id: Uuid,

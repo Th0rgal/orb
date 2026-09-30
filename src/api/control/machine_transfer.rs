@@ -930,7 +930,7 @@ pub async fn client_run(
     if req.op == "inbox_all" {
         let items = control
             .mission_store
-            .list_pending_board_outbox(10000)
+            .list_pending_board_outbox_filtered(1000, Some(true))
             .await
             .map_err(internal_error)?;
         let mut owners = std::collections::HashMap::new();
@@ -1022,7 +1022,7 @@ pub async fn client_run(
         }
         let items = control
             .mission_store
-            .list_pending_board_outbox(10000)
+            .list_pending_board_outbox_filtered(1000, Some(true))
             .await
             .map_err(internal_error)?;
         let pending: Vec<_> = items

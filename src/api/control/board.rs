@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::agents::TerminalReason;
 use crate::api::mission_store::{
     now_string, BoardOutboxItem, BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus,
-    MissionHistoryEntry, MissionProjectPatch, MissionStore, TaskAttempt,
+    Mission, MissionHistoryEntry, MissionProjectPatch, MissionStore, TaskAttempt,
 };
 
 use super::{ControlCommand, MissionStatus, UserMessageAck};
@@ -1061,7 +1061,36 @@ async fn replay_pending_board_outbox(
     cmd_tx: &mpsc::Sender<ControlCommand>,
     inflight: &BoardOutboxInflight,
 ) {
-    let pending = match mission_store.list_pending_board_outbox(1000).await {
+    // Retire stale client intents without consuming the server delivery
+    // budget. Leave pre-adoption and temporarily offline clients pending.
+    if let Ok(items) = mission_store
+        .list_pending_board_outbox_filtered(1000, Some(true))
+        .await
+    {
+        for item in items {
+            let obsolete = match mission_store.get_mission(item.boss_mission_id).await {
+                Ok(Some(mission)) => {
+                    super::worker_location::board_client_delivery_obsolete(mission_store, &mission)
+                        .await
+                        .unwrap_or(false)
+                }
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if obsolete {
+                if let Err(error) = mission_store
+                    .acknowledge_board_outbox(&item.idempotency_key)
+                    .await
+                {
+                    tracing::warn!(%error, "board: could not retire obsolete client delivery");
+                }
+            }
+        }
+    }
+    let pending = match mission_store
+        .list_pending_board_outbox_filtered(1000, Some(false))
+        .await
+    {
         Ok(items) => items,
         Err(error) => {
             tracing::warn!("board: failed to load pending outbox: {error}");
@@ -1070,9 +1099,6 @@ async fn replay_pending_board_outbox(
     };
     let mut eligible = Vec::new();
     for item in pending {
-        if item.delivery_kind == super::worker_location::CLIENT_DELIVERY {
-            continue;
-        }
         let (target, content) = match outbox_payload(&item) {
             Ok(payload) => payload,
             Err(error) => {
@@ -1344,6 +1370,31 @@ fn external_worker_inflight() -> &'static std::sync::Mutex<HashSet<Uuid>> {
     INFLIGHT.get_or_init(Default::default)
 }
 
+fn external_admission_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
+async fn release_external_reservation(id: Uuid) {
+    let _admission = external_admission_lock().lock().await;
+    external_worker_inflight().lock().unwrap().remove(&id);
+}
+
+fn external_tasks_share_directory(boss: &Mission, task: &BoardTask, other: &BoardTask) -> bool {
+    let directory = |task: &BoardTask| {
+        task.working_directory
+            .clone()
+            .or_else(|| boss.working_directory.clone())
+    };
+    match (directory(task), directory(other)) {
+        (Some(a), Some(b)) => {
+            super::same_directory(std::path::Path::new(&a), std::path::Path::new(&b))
+        }
+        // An unresolved inherited directory is not evidence of isolation.
+        _ => true,
+    }
+}
+
 fn external_worker_slots(
     tasks: &[BoardTask],
     running_ids: &HashSet<Uuid>,
@@ -1599,7 +1650,14 @@ pub async fn scheduler_pass(
                         || !boss.requires_local_disk
                     {
                         if let Some(hub) = control_hub {
-                            if schedule_external_worker(hub, mission_store, &task, &preflight).await
+                            if schedule_external_worker(
+                                hub,
+                                mission_store,
+                                &boss,
+                                &task,
+                                &preflight,
+                            )
+                            .await
                             {
                                 available -= 1;
                             }
@@ -1690,6 +1748,7 @@ fn append_note(notes: &Option<String>, line: &str) -> Option<String> {
 async fn schedule_external_worker(
     hub: &super::ControlHub,
     store: &Arc<dyn MissionStore>,
+    boss: &Mission,
     task: &BoardTask,
     preflight: &RetryPreflight,
 ) -> bool {
@@ -1709,8 +1768,25 @@ async fn schedule_external_worker(
     let Some(user) = user else {
         return false;
     };
-    if !external_worker_inflight().lock().unwrap().insert(task.id) {
+    // Serialize the read/reserve boundary with completion removing its
+    // reservation. Otherwise a stale Pending snapshot can miss a worker
+    // that was adopted immediately before the reservation was removed.
+    let _admission = external_admission_lock().lock().await;
+    let Ok(tasks) = store.list_board_tasks(boss.id).await else {
         return false;
+    };
+    {
+        let mut inflight = external_worker_inflight().lock().unwrap();
+        if inflight.contains(&task.id)
+            || tasks.iter().any(|other| {
+                other.id != task.id
+                    && (other.status == BoardTaskStatus::Running || inflight.contains(&other.id))
+                    && external_tasks_share_directory(boss, task, other)
+            })
+        {
+            return false;
+        }
+        inflight.insert(task.id);
     }
     let store = store.clone();
     let task = task.clone();
@@ -1752,7 +1828,7 @@ async fn schedule_external_worker(
                         }
                         Ok(Some(current)) if current.worker_mission_id == Some(id) => {
                             // A replay may observe a worker already adopted by the task.
-                            external_worker_inflight().lock().unwrap().remove(&task.id);
+                            release_external_reservation(task.id).await;
                             return;
                         }
                         _ => {
@@ -1778,7 +1854,7 @@ async fn schedule_external_worker(
                             {
                                 tracing::error!(mission=%id, task=%task.id, %error, "could not cancel unassigned board worker");
                             }
-                            external_worker_inflight().lock().unwrap().remove(&task.id);
+                            release_external_reservation(task.id).await;
                             return;
                         }
                     };
@@ -1823,7 +1899,7 @@ async fn schedule_external_worker(
                 tracing::warn!(task=%task.id,%error,"external worker remains queued on its selected machine");
             }
         }
-        external_worker_inflight().lock().unwrap().remove(&task.id);
+        release_external_reservation(task.id).await;
     });
     true
 }
@@ -2476,6 +2552,25 @@ mod tests {
         assert!(inflight.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn external_worker_directories_require_explicit_isolation() {
+        let store = InMemoryMissionStore::new();
+        let mut boss = store
+            .create_mission(Some("remote boss"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        boss.working_directory = Some("/work/repo".into());
+        let a = mk("a", &[], BoardTaskStatus::Pending, None);
+        let mut b = mk("b", &[], BoardTaskStatus::Running, None);
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+        b.working_directory = Some("/work/repo/./src".into());
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+        b.working_directory = Some("/work/worktree-b".into());
+        assert!(!external_tasks_share_directory(&boss, &a, &b));
+        boss.working_directory = None;
+        assert!(external_tasks_share_directory(&boss, &a, &b));
+    }
+
     #[test]
     fn external_worker_capacity_survives_scheduler_passes() {
         let mut external = mk("external", &[], BoardTaskStatus::Running, None);
@@ -2525,6 +2620,11 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert!(
+            !super::super::worker_location::board_client_delivery_obsolete(&store, &worker)
+                .await
+                .unwrap()
+        );
         task.worker_mission_id = Some(worker.id);
         task.status = BoardTaskStatus::Running;
         store.save_board_task(&task).await.unwrap();
@@ -2535,6 +2635,11 @@ mod tests {
         );
         task.status = BoardTaskStatus::Cancelled;
         store.save_board_task(&task).await.unwrap();
+        assert!(
+            super::super::worker_location::board_client_delivery_obsolete(&store, &worker)
+                .await
+                .unwrap()
+        );
         assert!(
             !super::super::worker_location::board_allows_client_run(&store, &worker)
                 .await

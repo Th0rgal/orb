@@ -4018,7 +4018,17 @@ pub trait MissionStore: Send + Sync {
         &self,
         limit: usize,
     ) -> Result<Vec<BoardOutboxItem>, String> {
-        let _ = limit;
+        self.list_pending_board_outbox_filtered(limit, None).await
+    }
+
+    /// Filter the delivery lane before applying the limit, so an offline
+    /// client's backlog cannot starve server-side board notifications.
+    async fn list_pending_board_outbox_filtered(
+        &self,
+        limit: usize,
+        client: Option<bool>,
+    ) -> Result<Vec<BoardOutboxItem>, String> {
+        let _ = (limit, client);
         Ok(vec![])
     }
 
