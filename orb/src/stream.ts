@@ -130,7 +130,10 @@ export function streamMission(
   let stopped = false;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
   const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{for(const event of pending)onEvent(event);}));};
-  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
+  // Thinking deltas carry the whole thought so far; applied one by one each
+  // re-renders a growing block (up to 70 ms each on a long thought). They are
+  // painted together with text, once per frame.
+  const deliver=(event:StreamEvent)=>{if(event.type==='text_delta'||event.type==='text_op'||(event.type==='thinking'&&event.data.done!==true)){fragments.push(event);paint??=setTimeout(flush,16);}else{flush();timed(`stream ${event.type}`,()=>onEvent(event));}};
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
