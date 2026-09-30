@@ -62,4 +62,23 @@ class DurableWakeupTests(unittest.TestCase):
             response=json.loads(subprocess.check_output(['python3',str(SCRIPT),root,'mission'],input=json.dumps(request)+'\n',text=True))
             self.assertTrue(response['result']['isError'])
             self.assertFalse(list(pathlib.Path(root).glob('*.json')))
+    def test_invalid_delays_are_rejected_by_cli_and_mcp_without_persisting(self):
+        for delay in [0, 59, 3601, 7200, 60.5, True, "120", None]:
+            with self.subTest(delay=delay), tempfile.TemporaryDirectory() as root:
+                args={'prompt':'continue','reason':'wait','delay_seconds':delay}
+                cli=subprocess.run(['python3',str(SCRIPT),root,'mission','schedule_wakeup',json.dumps(args)],capture_output=True,text=True)
+                self.assertNotEqual(cli.returncode,0)
+                self.assertIn('integer between 60 and 3600',cli.stderr)
+                request={'id':1,'method':'tools/call','params':{'name':'schedule_wakeup','arguments':args}}
+                response=json.loads(subprocess.check_output(['python3',str(SCRIPT),root,'mission'],input=json.dumps(request)+'\n',text=True))
+                self.assertTrue(response['result']['isError'])
+                self.assertFalse(list(pathlib.Path(root).iterdir()))
+    def test_boundary_delays_are_persisted_unchanged(self):
+        for name, delay in [('delay_seconds',60),('delaySeconds',3600)]:
+            with self.subTest(delay=delay), tempfile.TemporaryDirectory() as root:
+                args={'prompt':'continue','reason':'wait',name:delay}
+                result=json.loads(subprocess.check_output(['python3',str(SCRIPT),root,'mission','schedule_wakeup',json.dumps(args)]))
+                self.assertEqual(result['state'],'pending_sync')
+                saved=json.loads(next(pathlib.Path(root).glob('*.json')).read_text())
+                self.assertEqual(saved['body']['trigger']['seconds'],delay)
 if __name__ == '__main__': unittest.main()

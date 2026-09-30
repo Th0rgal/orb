@@ -21,7 +21,9 @@ def schedule(name, args):
         trigger = {'type': 'durable_job_terminal', 'job_id': str(uuid.UUID(args['job_id']))}
         variables['__wakeup_source'] = 'durable-job-terminal'
     elif name == 'schedule_wakeup':
-        delay = max(60, min(3600, int(args.get('delay_seconds', args.get('delaySeconds')))))
+        delay = args.get('delay_seconds', args.get('delaySeconds'))
+        if type(delay) is not int or not 60 <= delay <= 3600:
+            raise ValueError('delay_seconds must be an integer between 60 and 3600')
         trigger = {'type': 'interval', 'seconds': delay}
         variables['__wakeup_due_at'] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delay)).isoformat()
     else:
