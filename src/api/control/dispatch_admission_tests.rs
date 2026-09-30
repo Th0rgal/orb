@@ -9100,7 +9100,6 @@ async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
 }
 
 #[tokio::test]
-#[tokio::test]
 async fn relocated_worker_keeps_parent_metadata_without_inheriting_location() {
     let harness = Harness::new().await;
     let parent = harness
