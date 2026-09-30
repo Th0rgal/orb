@@ -5,7 +5,7 @@ vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,getMission:async(
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
 vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
-import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage} from '../src/localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage,cancelQueuedWakeups,captureWakeupFences,confirmWakeupStops} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
 beforeEach(()=>{vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
@@ -392,4 +392,36 @@ it('Send now preserves a scheduled continuation while stopping the preceding pro
  expect(mocks.stopNative).toHaveBeenCalledWith('mission',{cancelWakeups:false});
  expect(mocks.launch).toHaveBeenCalledTimes(1);
  expect(mocks.launch.mock.calls[0][0].prompt).toBe('scheduled continuation');
+});
+
+it('fences a fetched wake-up across Stop, Core acknowledgement and replay',async()=>{
+ const before=await captureWakeupFences();
+ const token=await cancelQueuedWakeups('mission');
+ const during=await captureWakeupFences();
+ const stale=crypto.randomUUID();
+ await enqueueLocalMessage(request,'old wake',{id:stale,delegated:true,scheduled:true,wakeupFence:before.mission});
+ expect(queuedLocalMessages('mission')).toEqual([]);
+ await confirmWakeupStops([{mission:'mission',token}]);
+ await enqueueLocalMessage(request,'in-flight wake',{delegated:true,scheduled:true,wakeupFence:during.mission});
+ expect(queuedLocalMessages('mission')).toEqual([]);
+ const after=await captureWakeupFences();
+ await enqueueLocalMessage(request,'replayed old wake',{id:stale,delegated:true,scheduled:true,wakeupFence:after.mission});
+ expect(queuedLocalMessages('mission')).toEqual([]);
+ await enqueueLocalMessage(request,'new wake',{delegated:true,scheduled:true,wakeupFence:after.mission});
+ expect(queuedLocalMessages('mission').map(r=>r.text)).toEqual(['new wake']);
+});
+it('keeps a newer Stop fenced when an older cancellation acknowledgement arrives',async()=>{
+ const older=await cancelQueuedWakeups('mission');
+ await cancelQueuedWakeups('mission');
+ await confirmWakeupStops([{mission:'mission',token:older}]);
+ const fences=await captureWakeupFences();
+ expect(fences.mission.blocked).toBe(true);
+ await enqueueLocalMessage(request,'late',{delegated:true,scheduled:true,wakeupFence:fences.mission});
+ expect(queuedLocalMessages('mission')).toEqual([]);
+});
+it('settles a scheduled local result using its occurrence identity',async()=>{
+ mocks.active=false;
+ const id=await enqueueLocalMessage(request,'wake',{scheduled:true});
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.status).toHaveBeenCalledWith('mission','awaiting_user',expect.anything(),id);
 });

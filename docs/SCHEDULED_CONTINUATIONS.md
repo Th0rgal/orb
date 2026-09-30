@@ -82,6 +82,11 @@ Rejected, acked and cancelled request files are deduplication tombstones. Do not
 while an originating tool request could still be replayed. Stop also saves an
 outgoing cancellation offline and removes queued local scheduled messages; an
 already-dispatching message is governed by the existing local launch/stop fence.
+Stop first persists a queue cancellation token. Inbox snapshots captured before or
+during Stop cannot enqueue a scheduled message after it. Core's acknowledged
+cancellation token releases this block; the acknowledgement survives frontend
+reloads, and older tokens cannot release a newer Stop. Local result reports include
+`scheduled_execution_id`, so a predecessor's completion cannot settle its successor.
 
 ## Validation
 

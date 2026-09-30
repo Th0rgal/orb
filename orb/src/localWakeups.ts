@@ -16,7 +16,9 @@ export function startLocalWakeups() {
     if (stopped || busy || !getJwt() || version !== connectionVersion()) return;
     busy = true;
     try {
-      const result = await invoke("local_wakeups_sync", { connection: { api_url: getApiUrl(), token: getJwt() } }) as { pending: (Continuation & { mission: string })[]; changed: boolean };
+      const result = await invoke("local_wakeups_sync", { connection: { api_url: getApiUrl(), token: getJwt() } }) as { pending: (Continuation & { mission: string })[]; changed: boolean; cancelled?: {mission:string;token:string}[] };
+      if (stopped || version !== connectionVersion()) return;
+      await import("./localMessageQueue").then(m => { if (!stopped && version === connectionVersion()) return m.confirmWakeupStops(result.cancelled ?? []); });
       if (stopped || version !== connectionVersion()) return;
       setPending(result.pending);
       if (result.changed) window.dispatchEvent(new Event("orb:refresh"));

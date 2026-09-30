@@ -457,12 +457,21 @@ export async function stopLocal(id: string, options: { cancelWakeups?: boolean }
   runVersions.set(id,(runVersions.get(id) ?? 0)+1);
   const invoke = tauriInvoke();
   if (invoke) {
+    const connection = { api_url: getApiUrl(), token: getJwt() };
+    const sameConnection = () => connection.api_url === getApiUrl() && connection.token === getJwt();
+    // Persist the fence before stopping: a previously fetched inbox can arrive late.
+    const queue = options.cancelWakeups !== false ? await import("./localMessageQueue") : undefined;
+    if (!sameConnection()) throw new Error("Connection changed. Stop the mission from its original connection.");
+    const cancelToken = await queue?.cancelQueuedWakeups(id);
     await invoke("local_agents_stop", { id });
     // Queue advancement and machine transfer stop a process, not the mission.
-    if (options.cancelWakeups !== false) {
-      await import("./localMessageQueue").then(m => m.cancelQueuedWakeups(id));
-      try { await invoke("local_wakeups_cancel", { mission: id, connection: { api_url: getApiUrl(), token: getJwt() } }); }
+    if (queue) {
+      try { await invoke("local_wakeups_cancel", { mission: id, connection, cancelToken }); }
       catch (error) { if (!/unknown command|command .*not found/i.test(String(error))) throw error; }
+      try {
+        const synced = await invoke("local_wakeups_sync", { connection }) as { cancelled?: {mission:string;token:string}[] };
+        if (sameConnection()) await queue.confirmWakeupStops(synced.cancelled ?? []);
+      } catch { /* Offline Stop stays fenced until its durable cancellation syncs. */ }
     }
   }
   setRunning((prev) => ({ ...prev, [id]: false }));

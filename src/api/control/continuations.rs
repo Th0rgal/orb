@@ -500,6 +500,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_client_predecessor_cannot_settle_successor() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "successor".into()).await.unwrap();
+        let mut occurrence = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        occurrence.status = ExecutionStatus::Running;
+        occurrence
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(occurrence.clone())
+            .await
+            .unwrap();
+        for predecessor in [None, Some(Uuid::new_v4())] {
+            assert_eq!(
+                store
+                    .complete_client_executions_for_mission(
+                        a.mission_id,
+                        predecessor,
+                        false,
+                        Some("predecessor interrupted".into())
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Running
+        );
+        assert_eq!(
+            store
+                .complete_client_executions_for_mission(
+                    a.mission_id,
+                    Some(occurrence.id),
+                    true,
+                    None
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Success
+        );
+    }
+
+    #[tokio::test]
     async fn continuation_acknowledged_mission_still_receives_due_wakeup() {
         let (_dir, store, a) = fixture().await;
         store

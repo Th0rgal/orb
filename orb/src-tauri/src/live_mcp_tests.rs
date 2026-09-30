@@ -138,9 +138,13 @@ fn live_native_mcp_roundtrip() {
                         .await
                         .unwrap();
                     assert_eq!(mission["continuation"]["items"][0]["state"], "scheduled");
-                    crate::local_wakeups::local_wakeups_cancel(connection.clone(), id.clone())
-                        .await
-                        .unwrap();
+                    crate::local_wakeups::local_wakeups_cancel(
+                        connection.clone(),
+                        id.clone(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
                     crate::local_wakeups::local_wakeups_sync(connection.clone())
                         .await
                         .unwrap();
@@ -325,7 +329,7 @@ fn live_native_wakeup_transport() {
             .await
             .unwrap();
         // Cancel before assertions so a failed check cannot leave a live timer.
-        crate::local_wakeups::local_wakeups_cancel(connection.clone(), id.clone())
+        crate::local_wakeups::local_wakeups_cancel(connection.clone(), id.clone(), None)
             .await
             .unwrap();
         crate::local_wakeups::local_wakeups_sync(connection.clone())

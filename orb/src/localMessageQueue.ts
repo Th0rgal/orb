@@ -51,11 +51,28 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean;replace?:boolean}={}){
+export type WakeupFence={token:string;blocked:boolean};
+export async function captureWakeupFences(){const key=storageKey();return locked(key,async()=>await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{});}
+export async function confirmWakeupStops(confirmations:{mission:string;token:string}[]){
+ const key=storageKey();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};let changed=false;
+  for(const {mission,token} of confirmations)if(fences[mission]?.token===token&&fences[mission].blocked){fences[mission].blocked=false;changed=true;}
+  if(changed)await saveSideThread(`${key}:wake-stops`,fences);
+ });
+}
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{wakeupFence?:WakeupFence;id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
  await locked(key,async()=>{
   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
   if(seen.includes(id))return;
+  if(options.scheduled){
+   const current=(await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`))?.[request.id];
+   if(current?.blocked||options.wakeupFence?.blocked||current?.token!==options.wakeupFence?.token){
+    if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
+    return; // Stop invalidated this inbox snapshot, even if it arrived late.
+   }
+  }
   const rows=await read(key),existing=rows.find(row=>row.id===id);
   if(options.replace){
    // An edit keeps the message's place in the queue and releases its hold.
@@ -172,7 +189,9 @@ export function startLocalQueueWorker(){
    // A turn cut by the connection is continued once the connection is back.
    const resume=!row.resultStatus&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;
    recordLocalFailure(row.mission,failed&&!resume?(row.result.error||`Local process exited with code ${row.result.exit_code}`):null);
-   await setClientMissionStatus(row.mission,row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user'),row.receipt);
+   const status=row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user');
+   if(row.scheduled)await setClientMissionStatus(row.mission,status,row.receipt,row.id);
+   else await setClientMissionStatus(row.mission,status,row.receipt);
    if(!valid())return;
    if(resume){
     await saveSideThread(`${key}:recovered:${row.id}:${row.receipt.run_id??'unknown'}`,row);
@@ -348,7 +367,11 @@ export function startLocalQueueWorker(){
 
 /** Stop removes automatic continuations still waiting on this computer. */
 export async function cancelQueuedWakeups(mission:string) {
- const key=storageKey();
- await locked(key,async()=>{const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='dispatching'||r.state==='accepted'));});
- wake();
+ const key=storageKey(),token=crypto.randomUUID();
+ await locked(key,async()=>{
+  const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};
+  fences[mission]={token,blocked:true};await saveSideThread(`${key}:wake-stops`,fences);
+  const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='dispatching'||r.state==='accepted'));
+ });
+ wake();return token;
 }

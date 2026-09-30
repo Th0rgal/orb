@@ -3058,6 +3058,19 @@ pub trait MissionStore: Send + Sync {
         Ok(0)
     }
 
+    /// Settle only the durable occurrence explicitly reported by a client run.
+    /// A predecessor's terminal status must not settle a queued successor.
+    async fn complete_client_executions_for_mission(
+        &self,
+        mission_id: Uuid,
+        occurrence: Option<Uuid>,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let _ = (mission_id, occurrence, success, error);
+        Ok(0)
+    }
+
     /// Update the mission mode (Task/Assistant).
     async fn update_mission_mode(&self, id: Uuid, mode: MissionMode) -> Result<(), String> {
         let _ = (id, mode);

@@ -2,7 +2,7 @@ import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 const mocks=vi.hoisted(()=>({api:vi.fn(),enqueue:vi.fn(),directory:vi.fn(),remember:vi.fn(),failure:vi.fn(),version:1}));
 vi.mock('../src/api',()=>({api:mocks.api,connectionVersion:()=>mocks.version}));
 vi.mock('../src/clientRuns',()=>({nativeInvoke:()=>true,machineIdentity:async()=> 'computer'}));
-vi.mock('../src/localMessageQueue',()=>({enqueueLocalMessage:mocks.enqueue}));
+vi.mock('../src/localMessageQueue',()=>({enqueueLocalMessage:mocks.enqueue,captureWakeupFences:async()=>({})}));
 vi.mock('../src/localAgents',()=>({localBinding:()=>undefined,localDirectory:mocks.directory,recordLocalFailure:mocks.failure,rememberBinding:mocks.remember,restoreLocalBindings:async()=>{},refreshLocalAgents:async()=>[{id:'codex',path:'/bin/codex',installed:true}]}));
 import {startClientDelegations} from '../src/clientDelegations';
 let stop:()=>void;

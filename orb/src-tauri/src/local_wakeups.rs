@@ -72,6 +72,7 @@ pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String>
 
 async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String> {
     let mut pending = Vec::new();
+    let mut cancelled = Vec::new();
     let mut changed = false;
     let mut files = Vec::new();
     if root.exists() {
@@ -86,11 +87,12 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
                 .map_err(|e| e.to_string())?
                 .flatten()
             {
-                if file
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e == "json" || e == "rejected")
-                {
+                if file.path().extension().is_some_and(|e| {
+                    e == "json"
+                        || e == "rejected"
+                        || (e == "acked"
+                            && file.file_name().to_string_lossy().starts_with("cancel-"))
+                }) {
                     let v: Value = serde_json::from_slice(
                         &std::fs::read(file.path()).map_err(|e| e.to_string())?,
                     )
@@ -111,6 +113,16 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
     for (path, v) in files {
         let mission = v["mission"].as_str().ok_or("Invalid wake-up mission")?;
         uuid::Uuid::parse_str(mission).map_err(|_| "Invalid wake-up mission")?;
+        let confirmation = (v["cancel"] == true)
+            .then(|| v["cancel_token"].as_str())
+            .flatten()
+            .map(|token| json!({"mission":mission,"token":token}));
+        if path.extension().is_some_and(|e| e == "acked") {
+            if let Some(confirmation) = confirmation {
+                cancelled.push(confirmation);
+            }
+            continue;
+        }
         let endpoint = if v["cancel"] == true {
             "continuations/cancel"
         } else {
@@ -137,6 +149,9 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
                     std::fs::rename(&path, path.with_extension("acked"))
                         .map_err(|e| e.to_string())?;
                     changed = true;
+                    if let Some(confirmation) = confirmation {
+                        cancelled.push(confirmation);
+                    }
                     continue;
                 }
                 Ok(r) => {
@@ -174,7 +189,7 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
         // Keep creation order when disconnected; an older request must never
         // arrive after and replace a newer request.
     }
-    Ok(json!({"pending": pending, "changed":changed}))
+    Ok(json!({"pending": pending, "changed":changed, "cancelled":cancelled}))
 }
 
 /// Persist native print-mode ScheduleWakeup through exactly the same outbox.
@@ -195,7 +210,11 @@ pub fn capture(mission: &str, args: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn local_wakeups_cancel(connection: Connection, mission: String) -> Result<(), String> {
+pub async fn local_wakeups_cancel(
+    connection: Connection,
+    mission: String,
+    cancel_token: Option<String>,
+) -> Result<(), String> {
     use std::io::Write;
     let _guard = SYNC_LOCK.lock().await;
     uuid::Uuid::parse_str(&mission).map_err(|_| "Invalid mission ID")?;
@@ -218,7 +237,9 @@ pub async fn local_wakeups_cancel(connection: Connection, mission: String) -> Re
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos() as u64;
-    let value = json!({"mission":mission,"created_ns":now,"cancel":true,"body":{}});
+    let token = cancel_token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let value =
+        json!({"mission":mission,"created_ns":now,"cancel":true,"cancel_token":token,"body":{}});
     let path = root.join(format!("cancel-{now}.tmp"));
     let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     file.write_all(value.to_string().as_bytes())
@@ -254,6 +275,27 @@ fn discard_rejected(root: &std::path::Path, request_id: &str) -> Result<(), Stri
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    #[tokio::test]
+    async fn cancellation_confirmation_survives_a_lost_frontend_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let mission = uuid::Uuid::new_v4().to_string();
+        let root = dir.path().join(&mission);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("cancel-1.acked"), json!({"mission":mission,"created_ns":1,"cancel":true,"cancel_token":"stop-token","body":{}}).to_string()).unwrap();
+        let connection = Connection {
+            api_url: "http://127.0.0.1:1".into(),
+            token: "test".into(),
+        };
+        for _ in 0..2 {
+            let result = sync_at(&connection, dir.path().to_owned()).await.unwrap();
+            assert_eq!(
+                result["cancelled"],
+                json!([{"mission":mission,"token":"stop-token"}])
+            );
+            assert_eq!(result["pending"], json!([]));
+        }
+    }
+
     #[tokio::test]
     async fn permanently_rejected_request_does_not_block_newer_wakeup() {
         let dir = tempfile::tempdir().unwrap();

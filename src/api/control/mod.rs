@@ -16218,6 +16218,7 @@ pub struct ClientTranscriptRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ClientStatusRequest {
+    pub scheduled_execution_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub generation: Option<u64>,
     pub status: String,
@@ -16325,8 +16326,9 @@ pub async fn set_client_mission_status(
         .map_err(internal_error)?;
     control
         .mission_store
-        .complete_running_executions_for_mission(
+        .complete_client_executions_for_mission(
             id,
+            req.scheduled_execution_id,
             matches!(
                 status,
                 MissionStatus::Completed | MissionStatus::AwaitingUser

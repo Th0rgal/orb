@@ -7970,6 +7970,24 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| format!("Task join error: {}", e))?
     }
 
+    async fn complete_client_executions_for_mission(
+        &self,
+        mission_id: Uuid,
+        occurrence: Option<Uuid>,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute("UPDATE automation_executions SET status = ?, completed_at = ?, error = ?
+                WHERE mission_id = ? AND ((trigger_source != 'durable_schedule' AND status IN ('pending','running'))
+                  OR (trigger_source = 'durable_schedule' AND status = 'running' AND id = ?))",
+                params![if success { "success" } else { "failed" }, now_string(), error, mission_id.to_string(), occurrence.map(|id| id.to_string())])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
     async fn update_mission_mode(&self, id: Uuid, mode: MissionMode) -> Result<(), String> {
         let conn = self.conn.clone();
         let id_str = id.to_string();
