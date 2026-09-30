@@ -347,7 +347,15 @@ export function startLocalQueueWorker(){
       }
       if(!valid())return;
      }
-     const receipt=await startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId});
+     // Stop may remove the claim while reopening the mission. Start the IPC
+     // invocation under the queue lock, but never hold that lock for its network work.
+     const launch=await locked(key,async()=>{
+      const stored=(await read(key)).find(r=>r.id===row.id);
+      if(!stored||stored.state!=='dispatching'||!valid()||stopping.has(runKey))return;
+      return {pending:startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
+     });
+     if(!launch)continue;
+     const receipt=await launch.pending;
      row.state='accepted';row.receipt=receipt;
      await update(key,row.id,stored=>{stored.state='accepted';stored.receipt=receipt;delete stored.error;});
      follow(row);
@@ -371,7 +379,7 @@ export async function cancelQueuedWakeups(mission:string) {
  await locked(key,async()=>{
   const fences=await readSideThread<Record<string,WakeupFence>>(`${key}:wake-stops`)??{};
   fences[mission]={token,blocked:true};await saveSideThread(`${key}:wake-stops`,fences);
-  const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='dispatching'||r.state==='accepted'));
+  const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='accepted'));
  });
  wake();return token;
 }

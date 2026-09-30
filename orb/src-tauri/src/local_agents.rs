@@ -114,6 +114,20 @@ fn runs() -> &'static Mutex<HashMap<String, Run>> {
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// Serialize Stop with the synchronous spawn boundary, while network preparation
+// holds only a captured generation. A stopped preparation must never spawn later.
+pub(crate) fn launch_fence(id: &str) -> Arc<Mutex<u64>> {
+    static FENCES: OnceLock<Mutex<HashMap<String, Arc<Mutex<u64>>>>> = OnceLock::new();
+    FENCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(id.into())
+        .or_insert_with(|| Arc::new(Mutex::new(0)))
+        .clone()
+}
+pub(crate) const LAUNCH_CANCELLED: &str = "Local launch rejected: stopped before launch";
+
 #[tauri::command]
 pub async fn local_agents_scan(request: ScanRequest) -> Result<Vec<ScanRow>, String> {
     // CLI discovery launches subprocesses; never block the desktop event loop.
@@ -237,6 +251,19 @@ pub(crate) fn start_with_env(
     request: StartRequest,
     env: &[(String, String)],
 ) -> Result<(), String> {
+    start_with_env_fenced(request, env, None)
+}
+
+pub(crate) fn start_with_env_fenced(
+    request: StartRequest,
+    env: &[(String, String)],
+    expected_stop: Option<u64>,
+) -> Result<(), String> {
+    let fence = launch_fence(&request.id);
+    let generation = fence.lock().map_err(|e| e.to_string())?;
+    if expected_stop.is_some_and(|expected| expected != *generation) {
+        return Err(LAUNCH_CANCELLED.into());
+    }
     if request
         .prompt
         .trim()
@@ -423,6 +450,9 @@ pub fn local_agents_unsubscribe(id: String, token: u64) -> Result<(), String> {
 
 #[tauri::command]
 pub fn local_agents_stop(id: String) -> Result<(), String> {
+    let fence = launch_fence(&id);
+    let mut generation = fence.lock().map_err(|e| e.to_string())?;
+    *generation += 1;
     stop_generation(&id, None)
 }
 pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {

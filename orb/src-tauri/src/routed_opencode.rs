@@ -18,11 +18,29 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
     })
 }
 
-pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result<(), String> {
+pub async fn start(request: StartRequest, base: &str, token: &str) -> Result<(), String> {
+    let generation = *local_agents::launch_fence(&request.id)
+        .lock()
+        .map_err(|e| e.to_string())?;
+    start_fenced(request, base, token, Some(generation)).await
+}
+
+pub async fn start_fenced(
+    mut request: StartRequest,
+    base: &str,
+    token: &str,
+    stop_generation: Option<u64>,
+) -> Result<(), String> {
     let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
-    crate::local_wakeups::prepare(&mut request, &crate::run_recovery::Connection { api_url: base.into(), token: token.into() })?;
+    crate::local_wakeups::prepare(
+        &mut request,
+        &crate::run_recovery::Connection {
+            api_url: base.into(),
+            token: token.into(),
+        },
+    )?;
     if request.harness != "opencode" {
-        return local_agents::start_with_env(request, &launch_env);
+        return local_agents::start_with_env_fenced(request, &launch_env, stop_generation);
     }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -86,7 +104,7 @@ pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result
         ("OPENCODE_CONFIG_CONTENT".into(), config.to_string()),
         ("ORB_ROUTING_KEY".into(), secret.into()),
     ]);
-    let started = local_agents::start_with_env(request, &launch_env);
+    let started = local_agents::start_with_env_fenced(request, &launch_env, stop_generation);
     let generation = local_agents::native_generation(&mission);
     let (base, token) = (base.to_string(), token.to_string());
     let failed = started.is_err();

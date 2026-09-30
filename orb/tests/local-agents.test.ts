@@ -170,3 +170,39 @@ it("keeps a discovered CLI available when an older native version probe fails", 
     expect(installedIds()).toEqual(["opencode"]);
   } finally { (window as any).__TAURI__ = previous; }
 });
+
+it('Stop drains an already invoked launch before reporting the mission stopped',async()=>{
+ const {startLocal,stopLocal}=await import('../src/localAgents');
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ let release!:(value:unknown)=>void;
+ const pending=new Promise(resolve=>release=resolve);let running=false;
+ const invoke=vi.fn(async(command:string)=>{
+  if(command==='local_run_launch'){const receipt=await pending;running=true;return receipt;}
+  if(command==='local_agents_stop'){running=false;return;}
+  if(command==='local_agents_poll')return {done:!running,text:''};
+  return {};
+ });host.__TAURI_INTERNALS__={invoke};
+ try{
+  const launch=startLocal({id:'stop-launch-race',harness:'codex',bin:'codex',cwd:'/work',prompt:'wake'});
+  await Promise.resolve();let stopped=false;
+  const stop=stopLocal('stop-launch-race',{cancelWakeups:false}).then(()=>{stopped=true;});
+  await Promise.resolve();await Promise.resolve();expect(stopped).toBe(false);
+  release({run_id:'late-run',generation:1});await launch;await stop;
+  expect(running).toBe(false);expect(invoke.mock.calls.filter(c=>c[0]==='local_agents_stop')).toHaveLength(2);
+ }finally{host.__TAURI_INTERNALS__=previous;}
+});
+
+it('Stop prevents a launch waiting for native recovery from reaching IPC',async()=>{
+ const {recoverLocalLaunch,startLocal,stopLocal}=await import('../src/localAgents');
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ let release!:()=>void;const pending=new Promise<void>(resolve=>release=resolve);
+ const invoke=vi.fn(async(command:string)=>command==='local_run_reconcile'?pending:command==='local_agents_poll'?{done:true,text:''}:{});
+ host.__TAURI_INTERNALS__={invoke};
+ try{
+  const recovery=recoverLocalLaunch('stop-recovery-race');
+  const launch=startLocal({id:'stop-recovery-race',harness:'codex',bin:'codex',cwd:'/work',prompt:'wake'});
+  const rejected=expect(launch).rejects.toThrow('stopped before launch');
+  await stopLocal('stop-recovery-race',{cancelWakeups:false});release();await recovery;await rejected;
+  expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(false);
+ }finally{host.__TAURI_INTERNALS__=previous;}
+});

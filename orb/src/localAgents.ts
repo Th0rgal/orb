@@ -371,13 +371,15 @@ export interface StartLocal {
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
+const pendingLaunches = new Map<string, Promise<unknown>>();
 
 export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   if (localRunActive(req.id)) throw new Error("This mission is still running locally. Stop it before sending another message.");
   const invoke = tauriInvoke();
   if (!invoke) throw new Error("Local agents run in the Orb desktop app.");
   launching.add(req.id);
-  runVersions.set(req.id,(runVersions.get(req.id) ?? 0)+1);
+  const version=(runVersions.get(req.id) ?? 0)+1;
+  runVersions.set(req.id,version);
   recordLocalFailure(req.id, null);
   setRunning((prev) => ({ ...prev, [req.id]: true }));
   setLiveText((prev) => ({ ...prev, [req.id]: "" }));
@@ -385,10 +387,13 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
   try {
     // Let this window's in-flight reconciliation release its native lock first.
     await nativeRecoveries.get(req.id);
-    const receipt = await invoke("local_run_launch", {
+    if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
+    const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
       request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
-    }) as ClientRunReceipt;
+    });
+    pendingLaunches.set(req.id,launch);
+    const receipt = await launch as ClientRunReceipt;
     rememberClientRunReceipt(req.id, receipt);
     return receipt;
   } catch (e) {
@@ -398,6 +403,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     recordLocalFailure(req.id, e);
     throw e;
   } finally {
+    pendingLaunches.delete(req.id);
     launching.delete(req.id);
   }
 }
@@ -463,7 +469,11 @@ export async function stopLocal(id: string, options: { cancelWakeups?: boolean }
     const queue = options.cancelWakeups !== false ? await import("./localMessageQueue") : undefined;
     if (!sameConnection()) throw new Error("Connection changed. Stop the mission from its original connection.");
     const cancelToken = await queue?.cancelQueuedWakeups(id);
+    const pending=pendingLaunches.get(id);
     await invoke("local_agents_stop", { id });
+    // A native command already sent to IPC may enter after the first Stop.
+    // Drain that invocation and stop again before acknowledging cancellation.
+    if(pending){await pending.catch(()=>{});await invoke("local_agents_stop",{id});}
     // Queue advancement and machine transfer stop a process, not the mission.
     if (queue) {
       try { await invoke("local_wakeups_cancel", { mission: id, connection, cancelToken }); }
