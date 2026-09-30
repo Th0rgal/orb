@@ -1,13 +1,13 @@
 use crate::project_context::Manifest;
 use std::path::Path;
 pub fn has_mentions(text: &str) -> bool {
-    regex::Regex::new(r#"(^|[\s(])@(?:\")?(?:context|__orb_path__)(?:[/\s\"),.;!?]|$)"#)
+    regex::Regex::new(r#"(^|[\s(\[{])@(?:\")?(?:context|__orb_path__)(?:[/\s\"),.;!?]|$)"#)
         .unwrap()
         .is_match(text)
 }
 pub fn resolve(text: &str, root: &Path, manifest: &Manifest) -> Result<String, String> {
     let pattern =
-        regex::Regex::new(r#"(^|[\s(])@(?:\"((?:context|__orb_path__)(?:/[^\"]*)?)\"|((?:context|__orb_path__)(?:/[^\s)\]},;]*)?))"#)
+        regex::Regex::new(r#"(^|[\s(\[{])@(?:\"((?:context|__orb_path__)(?:/[^\"]*)?)\"|((?:context|__orb_path__)(?:/[^\s)\]},;]*)?))"#)
             .unwrap();
     let mut result = String::new();
     let mut last = 0;
@@ -147,6 +147,15 @@ mod tests {
         assert_eq!(
             resolve(text, Path::new("/project"), &manifest).unwrap(),
             "Read \"/project/context/notes.md\"."
+        );
+        assert_eq!(
+            resolve(
+                "[@\"__orb_path__/context/notes.md\"]",
+                Path::new("/project"),
+                &manifest
+            )
+            .unwrap(),
+            "[\"/project/context/notes.md\"]"
         );
         manifest.entries.remove("context/notes.md");
         assert!(resolve(text, Path::new("/project"), &manifest).is_err());

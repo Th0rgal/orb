@@ -940,9 +940,8 @@ pub async fn client_run(
             .filter(|item| item.delivery_kind == worker_location::CLIENT_DELIVERY)
         {
             let target = item.boss_mission_id;
-            if !owners.contains_key(&target) {
-                owners.insert(
-                    target,
+            if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(target) {
+                entry.insert(
                     worker_location::resolved_client_owner(&control.mission_store, target)
                         .await
                         .map_err(internal_error)?,
