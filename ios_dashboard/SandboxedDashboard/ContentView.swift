@@ -116,55 +116,61 @@ struct SetupSheet: View {
     private let api = APIService.shared
 
     var allowsDismissal = false
+    var embedded = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Server URL").font(.subheadline).foregroundStyle(.secondary)
-                        TextField("https://your-server.com", text: $serverURL)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                            .accessibilityIdentifier("server-url")
-                            .padding(16)
-                            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Sign in").font(.subheadline).foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 16) {
-                            if api.authMode == .multiUser {
-                                TextField("Username", text: $username).textContentType(.username)
-                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                Divider()
-                            }
-                            SecureField("Password", text: $password).textContentType(.password)
-                                .accessibilityIdentifier("server-password")
-                        }.padding(16)
-                            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-                    }
-                    if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
-                }.padding(20)
-            }.background(OrbStyle.background)
-                .scrollDismissesKeyboard(.interactively)
-                .navigationTitle(allowsDismissal ? "Server" : "Connect to Orb")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    if allowsDismissal {
-                        ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() }.disabled(isTestingConnection) }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { Task { await connectToServer() } } label: {
-                            if isTestingConnection { ProgressView() } else { Text("Connect").fontWeight(.semibold) }
-                        }.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
-                        .accessibilityLabel("Connect")
-                    }
-                }
-                .interactiveDismissDisabled(!allowsDismissal || isTestingConnection)
+        Group {
+            if embedded { form } else { NavigationStack { form } }
         }
         .onAppear { if serverURL.isEmpty { serverURL = api.baseURL } }
         .presentationDetents(allowsDismissal ? [.medium, .large] : [.large])
         .presentationDragIndicator(allowsDismissal ? .visible : .hidden)
+    }
+
+    private var form: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Server URL").font(.subheadline).foregroundStyle(.secondary)
+                    TextField("https://your-server.com", text: $serverURL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                        .accessibilityIdentifier("server-url")
+                        .padding(16)
+                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Sign in").font(.subheadline).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if api.authMode == .multiUser {
+                            TextField("Username", text: $username).textContentType(.username)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            Divider()
+                        }
+                        SecureField("Password", text: $password).textContentType(.password)
+                            .accessibilityIdentifier("server-password")
+                    }.padding(16)
+                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                }
+                if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
+            }.padding(20)
+        }.background(OrbStyle.background)
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(embedded ? "Backend" : allowsDismissal ? "Server" : "Connect to Orb")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if allowsDismissal && !embedded {
+                    ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() }.disabled(isTestingConnection) }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Task { await connectToServer() } } label: {
+                        if isTestingConnection { ProgressView() } else { Text("Connect").fontWeight(.semibold) }
+                    }.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection)
+                    .accessibilityLabel("Connect")
+                }
+            }
+            .interactiveDismissDisabled(!allowsDismissal || isTestingConnection)
+            .navigationBarBackButtonHidden(embedded && isTestingConnection)
     }
 
     private func connectToServer() async {

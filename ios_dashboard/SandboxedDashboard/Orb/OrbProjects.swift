@@ -73,7 +73,7 @@ struct OrbHome: View {
             }
             .searchable(text: $search, prompt: "Search projects")
             .task { await load() }.refreshable { await load() }
-            .sheet(isPresented: $settings) { SetupSheet(onComplete: { settings = false; Task { await load() } }, allowsDismissal: true) }
+            .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
             .alert("New project", isPresented: $creating) {
                 TextField("Project name", text: $name)
                 Button("Create") { Task { await create() } }; Button("Cancel", role: .cancel) {}
