@@ -189,6 +189,7 @@ fn main() {
             local_agents::local_agents_poll,
             local_wakeups::local_wakeups_sync,
             local_wakeups::local_wakeups_cancel,
+            local_wakeups::local_wakeups_discard,
             local_agents::local_agents_subscribe,
             local_agents::local_agents_unsubscribe,
             local_agents::local_agents_stop

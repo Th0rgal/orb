@@ -8,6 +8,8 @@ def schedule(name, args):
     dest = root / (hashlib.sha256(key.encode()).hexdigest() + '.json')
     if dest.with_suffix('.cancelled').exists():
         return {'request_id': key, 'state': 'cancelled', 'owner': 'sandboxed'}
+    if dest.with_suffix('.rejected').exists():
+        raise ValueError('Core rejected this wake-up. Use a new request_id with corrected parameters.')
     if dest.exists() or dest.with_suffix('.acked').exists():
         return {'request_id': key, 'state': 'persisted', 'owner': 'sandboxed'}
     prompt = args.get('prompt', '')

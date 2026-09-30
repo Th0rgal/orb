@@ -170,10 +170,8 @@ pub async fn deliver(
         let Some(m) = store.get_mission(e.mission_id).await? else {
             continue;
         };
-        if matches!(
-            m.status,
-            MissionStatus::Paused | MissionStatus::Interrupted | MissionStatus::Acknowledged
-        ) && !e.variables_used.contains_key("__delivery_manual")
+        if matches!(m.status, MissionStatus::Paused | MissionStatus::Interrupted)
+            && !e.variables_used.contains_key("__delivery_manual")
         {
             continue;
         }
@@ -498,6 +496,40 @@ mod tests {
         assert_eq!(
             store.get_automation_executions(a.id, None).await.unwrap()[0].status,
             ExecutionStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_acknowledged_mission_still_receives_due_wakeup() {
+        let (_dir, store, a) = fixture().await;
+        store
+            .update_mission_status(a.mission_id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        stage(&store, &a, "resume after reading".into())
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        let (events, _) = broadcast::channel(8);
+        let receive = tokio::spawn(async move {
+            let Some(ControlCommand::UserMessage {
+                respond, content, ..
+            }) = rx.recv().await
+            else {
+                panic!("expected delivery")
+            };
+            assert_eq!(content, "resume after reading");
+            respond.send(UserMessageAck::Queued).unwrap();
+        });
+        deliver(&store, &tx, &events, None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].variables_used
+                ["__delivery_accepted"],
+            "true"
         );
     }
 

@@ -1,4 +1,4 @@
-import { localContinuation } from "./localWakeups";
+import { discardLocalWakeup, localContinuation } from "./localWakeups";
 import { Dynamic } from "solid-js/web";
 import { Show, For, createSignal, type JSX } from "solid-js";
 import { Dialog } from "./Dialog";
@@ -57,7 +57,12 @@ export function MissionGlyph(p: { status: string; missionId?: string; identity?:
   const state = () => missionStatusPresentation(p.status, pendingMissionInteraction(p.missionId), { count: items().length, items: items() });
   const act = async (id: string, action: "resume" | "cancel") => {
     setBusy(true); setError("");
-    try { await actOnContinuation(id, action); if (action === "cancel") setRemoved(ids => [...ids, id]); else setResumed(ids => [...ids, id]); window.dispatchEvent(new Event("orb:refresh")); }
+    try {
+      const localRejected = items().some(item => item.id === id && item.source === "orb-local-rejected");
+      if (localRejected) {
+        if (!p.missionId) throw new Error("Missing originating mission");
+        await discardLocalWakeup(p.missionId, id);
+      } else await actOnContinuation(id, action); if (action === "cancel") setRemoved(ids => [...ids, id]); else setResumed(ids => [...ids, id]); window.dispatchEvent(new Event("orb:refresh")); }
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
@@ -80,7 +85,7 @@ export function MissionGlyph(p: { status: string; missionId?: string; identity?:
       <Show when={item.error}><p role="alert">{item.error}</p></Show>
       <Show when={item.state === "scheduled" || item.state === "error"}>
         <div class="wake-up-actions"><Show when={item.state === "scheduled"}><button type="button" disabled={busy()} onClick={() => void act(item.id, "resume")}>Resume now</button></Show>
-        <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>Cancel wake-up</button></div>
+        <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>{item.source === "orb-local-rejected" ? "Dismiss rejected request" : "Cancel wake-up"}</button></div>
       </Show>
     </div>}</For>
   </Dialog></Show></>;

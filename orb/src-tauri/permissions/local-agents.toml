@@ -34,6 +34,7 @@ commands.allow = [
   "local_agents_poll",
   "local_wakeups_sync",
   "local_wakeups_cancel",
+  "local_wakeups_discard",
   "local_agents_subscribe",
   "local_agents_unsubscribe",
   "browse_local_files",

@@ -285,6 +285,12 @@ fn live_native_wakeup_transport() {
     };
     crate::local_wakeups::prepare(&mut request, &connection).unwrap();
     let command = crate::local_wakeups::command(&id).unwrap();
+    let rejected_key = format!("invalid-job-{}", uuid::Uuid::new_v4());
+    let invalid = std::process::Command::new(&command[0]).args(&command[1..])
+        .arg("schedule_job_wakeup")
+        .arg(json!({"request_id":rejected_key,"job_id":uuid::Uuid::new_v4(),"prompt":"Never run this invalid job wake-up","reason":"Reject then continue smoke"}).to_string())
+        .output().unwrap();
+    assert!(invalid.status.success());
     let output = std::process::Command::new(&command[0]).args(&command[1..]).arg("schedule_wakeup").arg(json!({"request_id":format!("native-transport-{}", uuid::Uuid::new_v4()),"delay_seconds":3600,"prompt":"Reply WAKE_NATIVE_OK","reason":"Native transport smoke"}).to_string()).output().unwrap();
     assert!(output.status.success(), "Local helper failed");
     assert!(String::from_utf8(output.stdout)
@@ -294,7 +300,17 @@ fn live_native_wakeup_transport() {
         let synced = crate::local_wakeups::local_wakeups_sync(connection.clone())
             .await
             .unwrap();
-        assert_eq!(synced["pending"], json!([]));
+        assert_eq!(synced["pending"].as_array().unwrap().len(), 1);
+        assert_eq!(synced["pending"][0]["source"], "orb-local-rejected");
+        crate::local_wakeups::local_wakeups_discard(connection.clone(), id.clone(), rejected_key)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::local_wakeups::local_wakeups_sync(connection.clone())
+                .await
+                .unwrap()["pending"],
+            json!([])
+        );
         let http = reqwest::Client::new();
         let url = format!("{}/api/control/missions/{id}", connection.api_url);
         let registered: serde_json::Value = http
@@ -333,7 +349,7 @@ fn live_native_wakeup_transport() {
                 .parent()
                 .unwrap()
                 .join("native-transport-receipt.json"),
-            &json!({"mission_id":id,"registered":registered["continuation"],"cancelled":true}),
+            &json!({"mission_id":id,"registered":registered["continuation"],"cancelled":true,"invalid_job_quarantined_and_dismissed":true}),
         );
     });
 }

@@ -1,4 +1,4 @@
-import { cleanup, render, fireEvent, screen } from '@solidjs/testing-library';
+import { cleanup, render, fireEvent, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createSignal } from 'solid-js';
 import { MissionGlyph, missionStatusPresentation } from '../src/MissionGlyph';
@@ -55,4 +55,16 @@ it('offers cancellation for retrying wake-ups without pretending they can be res
  fireEvent.click(screen.getByRole('button',{name:/View wake-ups/}));
  expect(screen.getByRole('button',{name:'Cancel wake-up'})).toBeTruthy();
  expect(screen.queryByRole('button',{name:'Resume now'})).toBeNull();
+});
+
+it('dismisses a rejected local request through native storage rather than the server automation API',async()=>{
+ const invoke=vi.fn().mockResolvedValue(undefined);
+ vi.stubGlobal('__TAURI_INTERNALS__',{invoke});
+ try {
+  render(()=><MissionGlyph status="awaiting_user" missionId="local-mission" continuation={{count:1,items:[{id:'bad-job',state:'error',trigger:'job',source:'orb-local-rejected'}]}}/>);
+  fireEvent.click(screen.getByRole('button',{name:/View wake-ups/}));
+  fireEvent.click(screen.getByRole('button',{name:'Dismiss rejected request'}));
+  await waitFor(()=>expect(invoke).toHaveBeenCalledWith('local_wakeups_discard',expect.objectContaining({mission:'local-mission',requestId:'bad-job'})));
+  await waitFor(()=>expect(screen.getByText('No pending wake-ups.')).toBeTruthy());
+ } finally {vi.unstubAllGlobals();}
 });

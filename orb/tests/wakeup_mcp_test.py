@@ -33,6 +33,20 @@ class DurableWakeupTests(unittest.TestCase):
             path.rename(path.with_suffix('.cancelled'))
             self.assertEqual(json.loads(subprocess.check_output(command))['state'],'cancelled')
             self.assertFalse(list(pathlib.Path(root).glob('*.json')))
+    def test_rejected_request_is_not_recreated_by_another_process(self):
+        with tempfile.TemporaryDirectory() as root:
+            args={'request_id':'rejected','delay_seconds':60,'prompt':'continue','reason':'CI'}
+            command=['python3',str(SCRIPT),root,'mission','schedule_wakeup',json.dumps(args)]
+            subprocess.check_output(command)
+            path=next(pathlib.Path(root).glob('*.json'))
+            rejected=path.with_suffix('.rejected')
+            path.rename(rejected)
+            result=subprocess.run(command,capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('Core rejected',result.stderr)
+            self.assertFalse(list(pathlib.Path(root).glob('*.json')))
+            rejected.rename(path.with_suffix('.cancelled'))
+            self.assertEqual(json.loads(subprocess.check_output(command))['state'],'cancelled')
     def test_concurrent_retries_create_one_request(self):
         with tempfile.TemporaryDirectory() as root:
             args={'request_id':'concurrent','delay_seconds':60,'prompt':'continue','reason':'CI'}

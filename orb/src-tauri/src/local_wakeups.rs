@@ -67,7 +67,10 @@ pub fn command(mission: &str) -> Option<Vec<String>> {
 #[tauri::command]
 pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String> {
     let _guard = SYNC_LOCK.lock().await;
-    let root = account(&connection)?;
+    sync_at(&connection, account(&connection)?).await
+}
+
+async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String> {
     let mut pending = Vec::new();
     let mut changed = false;
     let mut files = Vec::new();
@@ -83,7 +86,11 @@ pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String>
                 .map_err(|e| e.to_string())?
                 .flatten()
             {
-                if file.path().extension().is_some_and(|e| e == "json") {
+                if file
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e == "json" || e == "rejected")
+                {
                     let v: Value = serde_json::from_slice(
                         &std::fs::read(file.path()).map_err(|e| e.to_string())?,
                     )
@@ -109,7 +116,10 @@ pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String>
         } else {
             "automations"
         };
-        let error = if offline || blocked.contains_key(mission) || attempts >= 10 {
+        let mut rejected = path.extension().is_some_and(|e| e == "rejected");
+        let error = if rejected {
+            "Core rejected this wake-up. Dismiss it and submit a corrected request.".to_string()
+        } else if offline || blocked.contains_key(mission) || attempts >= 10 {
             "Waiting for earlier wake-up requests to sync".to_string()
         } else {
             attempts += 1;
@@ -131,7 +141,16 @@ pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String>
                 }
                 Ok(r) => {
                     let message = format!("Core refused wake-up ({})", r.status());
-                    blocked.insert(mission.into(), message.clone());
+                    // 404 may mean the local-origin mission has not synced yet.
+                    // Auth, conflicts, rate limits and network failures remain retryable.
+                    if matches!(r.status().as_u16(), 400 | 413 | 422) && v["cancel"] != true {
+                        std::fs::rename(&path, path.with_extension("rejected"))
+                            .map_err(|e| e.to_string())?;
+                        rejected = true;
+                        changed = true;
+                    } else {
+                        blocked.insert(mission.into(), message.clone());
+                    }
                     message
                 }
                 Err(_) => {
@@ -150,7 +169,7 @@ pub async fn local_wakeups_sync(connection: Connection) -> Result<Value, String>
                     .into_owned()
             });
         pending.push(json!({"mission":mission, "id":request_id,
-            "state":"pending_sync", "trigger":"time", "reason":if v["cancel"] == true { json!("Cancellation waiting to sync") } else {v["body"]["variables"]["__wakeup_reason"].clone()},
+            "state":if rejected {"error"} else {"pending_sync"}, "source":if rejected {"orb-local-rejected"} else {"orb-local"}, "trigger":"time", "reason":if v["cancel"] == true { json!("Cancellation waiting to sync") } else {v["body"]["variables"]["__wakeup_reason"].clone()},
             "next_at":v["body"]["variables"]["__wakeup_due_at"], "error":error}));
         // Keep creation order when disconnected; an older request must never
         // arrive after and replace a newer request.
@@ -186,7 +205,11 @@ pub async fn local_wakeups_cancel(connection: Connection, mission: String) -> Re
         .map_err(|e| e.to_string())?
         .flatten()
     {
-        if file.path().extension().is_some_and(|e| e == "json") {
+        if file
+            .path()
+            .extension()
+            .is_some_and(|e| e == "json" || e == "rejected")
+        {
             std::fs::rename(file.path(), file.path().with_extension("cancelled"))
                 .map_err(|e| e.to_string())?;
         }
@@ -203,4 +226,103 @@ pub async fn local_wakeups_cancel(connection: Connection, mission: String) -> Re
         .map_err(|e| e.to_string())?;
     std::fs::rename(&path, path.with_extension("json")).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn local_wakeups_discard(
+    connection: Connection,
+    mission: String,
+    request_id: String,
+) -> Result<(), String> {
+    let _guard = SYNC_LOCK.lock().await;
+    uuid::Uuid::parse_str(&mission).map_err(|_| "Invalid mission ID")?;
+    let root = account(&connection)?.join(mission);
+    discard_rejected(&root, &request_id)
+}
+
+fn discard_rejected(root: &std::path::Path, request_id: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let key = format!("{:x}", Sha256::digest(request_id.as_bytes()));
+    let path = root.join(key).with_extension("rejected");
+    if path.exists() {
+        std::fs::rename(&path, path.with_extension("cancelled")).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    #[tokio::test]
+    async fn permanently_rejected_request_does_not_block_newer_wakeup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mission = uuid::Uuid::new_v4().to_string();
+        let root = dir.path().join(&mission);
+        std::fs::create_dir(&root).unwrap();
+        use sha2::{Digest, Sha256};
+        for (i, key) in ["invalid-job", "valid-timer"].iter().enumerate() {
+            let name = format!("{:x}.json", Sha256::digest(key.as_bytes()));
+            std::fs::write(root.join(name), json!({"mission":mission,"created_ns":i,"body":{"variables":{"__wakeup_request_id":key}}}).to_string()).unwrap();
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for status in ["400 Bad Request", "200 OK"] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0; 4096];
+                    let n = socket.read(&mut bytes).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&bytes[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let c = Connection {
+            api_url: url,
+            token: "test".into(),
+        };
+        let synced = sync_at(&c, dir.path().to_owned()).await.unwrap();
+        assert_eq!(synced["pending"].as_array().unwrap().len(), 1);
+        assert_eq!(synced["pending"][0]["source"], "orb-local-rejected");
+        server.join().unwrap();
+        // No server remains: another sync must not retry the rejected request.
+        let again = sync_at(&c, dir.path().to_owned()).await.unwrap();
+        assert_eq!(again["pending"][0]["state"], "error");
+        discard_rejected(&root, "invalid-job").unwrap();
+        assert_eq!(
+            sync_at(&c, dir.path().to_owned()).await.unwrap()["pending"],
+            json!([])
+        );
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|f| f.path().extension().is_some_and(|e| e == "acked"))
+                .count(),
+            1
+        );
+    }
 }

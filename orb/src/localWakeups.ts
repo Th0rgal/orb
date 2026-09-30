@@ -27,3 +27,10 @@ export function startLocalWakeups() {
   const timer = window.setInterval(() => void tick(), 5000);
   return () => { stopped = true; clearInterval(timer); };
 }
+
+export async function discardLocalWakeup(mission: string, requestId: string) {
+  const invoke = nativeInvoke();
+  if (!invoke) throw new Error("Open this mission on its originating computer to dismiss the rejected wake-up");
+  await invoke("local_wakeups_discard", {mission, requestId, connection: {api_url: getApiUrl(), token: getJwt()}});
+  setPending(items => items.filter(item => item.mission !== mission || item.id !== requestId));
+}

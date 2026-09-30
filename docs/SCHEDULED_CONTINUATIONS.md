@@ -21,7 +21,8 @@ revokes future wake-ups and undelivered server outbox entries for that mission.
 Stopping a hosted mission or explicitly stopping a local mission invokes this
 revocation. Reporting an interrupted local process preserves its wake-ups so
 queue advancement and machine transfer can continue safely.
-An ordinary follow-up does not cancel the next wake-up.
+An ordinary follow-up does not cancel the next wake-up. Reading/acknowledging
+the preceding response also preserves automatic delivery of its wake-up.
 
 Requests may include `variables.__wakeup_request_id`. Its mission-scoped UUID is
 stable across retries; retrying returns the original automation. A replacement
@@ -74,7 +75,10 @@ Delivery back to the originating computer uses the existing durable client inbox
 and local message queue. Neither another computer nor the API host executes it.
 The computer must reconnect before local execution can start.
 
-Acked and cancelled request files are deduplication tombstones. Do not delete them
+A validation rejection (400, 413 or 422) quarantines the local request without
+blocking later requests. Orb shows the rejection with a Dismiss action. Missing
+missions, authentication failures, conflicts and rate limits remain retryable.
+Rejected, acked and cancelled request files are deduplication tombstones. Do not delete them
 while an originating tool request could still be replayed. Stop also saves an
 outgoing cancellation offline and removes queued local scheduled messages; an
 already-dispatching message is governed by the existing local launch/stop fence.
