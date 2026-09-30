@@ -972,7 +972,7 @@ impl NativeGrokObserver {
         // read from offset zero and the terminal fetch itself reached its end
         // (a failed fetch leaves stale offsets that look caught up).
         let complete_log = self.streaming == LogStreaming::Supported && self.pumped_to_end;
-        if !missing && !(allocated && complete_log && self.stream.json_events == 0) {
+        if !(missing || allocated && complete_log && self.stream.json_events == 0) {
             return;
         }
         let Some(session_id) = self.mission.session_id.clone() else {

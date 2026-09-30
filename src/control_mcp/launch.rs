@@ -13,7 +13,7 @@ pub fn require_runtime_owner(
     if matches!(
         harness,
         "codex" | "claudecode" | "opencode" | "gemini" | "grok"
-    ) && !user.is_some_and(|user| !user.id.trim().is_empty())
+    ) && user.is_none_or(|user| user.id.trim().is_empty())
     {
         return Err("Cannot launch native mission without its authenticated MCP owner".into());
     }

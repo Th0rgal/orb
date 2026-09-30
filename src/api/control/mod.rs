@@ -11125,8 +11125,8 @@ pub(super) async fn create_mission_inner(
     // ChatGPT OAuth is single-use and the extra occupant also races the
     // files. Sequential certify-after-repair is fine: the writer is terminal.
     if let Some(ws_id) = req.workspace_id.filter(|id| {
-        !shared_side_workspace
-            && !(req.parent_mission_id.is_some() && *id == workspace::DEFAULT_WORKSPACE_ID)
+        !(shared_side_workspace
+            || req.parent_mission_id.is_some() && *id == workspace::DEFAULT_WORKSPACE_ID)
     }) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = live_mission_on_workspace(
