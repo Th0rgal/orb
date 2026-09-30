@@ -20,7 +20,7 @@ struct OrbProvidersSettings: View {
     @State private var editKey: OrbJSON?
     @State private var keySheet = false
     @State private var login: OrbProviderLogin?
-    private static let subscriptionTypes = ["anthropic", "openai", "xai", "kimi"]
+    static let subscriptionTypes = ["anthropic", "openai", "google", "xai", "kimi"]
     var body: some View {
         List {
             OrbSettingsError(message: error)
@@ -34,10 +34,11 @@ struct OrbProvidersSettings: View {
                         OrbProviderQuota(value: detail)
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
                         if !detail["usage_note"].text.isEmpty { Text(detail["usage_note"].text).font(.caption).foregroundStyle(.secondary) }
-                        if !Self.canEditKey(provider) {
+                        if Self.canEditKey(provider) { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
+                        if Self.canConnectOAuth(provider) {
                             if let spec = Self.loginSpec(provider) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
                             else { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
-                        } else { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
+                        }
                         Button(provider["enabled"] == .bool(false) ? "Enable" : "Disable") { Task { await toggle(provider) } }.disabled(!ready || busy)
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
@@ -77,13 +78,16 @@ struct OrbProvidersSettings: View {
     static func canEditKey(_ provider: OrbJSON) -> Bool {
         provider["has_api_key"].flag || !provider["uses_oauth"].flag
     }
+    static func canConnectOAuth(_ provider: OrbJSON) -> Bool {
+        provider["uses_oauth"].flag && (provider["has_oauth"].flag || !provider["has_api_key"].flag)
+    }
     static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
-        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "kimi")
+        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: !["kimi", "google"].contains(type))
     }
     static func loginSpec(_ provider: OrbJSON) -> OrbProviderLogin? {
         guard provider["uses_oauth"].flag else { return nil }
         let owner = provider["credential_owner"].text, type = provider["provider_type"].text
-        let proxy = type != "kimi" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
+        let proxy = !["kimi", "google"].contains(type) && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
         guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }

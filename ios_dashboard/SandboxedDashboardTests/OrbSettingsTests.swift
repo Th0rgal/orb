@@ -37,14 +37,21 @@ final class OrbSettingsTests: XCTestCase {
     }
     func testKimiUsesNativeDeviceFlowAndAPIKeysRemainEditable() {
         XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("kimi").proxy)
+        XCTAssertTrue(OrbProvidersSettings.subscriptionTypes.contains("google"))
+        XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("google").proxy)
         let kimi: OrbJSON = .object(["id": .string("kimi-account"), "provider_type": .string("kimi"), "uses_oauth": .bool(true), "credential_owner": .string("sandboxed_sh")])
         XCTAssertEqual(OrbProvidersSettings.loginSpec(kimi)?.id, "kimi-account")
         XCTAssertEqual(OrbProvidersSettings.loginSpec(kimi)?.proxy, false)
         for type in ["anthropic", "openai", "google", "xai"] {
             let account: OrbJSON = .object(["provider_type": .string(type), "uses_oauth": .bool(true), "has_api_key": .bool(true), "has_oauth": .bool(false)])
             XCTAssertTrue(OrbProvidersSettings.canEditKey(account))
+            XCTAssertFalse(OrbProvidersSettings.canConnectOAuth(account))
         }
         XCTAssertFalse(OrbProvidersSettings.canEditKey(kimi))
+        XCTAssertTrue(OrbProvidersSettings.canConnectOAuth(kimi))
+        let dual: OrbJSON = .object(["provider_type": .string("openai"), "uses_oauth": .bool(true), "has_api_key": .bool(true), "has_oauth": .bool(true)])
+        XCTAssertTrue(OrbProvidersSettings.canEditKey(dual))
+        XCTAssertTrue(OrbProvidersSettings.canConnectOAuth(dual))
     }
 
 }
