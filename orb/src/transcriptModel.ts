@@ -281,6 +281,9 @@ export function applyStreamEvents(items: StreamItem[], events: StreamEvent[]): S
   }
   reducer.items=items.slice();
   for (const event of events) reducer.apply(event);
+  // An event that changed nothing (activity, status, a duplicate) keeps the
+  // array identity: a new one would re-run every memo and the turn list.
+  if(reducer.items.length===items.length&&reducer.items.every((item,index)=>item===items[index])){reducer.items=items;states.set(items,reducer);return items;}
   states.set(reducer.items,reducer);
   return reducer.items;
 }

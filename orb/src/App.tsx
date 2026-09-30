@@ -79,6 +79,7 @@ import {
   writeLocalFiles,
 } from "./localAgents";
 import { ControllerView } from "./Controller";
+import { timed } from "./diagnostics";
 import {
   createMission,
   getMission,
@@ -2373,7 +2374,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const applyLive = (ev: StreamEvent) => {
     liveEvents.push(ev);
     setItems((cur) => {
-      const next = applyStreamEvent(cur, ev);
+      const next = timed("reduce event", () => applyStreamEvent(cur, ev));
       if (next !== cur) {
         putTranscriptItems(p.id, next);
         queueMicrotask(()=>{if(!disposed){scrollIfPinned();scroller?.dispatchEvent(new Event("orb:transcript-change",{bubbles:true}));}});
