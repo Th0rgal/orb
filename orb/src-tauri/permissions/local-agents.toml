@@ -32,6 +32,8 @@ commands.allow = [
   "local_machine_identity",
   "local_machine_transfer",
   "local_agents_poll",
+  "local_wakeups_sync",
+  "local_wakeups_cancel",
   "local_agents_subscribe",
   "local_agents_unsubscribe",
   "browse_local_files",

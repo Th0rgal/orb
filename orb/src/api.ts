@@ -195,6 +195,8 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
+  continuation?: import("./continuations").ContinuationSummary | null;
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
   /** "hermes" when a controller created it; its controller session then follows. */

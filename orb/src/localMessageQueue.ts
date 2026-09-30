@@ -6,7 +6,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;delegated?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -51,7 +51,7 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;replace?:boolean}={}){
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
  await locked(key,async()=>{
   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
@@ -63,7 +63,7 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
    // Images stay attached while their marker is still in the edited text.
    const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
    existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
-  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated});
+  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled});
   await write(key,rows);
   if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
  });
@@ -344,4 +344,11 @@ export function startLocalQueueWorker(){
  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.
  const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
  return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
+}
+
+/** Stop removes automatic continuations still waiting on this computer. */
+export async function cancelQueuedWakeups(mission:string) {
+ const key=storageKey();
+ await locked(key,async()=>{const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='dispatching'||r.state==='accepted'));});
+ wake();
 }

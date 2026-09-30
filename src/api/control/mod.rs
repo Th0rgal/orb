@@ -9,6 +9,7 @@
 
 pub(crate) mod btw_context;
 pub(crate) mod client_placement;
+pub(crate) mod continuations;
 pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
 #[cfg(test)]
@@ -413,14 +414,14 @@ fn remote_node_needs_on_demand_probe(
     true
 }
 
-fn wakeup_supersession_key(
+pub(crate) fn wakeup_supersession_key(
     source: Option<&str>,
     trigger: &mission_store::TriggerType,
 ) -> Option<String> {
     match source? {
         // Wall-clock wakeups all represent the mission's next timer and may
         // supersede one another regardless of which helper created them.
-        "claude-builtin" | "automation-manager" => Some("wall-clock".to_string()),
+        "claude-builtin" | "automation-manager" | "orb-local" => Some("wall-clock".to_string()),
         // Durable completions are independent. Only a replacement watcher for
         // the same job may supersede an older one.
         "durable-job-terminal" => match trigger {
@@ -6791,6 +6792,9 @@ pub async fn list_missions(
         user_wait_starts_for_runs(control.mission_store.as_ref(), active_runs.values()).await;
     let (remote_handles, remote_outcomes) = remote_job_projection_inputs(&state).await;
     let now = chrono::Utc::now();
+    let continuation_summaries = continuations::summaries(&control.mission_store)
+        .await
+        .map_err(internal_error)?;
     let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
@@ -6817,6 +6821,11 @@ pub async fn list_missions(
         .collect();
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            continuations::attach_capabilities(value);
+            value["continuation"] = continuation_summaries
+                .get(&id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             if let Some(t) = machine_transfer::committed(&control.mission_store, id)
                 .await
                 .map_err(internal_error)?
@@ -7833,6 +7842,12 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
+            continuations::attach_capabilities(&mut value);
+            value["continuation"] = continuations::summaries(&control.mission_store)
+                .await
+                .map_err(internal_error)?
+                .remove(&id)
+                .unwrap_or(serde_json::Value::Null);
             // Remote placement must be visible on the read model: the row's
             // workspace/backend describe a local harness that a raw remote
             // mission never runs.
@@ -16301,9 +16316,27 @@ pub async fn set_client_mission_status(
     }
     let run =
         machine_transfer::check_client_receipt(&control, id, req.run_id, req.generation).await?;
+    if status == MissionStatus::Interrupted {
+        continuations::cancel_for_mission(&control.mission_store, id)
+            .await
+            .map_err(internal_error)?;
+    }
     control
         .mission_store
         .update_mission_status_with_reason(id, status, Some("client_runner"))
+        .await
+        .map_err(internal_error)?;
+    control
+        .mission_store
+        .complete_running_executions_for_mission(
+            id,
+            matches!(
+                status,
+                MissionStatus::Completed | MissionStatus::AwaitingUser
+            ),
+            matches!(status, MissionStatus::Failed | MissionStatus::Interrupted)
+                .then(|| "client_runner".to_string()),
+        )
         .await
         .map_err(internal_error)?;
     if let Some(run) = run {
@@ -17684,6 +17717,9 @@ pub async fn cancel_mission(
         ));
     }
     machine_transfer::guard(&control.mission_store, mission_id)
+        .await
+        .map_err(internal_error)?;
+    continuations::cancel_for_mission(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
     control
@@ -20266,6 +20302,16 @@ async fn automation_scheduler_loop(
     loop {
         tokio::time::sleep(check_interval).await;
         tick_count += 1;
+        if let Err(error) = continuations::deliver(
+            &mission_store,
+            &cmd_tx,
+            &events_tx,
+            telegram_bridge.as_ref(),
+        )
+        .await
+        {
+            tracing::error!(%error, "Scheduled continuation delivery failed");
+        }
 
         // Every ~60 seconds (12 ticks × 5s), run housekeeping sweeps.
         if tick_count.is_multiple_of(12) {
@@ -20640,6 +20686,19 @@ async fn automation_scheduler_loop(
 
             // Apply variable substitution
             let substituted_content = substitute_variables(&command_content, &context);
+
+            // One-shot continuations use the durable outbox. General automations
+            // retain their existing execution and notification behavior.
+            if automation.variables.contains_key("__wakeup_source") {
+                let mutex = continuations::lock(mission.id);
+                let _guard = mutex.lock().await;
+                if let Err(error) =
+                    continuations::stage(&mission_store, &automation, substituted_content).await
+                {
+                    tracing::error!(automation_id = %automation.id, %error, "Could not persist scheduled continuation");
+                }
+                continue;
+            }
 
             // Create execution record before execution
             let execution_id = Uuid::new_v4();
@@ -23035,8 +23094,8 @@ async fn control_actor_loop(
                 if let Some(mid) = message_target {
                     if mission_store.get_mission(mid).await.ok().flatten().is_some_and(|m| client_placement::is_tagged(&m.project.tags)) {
                         let command = match cmd { ControlCommand::AdmitDispatch { command, .. } => *command, command => command };
-                        if let ControlCommand::UserMessage { id, content, respond, .. } = command {
-                            let ack = match worker_location::enqueue(&mission_store, mid, id, content).await {
+                        if let ControlCommand::UserMessage { id, content, source, respond, .. } = command {
+                            let ack = match worker_location::enqueue_with_source(&mission_store, mid, id, content, source.as_deref() == Some("scheduled-continuation")).await {
                                 Ok(()) => UserMessageAck::Queued,
                                 Err(error) => UserMessageAck::Rejected(error),
                             };
@@ -23052,7 +23111,7 @@ async fn control_actor_loop(
                             command => command,
                         };
                         if let ControlCommand::UserMessage { id, content, source, respond, .. } = rejected {
-                            if source.as_deref() == Some("task-board") {
+                            if matches!(source.as_deref(), Some("task-board" | "scheduled-continuation")) {
                                 if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
                                     let user = AuthUser { id:session_user_id.clone(), username:session_user_id.clone() };
                                     tokio::spawn(async move {
@@ -29189,6 +29248,21 @@ pub async fn create_automation(
         ));
     }
 
+    let continuation_lock = continuations::lock(mission_id);
+    let _continuation_guard = continuation_lock.lock().await;
+    let automation_id = req
+        .variables
+        .get("__wakeup_request_id")
+        .map(|key| Uuid::new_v5(&mission_id, key.as_bytes()))
+        .unwrap_or_else(Uuid::new_v4);
+    if let Some(existing) = control
+        .mission_store
+        .get_automation(automation_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Ok(Json(existing));
+    }
     // Validate the command exists in the library if CommandSource::Library
     if let mission_store::CommandSource::Library { ref name } = req.command_source {
         validate_library_command(&state, name).await?;
@@ -29236,6 +29310,25 @@ pub async fn create_automation(
         None
     };
 
+    let last_triggered_at = if let (Some(due), mission_store::TriggerType::Interval { seconds }) =
+        (req.variables.get("__wakeup_due_at"), &trigger)
+    {
+        let due = chrono::DateTime::parse_from_rfc3339(due)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wake-up due time".into()))?;
+        let seconds = i64::try_from(*seconds)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wake-up delay".into()))?;
+        Some(
+            due.checked_sub_signed(
+                chrono::Duration::try_seconds(seconds)
+                    .ok_or((StatusCode::BAD_REQUEST, "Wake-up delay out of range".into()))?,
+            )
+            .ok_or((StatusCode::BAD_REQUEST, "Wake-up date out of range".into()))?
+            .to_rfc3339(),
+        )
+    } else {
+        last_triggered_at
+    };
+
     // Build the complete Automation struct
     let fresh_session = req
         .fresh_session
@@ -29256,7 +29349,7 @@ pub async fn create_automation(
     }
 
     let automation = mission_store::Automation {
-        id: Uuid::new_v4(),
+        id: automation_id,
         mission_id,
         command_source: req.command_source,
         trigger,
@@ -29478,7 +29571,11 @@ pub async fn update_automation(
 ) -> Result<Json<mission_store::Automation>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
+    let original = require_automation(&control.mission_store, automation_id).await?;
+    let mutex = continuations::lock(original.mission_id);
+    let _guard = mutex.lock().await;
     let mut automation = require_automation(&control.mission_store, automation_id).await?;
+    let was_wakeup = automation.variables.contains_key("__wakeup_source");
 
     // Validate the command exists in the library if CommandSource::Library is being updated
     if let Some(mission_store::CommandSource::Library { name }) = req.command_source.as_ref() {
@@ -29556,6 +29653,14 @@ pub async fn update_automation(
         }
     }
 
+    if was_wakeup && !automation.active {
+        continuations::ensure_cancellable(&control.mission_store, automation_id).await?;
+        control
+            .mission_store
+            .cancel_scheduled_delivery(automation_id)
+            .await
+            .map_err(internal_error)?;
+    }
     // Update automation in the store
     control
         .mission_store
@@ -29574,6 +29679,17 @@ pub async fn delete_automation(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
+    let automation = require_automation(&control.mission_store, automation_id).await?;
+    let mutex = continuations::lock(automation.mission_id);
+    let _guard = mutex.lock().await;
+    if automation.variables.contains_key("__wakeup_source") {
+        continuations::ensure_cancellable(&control.mission_store, automation_id).await?;
+        control
+            .mission_store
+            .cancel_scheduled_delivery(automation_id)
+            .await
+            .map_err(internal_error)?;
+    }
     let deleted = control
         .mission_store
         .delete_automation(automation_id)

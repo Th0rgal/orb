@@ -41,3 +41,5 @@ export const ChevronRight = (p: Props) => <Icon {...p}><path d="m9 18 6-6-6-6" /
 export const Archive = (p: Props) => <Icon {...p}><rect width="20" height="5" x="2" y="3" rx="1" />
   <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
   <path d="M10 12h4" /></Icon>;
+
+export const WakeClock = (p: Props) => <Icon {...p}><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" class="wake-clock-hand" /></Icon>;

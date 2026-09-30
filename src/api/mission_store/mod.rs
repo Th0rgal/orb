@@ -2998,6 +2998,34 @@ pub trait MissionStore: Send + Sync {
         Err("Automation executions not supported by this store".to_string())
     }
 
+    /// Atomically save a replayable scheduled occurrence and advance its schedule.
+    async fn stage_scheduled_delivery(
+        &self,
+        automation: &Automation,
+        execution: AutomationExecution,
+    ) -> Result<bool, String> {
+        let _ = (automation, execution);
+        Err("Durable scheduled delivery is not supported by this store".into())
+    }
+
+    /// Includes queued and accepted occurrences for the read projection.
+    async fn list_scheduled_deliveries(&self) -> Result<Vec<AutomationExecution>, String> {
+        Ok(vec![])
+    }
+
+    /// Cancel undelivered occurrences atomically with disabling the schedule.
+    async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
+        self.update_automation_active(id, false).await
+    }
+    async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
+        for a in self.get_mission_automations(mission).await? {
+            if a.variables.contains_key("__wakeup_source") {
+                self.cancel_scheduled_delivery(a.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Get execution history for an automation.
     async fn get_automation_executions(
         &self,

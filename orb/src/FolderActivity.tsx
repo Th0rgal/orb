@@ -24,12 +24,13 @@ export function folderActivity(missions: Mission[], running = (m: Mission) =>
   return counts;
 }
 
-export function FolderActivityIcon(p: { expanded?: boolean; color?: string; count: number }) {
+export function FolderActivityIcon(p: { expanded?: boolean; color?: string; count: number; scheduled?: number }) {
   const label = () => `${p.count} ${p.count === 1 ? "agent" : "agents"} running inside`;
   return <span class="row-ico folder-activity-icon" style={{ color: p.color ?? "var(--fg-3)" }}>
     <Show when={p.expanded} fallback={<Icon.Folder />}><Icon.FolderOpen /></Show>
     <Show when={p.count > 0}><span class="folder-activity-mark" role="img" aria-label={label()} title={label()}>
       <Icon.LoaderCircle size={10} class="mission-status-spin" />
     </span></Show>
+    <Show when={!p.count && p.scheduled}><span class="folder-activity-mark" role="img" aria-label={`${p.scheduled} scheduled wake-ups inside`} title={`${p.scheduled} scheduled wake-ups inside`}><Icon.WakeClock size={10} /></span></Show>
   </span>;
 }

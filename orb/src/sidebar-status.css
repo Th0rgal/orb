@@ -20,3 +20,11 @@
 .sidebar-tree .tree-entry { animation: sidebar-row-arrive 100ms ease-out; }
 @keyframes sidebar-row-arrive { from { opacity: .55; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .sidebar-tree .tree-entry { animation: none; } }
+
+.mission-glyph.scheduled { color: var(--fg-3); }
+.mission-glyph[role="button"] { cursor: pointer; }
+.wake-clock-hand { transform-origin: 12px 12px; animation: wake-clock-tick 60s steps(60, end) infinite; }
+@keyframes wake-clock-tick { to { transform: rotate(360deg); } }
+.wake-up-item + .wake-up-item { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
+.wake-up-actions { display: flex; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .wake-clock-hand { animation: none; } }

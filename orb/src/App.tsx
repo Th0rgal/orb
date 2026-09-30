@@ -1,6 +1,7 @@
 import { MessageCircle } from "./sidebarIcons";
 import {MentionPicker} from "./MentionPicker";
 import {MentionProjectContext} from "./PromptEditor";
+import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
 import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
@@ -1016,7 +1017,7 @@ export function floatingDock(el: HTMLDivElement) {
 
 export default function App() {
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
-  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);});
+  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [projects, setProjects] = createStore<typeof seed>([]);
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = localStorage.getItem("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
   createEffect(() => { localStorage.setItem("orb.selectedConversation",selected() ?? ""); });

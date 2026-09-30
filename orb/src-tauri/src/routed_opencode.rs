@@ -20,6 +20,7 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
 
 pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result<(), String> {
     let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
+    crate::local_wakeups::prepare(&mut request, &crate::run_recovery::Connection { api_url: base.into(), token: token.into() })?;
     if request.harness != "opencode" {
         return local_agents::start_with_env(request, &launch_env);
     }
