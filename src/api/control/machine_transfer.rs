@@ -632,6 +632,7 @@ pub async fn operate(
 
 #[derive(Deserialize)]
 pub struct ClientRunRequest {
+    pub message_id: Option<Uuid>,
     pub op: String,
     pub client_id: String,
     pub run_id: Option<Uuid>,
@@ -649,16 +650,45 @@ pub async fn client_run(
     Uuid::parse_str(&req.client_id).map_err(|_| conflict("Invalid computer identity"))?;
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
+    if req.op == "inbox_all" {
+        let items = control
+            .mission_store
+            .list_pending_board_outbox(10000)
+            .await
+            .map_err(internal_error)?;
+        let mut owners = std::collections::HashMap::new();
+        let mut messages = Vec::new();
+        for item in items
+            .into_iter()
+            .filter(|item| item.delivery_kind == worker_location::CLIENT_DELIVERY)
+        {
+            let target = item.boss_mission_id;
+            if !owners.contains_key(&target) {
+                owners.insert(
+                    target,
+                    worker_location::resolved_client_owner(&control.mission_store, target)
+                        .await
+                        .map_err(internal_error)?,
+                );
+            }
+            if owners.get(&target).and_then(|owner| owner.as_deref())
+                == Some(req.client_id.as_str())
+            {
+                messages.push(item.payload);
+            }
+        }
+        return Ok(Json(json!({"messages":messages})));
+    }
     if !client_placement::is_tagged(&m.project.tags) {
         return Err(conflict(
             "This conversation no longer runs on this computer",
         ));
     }
     guard(&control.mission_store, id).await.map_err(conflict)?;
-    if let Some(t) = committed(&control.mission_store, id)
+    let transfer = committed(&control.mission_store, id)
         .await
-        .map_err(internal_error)?
-    {
+        .map_err(internal_error)?;
+    if let Some(t) = transfer.as_ref() {
         if t.destination
             != (Machine::Client {
                 id: req.client_id.clone(),
@@ -671,6 +701,61 @@ pub async fn client_run(
         if req.op == "begin" && req.cwd.as_deref() != t.destination_root.as_deref() {
             return Err(conflict("Reload the transferred workspace before starting"));
         }
+    }
+    let designated = transfer
+        .as_ref()
+        .and_then(|t| match &t.destination {
+            Machine::Client { id } => Some(id.clone()),
+            _ => None,
+        })
+        .or_else(|| worker_location::client_owner(&m).map(str::to_owned))
+        .or(control
+            .mission_store
+            .get_latest_mission_run(id)
+            .await
+            .map_err(internal_error)?
+            .and_then(|run| {
+                run.owner_actor_id
+                    .strip_prefix("orb-client:")
+                    .map(str::to_owned)
+            }));
+    if designated
+        .as_deref()
+        .is_some_and(|owner| owner != req.client_id)
+    {
+        return Err(conflict("Open this conversation on its owning computer"));
+    }
+    if matches!(req.op.as_str(), "inbox" | "received") {
+        if designated.is_none() {
+            return Err(conflict("This conversation has no owning computer"));
+        }
+        let items = control
+            .mission_store
+            .list_pending_board_outbox(10000)
+            .await
+            .map_err(internal_error)?;
+        let pending: Vec<_> = items
+            .into_iter()
+            .filter(|item| {
+                item.delivery_kind == worker_location::CLIENT_DELIVERY && item.boss_mission_id == id
+            })
+            .collect();
+        if req.op == "received" {
+            let message_id = req
+                .message_id
+                .ok_or_else(|| conflict("Missing message identity"))?;
+            if let Some(item) = pending.iter().find(|item| item.id == message_id) {
+                control
+                    .mission_store
+                    .acknowledge_board_outbox(&item.idempotency_key)
+                    .await
+                    .map_err(internal_error)?;
+            }
+            return Ok(Json(json!({"received":message_id})));
+        }
+        return Ok(Json(
+            json!({"messages":pending.into_iter().map(|item| item.payload).collect::<Vec<_>>()}),
+        ));
     }
     let owner = format!("orb-client:{}", req.client_id);
     if req.op == "begin" {

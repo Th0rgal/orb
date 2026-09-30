@@ -1,5 +1,5 @@
 import { contextManifest } from "./projectContext";
-import { getProjectController, listProjectFiles, type MissionAttachment } from "./api";
+import { listProjectFiles, type MissionAttachment } from "./api";
 
 export type AttachKind = "file" | "folder" | "controller" | "context";
 
@@ -8,6 +8,8 @@ export interface AttachChip {
   kind: AttachKind;
   path?: string;
   label: string;
+  /** Project owning this path; never inferred from its basename. */
+  project?: string;
 }
 
 export interface AttachItem {
@@ -16,6 +18,8 @@ export interface AttachItem {
   section: "Files" | "Folders" | "Controller" | "Context";
   path?: string;
   label: string;
+  /** Project owning this path; never inferred from its basename. */
+  project?: string;
 }
 
 /** `@` plus a query at the start of the current token. */
@@ -28,13 +32,14 @@ export function atQuery(text: string, caret: number): { open: boolean; query: st
 }
 
 export function filterAttach(items: AttachItem[], query: string): AttachItem[] {
+  items = items.filter(item => item.kind !== "controller");
   if (!query) return items.slice(0,100);
   const q = query.replace(/^@/, "");
   return items.filter((it) => it.label.toLowerCase().includes(q) || (it.path ?? "").toLowerCase().includes(q)).slice(0,100);
 }
 
 export function chipToAttachment(chip: AttachChip): MissionAttachment {
-  return chip.kind === "controller" ? { kind: "controller" } : { kind: chip.kind, path: chip.path };
+  return chip.kind === "controller" ? { kind: "controller" } : { kind: chip.kind === "context" ? "path" : chip.kind, path: chip.path };
 }
 
 export function consumeAtToken(text: string, caret: number): string {
@@ -93,27 +98,18 @@ function trimBare(value: string): string {
  * Order follows the sentence, and a file mentioned twice is sent once.
  */
 export function mentionedChips(text: string, items: AttachItem[]): AttachChip[] {
-  const byPath = new Map<string, AttachItem>();
-  for (const item of items) {
-    if (item.path) byPath.set(item.path.replace(/\/$/, ""), item);
-  }
-  const controller = items.find((it) => it.kind === "controller");
   const chips: AttachChip[] = [];
   const seen = new Set<string>();
   for (const mention of scanMentions(text)) {
     const bare = (mention.raw.startsWith('@"') ? mention.value : trimBare(mention.value)).replace(/\/$/, "");
-    const item =
-      bare.toLowerCase() === CONTROLLER_MENTION && controller
-        ? controller
-        : byPath.get(bare) ?? byPath.get(trimBare(bare).replace(/\/$/, ""));
-    if (bare === "context" || bare.startsWith("context/")) {
-      if (!seen.has(bare)) { seen.add(bare); chips.push({id:`context:${bare}`,kind:"context",path:bare,label:bare}); }
-      continue;
-    }
+    const matches = items.filter(item => item.kind !== "controller" && item.path?.replace(/\/$/, "") === bare);
+    // Ambiguous roots must never silently resolve to the last item in a map.
+    const roots = new Set(matches.map(item => item.project ?? ""));
+    const item = roots.size === 1 ? matches[0] : undefined;
     // An unknown `@word` is ordinary prose, not a silent attachment.
     if (!item || seen.has(item.id)) continue;
     seen.add(item.id);
-    chips.push({ id: item.id, kind: item.kind, path: item.path, label: item.label });
+    chips.push({ id: item.id, kind: item.kind, path: item.path, label: item.label, ...(item.project ? {project:item.project} : {}) });
   }
   return chips;
 }
@@ -138,27 +134,19 @@ export function insertMention(
 }
 
 export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
-  const items: AttachItem[] = [];
-  let context: AttachItem[] = [];
   try {
-    const manifest=await contextManifest(slug);
-    context=[{id:"context:root",kind:"context",path:"context",label:"context/",section:"Context"},...Object.entries(manifest.entries).map(([path,entry])=>({id:`context:${path}`,kind:"context" as const,path:`context/${path}`,label:`context/${path}${entry.directory?"/":""}`,section:"Context" as const}))];
-  } catch { /* Older servers do not advertise synchronized context. */ }
-  try {
-    const controller = await getProjectController(slug, 1);
-    if (controller.job) {
-      items.push({
-        id: `controller:${slug}`,
-        kind: "controller",
-        section: "Controller",
-        label: controller.job.name || `${slug} controller`,
-      });
-    }
+    const manifest = await contextManifest(slug);
+    return Object.entries(manifest.entries).map(([path, entry]) => ({
+      id: `context:${slug}:${path}`, kind: "context", project: slug, path,
+      label: `${path}${entry.directory ? "/" : ""}`,
+      section: entry.directory ? "Folders" : "Files",
+    }));
   } catch {
-    /* no cron */
+    // Older servers only expose the project file listing.
+    const items: AttachItem[] = [];
+    await walkFiles(slug, "", items, 0);
+    return items.map(item => ({...item, project: slug}));
   }
-  await walkFiles(slug, "", items, 0);
-  return [...context,...items];
 }
 
 async function walkFiles(slug: string, path: string, items: AttachItem[], depth: number) {

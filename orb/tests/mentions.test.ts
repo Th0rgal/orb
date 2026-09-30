@@ -96,15 +96,14 @@ describe("what a draft actually attaches", () => {
     expect(ids("(see @notes.md)")).toEqual(["file:notes.md"]);
   });
 
-  it("resolves folders and the controller", () => {
-    expect(ids("scan @reference/ and @controller")).toEqual(["folder:reference", "controller:pareto"]);
+  it("resolves folders but leaves controller text alone", () => {
+    expect(ids("scan @reference/ and @controller")).toEqual(["folder:reference"]);
   });
 
   it("carries the identity needed for the payload", () => {
     const chips = mentionedChips("@reference/spec.md and @controller", ITEMS);
     expect(chips[0]).toMatchObject({ kind: "file", path: "reference/spec.md" });
-    expect(chips[1]).toMatchObject({ kind: "controller" });
-    expect(chips[1].path).toBeUndefined();
+    expect(chips).toHaveLength(1);
   });
 });
 

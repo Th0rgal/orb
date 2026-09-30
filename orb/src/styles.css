@@ -2483,3 +2483,6 @@ select.orb-select-native:disabled { cursor: default; }
 
 .queue-menu-help { max-width: 240px; padding: 8px; font-size: 12px; line-height: 1.5; color: var(--fg-3); }
 .project-option .row-project-color svg { color: inherit; }
+
+.working-directory-field { display:flex; align-items:center; gap:12px; margin:12px 0; color:var(--fg-2); font-size:12px; }
+.working-directory-field input { flex:1; min-width:0; border:1px solid var(--border); border-radius:6px; padding:7px 10px; background:transparent; color:var(--fg); font:inherit; }

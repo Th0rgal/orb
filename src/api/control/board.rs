@@ -1070,6 +1070,9 @@ async fn replay_pending_board_outbox(
     };
     let mut eligible = Vec::new();
     for item in pending {
+        if item.delivery_kind == super::worker_location::CLIENT_DELIVERY {
+            continue;
+        }
         let (target, content) = match outbox_payload(&item) {
             Ok(payload) => payload,
             Err(error) => {
@@ -1559,6 +1562,17 @@ pub async fn scheduler_pass(
                         }
                         continue;
                     }
+                    if super::client_placement::is_tagged(&boss.project.tags)
+                        || !boss.requires_local_disk
+                    {
+                        if let Some(hub) = control_hub {
+                            if schedule_external_worker(hub, mission_store, &task, &preflight).await
+                            {
+                                available -= 1;
+                            }
+                        }
+                        continue;
+                    }
                     match spawn_task_worker(
                         control_hub,
                         mission_store,
@@ -1638,6 +1652,128 @@ fn append_note(notes: &Option<String>, line: &str) -> Option<String> {
     }
 }
 
+/// API creation may wait on this actor. Run it outside the scheduler turn,
+/// retaining the task key as the durable dispatch identity across retries.
+async fn schedule_external_worker(
+    hub: &super::ControlHub,
+    store: &Arc<dyn MissionStore>,
+    task: &BoardTask,
+    preflight: &RetryPreflight,
+) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static INFLIGHT: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+    let Some(state) = hub.admission_state.get().and_then(std::sync::Weak::upgrade) else {
+        return false;
+    };
+    let user = hub
+        .sessions
+        .read()
+        .await
+        .iter()
+        .find(|(_, session)| Arc::ptr_eq(&session.mission_store, store))
+        .map(|(id, _)| super::AuthUser {
+            id: id.clone(),
+            username: id.clone(),
+        });
+    let Some(user) = user else {
+        return false;
+    };
+    if !INFLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(task.id)
+    {
+        return false;
+    }
+    let store = store.clone();
+    let task = task.clone();
+    let preflight = preflight.clone();
+    tokio::spawn(async move {
+        let request = serde_json::from_value::<super::CreateMissionRequest>(serde_json::json!({
+            "title":format!("[{}] {}",task.task_key,task.title),
+            "parent_mission_id":task.boss_mission_id,
+            "backend":task.backend,"model_override":task.model_override.as_deref().or_else(|| role_default_model(&task)),
+            "model_effort":task.model_effort,"working_directory":task.working_directory,
+            "idempotency_key":format!("board:{}:attempt:{}",task.id,task.attempts+1),
+            "prompt":format!("{}{}",retry_prompt(&task,&preflight),worker_contract(&task)),
+        }));
+        let result = match request {
+            Ok(request) => super::create_mission_inner(
+                super::State(state),
+                super::Extension(user),
+                Some(super::Json(request)),
+                true,
+            )
+            .await
+            .map_err(|(_, error)| error),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok((_, super::Json(value))) => {
+                if let Some(id) = value
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    let mut updated = match store.get_board_task(task.id).await {
+                        Ok(Some(current))
+                            if current.status == task.status
+                                && current.worker_mission_id == task.worker_mission_id =>
+                        {
+                            current
+                        }
+                        _ => {
+                            INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+                            return;
+                        }
+                    };
+                    updated.worker_mission_id = Some(id);
+                    updated.status = BoardTaskStatus::Running;
+                    updated.attempts += 1;
+                    if let Err(error) = store.save_board_task(&updated).await {
+                        tracing::error!(task=%task.id,%error,"could not record external worker; dispatch key retained for retry");
+                    } else {
+                        let _ = store
+                            .create_task_attempt(TaskAttempt {
+                                id: Uuid::new_v4(),
+                                task_id: task.id,
+                                attempt_number: updated.attempts,
+                                mission_id: id,
+                                backend: task.backend.clone(),
+                                model: task.model_override.clone(),
+                                role: task.role,
+                                run_id: None,
+                                commit_sha: None,
+                                changed_files: vec![],
+                                verification_evidence: serde_json::json!({}),
+                                cost_cents: None,
+                                terminal_class: None,
+                                started_at: now_string(),
+                                finished_at: None,
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                if let Ok(Some(mut updated)) = store.get_board_task(task.id).await {
+                    let note = format!("Worker remains queued: {error}");
+                    if updated.status == task.status
+                        && !updated.notes.as_deref().unwrap_or("").contains(&note)
+                    {
+                        updated.notes = append_note(&updated.notes, &note);
+                        let _ = store.save_board_task(&updated).await;
+                    }
+                }
+                tracing::warn!(task=%task.id,%error,"external worker remains queued on its selected machine");
+            }
+        }
+        INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+    });
+    true
+}
+
 async fn spawn_task_worker(
     control_hub: Option<&super::ControlHub>,
     mission_store: &Arc<dyn MissionStore>,
@@ -1682,6 +1818,36 @@ async fn spawn_task_worker(
     } else {
         None
     };
+    let parent = mission_store.get_mission(task.boss_mission_id).await?;
+    let mut working_directory = task
+        .working_directory
+        .clone()
+        .or_else(|| parent.as_ref().and_then(|p| p.working_directory.clone()));
+    if let Some(hub) = control_hub {
+        let workspace =
+            crate::workspace::resolve_workspace(&hub.workspaces, &hub.config, Some(workspace_id))
+                .await;
+        let requested = working_directory.unwrap_or_else(|| {
+            crate::workspace::configured_project_dir(
+                &workspace,
+                &crate::workspace::mission_workspace_dir_for_workspace(
+                    &workspace,
+                    task.boss_mission_id,
+                ),
+            )
+            .to_string_lossy()
+            .into_owned()
+        });
+        working_directory = Some(
+            crate::api::mission_runner::resolve_mission_working_directory(
+                &workspace.path,
+                workspace.workspace_type,
+                &requested,
+            )?
+            .to_string_lossy()
+            .into_owned(),
+        );
+    }
     let assigned_id = Uuid::new_v4();
     let mut admission_guard = None;
     if let Some((guard, mut reservation, workspace)) = admission {
@@ -1712,9 +1878,9 @@ async fn spawn_task_worker(
             task.model_effort.as_deref(),
             false,
             Some(&task.backend),
-            None,
+            parent.as_ref().and_then(|p| p.config_profile.as_deref()),
             Some(task.boss_mission_id),
-            task.working_directory.as_deref(),
+            working_directory.as_deref(),
             true,
             Some(assigned_id),
         )

@@ -162,6 +162,7 @@ pub async fn local_run_launch(
     mut request: local_agents::StartRequest,
     connection: Connection,
 ) -> Result<Value, String> {
+    request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let guard = lock(&request.id)?;
     recover(&connection, &request.id, &request.cwd).await?;
     let client_id = transfers::local_machine_identity()?;

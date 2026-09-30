@@ -64,7 +64,7 @@ export async function transferFile(source: UploadSource, destination: string): P
     });
     if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
     if (receipt.conflict) throw new Error("Shared context changed. Drop the file again.");
-    return {source,path:`context/${path}`,destination,connection,endpoint:getApiUrl()};
+    return {source,path,destination,connection,endpoint:getApiUrl()};
   }
   if (connection !== connectionVersion()) throw new Error("The backend changed. Choose the file again.");
   const receipt = await api<UploadReceipt>("/api/uploads", {

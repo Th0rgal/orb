@@ -92,6 +92,11 @@ pub(crate) fn resolve_mission_working_directory(
         }
     }
 
+    if workspace_type == WorkspaceType::Host {
+        return resolved
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve working_directory: {error}"));
+    }
     Ok(resolved)
 }
 
@@ -3844,6 +3849,52 @@ async fn run_mission_turn(
         }
     };
 
+    // Host cwd is source, not harness state. Never share generated config or
+    // session databases merely because two workers edit the same directory.
+    workspace.env_vars.remove("SANDBOXED_SH_MISSION_CWD");
+    if workspace.workspace_type == WorkspaceType::Host {
+        if let Some(path) = explicit_worktree.as_ref() {
+            // A generated mission tree retains its recorded source identity.
+            // Ordinary host directories do not require a workspace owner.
+            let managed = path.ancestors().any(|ancestor| {
+                ancestor
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        name.strip_prefix("mission-").is_some_and(|suffix| {
+                            suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                        })
+                    })
+                    && ancestor
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "workspaces")
+            });
+            if managed {
+                let mut candidates = vec![mission_id];
+                if let Some(store) = mission_store.as_ref() {
+                    if let Ok(Some(mission)) = store.get_mission(mission_id).await {
+                        candidates.extend(mission.parent_mission_id);
+                    }
+                }
+                if let Err(error) = workspace::verify_or_adopt_explicit_mission_working_directory(
+                    &workspace,
+                    path,
+                    &candidates,
+                ) {
+                    return AgentResult::failure(
+                        format!("Host source directory is unavailable or unverified: {error}"),
+                        0,
+                    );
+                }
+            }
+            workspace.env_vars.insert(
+                "SANDBOXED_SH_MISSION_CWD".into(),
+                path.to_string_lossy().into_owned(),
+            );
+        }
+    }
+
     if let Err(e) =
         workspace::sync_workspace_mcp_binaries_for_workspace(&config.working_dir, &workspace).await
     {
@@ -3892,7 +3943,9 @@ async fn run_mission_turn(
     };
 
     // Override with mission-specific working_directory (e.g. git worktree for orchestrated workers)
-    let mission_work_dir = if let Some(ref wd) = mission_working_directory {
+    let mission_work_dir = if workspace.workspace_type == WorkspaceType::Host {
+        mission_work_dir
+    } else if let Some(ref wd) = mission_working_directory {
         match resolve_mission_working_directory(&workspace.path, workspace.workspace_type, wd) {
             Ok(wd_path) => {
                 if let Err(error) = workspace::verify_or_adopt_explicit_mission_working_directory(
@@ -3946,6 +3999,14 @@ async fn run_mission_turn(
         mission_work_dir
     };
 
+    let user_message = match super::mission_payload::qualify_path_mentions(
+        &config.working_dir,
+        mission_id,
+        &user_message,
+    ) {
+        Ok(message) => message,
+        Err(error) => return AgentResult::failure(format!("Resolve attached paths: {error}"), 0),
+    };
     let user_message = if super::context_execution::has_mentions(&user_message) {
         let project = if let Some(store) = mission_store.as_ref() {
             store
@@ -3991,9 +4052,10 @@ async fn run_mission_turn(
         user_message
     };
 
+    let attachment_dir = workspace::configured_project_dir(&workspace, &mission_work_dir);
     let user_message = match crate::api::mission_payload::materialize_turn(
         &config.working_dir,
-        &mission_work_dir,
+        &attachment_dir,
         mission_id,
         &user_message,
     ) {

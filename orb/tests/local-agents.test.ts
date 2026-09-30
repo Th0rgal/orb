@@ -97,10 +97,10 @@ it("resolves context at the cursor token without consuming punctuation or copyin
  const previous=host.__TAURI_INTERNALS__;
  const invoke=vi.fn().mockResolvedValue({root:"/local/shared context",state:{}});host.__TAURI_INTERNALS__={invoke};
  try{
-  const result=await materializeMentions("demo",'Read @context/notes.md. Then @"context/a b.md" and @context.',[]);
-  expect(result.prompt).toBe('Read "/local/shared context/notes.md". Then "/local/shared context/a b.md" and "/local/shared context".');
+  const result=await materializeMentions("demo",'Read @context/notes.md. Then @"context/a b.md" and @context.', ['context/notes.md','context/a b.md','context'].map(path=>({id:path,kind:'context' as const,path,label:path,project:'demo'})));
+  expect(result.prompt).toBe('Read "/local/shared context/context/notes.md". Then "/local/shared context/context/a b.md" and "/local/shared context/context".');
   expect(result.files).toEqual([]);
-  expect(invoke.mock.calls[0][1].request.paths).toEqual(['/notes.md','/a b.md','']);
+  expect(invoke.mock.calls[0][1].request.paths).toEqual(['context/notes.md','context/a b.md','context']);
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
 

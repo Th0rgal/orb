@@ -1174,6 +1174,18 @@ pub(crate) async fn continue_on_node(
                 format!("Mission {mission_id} not found"),
             )
         })?;
+    if let Some(id) = message_id {
+        let expected = id.to_string();
+        if store
+            .get_events(mission_id, Some(&["user_message"]), None, None)
+            .await
+            .map_err(internal)?
+            .iter()
+            .any(|event| event.event_id.as_deref() == Some(expected.as_str()))
+        {
+            return Ok(mission);
+        }
+    }
     // Create absorbs project missions under a generated track, including Orb
     // requests with no writer flag. Re-admit that same identity and capability;
     // PR bindings and explicit tracks still require full create admission.

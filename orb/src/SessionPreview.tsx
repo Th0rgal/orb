@@ -18,6 +18,8 @@ export interface SessionPreviewData {
   local: boolean;
   destination: string;
   directory?: string | null;
+  parent?: string;
+  children?: number;
   project?: string | null;
   harness?: string;
   model?: string;
@@ -150,6 +152,8 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
             onFocusOut={e => { if (!panel?.contains(e.relatedTarget as Node)) leave(); }}
           >
             <div class="session-preview-title">{p.data.title}</div>
+            <Show when={p.data.parent}><div class="session-preview-row"><span>Parent session</span><span>{p.data.parent}</span></div></Show>
+            <Show when={p.data.children}><div class="session-preview-row"><span>Worker sessions</span><span>{p.data.children}</span></div></Show>
             <Show when={git()}>
               {(g) => (
                 <div class="session-preview-row">

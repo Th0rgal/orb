@@ -1506,7 +1506,12 @@ pub fn run_claudecode_turn<'a>(
             (program, full_args)
         };
         let mut pty = match workspace_exec
-            .spawn_streaming_pty(work_dir, &program, &full_args, env)
+            .spawn_streaming_pty(
+                &crate::workspace::configured_project_dir(workspace, work_dir),
+                &program,
+                &full_args,
+                env,
+            )
             .await
         {
             Ok(child) => child,

@@ -5,7 +5,7 @@ import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;delegated?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
 const [entries,setEntries]=createSignal<QueuedLocalMessage[]>([]);
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
@@ -21,9 +21,16 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean}={}){
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
- await locked(key,async()=>{const rows=await read(key);if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true});await write(key,rows);});
+ await locked(key,async()=>{
+  const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
+  if(seen.includes(id))return;
+  const rows=await read(key);
+  if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated});
+  await write(key,rows);
+  if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
+ });
  wake();return id;
 }
 export async function removeQueuedMessage(id:string){const key=storageKey();await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row?.state==='dispatching'||row?.state==='accepted')throw Error('This message has already been sent.');await write(key,rows.filter(row=>row.id!==id));});wake();}
@@ -152,7 +159,7 @@ export function startLocalQueueWorker(){
      await reconcileLocalRun(row.mission);if(!valid())return;
      const mission=await getMission(row.mission);
      if(!mission.tags?.includes('placement:client')||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
-     if(['active','running','pending','starting','resuming'].includes(mission.status))continue;
+     if(['active','running','starting','resuming'].includes(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;
      // Only the durable claim is locked: enqueue/cancel never waits for the network.
      const claimed=await locked(key,async()=>{const current=await read(key);const first=current.find(r=>r.mission===row.mission);if(first?.id!==row.id||first.state!=='queued'||!valid()||stopping.has(runKey))return false;first.state='dispatching';first.claimedAt=Date.now();await write(key,current);return true;});

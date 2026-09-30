@@ -227,23 +227,24 @@ export async function materializeMentions(
   const mentions = scanMentions(text).map(m=>{
     if(m.raw.startsWith('@"'))return m;
     const value=m.value.replace(/[.,;:!?]+$/,"");
-    return (value==="context"||value.startsWith("context/"))?{...m,value,raw:m.raw.slice(0,m.raw.length-(m.value.length-value.length))}:m;
+    return {...m,value,raw:m.raw.slice(0,m.raw.length-(m.value.length-value.length))};
   });
   const files: LocalFile[] = [];
   const replacements: Array<{ raw: string; absolute: string }> = [];
-  const contextMentions = mentions.filter(m => m.value === "context" || m.value.startsWith("context/"));
+  const contextMentions = mentions.filter(m => chips.some(c => c.kind === "context" && c.path?.replace(/\/$/, "") === m.value.replace(/\/$/, "")));
+  if (chips.some(c => c.project && c.project !== slug)) throw new Error("The referenced files belong to another project. Select them again.");
   let contextRoot: string | undefined;
   if (contextMentions.length) {
     const invoke = tauriInvoke();
     if (!invoke) throw new Error("Shared context requires the Orb desktop app on this computer.");
-    const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value.slice(7).replace(/\/$/,""))}}) as {root:string;state:{error?:string}};
+    const result = await invoke("project_context_prepare", {request:{endpoint:getApiUrl(),token:getJwt()??"",project:slug,paths:contextMentions.map(m=>m.value.replace(/\/$/,""))}}) as {root:string;state:{error?:string}};
     contextRoot=result.root;
   }
   let folderBytes = 0;
   for (const mention of mentions) {
     const bare = mention.value.replace(/\/$/, "");
-    if (contextRoot && (bare === "context" || bare.startsWith("context/"))) {
-      replacements.push({raw:mention.raw,absolute:`${contextRoot}${bare === "context" ? "" : "/"+bare.slice(8)}`});
+    if (contextRoot && contextMentions.some(m => m.raw === mention.raw)) {
+      replacements.push({raw:mention.raw,absolute:`${contextRoot}/${bare}`});
       continue;
     }
     const chip = chips.find((item) => {
@@ -314,6 +315,13 @@ export async function materializeMentions(
 /** Swap the placeholder root for the workspace Tauri created. */
 export function bindWorkspace(prompt: string, root: string): string {
   return prompt.replaceAll("__ROOT__", root.replace(/\/$/, ""));
+}
+
+/** Validate an explicit host folder before copying attachments or claiming a run. */
+export async function localDirectory(path: string): Promise<string> {
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Local folders require Orb desktop.");
+  return await invoke("local_agents_directory", {path}) as string;
 }
 
 export async function localWorkspace(slug: string): Promise<string> {

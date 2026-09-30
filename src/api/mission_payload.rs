@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -178,6 +178,8 @@ pub const FILE_BYTE_CAP: usize = 512 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
+    /// A literal project-relative path from Orb. Context is the legacy namespace.
+    Path,
     Context,
     File,
     Folder,
@@ -325,12 +327,14 @@ fn prepare(
 
     for attachment in &payload.attachments {
         match attachment.kind {
-            AttachmentKind::Context => {
+            AttachmentKind::Path | AttachmentKind::Context => {
                 let written = attachment.path.as_deref().unwrap_or("context");
-                let relative = written
-                    .strip_prefix("context/")
-                    .unwrap_or("")
-                    .trim_end_matches('/');
+                let relative = if attachment.kind == AttachmentKind::Path {
+                    written
+                } else {
+                    written.strip_prefix("context/").unwrap_or("")
+                }
+                .trim_end_matches('/');
                 if !relative.is_empty() {
                     crate::project_context::valid_path(relative)?;
                 }
@@ -486,6 +490,59 @@ pub fn validate(payload: &MissionPayload) -> Result<(), String> {
     Ok(())
 }
 
+// Enumerate the open directory itself on Linux and macOS. Reopening its
+// pathname would allow replacement between validation and enumeration.
+fn directory_names(dir: &File) -> Result<Vec<std::ffi::OsString>, String> {
+    let fd = open_child(
+        dir,
+        std::ffi::OsStr::new("."),
+        libc::O_RDONLY | libc::O_DIRECTORY,
+    )?
+    .into_raw_fd();
+    let raw = unsafe { libc::fdopendir(fd) };
+    if raw.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(error.to_string());
+    }
+    struct Directory(*mut libc::DIR);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let stream = Directory(raw);
+    let mut names = Vec::new();
+    // One extra entry lets the caller report its 4000-entry cap.
+    while names.len() < 4001 {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            *libc::__error() = 0;
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) != 0 {
+                return Err(error.to_string());
+            }
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(std::ffi::OsString::from_vec(name.to_vec()));
+        }
+    }
+    Ok(names)
+}
+
 fn collect_files(
     dir: &File,
     prefix: &Path,
@@ -498,9 +555,7 @@ fn collect_files(
         report.truncated = true;
         return;
     }
-    // Linux procfs exposes this already-open descriptor. Keep it alive while
-    // enumerating and open every child relative to it, never via a raced path.
-    let read = match std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())) {
+    let read = match directory_names(dir) {
         Ok(read) => read,
         Err(error) => {
             report
@@ -515,18 +570,12 @@ fn collect_files(
             break;
         }
         *visited += 1;
-        let Ok(entry) = entry else {
-            report
-                .skipped
-                .push(format!("{} (unreadable entry)", prefix.display()));
-            continue;
-        };
-        let rel = prefix.join(entry.file_name());
+        let rel = prefix.join(&entry);
         if is_secret_path(&rel.to_string_lossy()) {
             report.skipped.push(format!("{} (secret)", rel.display()));
             continue;
         }
-        let file = match open_child(dir, &entry.file_name(), libc::O_RDONLY | libc::O_NONBLOCK) {
+        let file = match open_child(dir, &entry, libc::O_RDONLY | libc::O_NONBLOCK) {
             Ok(file) => file,
             Err(error) => {
                 report.skipped.push(format!("{} ({error})", rel.display()));
@@ -704,6 +753,62 @@ pub fn materialize_turn(
     Ok(content)
 }
 
+/// Translate only explicitly attached literal paths into the legacy internal
+/// context protocol. Stored/user-visible messages keep their original paths.
+/// Keeping this at the execution boundary also supports older node replicas.
+pub fn qualify_path_mentions(
+    working_dir: &Path,
+    mission_id: Uuid,
+    content: &str,
+) -> Result<String, String> {
+    let mut payloads = Vec::new();
+    if let Some(payload) = read_sidecar(working_dir, mission_id)? {
+        payloads.push(payload);
+    }
+    for part in content.split(SNAPSHOT_MARKER).skip(1) {
+        let id = part
+            .split_once(" -->")
+            .ok_or("invalid attachment reference")?
+            .0;
+        let id = Uuid::parse_str(id).map_err(|_| "invalid attachment ID")?;
+        payloads.push(read_message_snapshot(working_dir, mission_id, id)?.payload);
+    }
+    let paths: std::collections::HashSet<&str> = payloads
+        .iter()
+        .flat_map(|payload| &payload.attachments)
+        .filter(|item| item.kind == AttachmentKind::Path)
+        .filter_map(|item| item.path.as_deref())
+        .map(|path| path.trim_end_matches('/'))
+        .collect();
+    let pattern =
+        regex::Regex::new(r#"(^|[\s(\[{])@(?:"((?:[^"\\]|\\.)*)"|([^\s)\]},;]+))"#).unwrap();
+    Ok(pattern
+        .replace_all(content, |caps: &regex::Captures| {
+            let quoted = caps.get(2).is_some();
+            let raw = caps.get(2).or_else(|| caps.get(3)).unwrap().as_str();
+            let decoded = if quoted {
+                serde_json::from_str::<String>(&format!("\"{raw}\"")).unwrap_or_else(|_| raw.into())
+            } else {
+                raw.into()
+            };
+            let value = if quoted {
+                decoded.as_str()
+            } else {
+                decoded.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            };
+            if !paths.contains(value.trim_end_matches('/')) {
+                return caps[0].to_owned();
+            }
+            format!(
+                "{}@{}{}",
+                &caps[1],
+                serde_json::to_string(&format!("context/{value}")).unwrap(),
+                &decoded[value.len()..]
+            )
+        })
+        .into_owned())
+}
+
 fn rewrite_context(content: &str, root: &Path, payload: &MissionPayload) -> Result<String, String> {
     let pattern = regex::Regex::new(r#"(^|[\s(])@(?:"([^"]+)"|([^\s)\]},;]+))"#)
         .map_err(|e| e.to_string())?;
@@ -800,6 +905,33 @@ pub fn parse_attachments(value: Option<&serde_json::Value>) -> Vec<MissionAttach
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_paths_are_qualified_only_when_attached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let payload = MissionPayload {
+            project: Some("demo".into()),
+            controller_md: None,
+            attachments: vec![
+                MissionAttachment {
+                    kind: AttachmentKind::Path,
+                    path: Some("context/notes.md".into()),
+                },
+                MissionAttachment {
+                    kind: AttachmentKind::Path,
+                    path: Some("a b.md".into()),
+                },
+            ],
+        };
+        write_sidecar(tmp.path(), id, &payload).unwrap();
+        let text =
+            r#"Read @context/notes.md. and @"a b.md"; leave @unknown and @controller alone."#;
+        assert_eq!(
+            qualify_path_mentions(tmp.path(), id, text).unwrap(),
+            r#"Read @"context/context/notes.md". and @"context/a b.md"; leave @unknown and @controller alone."#
+        );
+    }
 
     #[test]
     fn secrets_and_git_are_skipped() {

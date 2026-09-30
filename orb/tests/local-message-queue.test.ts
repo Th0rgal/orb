@@ -144,3 +144,17 @@ it('Send now recovers an already-ended run without trying to close a missing rec
  expect(mocks.recover).toHaveBeenCalledWith('mission');
  expect(mocks.status).not.toHaveBeenCalled();
 });
+
+it('does not replay a delegated message after completion when its server acknowledgement was lost',async()=>{
+ mocks.active=false;
+ const id=crypto.randomUUID();
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage(request,'delegated',{id,delegated:true,waiting:false});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+ await enqueueLocalMessage(request,'delegated',{id,delegated:true,waiting:false});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});

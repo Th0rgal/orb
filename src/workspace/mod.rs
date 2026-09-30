@@ -1920,6 +1920,11 @@ fn configured_project_dir_with_nspawn(
     fallback: &Path,
     uses_nspawn: bool,
 ) -> PathBuf {
+    if workspace.workspace_type == WorkspaceType::Host {
+        if let Some(path) = workspace.env_vars.get("SANDBOXED_SH_MISSION_CWD") {
+            return PathBuf::from(path);
+        }
+    }
     // An explicit mission working directory (most importantly an
     // orchestrator-owned git worktree) is authoritative. Only replace the
     // generated per-mission state directory; otherwise every worker would be
@@ -3940,6 +3945,11 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
             if let McpTransport::Stdio { ref mut env, .. } = cfg.transport {
                 let previous_mission_id =
                     env.insert("MISSION_ID".to_string(), mission_id.to_string());
+                if workspace.workspace_type == WorkspaceType::Host {
+                    if let Some(cwd) = workspace.env_vars.get("SANDBOXED_SH_MISSION_CWD") {
+                        env.insert("WORKING_DIR".into(), cwd.clone());
+                    }
+                }
                 if let Some(previous) = previous_mission_id.as_deref() {
                     if previous != mission_id.to_string() {
                         tracing::warn!(
@@ -5954,6 +5964,25 @@ sandboxed-harness-version:grok=\n";
         assert_eq!(
             configured_project_dir_with_nspawn(&workspace, &worker, true),
             worker
+        );
+    }
+
+    #[test]
+    fn host_execution_directory_does_not_replace_private_runtime_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let mut workspace = Workspace::default_host(root.path().to_path_buf());
+        let runtime = mission_workspace_dir_for_workspace(&workspace, Uuid::new_v4());
+        workspace.env_vars.insert(
+            "SANDBOXED_SH_MISSION_CWD".into(),
+            source.path().to_string_lossy().into_owned(),
+        );
+        assert_eq!(configured_project_dir(&workspace, &runtime), source.path());
+        assert!(!runtime.starts_with(source.path()));
+        workspace.workspace_type = WorkspaceType::Container;
+        assert_eq!(
+            configured_project_dir_with_nspawn(&workspace, &runtime, true),
+            runtime
         );
     }
 

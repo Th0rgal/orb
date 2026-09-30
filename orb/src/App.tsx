@@ -1,3 +1,4 @@
+import { startClientDelegations } from "./clientDelegations";
 import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
@@ -66,6 +67,7 @@ import {
   localRunActive,
   reconcileLocalRun,
   localWorkspace,
+  localDirectory,
   materializeMentions,
   refreshLocalAgents,
   rememberBinding,
@@ -568,7 +570,7 @@ export function Composer(p: {
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
       uploaded = resolved.files;
       payload = draftOf(resolved.text);
-      p.onAttachments?.(mentionedChips(resolved.text,atItems()));
+      p.onAttachments?.(mentionedChips(resolved.text,[...atItems(), ...resolved.files.filter(file => file.destination.startsWith("context:")).map(file => ({id:`upload:${file.path}`,kind:"context" as const,label:file.source.name,path:file.path,project:file.destination.slice("context:".length),section:"Files" as const}))]));
       accepted = sideMode
         ? await p.onBtw!(payload.replace(/^\/btw\s*/, "").trim() || "Please look at the attachments.", sentImages, resolved.files)
         : await (p.sideQuestion ? p.onSend(payload || "Please look at the attached images.", sentImages, resolved.files) : p.onSend(payload || "Please look at the attached images.", sentImages)) !== false;
@@ -630,16 +632,6 @@ export function Composer(p: {
       <Show when={ctx()}>
         <div class="menu plus-menu slash-menu">
           <button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span>Upload file or image…</button>
-          <Show when={atItems().some((i) => i.section === "Controller")}>
-            <div class="slash-head">Controller</div>
-            <For each={atItems().filter((i) => i.section === "Controller")}>
-              {(it) => (
-                <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} onClick={() => pickAttach(it)}>
-                  <span class="menu-ico"><Ic.TargetIcon size={14} /></span> {it.label}
-                </button>
-              )}
-            </For>
-          </Show>
           <Show when={atItems().some((i) => i.section === "Folders") || (p.files?.length ?? 0) > 0}>
             <div class="slash-head">Folders</div>
             <For each={atItems().filter((i) => i.section === "Folders")}>
@@ -858,7 +850,7 @@ export function Composer(p: {
     <Show when={at()}>
       {(s) => (
         <div class="menu slash-menu" role="listbox" aria-label="Context" onPointerDown={(e) => e.stopPropagation()}>
-          <For each={["Context", "Controller", "Folders", "Files"] as const}>
+          <For each={["Context", "Folders", "Files"] as const}>
             {(section) => {
               const rows = () => s().items.filter((it) => it.section === section);
               return (
@@ -1028,7 +1020,7 @@ export function floatingDock(el: HTMLDivElement) {
 
 export default function App() {
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
-  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);});
+  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);});
   const [projects, setProjects] = createStore<typeof seed>([]);
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = localStorage.getItem("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
   createEffect(() => { localStorage.setItem("orb.selectedConversation",selected() ?? ""); });
@@ -1067,6 +1059,16 @@ export default function App() {
     setNewMachine(id);
     try { localStorage.setItem(MACHINE_KEY, id === "dgx-spark-admin" ? "core" : id); } catch { /* ignore */ }
     if (id === "local") void refreshLocalAgents(false);
+  };
+  const [workingDirectory, setWorkingDirectory] = createSignal("");
+  const directoryKey = () => `orb.directory:${getApiUrl()}:${effectiveNewProject()}:${newMachine()}`;
+  createEffect(() => {
+    const key = directoryKey();
+    try { setWorkingDirectory(localStorage.getItem(key) ?? ""); } catch { setWorkingDirectory(""); }
+  });
+  const chooseDirectory = (value: string) => {
+    setWorkingDirectory(value);
+    try { localStorage.setItem(directoryKey(), value); } catch { /* Keep the draft in memory. */ }
   };
   const [envOpen, setEnvOpen] = createSignal<"machine" | "project" | null>(null);
   const [history, setHistory] = createSignal<(string | null)[]>([selected()]);
@@ -1245,6 +1247,8 @@ export default function App() {
     return { id, title: displayTitle(mission?.title) || "Mission", local,
       destination: local ? "This computer" : missionDestination(mission ?? null, recalledLaunch(id)),
       directory: binding?.cwd || mission?.working_directory,
+      parent: mission?.parent_mission_id ? missions().find(m => m.id === mission.parent_mission_id)?.title || mission.parent_mission_id : undefined,
+      children: missions().filter(m => m.parent_mission_id === id).length,
       project: liveProjects().find(p => p.slug === mission?.project)?.title || mission?.project,
       harness: choice?.backend.name || backend,
       model: modelLabel ? shortModelLabel(modelLabel) : model || undefined,
@@ -1369,12 +1373,12 @@ export default function App() {
     const row = rows.find((item) => item.id === pick.backend && item.installed && item.path);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
     const plan = await materializeMentions(projectSlug, prompt, attachChips());
-    const root = await localWorkspace(projectSlug);
+    const root = workingDirectory().trim() ? await localDirectory(workingDirectory()) : await localWorkspace(projectSlug);
     if (plan.files.length) await writeLocalFiles(root, plan.files);
     const imagePaths = await stageLocalImages(root, images);
     const sent = imagePrompt(bindWorkspace(plan.prompt, root), imagePaths, images);
     const effort = normalizeEffort(pick.effort, pick.backend);
-    const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, ...(effort ? { model_effort: effort } : {}) };
+    const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify(body);
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
     let m:Mission;
@@ -1440,7 +1444,7 @@ export default function App() {
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
-        const body = {title,prompt:sentPrompt,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const body = {title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
@@ -1964,6 +1968,10 @@ export default function App() {
                     </Show>
                   </div>
                 </div>
+                <label class="working-directory-field">
+                  <span>Working directory</span>
+                  <input aria-label="Working directory" value={workingDirectory()} placeholder="Default directory" spellcheck={false} disabled={creating()} onInput={event => chooseDirectory(event.currentTarget.value)} />
+                </label>
                 {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
                 <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
                 <div hidden={!!launchPreview()}>
