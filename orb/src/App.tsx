@@ -1964,10 +1964,10 @@ export default function App() {
                     </Show>
                   </div>
                 </div>
-                <label class="working-directory-field">
+                <Show when={!launchPreview()}><label class="working-directory-field">
                   <span>Working directory</span>
                   <input aria-label="Working directory" value={workingDirectory()} placeholder="Default directory" spellcheck={false} disabled={creating()} onInput={event => chooseDirectory(event.currentTarget.value)} />
-                </label>
+                </label></Show>
                 {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
                 <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
                 <div hidden={!!launchPreview()}>
