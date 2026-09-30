@@ -999,7 +999,7 @@ export function LiveProjectsSection(p: {
   const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
   const workNodes = (slug: string, path: string): Node[] => {
     const out: Node[] = (crons[slug] ?? []).filter(job => (job.folder ?? "") === path).map(job => ({ id: `pc:${slug}:${job.id}`, data: { kind: "cron", slug, label: job.name, job } }));
-    out.push(...rootMissions(slug).filter(root => missionFolder(root.mission) === path).map(root => missionNode(slug, root)));
+    out.push(...rootMissions(slug).filter(root => missionFolder(root.mission) === path && !(controllerRow(slug) && controllerLaunched(root.mission))).map(root => missionNode(slug, root)));
     return out;
   };
   const fileNodes = (slug: string, path: string): Node[] => {
@@ -1026,6 +1026,11 @@ export function LiveProjectsSection(p: {
   // Missions a mission launched are listed inside it. Closed by default,
   // except around the conversation that is open.
   const rootMissions = (slug: string) => nestMissions(visibleMissions(slug));
+  // A mission the project's controller created (a Hermes session, no parent
+  // mission) is listed under the controller, like a child under its parent.
+  const controllerLaunched = (mission: Mission) => !mission.parent_mission_id && mission.origin === "hermes" && !!mission.origin_session_id;
+  const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
+  const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
     const mission = nested.mission, id = `m:${mission.id}`;
     const data: RowData = { kind: "mission", slug, mission, label: displayTitle(mission.title) || mission.id };
@@ -1040,7 +1045,15 @@ export function LiveProjectsSection(p: {
     const children: Node[] = [];
     if (open) {
       const job = controllers[slug]?.job;
-      if (job && !job.archived) children.push({ id: `c:${slug}`, data: { kind: "cron", slug, label: job.name, job, controller: true } });
+      if (job && !job.archived) {
+        const launched = controllerRoots(slug), id = `c:${slug}`, selected = p.selected();
+        const inside = !!selected?.startsWith("m:") && launched.some(root => root.mission.id === selected.slice(2) || holds(root, selected.slice(2)));
+        const open = launched.length ? (expanded[id] ?? inside) : undefined;
+        const count = launched.reduce((sum, root) => sum + 1 + countNested(root), 0);
+        const live = launched.reduce((sum, root) => sum + Number(RUNNING.has(root.mission.status)) + countNested(root, child => RUNNING.has(child.status)), 0);
+        children.push({ id, data: { kind: "cron", slug, label: job.name, job, controller: true, ...(launched.length ? { launched: count, launchedLive: live } : {}) },
+          ...(launched.length ? { expanded: open, children: open ? launched.map(root => missionNode(slug, root)) : [] } : {}) });
+      }
       if (cronUnsupported() || cronErrors[slug]) children.push({ id: `crons-error:${slug}`, data: { kind: "cron-error", slug, label: "Crons unavailable" } });
 
       if (missions[slug] === undefined) children.push({ id: `loading-missions:${slug}`, data: { kind: "note", slug, label: "Loading missions…" } });
@@ -1120,6 +1133,13 @@ export function LiveProjectsSection(p: {
     void loadMissions(slug);
     void loadDir(slug, "");
   }, {defer:true}));
+  const launchedToggle = (row: TreeRow<RowData>, d: RowData) => <Show when={d.launched}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
+    aria-label={`${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}`}
+    title={`${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}`}
+    onClick={e => { e.stopPropagation(); setExpanded(row.id, !row.expanded); }}>
+    <span class="launched-count">{d.launchedLive ? `${d.launchedLive}/${d.launched}` : d.launched}</span>
+    <SidebarIcon.ChevronRight size={12} class={`launched-chevron ${row.expanded ? "open" : ""}`} />
+  </button></Show>;
   const renderRow = (row: TreeRow<RowData>) => {
     const d = row.data;
     const contextMenu = (e: MouseEvent) => {
@@ -1158,7 +1178,8 @@ export function LiveProjectsSection(p: {
     </div>;
     if (d.kind === "cron") {
       const ticking = () => d.controller && (controllers[d.slug]?.runs ?? []).some(r => r.status === "running" || r.status === "claimed");
-      return <button class={`row agent cron ${d.job?.archived ? "done" : ""} ${p.selected() === row.id ? "active" : ""}`} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron"]))} onClick={() => p.open(row.id)} onContextMenu={e => {
+      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${p.selected() === row.id ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron"]))} onClick={() => p.open(row.id)}
+        onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
         if (!d.controller) return;
         e.preventDefault(); e.stopPropagation();
         setActionMenu(null); setMissionMenu(null);
@@ -1168,12 +1189,11 @@ export function LiveProjectsSection(p: {
         <span class="row-machine"><Show when={!d.job!.enabled || d.job!.state === "paused"} fallback={<span class="row-machine-name cron-next">{ticking() ? "ticking" : untilLabel(d.job!.next_run_at, Date.now())}</span>}>
           <span class="cron-paused-indicator" role="img" aria-label="Paused" title={ticking() ? "Paused · current run finishing" : "Paused"}><Ic.PauseIcon size={14} /></span>
         </Show></span>
-      </button>;
+      </button>{launchedToggle(row, d)}</>;
     }
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined]));
-    const toggleLaunched = () => setExpanded(row.id, !row.expanded);
     return <><button aria-expanded={d.launched ? row.expanded : undefined}
-      onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); toggleLaunched(); } }}
+      onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.kind === "file" && cutFile()?.slug === d.slug && cutFile()?.path === d.path ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
       onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null);
@@ -1182,13 +1202,7 @@ export function LiveProjectsSection(p: {
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={!d.launched}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
-    <Show when={d.launched}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
-      aria-label={`${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}`}
-      title={`${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}`}
-      onClick={e => { e.stopPropagation(); toggleLaunched(); }}>
-      <span class="launched-count">{d.launchedLive ? `${d.launchedLive}/${d.launched}` : d.launched}</span>
-      <SidebarIcon.ChevronRight size={12} class={`launched-chevron ${row.expanded ? "open" : ""}`} />
-    </button></Show></>;
+    {launchedToggle(row, d)}</>;
   };
 
   return (

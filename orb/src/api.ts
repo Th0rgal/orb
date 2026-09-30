@@ -197,6 +197,9 @@ export interface RemoteJob {
 export interface Mission {
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
+  /** "hermes" when a controller created it; its controller session then follows. */
+  origin?: string | null;
+  origin_session_id?: string | null;
   execution_kind?: "hosted";
   cloud?: import("./cloudAgentApi").CloudExecution;
   local_sync_pending?: boolean;
