@@ -16326,7 +16326,7 @@ pub async fn set_client_mission_status(
         .map_err(internal_error)?;
     control
         .mission_store
-        .complete_client_executions_for_mission(
+        .complete_turn_executions_for_mission(
             id,
             req.scheduled_execution_id,
             matches!(
@@ -20777,7 +20777,7 @@ async fn automation_scheduler_loop(
                         // Message queued successfully – keep execution in Running
                         // status. The actual success/failure will be determined
                         // when the agent finishes processing and
-                        // complete_running_executions_for_mission is called.
+                        // complete_turn_executions_for_mission is called.
                         let mut exec = execution.clone();
                         exec.retry_count = retry_attempt;
                         if let Err(e) = mission_store.update_automation_execution(exec).await {
@@ -22263,7 +22263,7 @@ async fn agent_finished_automation_messages(
             resolve_agent_finished_target_mission(mission.id, mission.status, &automation);
 
         // Create an execution record in Running status – it will be
-        // completed by complete_running_executions_for_mission when the
+        // completed by complete_turn_executions_for_mission when the
         // target agent finishes processing.
         let execution_id = Uuid::new_v4();
         let execution = AutomationExecution {
@@ -22515,6 +22515,7 @@ async fn control_actor_loop(
     // Track which mission the main `running` task is actually working on.
     // This is different from `current_mission` which can change when user creates a new mission.
     let mut running_mission_id: Option<Uuid> = None;
+    let mut running_message_id: Option<Uuid> = None;
     // Backend captured for the currently executing primary turn. Updating a
     // mission's settings while it runs must not change watchdog semantics for
     // that in-flight process.
@@ -24462,6 +24463,7 @@ async fn control_actor_loop(
                                 };
                                 let turn_mission_store = mission_store.clone();
                                 let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                                running_message_id = Some(mid);
                                 running = Some(tokio::spawn(async move {
                                     let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                         turn_mission_store,
@@ -25953,6 +25955,7 @@ async fn control_actor_loop(
                                         };
                                         let turn_mission_store = mission_store.clone();
                                         let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                                        running_message_id = Some(mid);
                                         running = Some(tokio::spawn(async move {
                                             let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                                 turn_mission_store,
@@ -26391,6 +26394,7 @@ async fn control_actor_loop(
                     // Save the running mission ID before clearing it - we need it for persist and auto-complete
                     // (current_mission can change if user clicks "New Mission" while task was running)
                     let completed_mission_id = running_mission_id;
+                    let completed_message_id = running_message_id.take();
                     let completed_cancellation_requested = running_cancel
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled);
@@ -26668,8 +26672,9 @@ async fn control_actor_loop(
                                     )
                                 };
                                 if let Err(e) = mission_store
-                                    .complete_running_executions_for_mission(
+                                    .complete_turn_executions_for_mission(
                                         mission_id,
+                                        completed_message_id,
                                         agent_result.success,
                                         error_msg,
                                     )
@@ -26709,8 +26714,9 @@ async fn control_actor_loop(
                             if let Some(mission_id) = completed_mission_id {
                                 // Mark running automation executions as failed
                                 if let Err(e2) = mission_store
-                                    .complete_running_executions_for_mission(
+                                    .complete_turn_executions_for_mission(
                                         mission_id,
+                                        completed_message_id,
                                         false,
                                         Some(format!("Task join failed: {}", e)),
                                     )
@@ -27102,6 +27108,7 @@ async fn control_actor_loop(
                     let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                     let turn_mission_store = mission_store.clone();
                     let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                    running_message_id = Some(mid);
                     running = Some(tokio::spawn(async move {
                         let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                             turn_mission_store,
@@ -27209,6 +27216,7 @@ async fn control_actor_loop(
                 let mut completed_missions = Vec::new();
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
+                    let completed_message_id = runner.inflight_message().map(|message| message.id);
                     if runner.force_clear_cancelled_if_due() {
                         tracing::warn!(
                             mission_id = %mission_id,
@@ -27252,8 +27260,9 @@ async fn control_actor_loop(
                             });
                         }
                         if let Err(error) = mission_store
-                            .complete_running_executions_for_mission(
+                            .complete_turn_executions_for_mission(
                                 *mission_id,
+                                completed_message_id,
                                 false,
                                 Some(
                                     "Force-aborted stuck parallel runner after cancel timed out"
@@ -27397,8 +27406,9 @@ async fn control_actor_loop(
                                     )
                                 };
                                 if let Err(e) = mission_store
-                                    .complete_running_executions_for_mission(
+                                    .complete_turn_executions_for_mission(
                                         *mission_id,
+                                        completed_message_id,
                                         result.success,
                                         error_msg,
                                     )
@@ -27980,8 +27990,9 @@ async fn control_actor_loop(
                         });
                     }
                     if let Err(e) = mission_store
-                        .complete_running_executions_for_mission(
+                        .complete_turn_executions_for_mission(
                             mid,
+                            running_message_id.take(),
                             false,
                             Some("Force-aborted stuck runner after cancel timed out".to_string()),
                         )
@@ -29503,7 +29514,7 @@ pub async fn create_automation(
             };
 
             // Record the execution in Running status – it will be completed
-            // by complete_running_executions_for_mission when the agent
+            // by complete_turn_executions_for_mission when the agent
             // finishes processing.
             let execution_id = Uuid::new_v4();
             let execution = mission_store::AutomationExecution {
@@ -30840,7 +30851,7 @@ pub async fn webhook_receiver(
             // Message queued successfully – keep execution in Running
             // status. The actual success/failure will be determined
             // when the agent finishes processing and
-            // complete_running_executions_for_mission is called.
+            // complete_turn_executions_for_mission is called.
             if let Err(e) = mission_store
                 .update_automation_last_triggered(automation.id)
                 .await

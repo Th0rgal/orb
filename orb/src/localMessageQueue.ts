@@ -190,7 +190,7 @@ export function startLocalQueueWorker(){
    const resume=!row.resultStatus&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;
    recordLocalFailure(row.mission,failed&&!resume?(row.result.error||`Local process exited with code ${row.result.exit_code}`):null);
    const status=row.resultStatus??(resume?'interrupted':failed?'failed':'awaiting_user');
-   if(row.scheduled)await setClientMissionStatus(row.mission,status,row.receipt,row.id);
+   if(row.scheduled&&!resume)await setClientMissionStatus(row.mission,status,row.receipt,row.id);
    else await setClientMissionStatus(row.mission,status,row.receipt);
    if(!valid())return;
    if(resume){

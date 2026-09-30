@@ -3046,21 +3046,9 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
-    /// Complete all running automation executions for a mission, setting them
-    /// to either Success or Failed based on the agent outcome.
-    async fn complete_running_executions_for_mission(
-        &self,
-        mission_id: Uuid,
-        success: bool,
-        error: Option<String>,
-    ) -> Result<u32, String> {
-        let _ = (mission_id, success, error);
-        Ok(0)
-    }
-
-    /// Settle only the durable occurrence explicitly reported by a client run.
-    /// A predecessor's terminal status must not settle a queued successor.
-    async fn complete_client_executions_for_mission(
+    /// Settle legacy mission executions and only the matching durable occurrence.
+    /// Pass no occurrence while closing a local process that will be retried.
+    async fn complete_turn_executions_for_mission(
         &self,
         mission_id: Uuid,
         occurrence: Option<Uuid>,

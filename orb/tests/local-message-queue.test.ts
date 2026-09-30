@@ -425,3 +425,23 @@ it('settles a scheduled local result using its occurrence identity',async()=>{
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(2500);
  expect(mocks.status).toHaveBeenCalledWith('mission','awaiting_user',expect.anything(),id);
 });
+it('keeps a scheduled occurrence running across connection recovery and settles the final result',async()=>{
+ mocks.active=false;
+ mocks.follow.mockResolvedValueOnce({text:'API Error: Connection error. (ECONNRESET)',done:true,exit_code:1,resumed:true});
+ const id=await enqueueLocalMessage(request,'wake',{scheduled:true});
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(3000);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ expect(mocks.status.mock.calls[0]).toEqual(['mission','interrupted',expect.anything()]);
+ expect(mocks.status.mock.calls[1]).toEqual(['mission','awaiting_user',expect.anything(),id]);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+it('settles a scheduled occurrence when connection retries are exhausted',async()=>{
+ mocks.active=false;
+ mocks.follow.mockResolvedValue({text:'API Error: Connection error. (ECONNRESET)',done:true,exit_code:1,resumed:true});
+ const id=await enqueueLocalMessage(request,'wake',{scheduled:true});
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(65000);
+ expect(mocks.launch).toHaveBeenCalledTimes(4);
+ expect(mocks.status.mock.calls.slice(0,3).every(call=>call.length===3)).toBe(true);
+ expect(mocks.status.mock.calls.at(-1)).toEqual(['mission','failed',expect.anything(),id]);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});

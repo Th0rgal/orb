@@ -106,3 +106,5 @@ wake-up MCP, synchronize its receipt and cancel the timer. The separate
 `live_native_wakeup_transport` check reuses that dedicated test mission to verify
 the Python helper → native sync → Core → cancellation path without a provider.
 Both tests are ignored by default and require an explicitly configured test Core.
+
+Hosted and local turn completion uses the delivered message/occurrence ID, including crash and forced-stop paths. A predecessor cannot settle a later durable occurrence. Local connection recovery closes its process receipt without settling the occurrence until recovery finishes or its retry budget is exhausted.

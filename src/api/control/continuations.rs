@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_client_predecessor_cannot_settle_successor() {
+    async fn continuation_turn_predecessor_cannot_settle_successor() {
         let (_dir, store, a) = fixture().await;
         stage(&store, &a, "successor".into()).await.unwrap();
         let mut occurrence = store.list_scheduled_deliveries().await.unwrap().remove(0);
@@ -515,7 +515,7 @@ mod tests {
         for predecessor in [None, Some(Uuid::new_v4())] {
             assert_eq!(
                 store
-                    .complete_client_executions_for_mission(
+                    .complete_turn_executions_for_mission(
                         a.mission_id,
                         predecessor,
                         false,
@@ -532,12 +532,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .complete_client_executions_for_mission(
-                    a.mission_id,
-                    Some(occurrence.id),
-                    true,
-                    None
-                )
+                .complete_turn_executions_for_mission(a.mission_id, Some(occurrence.id), true, None)
                 .await
                 .unwrap(),
             1
