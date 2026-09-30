@@ -9209,7 +9209,21 @@ async fn continuation_parent_stop_revokes_child_and_rejects_late_creation() {
             .0,
         );
     }
-    cancel_mission(
+    let child_timer = timers.last().unwrap();
+    continuations::stage(store, child_timer, "stale queued wake".into())
+        .await
+        .unwrap();
+    let mut occurrence = store
+        .get_automation_executions(child_timer.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    occurrence.status = mission_store::ExecutionStatus::Running;
+    store
+        .update_automation_execution(occurrence.clone())
+        .await
+        .unwrap();
+    let _ = cancel_mission(
         State(h.state.clone()),
         Extension(h.user.clone()),
         Path(parent.id),
@@ -9239,6 +9253,29 @@ async fn continuation_parent_stop_revokes_child_and_rejects_late_creation() {
             MissionStatus::Interrupted
         );
     }
+    let (respond, response) = oneshot::channel();
+    h.control
+        .cmd_tx
+        .send(ControlCommand::UserMessage {
+            id: occurrence.id,
+            content: "stale queued wake".into(),
+            agent: None,
+            target_mission_id: Some(child.id),
+            strict: true,
+            source: Some("scheduled-continuation".into()),
+            respond,
+        })
+        .await
+        .unwrap();
+    let ack = tokio::time::timeout(std::time::Duration::from_secs(5), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ack, UserMessageAck::Rejected(reason) if reason.contains("revoked")));
+    assert_eq!(
+        store.get_mission(child.id).await.unwrap().unwrap().status,
+        MissionStatus::Interrupted
+    );
     let late = serde_json::from_value(json!({"command_source":{"type":"inline","content":"late"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"late"}})).unwrap();
     let result = create_automation(
         State(h.state.clone()),

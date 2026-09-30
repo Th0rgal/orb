@@ -7854,6 +7854,14 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|e| e.to_string())?
     }
 
+    async fn can_admit_scheduled_delivery(&self, mission: Uuid, id: Uuid) -> Result<bool, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().query_row("SELECT EXISTS (SELECT 1 FROM automation_executions WHERE id = ?1 AND mission_id = ?2 AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped'))",
+                params![id.to_string(), mission.to_string()], |row| row.get(0)).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
     async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {

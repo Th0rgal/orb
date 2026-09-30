@@ -23110,6 +23110,33 @@ async fn control_actor_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
+                // Stop may revoke a delivery while its command is already in this
+                // channel. Reject it before client routing or admission can resume
+                // the interrupted mission. The actor serializes this with Stop.
+                let scheduled_target = match &cmd {
+                    ControlCommand::UserMessage { id, target_mission_id: Some(mid), source, .. }
+                        if source.as_deref() == Some("scheduled-continuation") => Some((*mid, *id)),
+                    ControlCommand::AdmitDispatch { command, .. } => match command.as_ref() {
+                        ControlCommand::UserMessage { id, target_mission_id: Some(mid), source, .. }
+                            if source.as_deref() == Some("scheduled-continuation") => Some((*mid, *id)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((mid, id)) = scheduled_target {
+                    let rejection = match mission_store.can_admit_scheduled_delivery(mid, id).await {
+                        Ok(true) => None,
+                        Ok(false) => Some("Scheduled continuation was revoked".to_string()),
+                        Err(error) => Some(format!("Could not validate scheduled continuation: {error}")),
+                    };
+                    if let Some(error) = rejection {
+                        let command = match cmd { ControlCommand::AdmitDispatch { command, .. } => *command, command => command };
+                        if let ControlCommand::UserMessage { respond, .. } = command {
+                            let _ = respond.send(UserMessageAck::Rejected(error));
+                        }
+                        continue;
+                    }
+                }
                 // Reject remote messages before admission can retag or reactivate
                 // the mission. The actual node continuation is the resume route.
                 let message_target = match &cmd {

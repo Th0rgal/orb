@@ -3017,6 +3017,15 @@ pub trait MissionStore: Send + Sync {
     async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
         self.update_automation_active(id, false).await
     }
+    /// Recheck a queued scheduled command immediately before actor admission.
+    async fn can_admit_scheduled_delivery(&self, mission: Uuid, id: Uuid) -> Result<bool, String> {
+        Ok(self
+            .list_scheduled_deliveries()
+            .await?
+            .iter()
+            .any(|e| e.mission_id == mission && e.id == id))
+    }
+
     /// Persist Stop against the current generation, including an idle generation zero.
     async fn fence_mission_wakeups(&self, mission: Uuid) -> Result<(), String> {
         let _ = mission;
