@@ -1144,6 +1144,9 @@ fn spawn_codex(
     if let Some(args) = crate::local_wakeups::command(&request.id) {
         command.arg("-c").arg(format!("mcp_servers.orb-wakeups.command={}", json!(args[0])));
         command.arg("-c").arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
+        // This private, mission-bound MCP must work under approvalPolicy=never,
+        // just like the common sandboxed MCP installed by the launcher.
+        command.arg("-c").arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
     }
     let mut child = command
         .current_dir(&request.cwd)
