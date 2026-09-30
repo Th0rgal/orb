@@ -213,7 +213,10 @@ fn take_for_parked_session(
 ) -> Option<(QueuedAt, super::mission_runner::QueuedMessage)> {
     fn plain(content: &str, agent: &Option<String>, source: &Option<String>) -> bool {
         agent.is_none()
-            && source.as_deref() != Some("scheduler")
+            && !matches!(
+                source.as_deref(),
+                Some("scheduler" | "scheduled-continuation")
+            )
             && !content.trim_start().starts_with('/')
     }
     if let Some(position) = queue
@@ -250,6 +253,23 @@ async fn pop_next_runnable_control_queue(
     let queued = queue.len();
     for _ in 0..queued {
         let entry = queue.pop_front()?;
+        if entry.4.as_deref() == Some("scheduled-continuation") {
+            let Some(mission_id) = entry.3 else { continue };
+            match store
+                .can_admit_scheduled_delivery(mission_id, entry.0)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    // Preserve work on transient store failures, but never launch
+                    // a scheduled message whose revocation cannot be checked.
+                    tracing::warn!(%mission_id, %error, "Scheduled dequeue validation failed");
+                    queue.push_back(entry);
+                    continue;
+                }
+            }
+        }
         let parked = match entry.3 {
             Some(mission_id) => {
                 let paused = store

@@ -723,6 +723,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_stop_filters_revoked_main_queue_delivery() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "scheduled".into()).await.unwrap();
+        let mut occurrence = store
+            .get_automation_executions(a.id, None)
+            .await
+            .unwrap()
+            .remove(0);
+        occurrence.status = ExecutionStatus::Running;
+        occurrence
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(occurrence.clone())
+            .await
+            .unwrap();
+        let scheduled = (
+            occurrence.id,
+            "scheduled".into(),
+            None,
+            Some(a.mission_id),
+            Some("scheduled-continuation".into()),
+        );
+        let mut queue = std::collections::VecDeque::from([scheduled.clone()]);
+        assert_eq!(
+            super::super::pop_next_runnable_control_queue(&mut queue, &store)
+                .await
+                .unwrap()
+                .0,
+            occurrence.id
+        );
+        queue.push_back(scheduled);
+        // A parked live session must not bypass the durable dequeue check.
+        assert!(super::super::take_for_parked_session(
+            a.mission_id,
+            true,
+            &mut queue,
+            &mut Default::default()
+        )
+        .is_none());
+        assert_eq!(queue.len(), 1);
+        stop_for_mission(&store, a.mission_id).await.unwrap();
+        store
+            .update_mission_status(a.mission_id, MissionStatus::Interrupted)
+            .await
+            .unwrap();
+        let ordinary = Uuid::new_v4();
+        queue.push_back((
+            ordinary,
+            "ordinary follow-up".into(),
+            None,
+            Some(a.mission_id),
+            None,
+        ));
+        assert_eq!(
+            super::super::pop_next_runnable_control_queue(&mut queue, &store)
+                .await
+                .unwrap()
+                .0,
+            ordinary
+        );
+        assert!(queue.is_empty());
+        assert_eq!(
+            store
+                .get_mission(a.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Interrupted
+        );
+    }
+
+    #[tokio::test]
     async fn continuation_stop_fences_cancelled_generation_through_restart() {
         let (dir, store, a) = fixture().await;
         let run = store
