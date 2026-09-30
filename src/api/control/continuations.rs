@@ -122,6 +122,11 @@ pub async fn stage(
         .await
 }
 
+enum DeliveryFailure {
+    Rejected(String),
+    Uncertain(String),
+}
+
 pub async fn deliver(
     store: &Arc<dyn MissionStore>,
     tx: &mpsc::Sender<ControlCommand>,
@@ -199,21 +204,25 @@ pub async fn deliver(
                 respond,
             })
             .await
-            .map_err(|_| "Control queue unavailable".to_string())?;
+            .map_err(|_| DeliveryFailure::Rejected("Control queue unavailable".into()))?;
             match response.await {
                 Ok(
                     UserMessageAck::Queued
                     | UserMessageAck::Delivered
                     | UserMessageAck::Continued { .. },
                 ) => Ok(()),
-                Ok(UserMessageAck::Rejected(error)) => Err(error),
-                _ => Err("Delivery acknowledgement was lost".into()),
+                Ok(UserMessageAck::Rejected(error)) => Err(DeliveryFailure::Rejected(error)),
+                _ => Err(DeliveryFailure::Uncertain(
+                    "Delivery acknowledgement was lost".into(),
+                )),
             }
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), attempt)
             .await
             .unwrap_or_else(|_| {
-                Err("Awaiting delivery acknowledgement; retrying the same message".into())
+                Err(DeliveryFailure::Uncertain(
+                    "Awaiting delivery acknowledgement; retrying the same message".into(),
+                ))
             });
         if result.is_ok() {
             if let Some(bridge) = telegram {
@@ -251,8 +260,16 @@ pub async fn deliver(
                     .insert("__delivery_accepted".into(), "true".into());
                 e.error = None;
             }
-            Err(error) => {
-                e.error = Some(error);
+            Err(failure) => {
+                e.error = Some(match failure {
+                    DeliveryFailure::Rejected(error) => {
+                        // Admission definitely did not happen. Backoff is cancellable;
+                        // an uncertain/lost ACK remains running to avoid claiming that.
+                        e.status = ExecutionStatus::Pending;
+                        error
+                    }
+                    DeliveryFailure::Uncertain(error) => error,
+                });
                 e.retry_count = e.retry_count.saturating_add(1);
                 e.variables_used.insert(
                     "__delivery_retry_at".into(),
@@ -477,6 +494,34 @@ mod tests {
         store.create_automation(replacement).await.unwrap();
         // A late delivery snapshot cannot resurrect the superseded occurrence.
         store.update_automation_execution(stale).await.unwrap();
+        assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_rejected_admission_can_be_cancelled_during_backoff() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "continue".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        let (events, _) = broadcast::channel(8);
+        let reject = tokio::spawn(async move {
+            let Some(ControlCommand::UserMessage { respond, .. }) = rx.recv().await else {
+                panic!("expected delivery")
+            };
+            respond
+                .send(UserMessageAck::Rejected("No capacity".into()))
+                .unwrap();
+        });
+        deliver(&store, &tx, &events, None).await.unwrap();
+        reject.await.unwrap();
+        let pending = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        assert_eq!(pending.status, ExecutionStatus::Pending);
+        assert_eq!(pending.error.as_deref(), Some("No capacity"));
+        assert!(pending.variables_used.contains_key("__delivery_retry_at"));
+        store.cancel_scheduled_delivery(a.id).await.unwrap();
         assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
         assert_eq!(
             store.get_automation_executions(a.id, None).await.unwrap()[0].status,

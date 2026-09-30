@@ -49,3 +49,10 @@ it('sends wake-up actions as JSON accepted by the API extractor',async()=>{
   expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({action:'cancel'});
  } finally {vi.unstubAllGlobals();}
 });
+
+it('offers cancellation for retrying wake-ups without pretending they can be resumed twice',()=>{
+ render(()=><MissionGlyph status="awaiting_user" continuation={{count:1,items:[{id:'retry',state:'error',trigger:'delivery',error:'No capacity'}]}}/>);
+ fireEvent.click(screen.getByRole('button',{name:/View wake-ups/}));
+ expect(screen.getByRole('button',{name:'Cancel wake-up'})).toBeTruthy();
+ expect(screen.queryByRole('button',{name:'Resume now'})).toBeNull();
+});
