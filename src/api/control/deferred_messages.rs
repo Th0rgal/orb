@@ -38,14 +38,16 @@ pub(crate) fn decode(content: &str) -> (String, Vec<(Uuid, String)>) {
         _ => (content.into(), vec![]),
     }
 }
-/// A single persisted continuation must keep its delivery identity after restart.
-pub(crate) fn delivery_id(content: &str) -> Uuid {
-    let messages = decode(content).1;
-    if messages.len() == 1 {
-        messages[0].0
-    } else {
-        Uuid::new_v4()
+/// Attribute completion to the persisted logical message, while the scheduler
+/// keeps a distinct outer dispatch ID so admission does not dedupe its own goal.
+pub(crate) fn execution_id(outer: Uuid, content: &str, source: Option<&str>) -> Uuid {
+    if source == Some("scheduler") {
+        let messages = decode(content).1;
+        if messages.len() == 1 {
+            return messages[0].0;
+        }
     }
+    outer
 }
 pub(crate) fn strip(content: &str) -> String {
     decode(content).0
@@ -88,11 +90,13 @@ pub(crate) fn stream_payload(event: &super::AgentEvent) -> Result<String, serde_
 mod tests {
     use super::*;
     #[test]
-    fn continuation_single_deferred_delivery_keeps_its_identity() {
+    fn continuation_deferred_execution_keeps_identity_without_reusing_dispatch_id() {
         let id = Uuid::new_v4();
+        let outer = Uuid::new_v4();
         let wrapped = encode(id, "remote receipt");
-        assert_eq!(delivery_id(&wrapped), id);
-        assert_eq!(delivery_id(&wrapped), id);
+        assert_eq!(execution_id(outer, &wrapped, Some("scheduler")), id);
+        assert_eq!(execution_id(outer, &wrapped, Some("user")), outer);
+        assert_eq!(execution_id(outer, "plain goal", Some("scheduler")), outer);
         assert_eq!(strip(&wrapped), "remote receipt");
     }
     #[test]

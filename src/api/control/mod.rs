@@ -24490,7 +24490,7 @@ async fn control_actor_loop(
                                 };
                                 let turn_mission_store = mission_store.clone();
                                 let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                                running_message_id = Some(mid);
+                                running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
                                 running = Some(tokio::spawn(async move {
                                     let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                         turn_mission_store,
@@ -25982,7 +25982,7 @@ async fn control_actor_loop(
                                         };
                                         let turn_mission_store = mission_store.clone();
                                         let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                                        running_message_id = Some(mid);
+                                        running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
                                         running = Some(tokio::spawn(async move {
                                             let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                                 turn_mission_store,
@@ -27122,7 +27122,7 @@ async fn control_actor_loop(
                     let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                     let turn_mission_store = mission_store.clone();
                     let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
-                    running_message_id = Some(mid);
+                    running_message_id = Some(deferred_messages::execution_id(mid, &msg, msg_source.as_deref()));
                     running = Some(tokio::spawn(async move {
                         let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                             turn_mission_store,
@@ -27230,7 +27230,7 @@ async fn control_actor_loop(
                 let mut completed_missions = Vec::new();
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
-                    let completed_message_id = runner.inflight_message().map(|message| message.id);
+                    let completed_message_id = runner.inflight_message().map(|message| deferred_messages::execution_id(message.id, &message.content, message.source.as_deref()));
                     if runner.force_clear_cancelled_if_due() {
                         tracing::warn!(
                             mission_id = %mission_id,
@@ -27873,9 +27873,8 @@ async fn control_actor_loop(
                                         // simply retries on the next pass instead of losing
                                         // the scheduled work.
                                         let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
-                                        let message_id = deferred_messages::delivery_id(&goal);
                                         match self_cmd_tx.try_send(ControlCommand::UserMessage {
-                                            id: message_id,
+                                            id: Uuid::new_v4(),
                                             content: goal,
                                             agent: None,
                                             target_mission_id: Some(mission_id),
