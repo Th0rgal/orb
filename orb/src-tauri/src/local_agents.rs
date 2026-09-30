@@ -230,6 +230,9 @@ pub fn local_agents_start(request: StartRequest) -> Result<(), String> {
     start_with_env(request, &[])
 }
 
+pub(crate) const DIRECTORY_BUSY: &str =
+    "This directory already has a running local mission. Choose a separate directory or worktree.";
+
 pub(crate) fn start_with_env(
     request: StartRequest,
     env: &[(String, String)],
@@ -268,7 +271,7 @@ pub(crate) fn start_with_env(
             && !run.done.load(Ordering::SeqCst)
             && run.cwd.canonicalize().ok().as_ref() == Some(&canonical_cwd)
     }) {
-        return Err("This directory already has a running local mission. Choose a separate directory or worktree.".into());
+        return Err(DIRECTORY_BUSY.into());
     }
     // Completed handles are retained for reconnect snapshots until the next turn.
     // Retire the old app-server before resuming its thread in a fresh process.
@@ -3136,6 +3139,18 @@ mod directory_tests {
             image_paths: vec![],
         };
         start_with_env(request.clone(), &[]).unwrap();
+        let deferred = tauri::async_runtime::block_on(crate::run_recovery::local_run_launch(
+            StartRequest {
+                id: uuid::Uuid::new_v4().to_string(),
+                ..request.clone()
+            },
+            crate::run_recovery::Connection {
+                api_url: "http://127.0.0.1:1".into(),
+                token: "unused".into(),
+            },
+        ))
+        .unwrap_err();
+        assert!(deferred.starts_with("Local launch deferred: directory busy"));
         let second = start_with_env(
             StartRequest {
                 id: uuid::Uuid::new_v4().to_string(),

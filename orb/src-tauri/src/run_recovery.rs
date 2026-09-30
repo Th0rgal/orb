@@ -164,6 +164,9 @@ pub async fn local_run_launch(
 ) -> Result<Value, String> {
     request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let guard = lock(&request.id)?;
+    if local_agents::workspace_busy(std::path::Path::new(&request.cwd))? {
+        return Err("Local launch deferred: directory busy".into());
+    }
     recover(&connection, &request.id, &request.cwd).await?;
     let client_id = transfers::local_machine_identity()?;
     let response=post(&connection,&request.id,"client-run",json!({"op":"begin","client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
@@ -197,6 +200,13 @@ pub async fn local_run_launch(
     };
     let id = request.id.clone();
     if let Err(error) = transfers::local_agents_start_authorized(request, permit).await {
+        if error == local_agents::DIRECTORY_BUSY {
+            // Another launch won the directory after preflight. The atomic
+            // native guard proves this attempt spawned nothing; release only
+            // its exact server generation before returning it to the queue.
+            settle(&connection, &id, &receipt).await?;
+            return Err("Local launch deferred: directory busy".into());
+        }
         // Keep an uncertain launch fenced. Next reconciliation will retry only
         // after checking the native process and the exact server receipt.
         return Err(error);

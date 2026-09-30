@@ -335,6 +335,7 @@ export function startLocalQueueWorker(){
     }catch(error){if(valid())await update(key,row.id,stored=>{
      // Without a connection nothing was sent: the message keeps its place and goes out when the connection returns.
      if(stored.state==='queued'&&offline(error)){stored.error='Waiting for the connection to come back.';return;}
+     if(/^Local launch deferred: directory busy/.test(error instanceof Error?error.message:String(error))){stored.state='queued';stored.error='Waiting for another local mission to release this directory.';delete stored.claimedAt;return;}
      if(stored.state==='queued'||/^Local launch rejected:/.test(error instanceof Error?error.message:String(error)))stored.state='error';stored.error=stored.state==='dispatching'?`Launch outcome uncertain. Retry will check that the previous run stopped. ${String(error)}`:String(error);});}
    }
   }catch{/* Durable entries stay available for the next attempt. */}
