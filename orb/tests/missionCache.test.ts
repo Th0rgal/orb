@@ -55,3 +55,20 @@ it("durable inflight evidence confirms the ID while the transcript logger is beh
   const snap=await loadTranscript("m");
   expect(snap.items).toMatchObject([{messageId:"dispatched",queued:false},{messageId:"waiting",queued:true}]);
 });
+
+import { forgetPrefetchPauses, prefetchTranscript } from "../src/missionCache";
+it("a transcript the cache cannot hold is prefetched once, not at every refresh", async () => {
+  cacheReset(); forgetPrefetchPauses();
+  const big = "x".repeat(20 * 1024 * 1024);
+  const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("/queue") ? [] :
+    [{ id: 1, event_id: "one", event_type: "assistant_message", content: big, sequence: 1, metadata: {}, timestamp: "" }]),
+    { headers: { "X-Orb-Events-Protocol": "1", "X-Has-More": "false", "X-Next-Cursor": "1", "X-Page-Max": "1", "Content-Type": "application/json" } }));
+  vi.stubGlobal("fetch", fetchMock);
+  prefetchTranscript("huge");
+  await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+  const after = fetchMock.mock.calls.length;
+  expect(peekReadyTranscript("huge")).toBeUndefined();
+  for (let i = 0; i < 5; i++) prefetchTranscript("huge");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(fetchMock.mock.calls.length).toBe(after);
+});
