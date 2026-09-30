@@ -48,8 +48,8 @@ struct CreateWorkerParams {
     estimated_disk_gib: Option<u64>,
     /// Workspace to spawn the worker in. If omitted, the worker inherits the
     /// boss mission's workspace so it sees the same container, mounts, and
-    /// installed tooling. Pass `"00000000-0000-0000-0000-000000000000"` to
-    /// explicitly target the host workspace.
+    /// installed tooling. Changing workspace also requires an explicit machine:
+    /// use `placement="core"` with the nil UUID for the API host workspace.
     #[serde(default)]
     workspace_id: Option<String>,
     /// Initial prompt to send to the worker after creation.
@@ -659,7 +659,7 @@ impl OrchestratorMcp {
                         },
                         "workspace_id": {
                             "type": "string",
-                            "description": "Workspace UUID to spawn the worker in. Defaults to the boss's workspace so the worker inherits the same container, mounts, and installed tooling. Pass the nil UUID to force the host workspace."
+                            "description": "Workspace UUID on the selected destination. Omit to inherit the parent's actual workspace and machine. When changing workspace, also set placement=core or remote_node_id explicitly. To select the API host workspace, pass placement=core and the nil workspace UUID."
                         },
                         "prompt": {
                             "type": "string",

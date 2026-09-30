@@ -1338,6 +1338,29 @@ fn seconds_since(rfc3339: &str) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+fn external_worker_inflight() -> &'static std::sync::Mutex<HashSet<Uuid>> {
+    static INFLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<Uuid>>> =
+        std::sync::OnceLock::new();
+    INFLIGHT.get_or_init(Default::default)
+}
+
+fn external_worker_slots(
+    tasks: &[BoardTask],
+    running_ids: &HashSet<Uuid>,
+    inflight: &HashSet<Uuid>,
+) -> usize {
+    tasks
+        .iter()
+        .filter(|task| {
+            inflight.contains(&task.id)
+                || (task.status == BoardTaskStatus::Running
+                    && task
+                        .worker_mission_id
+                        .is_some_and(|id| !running_ids.contains(&id)))
+        })
+        .count()
+}
+
 /// Spawn workers for ready tasks while capacity allows, and sweep zombies.
 /// Called from the control actor's tick, throttled by the caller (~2s).
 pub async fn scheduler_pass(
@@ -1370,19 +1393,29 @@ pub async fn scheduler_pass(
         return;
     }
 
-    let total_running = snapshot.running_count + usize::from(snapshot.main_running);
+    // The actor snapshot only sees local runners. Reserve slots across every
+    // board for external workers and creates still awaiting adoption.
+    let mut board_tasks = Vec::new();
+    for boss_id in boards {
+        match mission_store.list_board_tasks(boss_id).await {
+            Ok(tasks) => board_tasks.push((boss_id, tasks)),
+            Err(error) => {
+                tracing::warn!(boss = %boss_id, %error, "board: cannot determine worker occupancy");
+                return;
+            }
+        }
+    }
+    let inflight = external_worker_inflight().lock().unwrap().clone();
+    let external_running: usize = board_tasks
+        .iter()
+        .map(|(_, tasks)| external_worker_slots(tasks, &snapshot.running_ids, &inflight))
+        .sum();
+    let total_running =
+        snapshot.running_count + usize::from(snapshot.main_running) + external_running;
     let spawnable_cap = max_parallel.saturating_sub(RESERVED_BOSS_SLOTS);
     let mut available = spawnable_cap.saturating_sub(total_running);
 
-    for boss_id in boards {
-        let tasks = match mission_store.list_board_tasks(boss_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(boss = %boss_id, "board: failed to list tasks: {}", e);
-                continue;
-            }
-        };
-
+    for (boss_id, tasks) in board_tasks {
         // --- Dead-boss teardown: `list_active_board_missions` keys only on task
         // status, so a boss whose own mission has terminated (failed, completed,
         // interrupted, …) with tasks still in flight would otherwise keep
@@ -1660,8 +1693,6 @@ async fn schedule_external_worker(
     task: &BoardTask,
     preflight: &RetryPreflight,
 ) -> bool {
-    use std::sync::{Mutex, OnceLock};
-    static INFLIGHT: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
     let Some(state) = hub.admission_state.get().and_then(std::sync::Weak::upgrade) else {
         return false;
     };
@@ -1678,12 +1709,7 @@ async fn schedule_external_worker(
     let Some(user) = user else {
         return false;
     };
-    if !INFLIGHT
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .insert(task.id)
-    {
+    if !external_worker_inflight().lock().unwrap().insert(task.id) {
         return false;
     }
     let store = store.clone();
@@ -1726,7 +1752,7 @@ async fn schedule_external_worker(
                         }
                         Ok(Some(current)) if current.worker_mission_id == Some(id) => {
                             // A replay may observe a worker already adopted by the task.
-                            INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+                            external_worker_inflight().lock().unwrap().remove(&task.id);
                             return;
                         }
                         _ => {
@@ -1752,7 +1778,7 @@ async fn schedule_external_worker(
                             {
                                 tracing::error!(mission=%id, task=%task.id, %error, "could not cancel unassigned board worker");
                             }
-                            INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+                            external_worker_inflight().lock().unwrap().remove(&task.id);
                             return;
                         }
                     };
@@ -1797,7 +1823,7 @@ async fn schedule_external_worker(
                 tracing::warn!(task=%task.id,%error,"external worker remains queued on its selected machine");
             }
         }
-        INFLIGHT.get().unwrap().lock().unwrap().remove(&task.id);
+        external_worker_inflight().lock().unwrap().remove(&task.id);
     });
     true
 }
@@ -2448,6 +2474,27 @@ mod tests {
         .await
         .expect("outbox acknowledgement persisted");
         assert!(inflight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_worker_capacity_survives_scheduler_passes() {
+        let mut external = mk("external", &[], BoardTaskStatus::Running, None);
+        external.worker_mission_id = Some(Uuid::new_v4());
+        let mut local = mk("local", &[], BoardTaskStatus::Running, None);
+        local.worker_mission_id = Some(Uuid::new_v4());
+        let launching = mk("launching", &[], BoardTaskStatus::Pending, None);
+        let running = HashSet::from([local.worker_mission_id.unwrap()]);
+        let inflight = HashSet::from([launching.id, external.id]);
+        let tasks = vec![external, local, launching];
+        // A worker present both in-flight and adopted occupies one slot;
+        // a local worker already in the snapshot is not counted twice.
+        assert_eq!(external_worker_slots(&tasks, &running, &inflight), 2);
+        assert_eq!(external_worker_slots(&tasks, &running, &HashSet::new()), 1);
+        let capacity = 3usize.saturating_sub(RESERVED_BOSS_SLOTS);
+        assert_eq!(
+            capacity.saturating_sub(1 + external_worker_slots(&tasks, &running, &HashSet::new())),
+            0
+        );
     }
 
     #[tokio::test]
