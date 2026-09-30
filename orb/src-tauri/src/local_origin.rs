@@ -24,6 +24,9 @@ pub struct Draft {
 struct Record {
     snapshot: Snapshot,
     acked: u64,
+    /// Native generation of the initial run; never adopt a follow-up.
+    #[serde(default)]
+    native_generation: Option<String>,
     error: Option<String>,
     /// Archive, restore and title changes confirmed by Core after synchronization.
     #[serde(default)]
@@ -142,8 +145,16 @@ async fn start_worker(path: PathBuf, c: Connection) {
         let mut last_session = None;
         loop {
             let Ok(mut record) = read(&path) else { break };
+            // A completed initial snapshot is immutable; subsequent turns have their own receipts.
+            if record.acked == record.snapshot.sequence && record.snapshot.status != "active" {
+                break;
+            }
             let id = record.snapshot.origin.id.to_string();
-            if let Ok(p) = local_agents::local_agents_poll(id.clone()) {
+            if let Some(p) = record
+                .native_generation
+                .as_deref()
+                .and_then(|generation| local_agents::poll_generation(&id, Some(generation)).ok())
+            {
                 if p.session_id.is_some() && p.session_id != last_session {
                     if let Ok(bindings) = crate::local_bindings(None, None) {
                         let mut binding = bindings[&id].clone();
@@ -184,7 +195,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
                 };
-                let generation = local_agents::native_generation(&id);
+                let generation = record.native_generation.clone();
                 let response = client
                     .post(format!(
                         "{}/api/control/local-origins",
@@ -201,10 +212,15 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     }
                     Ok(r) => {
                         let status = r.status();
-                        record.error = Some(format!("Core synchronization refused ({status})"));
+                        let detail = r.text().await.unwrap_or_default();
+                        let detail: String = detail.chars().take(512).collect();
+                        record.error =
+                            Some(format!("Core synchronization refused ({status}): {detail}"));
                         if status.as_u16() == 409 {
-                            // A definitive ownership rejection fences only this native generation.
-                            let _ = local_agents::stop_generation(&id, generation.as_deref());
+                            // Never stop a successor or an unidentifiable legacy execution.
+                            if let Some(generation) = generation.as_deref() {
+                                let _ = local_agents::stop_generation(&id, Some(generation));
+                            }
                         }
                         let _ = write(&path, &record);
                         if matches!(status.as_u16(), 401 | 403) {
@@ -363,6 +379,7 @@ pub async fn local_origin_launch(
     let mut record = Record {
         snapshot,
         acked: 0,
+        native_generation: None,
         error: None,
         confirmed: None,
     };
@@ -408,6 +425,10 @@ pub async fn local_origin_launch(
         crate::routed_opencode::start(request, &connection.api_url, &connection.token).await
     }
     .await;
+    if started.is_ok() {
+        record.native_generation = local_agents::native_generation(&id.to_string());
+        write(&path, &record)?;
+    }
     if let Err(error) = started {
         record.snapshot.status = "failed".into();
         record.snapshot.sequence += 1;

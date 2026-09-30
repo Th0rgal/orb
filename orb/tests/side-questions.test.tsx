@@ -137,3 +137,18 @@ it('shows the thoughts of the side agent while it answers',async()=>{
  await handle.ask('Status?');
  expect(await screen.findByText('Reading the ledger first.')).toBeTruthy();
 });
+it('keeps the same side-turn DOM node while streaming and committing the answer',async()=>{
+ let controller!:ReadableStreamDefaultController<Uint8Array>;
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream({start(c){controller=c;}}))));
+ let handle!:SideQuestionsHandle;
+ const view=render(()=><SideQuestions mission="stable-turn" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('A stable question');
+ const first=view.container.querySelector('[data-side-turn]');expect(first).toBeTruthy();
+ const emit=(event:unknown)=>controller.enqueue(new TextEncoder().encode(`event: btw\ndata: ${JSON.stringify(event)}\n\n`));
+ emit({type:'delta',text:'Partial'});await screen.findByText('Partial');
+ expect(view.container.querySelector('[data-side-turn]')).toBe(first);
+ emit({type:'done',answer:'Finished'});controller.close();await screen.findByText('Finished');
+ expect(view.container.querySelector('[data-side-turn]')).toBe(first);
+ expect(screen.getAllByText('A stable question')).toHaveLength(1);
+ expect(screen.queryByText('Side agent is working…')).toBeNull();
+});

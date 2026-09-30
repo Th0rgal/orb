@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 
@@ -17,6 +17,16 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   const visible = createMemo(() => visibleTree(p.nodes));
   const [rows, setRows] = createStore<TreeRow<T>[]>([]);
   createEffect(() => setRows(reconcile(visible(), { key: "id" })));
+  let element: HTMLDivElement | undefined;
+  const visibleCurrent = createMemo(() => rows.some(row => row.id === p.selected) ? p.selected : null);
+  createEffect(on(visibleCurrent, id => {
+    if (!id) return;
+    const frame = requestAnimationFrame(() => {
+      const row = [...(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])].find(row => row.dataset.treeId === id);
+      row?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    onCleanup(() => cancelAnimationFrame(frame));
+  }));
   const keydown: JSX.EventHandler<HTMLDivElement, KeyboardEvent> = e => {
     const target = e.target as HTMLElement;
     const entry = target.closest<HTMLElement>(".tree-entry");
@@ -46,7 +56,7 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     e.preventDefault();
     next?.querySelector<HTMLButtonElement>("button")?.focus();
   };
-  return <div class="sidebar-tree" role="tree" aria-multiselectable="true" aria-label={p.label} data-pointer-focus={pointerFocus() ? "true" : undefined}
+  return <div ref={element} class="sidebar-tree" role="tree" aria-multiselectable="true" aria-label={p.label} data-pointer-focus={pointerFocus() ? "true" : undefined}
     onPointerDown={() => setPointerFocus(true)}
     onKeyDown={e => { if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End", "Tab"].includes(e.key)) setPointerFocus(false); keydown(e); }}
     onClick={e => {
@@ -56,7 +66,7 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
       if (button && e.currentTarget.contains(button)) button.focus({ preventScroll: true });
     }}>
     <For each={rows}>{row => <div class="tree-entry" data-tree-id={row.id} data-depth={row.depth}
-      role="treeitem" aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.size}
+      role="treeitem" aria-current={p.selected === row.id ? "page" : undefined} aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.size}
       aria-expanded={row.expanded} aria-selected={p.selectedIds ? p.selectedIds.includes(row.id) : p.selected === row.id}
       style={{ "--depth": row.depth }}>
       {p.render(row)}<TreeConnectors row={row} />

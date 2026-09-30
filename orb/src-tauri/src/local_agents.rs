@@ -383,8 +383,16 @@ fn watch_exit(
 
 #[tauri::command]
 pub fn local_agents_poll(id: String) -> Result<PollState, String> {
+    poll_generation(&id, None)
+}
+
+/// Read only the execution owned by the caller, under the same registry lock.
+pub fn poll_generation(id: &str, expected: Option<&str>) -> Result<PollState, String> {
     let map = runs().lock().map_err(|e| e.to_string())?;
-    let run = map.get(&id).ok_or_else(|| "no local run".to_string())?;
+    let run = map.get(id).ok_or_else(|| "no local run".to_string())?;
+    if expected.is_some_and(|generation| generation != run.generation) {
+        return Err("Local execution generation changed".into());
+    }
     let snapshot = PollState {
         text: run.text.snapshot(),
         activities: run.text.activities(),
@@ -2823,12 +2831,17 @@ printf '%s\n' '{"type":"result"}'
             session_id: None,
         };
         local_agents_start(request.clone()).unwrap();
+        let initial_generation = native_generation(&request.id).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !local_agents_poll(request.id.clone()).unwrap().done {
             assert!(Instant::now() < deadline, "fixture did not complete");
             thread::sleep(Duration::from_millis(10));
         }
         local_agents_start(request.clone()).expect("a finished run must not block a new turn");
+        assert!(
+            poll_generation(&request.id, Some(&initial_generation)).is_err(),
+            "initial-origin sync must not consume the follow-up's output"
+        );
         local_agents_stop(request.id).unwrap();
     }
 
@@ -2853,6 +2866,8 @@ printf '%s\n' '{"type":"result"}'
         })
         .unwrap();
         let generation = native_generation(&id).unwrap();
+        assert!(poll_generation(&id, Some("old-generation")).is_err());
+        assert!(poll_generation(&id, Some(&generation)).is_ok());
         stop_generation(&id, Some("old-generation")).unwrap();
         assert!(!local_agents_poll(id.clone()).unwrap().done);
         stop_generation(&id, Some(&generation)).unwrap();

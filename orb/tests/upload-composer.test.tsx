@@ -61,7 +61,7 @@ it("hands the optimistic message to the transcript immediately without a duplica
   const input = screen.getByPlaceholderText("Task") as HTMLTextAreaElement;
   fireEvent.input(input, { target: { value: "Optimistic turn" } });
   fireEvent.keyDown(input, { key: "Enter" });
-  expect(pending).toHaveBeenCalledWith({ text: "Optimistic turn", images: [] });
+  expect(pending).toHaveBeenCalledWith({ text: "Optimistic turn", images: [], retry: expect.any(Function) });
   expect(screen.queryByLabelText("Pending message")).toBeNull();
   expect(input.value).toBe("");
   fireEvent.keyDown(input, { key: "Enter" });

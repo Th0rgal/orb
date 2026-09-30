@@ -58,6 +58,7 @@ const [running, setRunning] = createSignal<Record<string, boolean>>({});
 const [liveText, setLiveText] = createSignal<Record<string, string>>({});
 
 export const localInstalled = installed;
+export const localRunKnown = (id:string) => Object.hasOwn(running(),id);
 export const localRunActive = (id: string) => !!running()[id];
 export interface LocalActivity {
   id: string; label: string; done: boolean; failed: boolean;
@@ -138,7 +139,14 @@ export const localAgentsScanning = scanning;
 let scanPromise: Promise<ScanRow[]> | undefined;
 let scannedAt = 0;
 let scannedPaths = "";
-export function refreshLocalAgents(force = true): Promise<ScanRow[]> {
+/** A known binary can start while inventory refreshes. Native spawn validates its path. */
+export async function localAgentForLaunch(id:string):Promise<ScanRow|undefined>{
+ const cached=installed().find(row=>row.id===id&&row.installed&&row.path);
+ if(cached){void refreshLocalAgents(false);return cached;}
+ return (await refreshLocalAgents(false)).find(row=>row.id===id&&row.installed&&row.path);
+}
+
+export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
   if (scanPromise) return scanPromise;
   const paths = pathOverrides();
   const key = JSON.stringify(paths);

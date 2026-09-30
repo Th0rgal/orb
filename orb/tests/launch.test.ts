@@ -120,3 +120,10 @@ describe("remote launch preflight follows the server-advertised capability",()=>
  expect(remoteLaunchPreflight(fleet(typed,{nodes:[unavailable]}),unavailable.id,pick)).toContain("unavailable");
  }
  });
+it('preserves the draft turn identity when the server allocates the mission id',()=>{
+ const receipt={prompt:'Launch',messageKey:'draft:stable',nodeId:'local',destination:'This computer'};
+ const draft=withInitialPrompt([],null,receipt);
+ const accepted=withInitialPrompt(buildTranscript([{type:'user_message',data:{id:'server-message',content:'Launch'}}]),mission({id:'server-mission'}),receipt);
+ expect(accepted[0].key).toBe(draft[0].key);
+ expect(accepted).toHaveLength(1);
+});

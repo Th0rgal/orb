@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { localAgentsScanning, refreshLocalAgents } from "../src/localAgents";
+import { localAgentForLaunch, localAgentsScanning, refreshLocalAgents } from "../src/localAgents";
 afterEach(() => { delete (window as any).__TAURI__; vi.restoreAllMocks(); });
 it("deduplicates scans, reuses recent results and keeps inventory while refreshing", async () => {
  let finish!: (value: unknown) => void;
@@ -16,4 +16,9 @@ it("deduplicates scans, reuses recent results and keeps inventory while refreshi
  expect(await refreshLocalAgents(true)).toEqual(rows);
  expect(invoke).toHaveBeenCalledTimes(2);
  expect(localAgentsScanning()).toBe(false);
+ vi.spyOn(Date,'now').mockReturnValue(Date.now()+61_000);
+ invoke.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+ expect(await localAgentForLaunch('codex')).toEqual(rows[0]);
+ expect(localAgentsScanning()).toBe(true);
+ finish(rows);await refreshLocalAgents(false);
 });

@@ -6,7 +6,7 @@ import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type Re
 import { goalObjective, GoalTag } from "./goal";
 import type { StreamItem } from "./Transcript";
 
-export type LaunchReceipt = { prompt: string; images?: DraftImage[]; nodeId: string; destination: string; replacement?: boolean };
+export type LaunchReceipt = { messageKey?:string; prompt: string; images?: DraftImage[]; nodeId: string; destination: string; replacement?: boolean };
 const receiptKey = (id: string) => `orb.launch:${getApiUrl()}:${id}`;
 const receipts = new Map<string, LaunchReceipt>();
 export function rememberLaunch(id: string, receipt: LaunchReceipt) {
@@ -63,7 +63,7 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
       : {kind:"text", key:`continuation:${mission?.id}:${index}`, text:entry.content, live:false});
     return first < 0 ? [...expanded, ...items] : [...items.slice(0, first), ...expanded, ...items.slice(first + 1)];
   }
-  const key = `initial:${mission?.id ?? "launch"}`;
+  const key = receipt?.messageKey ?? `initial:${mission?.id ?? "launch"}`;
   if (first < 0) return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images}, ...items] : items;
   // Keep the optimistic turn mounted when its canonical event arrives.
   return receipt ? items.map((item,index) => index === first ? {...item,key,...(receipt.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
@@ -272,5 +272,5 @@ export function MissionFailure(p: { mission?: Mission | null; error?: string; ac
  * animation on their prompt.
  */
 export function MissionPending(p: { destination: string; label: string }) {
-  return <div class="agent-wait-status" role="status" aria-live="polite">{p.label} on {p.destination}…</div>;
+  return <div class="sr-only" role="status" aria-live="polite">{p.label} on {p.destination}…</div>;
 }

@@ -80,7 +80,7 @@ function LocalAgentsCard() {
   const scan = async () => {
     setBusy(true);
     try {
-      await refreshLocalAgents();
+      await refreshLocalAgents(true);
     } finally {
       setBusy(false);
     }

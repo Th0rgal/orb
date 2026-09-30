@@ -191,7 +191,7 @@ button:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset:
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }
 button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focus:not(:focus-visible) { outline: 0; }
-.sb-scroll { flex: 1; overflow-y: auto; padding: 0 6px 12px; scrollbar-width: none; }
+.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; }
 .sb-scroll::-webkit-scrollbar { display: none; }
 .sb-scroll > .row + .row { margin-top: 1px; }
 .row {
@@ -207,6 +207,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 }
 .row:hover:not(.active) { background: var(--bg-hover); }
 .row.active { background: var(--bg-active); color: var(--fg-strong); }
+.row.project.contains-current { color: var(--fg-strong); }
+.current-location-label { flex: none; font-size: 11px; color: var(--fg-2); }
+
 .row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .row kbd { font: inherit; font-size: 11px; color: var(--fg-4); }
 .row.project { color: var(--fg-2); }
@@ -411,15 +414,17 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 .sb-foot {
   flex: none;
   display: flex;
-  justify-content: flex-end;
   align-items: center;
-  padding: 10px 10px 12px;
+  padding: 6px;
+  border-top: 1px solid var(--stroke-soft);
 }
 .gear-btn {
-  width: 32px; height: 32px; border-radius: var(--radius-md);
-  display: grid; place-items: center;
+  width: 100%; height: 32px; padding: 0 8px; border-radius: var(--radius-md);
+  display: flex; align-items: center; gap: 8px;
+  text-align: left; font-size: 13px;
   color: var(--fg-2);
 }
+.gear-btn > svg { width: 16px; height: 16px; flex: none; }
 .gear-btn:hover { background: var(--hover-1); color: var(--fg); }
 .gear-btn.on { background: var(--hover-3); color: var(--fg); }
 .dim { color: var(--fg-3) !important; }
