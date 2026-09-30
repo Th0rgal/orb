@@ -41,16 +41,19 @@ export async function contextSnapshot(source:Mission,events:StoredEvent[],visibl
  return {cursor:{sequence,visibleHash},safe,summary:`${initial?'Initial recent context':`New events after ${cursor.sequence} through ${sequence}`}\n${recent||'No new public events.'}${live}`};
 }
 async function archiveFile(name:string,text:string,destination:string){return (await transferFile({name,file:new File([text],name,{type:'text/plain'})},destination)).path;}
-async function archiveParts(name:string,rows:string[],write:(name:string,text:string)=>Promise<string>){
- const paths:string[]=[];let chunk='';
- // Bound each upload, including a single unusually large tool result.
+export async function archiveParts(name:string,rows:string[],write:(name:string,text:string)=>Promise<string>){
+ const paths:string[]=[];let chunk:string[]=[],chunkBytes=0;
+ const flush=async()=>{paths.push(await write(`${name}.${paths.length}`,chunk.join('')));chunk=[];chunkBytes=0;};
+ // Bound each upload, including a single unusually large tool result. The
+ // size of the chunk is kept as a count: re-encoding it for every row froze
+ // the page for a minute on a long conversation.
  for(const row of rows){let bytes=encoder.encode(row+'\n');while(bytes.length){
   let end=Math.min(bytes.length,4*1024*1024);while(end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;
-  const part=new TextDecoder().decode(bytes.slice(0,end));bytes=bytes.slice(end);
-  if(encoder.encode(chunk).length+encoder.encode(part).length>8*1024*1024){paths.push(await write(`${name}.${paths.length}`,chunk));chunk='';}
-  chunk+=part;
+  const part=bytes.slice(0,end);bytes=bytes.slice(end);
+  if(chunkBytes+part.length>8*1024*1024)await flush();
+  chunk.push(new TextDecoder().decode(part));chunkBytes+=part.length;
  }}
- if(chunk||!paths.length)paths.push(await write(`${name}.${paths.length}`,chunk));return paths;
+ if(chunk.length||!paths.length)await flush();return paths;
 }
 export async function prepareBtwContext(source:Mission,visible:string,destination:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[],localRoot?:string){
  const events=await conversationEvents(source.id),snapshot=await contextSnapshot(source,events,visible,previous);
