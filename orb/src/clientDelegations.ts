@@ -40,7 +40,8 @@ export function startClientDelegations(missions: () => Mission[]) {
             const cwd = await localDirectory(mission.working_directory);
             if (!valid()) return;
             binding = {cwd,harness:mission.backend,bin:harness.path,model:mission.model_override??undefined};
-            rememberBinding(id,binding);
+            await rememberBinding(id,binding);
+            if (!valid()) return;
           }
           await enqueueLocalMessage({id,...binding,prompt:message.content},message.content,{id:message.id,delegated:true,waiting:false});
           if (!valid()) return;

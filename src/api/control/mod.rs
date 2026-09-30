@@ -1499,7 +1499,7 @@ mod campaign_guard_tests {
             .update_mission_status(writer.id, MissionStatus::Active)
             .await
             .expect("active");
-        let occupant = live_mission_on_workspace(&store, writer.workspace_id, None)
+        let occupant = live_mission_on_workspace(&store, writer.workspace_id, None, None)
             .await
             .expect("occupant");
         assert_eq!(occupant.id, writer.id);
@@ -1508,7 +1508,7 @@ mod campaign_guard_tests {
             .await
             .expect("complete");
         assert!(
-            live_mission_on_workspace(&store, writer.workspace_id, None)
+            live_mission_on_workspace(&store, writer.workspace_id, None, None)
                 .await
                 .is_none(),
             "a finished writer frees the worktree"
@@ -1537,7 +1537,7 @@ mod campaign_guard_tests {
                 .await
                 .unwrap();
         }
-        assert!(live_mission_on_workspace(&store, workspace, None)
+        assert!(live_mission_on_workspace(&store, workspace, None, None)
             .await
             .is_none());
         let native = store
@@ -1557,7 +1557,7 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         assert_eq!(
-            live_mission_on_workspace(&store, workspace, None)
+            live_mission_on_workspace(&store, workspace, None, None)
                 .await
                 .unwrap()
                 .id,
@@ -1595,11 +1595,11 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         let source_dir = format!("/root/workspaces/mission-{}", &ids[1].to_string()[..8]);
-        assert!(live_mission_on_workspace(&store, host, None)
+        assert!(live_mission_on_workspace(&store, host, None, None)
             .await
             .is_none());
         assert!(
-            live_mission_on_workspace(&store, host, Some(&source_dir))
+            live_mission_on_workspace(&store, host, Some(&source_dir), None)
                 .await
                 .is_none(),
             "forking a blocked mission must not collide with unrelated host chats"
@@ -1609,7 +1609,7 @@ mod campaign_guard_tests {
             .await
             .unwrap();
         assert_eq!(
-            live_mission_on_workspace(&store, host, Some(&source_dir))
+            live_mission_on_workspace(&store, host, Some(&source_dir), None)
                 .await
                 .unwrap()
                 .id,
@@ -1617,12 +1617,65 @@ mod campaign_guard_tests {
             "a live source still owns its directory"
         );
         assert_eq!(
-            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")))
+            live_mission_on_workspace(&store, host, Some(&format!("{source_dir}/repo")), None)
                 .await
                 .unwrap()
                 .id,
             ids[1],
             "a directory below the mission root is the same worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_directory_occupancy_excludes_only_its_parent() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let host = workspace::DEFAULT_WORKSPACE_ID;
+        let parent = store
+            .create_mission_with_parent(
+                Some("parent"),
+                Some(host),
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                Some("/repo"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            live_mission_on_workspace(&store, host, Some("/repo"), Some(parent.id))
+                .await
+                .is_none()
+        );
+        let unrelated = store
+            .create_mission_with_parent(
+                Some("unrelated"),
+                Some(host),
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                Some("/repo"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            live_mission_on_workspace(&store, host, Some("/repo"), Some(parent.id))
+                .await
+                .unwrap()
+                .id,
+            unrelated.id
+        );
+        assert!(
+            live_mission_on_workspace(&store, host, Some("/other-worktree"), Some(parent.id))
+                .await
+                .is_none()
         );
     }
 
@@ -5384,6 +5437,31 @@ pub async fn post_message(
             {
                 return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
             }
+            let content =
+                if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
+                    let mission = control
+                        .mission_store
+                        .get_mission(mid)
+                        .await
+                        .map_err(internal_error)?
+                        .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+                    let payload = crate::api::mission_payload::MissionPayload {
+                        attachments: attachments.clone(),
+                        project: mission.project.project,
+                        controller_md: None,
+                    };
+                    crate::api::mission_payload::stage_message(
+                        &state.config.working_dir,
+                        mid,
+                        id,
+                        &content,
+                        &payload,
+                    )
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("attachments: {e}")))?
+                    .0
+                } else {
+                    content
+                };
             // Public follow-ups can continue the native session on its node.
             // Internal actor routes retain their fence against local execution.
             remote_grok::continue_on_node(
@@ -10380,6 +10458,7 @@ async fn live_mission_on_workspace(
     mission_store: &Arc<dyn MissionStore>,
     workspace_id: Uuid,
     working_directory: Option<&str>,
+    excluded_parent: Option<Uuid>,
 ) -> Option<Mission> {
     const PAGE: usize = 200;
     let shared = workspace_id == workspace::DEFAULT_WORKSPACE_ID;
@@ -10387,20 +10466,27 @@ async fn live_mission_on_workspace(
         return None;
     }
     let directory = working_directory.map(std::path::Path::new);
-    mission_store
-        .list_missions(PAGE, 0)
-        .await
-        .ok()?
-        .into_iter()
-        .find(|mission| {
-            mission.workspace_id == workspace_id
+    let mut offset = 0;
+    loop {
+        let page = mission_store.list_missions(PAGE, offset).await.ok()?;
+        let count = page.len();
+        if let Some(mission) = page.into_iter().find(|mission| {
+            Some(mission.id) != excluded_parent
+                && mission.workspace_id == workspace_id
                 && !matches!(
                     mission.backend.as_str(),
                     "cloud_chatgpt" | "cloud_grok_bot" | "cloud_cursor"
                 )
                 && campaign_slot_held_by(mission.status)
                 && (!shared || directory.is_some_and(|dir| mission_uses_directory(mission, dir)))
-        })
+        }) {
+            return Some(mission);
+        }
+        if count < PAGE {
+            return None;
+        }
+        offset += count;
+    }
 }
 
 /// The directory as the runner reaches it. An absolute path is walked one
@@ -11124,15 +11210,14 @@ pub(super) async fn create_mission_inner(
     // worker (`6f1e92b0`) on the same workspace as the existing writer;
     // ChatGPT OAuth is single-use and the extra occupant also races the
     // files. Sequential certify-after-repair is fine: the writer is terminal.
-    if let Some(ws_id) = req.workspace_id.filter(|id| {
-        !(shared_side_workspace
-            || req.parent_mission_id.is_some() && *id == workspace::DEFAULT_WORKSPACE_ID)
-    }) {
+    if let Some(ws_id) = req.workspace_id.filter(|_| !shared_side_workspace) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = live_mission_on_workspace(
             &control_state.mission_store,
             ws_id,
             req.working_directory.as_deref(),
+            req.parent_mission_id
+                .filter(|_| ws_id == workspace::DEFAULT_WORKSPACE_ID),
         )
         .await
         {
@@ -13798,7 +13883,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Raw { .. } => None,
     };
     if let Some(prompt) = prompt {
-        *prompt = super::mission_payload::qualify_path_mentions(
+        *prompt = super::mission_payload::prepare_remote_turn(
             &state.config.working_dir,
             mission.id,
             prompt,

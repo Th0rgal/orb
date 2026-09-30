@@ -854,6 +854,36 @@ pub fn qualify_path_mentions(
         .into_owned())
 }
 
+/// Remote shared-context attachments use the node replica, not a local snapshot
+/// manifest. Retain durable snapshot identities in history, but omit local-only
+/// manifest instructions from the prompt sent to the node.
+pub fn prepare_remote_turn(
+    working_dir: &Path,
+    mission_id: Uuid,
+    content: &str,
+) -> Result<String, String> {
+    let mut prompt = qualify_path_mentions(working_dir, mission_id, content)?;
+    for part in content.split(SNAPSHOT_MARKER).skip(1) {
+        let id = part
+            .split_once(" -->")
+            .ok_or("invalid attachment reference")?
+            .0;
+        let id = Uuid::parse_str(id).map_err(|_| "invalid attachment ID")?;
+        let snapshot = read_message_snapshot(working_dir, mission_id, id)?;
+        if snapshot
+            .payload
+            .attachments
+            .iter()
+            .any(|item| !matches!(item.kind, AttachmentKind::Path | AttachmentKind::Context))
+        {
+            return Err("Remote continuation supports shared context attachments only".into());
+        }
+        let relative = format!(".paloma/messages/{id}");
+        prompt = prompt.replace(&format!("\n\n{SNAPSHOT_MARKER}{id} -->\nAttached context: read `{relative}/.paloma/attach.md` (paths in that manifest are relative to `{relative}`)."), "");
+    }
+    Ok(prompt)
+}
+
 fn rewrite_context(content: &str, root: &Path, payload: &MissionPayload) -> Result<String, String> {
     let mut resolved = BTreeMap::new();
     for item in payload
@@ -1028,6 +1058,36 @@ mod tests {
         assert_eq!(
             qualify_path_mentions(tmp.path(), id, text).unwrap(),
             r#"Read @"__orb_path__/context/notes.md". and @"__orb_path__/a b.md"; leave @unknown and @controller alone."#
+        );
+    }
+
+    #[test]
+    fn remote_followup_resolves_staged_paths_without_local_manifest_instructions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = project_files_root(tmp.path(), "demo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.md"), "context").unwrap();
+        let id = Uuid::new_v4();
+        let payload = MissionPayload {
+            project: Some("demo".into()),
+            controller_md: None,
+            attachments: vec![MissionAttachment {
+                kind: AttachmentKind::Path,
+                path: Some("notes.md".into()),
+            }],
+        };
+        let (staged, _) =
+            stage_message(tmp.path(), id, Uuid::new_v4(), "Read @notes.md", &payload).unwrap();
+        let prompt = prepare_remote_turn(tmp.path(), id, &staged).unwrap();
+        assert_eq!(prompt, r#"Read @"__orb_path__/notes.md""#);
+        assert!(!prompt.contains(".paloma/"));
+        let manifest = crate::project_context::Store::new(root, tmp.path().join("metadata"))
+            .manifest()
+            .unwrap();
+        assert_eq!(
+            crate::api::context_execution::resolve(&prompt, Path::new("/node/context"), &manifest)
+                .unwrap(),
+            r#"Read "/node/context/notes.md""#
         );
     }
 
