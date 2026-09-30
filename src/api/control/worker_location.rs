@@ -24,6 +24,54 @@ pub fn initial_delivery_id(mission: Uuid) -> Uuid {
     Uuid::new_v5(&mission, b"initial-worker-message")
 }
 
+pub const INITIALIZED_TAG: &str = "worker-initialized-v1";
+
+/// A persisted identity alone is not a completed create. Never acknowledge or
+/// replay a partial initialization; expose the orphan's ID for reconciliation.
+pub fn require_initialized(mission: &Mission) -> Result<(), (StatusCode, String)> {
+    if mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| tag == INITIALIZED_TAG)
+    {
+        return Ok(());
+    }
+    Err((StatusCode::CONFLICT, serde_json::json!({
+        "error": "worker_initialization_incomplete",
+        "mission_id": mission.id,
+        "message": "worker creation was interrupted before initialization completed; inspect and reconcile this mission before retrying with a new dispatch key"
+    }).to_string()))
+}
+
+pub async fn mark_initialized(
+    store: &Arc<dyn MissionStore>,
+    mission: &mut Mission,
+) -> Result<(), String> {
+    if !mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| tag.starts_with("worker-dispatch:"))
+    {
+        return Ok(());
+    }
+    store
+        .update_mission_project(
+            mission.id,
+            crate::api::mission_store::MissionProjectPatch {
+                tag_patch: Some(crate::api::mission_store::MissionTagPatch {
+                    add: vec![INITIALIZED_TAG.into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+    mission.project.tags.push(INITIALIZED_TAG.into());
+    Ok(())
+}
+
 pub const CLIENT_TAG: &str = "worker-client:";
 pub const CLIENT_DELIVERY: &str = "client_message";
 
@@ -205,6 +253,44 @@ pub async fn enqueue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn partial_worker_is_not_a_completed_dispatch_receipt() {
+        let store: Arc<dyn MissionStore> =
+            Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
+        let mut mission = store
+            .create_mission(Some("partial worker"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        mission.project.tags.push("worker-dispatch:test".into());
+        store
+            .update_mission_project(
+                mission.id,
+                crate::api::mission_store::MissionProjectPatch {
+                    tags: Some(mission.project.tags.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let persisted = store.get_mission(mission.id).await.unwrap().unwrap();
+        let error = require_initialized(&persisted).unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.contains("worker_initialization_incomplete"));
+        assert!(error.1.contains(&mission.id.to_string()));
+        assert!(store
+            .list_pending_board_outbox(10)
+            .await
+            .unwrap()
+            .is_empty());
+        mark_initialized(&store, &mut mission).await.unwrap();
+        let persisted = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert!(require_initialized(&persisted).is_ok());
+        assert!(persisted
+            .project
+            .tags
+            .contains(&"worker-dispatch:test".into()));
+    }
+
     #[tokio::test]
     async fn delivery_receipt_survives_duplicate_enqueue() {
         let store: Arc<dyn MissionStore> =

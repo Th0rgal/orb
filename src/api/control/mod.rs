@@ -10932,6 +10932,7 @@ pub(super) async fn create_mission_inner(
             .await
             .map_err(internal_error)?;
         if let Some(existing) = existing.into_iter().next() {
+            worker_location::require_initialized(&existing)?;
             verify_coalesced_attachments(&state.config, &req, &existing)?;
             // Recover a crash between mission persistence and initial delivery.
             // Orb's durable receipt makes a repeated initial message harmless.
@@ -11562,6 +11563,9 @@ pub(super) async fn create_mission_inner(
         }
     }
     let mut normalized_request_tags = normalize_mission_tags(req.tags.as_deref());
+    if let Some(tags) = normalized_request_tags.as_mut() {
+        tags.retain(|tag| tag != worker_location::INITIALIZED_TAG);
+    }
     if normalized_request_tags
         .as_deref()
         .is_some_and(contains_internal_disk_reservation_tag)
@@ -12260,7 +12264,10 @@ pub(super) async fn create_mission_inner(
             Err(message) => Err(message),
         };
         match dispatch {
-            Ok(updated) => {
+            Ok(mut updated) => {
+                worker_location::mark_initialized(&control.mission_store, &mut updated)
+                    .await
+                    .map_err(internal_error)?;
                 let value = mission_create_response(&state, &control, updated).await?;
                 return Ok((headers, Json(value)));
             }
@@ -12286,6 +12293,14 @@ pub(super) async fn create_mission_inner(
     }
 
     if client_placement {
+        // Persist history and the completion receipt before exposing a delivery.
+        // A retry may replay delivery only after all initialization is durable.
+        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.clone())
+            .await
+            .map_err(internal_error)?;
+        worker_location::mark_initialized(&control.mission_store, &mut mission)
+            .await
+            .map_err(internal_error)?;
         if worker_location::client_owner(&mission).is_some() {
             if let Some((id, prompt)) = &initial_prompt {
                 worker_location::enqueue(&control.mission_store, mission.id, *id, prompt.clone())
@@ -12293,13 +12308,13 @@ pub(super) async fn create_mission_inner(
                     .map_err(internal_error)?;
             }
         }
-        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.take())
-            .await
-            .map_err(internal_error)?;
         let value = mission_create_response(&state, &control, mission).await?;
         return Ok((headers, Json(value)));
     }
 
+    worker_location::mark_initialized(&control.mission_store, &mut mission)
+        .await
+        .map_err(internal_error)?;
     let value = mission_create_response(&state, &control, mission).await?;
     Ok((headers, Json(value)))
 }
