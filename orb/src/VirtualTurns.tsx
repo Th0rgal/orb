@@ -1,5 +1,6 @@
 import {For,createEffect,createMemo,createSignal,onCleanup,onMount,type JSX} from 'solid-js';
 import {matchOffsets} from './searchIndex';
+import { timed } from "./diagnostics";
 export type SearchHit={key:string;occurrence:number};
 export interface TranscriptSearch {
  search(query:string,sensitive:boolean,whole:boolean):SearchHit[];
@@ -17,7 +18,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const [revision,setRevision]=createSignal(0),[viewport,setViewport]=createSignal({top:0,height:800});
  const [pinned,setPinned]=createSignal(new Set<string>());
  let firstKey:string|undefined;
- const layout=createMemo(()=>{
+ const layout=createMemo(()=>timed("turns layout",()=>{
   revision();let top=0;
   const rows=p.items.map(item=>{const row={item,top,height:sizes.get(item.key)??300};top+=row.height;return row;});
   const previousIndex=firstKey?rows.findIndex(row=>row.item.key===firstKey):-1;
@@ -29,7 +30,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    queueMicrotask(()=>{if(target.isConnected){target.scrollTop=scrollTop+delta;schedule();}});
   }
   return rows;
- });
+ }));
  const total=()=>{const rows=layout(),last=rows.at(-1);return last?last.top+last.height:0;};
  const update=()=>{
   const rect=root.getBoundingClientRect(),box=scroller?.getBoundingClientRect();
@@ -44,7 +45,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const schedule=()=>{if(!frame)frame=requestAnimationFrame(()=>{frame=0;update();});};
  type Segment={key:string;item?:T;height:number};
  const stable=new Map<string,Segment>();
- const segments=createMemo(()=>{
+ const segments=createMemo(()=>timed("turns segments",()=>{
   const rows=layout(),v=viewport(),keep=pinned(),out:Segment[]=[];let gap=0,gapStart='';
   const spacer=()=>{if(!gap)return;const key=`gap:${gapStart}`;let row=stable.get(key);if(!row){row={key,height:gap};stable.set(key,row);}row.height=gap;out.push(row);gap=0;};
   rows.forEach((row,index)=>{
@@ -52,19 +53,19 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    if(visible){spacer();let value=stable.get(row.item.key);if(!value){value={key:row.item.key,item:row.item,height:0};stable.set(value.key,value);}out.push(value);}
    else{if(!gap)gapStart=row.item.key;gap+=row.height;}
   });spacer();return out;
- });
+ }));
  function Row(props:{segment:Segment}){
   let element!:HTMLDivElement;
   onMount(()=>{
    if(!props.segment.item)return;
    const key=props.segment.key;nodes.set(key,element);
-   const observer=new ResizeObserver(()=>{
+   const observer=new ResizeObserver(()=>timed("turn resized",()=>{
     const height=element.getBoundingClientRect().height;if(height<=0||sizes.get(key)===height)return;
     const row=layout().find(row=>row.item.key===key),delta=height-(sizes.get(key)??300);
     sizes.set(key,height);
     if(scroller&&row&&row.top+row.height<viewport().top)scroller.scrollTop+=delta;
     setRevision(n=>n+1);schedule();
-   });observer.observe(element);
+   }));observer.observe(element);
    onCleanup(()=>{observer.disconnect();nodes.delete(key);});
   });
   return props.segment.item?<div ref={element} data-turn-key={props.segment.key} style={{display:'flow-root'}}>{p.children(props.segment.item)}</div>:<div aria-hidden="true" style={{height:`${segments().find(s=>s.key===props.segment.key)?.height??0}px`}}/>;
