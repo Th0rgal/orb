@@ -22,7 +22,7 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertTrue(OrbProviderQuota.windows(.null).isEmpty)
     }
     func testOAuthUsesCredentialOwner() {
-        let proxy: OrbJSON = .object(["id": .string("account"), "name": .string("Kimi"), "provider_type": .string("kimi"), "uses_oauth": .bool(true), "credential_owner": .string("cli_proxy")])
+        let proxy: OrbJSON = .object(["id": .string("account"), "name": .string("OpenAI"), "provider_type": .string("openai"), "uses_oauth": .bool(true), "credential_owner": .string("cli_proxy")])
         XCTAssertTrue(OrbProvidersSettings.loginSpec(proxy)?.proxy == true)
         let foreign: OrbJSON = .object(["provider_type": .string("openai"), "uses_oauth": .bool(true), "credential_owner": .string("external")])
         XCTAssertNil(OrbProvidersSettings.loginSpec(foreign))
@@ -35,4 +35,16 @@ final class OrbSettingsTests: XCTestCase {
         do { _ = try await client.call("/should-not-send"); XCTFail("Old connection should not send") }
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
     }
+    func testKimiUsesNativeDeviceFlowAndAPIKeysRemainEditable() {
+        XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("kimi").proxy)
+        let kimi: OrbJSON = .object(["id": .string("kimi-account"), "provider_type": .string("kimi"), "uses_oauth": .bool(true), "credential_owner": .string("sandboxed_sh")])
+        XCTAssertEqual(OrbProvidersSettings.loginSpec(kimi)?.id, "kimi-account")
+        XCTAssertEqual(OrbProvidersSettings.loginSpec(kimi)?.proxy, false)
+        for type in ["anthropic", "openai", "google", "xai"] {
+            let account: OrbJSON = .object(["provider_type": .string(type), "uses_oauth": .bool(true), "has_api_key": .bool(true), "has_oauth": .bool(false)])
+            XCTAssertTrue(OrbProvidersSettings.canEditKey(account))
+        }
+        XCTAssertFalse(OrbProvidersSettings.canEditKey(kimi))
+    }
+
 }

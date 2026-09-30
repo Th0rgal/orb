@@ -397,6 +397,7 @@ async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(),
 /// Files included in the backup (relative to .sandboxed-sh/)
 const BACKUP_FILES: &[&str] = &[
     "settings.json",
+    "ssh-hosts.json",
     "ai_providers.json",
     "backend_config.json",
     "workspaces.json",

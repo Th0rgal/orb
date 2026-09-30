@@ -34,7 +34,7 @@ struct OrbProvidersSettings: View {
                         OrbProviderQuota(value: detail)
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
                         if !detail["usage_note"].text.isEmpty { Text(detail["usage_note"].text).font(.caption).foregroundStyle(.secondary) }
-                        if provider["uses_oauth"].flag {
+                        if !Self.canEditKey(provider) {
                             if let spec = Self.loginSpec(provider) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
                             else { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
                         } else { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
@@ -52,7 +52,7 @@ struct OrbProvidersSettings: View {
                 Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
                 Menu("Connect subscription") {
                     ForEach(Self.subscriptionTypes, id: \.self) { type in
-                        Button(type.capitalized) { login = OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: true) }
+                        Button(type.capitalized) { login = Self.subscriptionLogin(type) }
                     }
                 }.disabled(!ready)
             }
@@ -74,11 +74,17 @@ struct OrbProvidersSettings: View {
         }
         .sheet(item: $login) { spec in OrbProviderLoginView(spec: spec, client: client) { Task { await load() } } }
     }
+    static func canEditKey(_ provider: OrbJSON) -> Bool {
+        provider["has_api_key"].flag || !provider["uses_oauth"].flag
+    }
+    static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
+        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "kimi")
+    }
     static func loginSpec(_ provider: OrbJSON) -> OrbProviderLogin? {
         guard provider["uses_oauth"].flag else { return nil }
         let owner = provider["credential_owner"].text, type = provider["provider_type"].text
-        let proxy = owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type))
-        guard proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
+        let proxy = type != "kimi" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
+        guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }
     private func status(_ p: OrbJSON) -> String {
@@ -220,7 +226,11 @@ struct OrbProviderLoginView: View {
                 if let url {
                     Button("Open sign-in page") { openURL(url) }
                     if !instructions.isEmpty { Text(instructions).textSelection(.enabled) }
-                    if device { Text("Complete sign-in in your browser, then return here. This page checks for completion automatically.") }
+                    if !spec.proxy && spec.type == "kimi" {
+                        Text("Approve the code in your browser, then return here.")
+                        Button("Complete sign-in") { Task { await submit() } }.disabled(busy || finished)
+                    }
+                    else if device { Text("Complete sign-in in your browser, then return here. This page checks for completion automatically.") }
                     else {
                         Text("After signing in, paste the final redirect URL or authorization code below if the browser cannot return to Orb.").font(.caption).foregroundStyle(.secondary)
                         TextField("Redirect URL or code", text: $callback).textInputAutocapitalization(.never).autocorrectionDisabled()
