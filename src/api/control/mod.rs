@@ -29406,6 +29406,12 @@ pub async fn create_automation(
                     "Invalid originating wake-up generation".into(),
                 )
             })?,
+            None if req.variables.contains_key("__wakeup_local") => {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Local wake-up is missing its originating run generation".into(),
+                ))
+            }
             None => control
                 .mission_store
                 .get_latest_mission_run(mission_id)
@@ -29438,7 +29444,7 @@ pub async fn create_automation(
             .await
             .map_err(internal_error)?
         {
-            return Err((StatusCode::CONFLICT, "Wake-up creation belongs to a stopped or superseded mission generation; resume the mission first".into()));
+            return Err((if req.variables.contains_key("__wakeup_local") {StatusCode::GONE} else {StatusCode::CONFLICT}, "Wake-up creation belongs to a stopped or superseded mission generation; resume the mission first".into()));
         }
     }
     // Validate the command exists in the library if CommandSource::Library
@@ -29531,7 +29537,13 @@ pub async fn create_automation(
         mission_id,
         command_source: req.command_source,
         trigger,
-        variables: req.variables,
+        variables: {
+            let mut variables = req.variables;
+            if let Some(generation) = wakeup_generation {
+                variables.insert("__wakeup_run_generation".into(), generation.to_string());
+            }
+            variables
+        },
         active: true,
         stop_policy: req
             .stop_policy

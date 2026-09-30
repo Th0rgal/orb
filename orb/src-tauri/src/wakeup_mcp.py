@@ -1,6 +1,7 @@
 """Orb's credential-free, durable scheduling transport (stdio MCP or CLI)."""
 import datetime, hashlib, json, os, pathlib, sys, tempfile, time, uuid
-root, mission = pathlib.Path(sys.argv[1]), sys.argv[2]
+root, mission, generation = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+if generation < 0: raise ValueError("Invalid run generation")
 
 def schedule(name, args):
     key = str(args.get('request_id') or uuid.uuid4())
@@ -16,7 +17,7 @@ def schedule(name, args):
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('A nonempty prompt is required')
     reason = str(args.get('reason', ''))
-    variables = {'__wakeup_source': 'orb-local', '__wakeup_request_id': key, '__wakeup_reason': reason}
+    variables = {'__wakeup_source': 'orb-local', '__wakeup_request_id': key, '__wakeup_reason': reason, '__wakeup_local': 'true', '__wakeup_run_generation': str(generation)}
     if name == 'schedule_job_wakeup':
         trigger = {'type': 'durable_job_terminal', 'job_id': str(uuid.UUID(args['job_id']))}
         variables['__wakeup_source'] = 'durable-job-terminal'
@@ -57,8 +58,8 @@ job_schema['properties']['job_id'] = {'type': 'string'}
 job_schema['required'] = ['prompt', 'reason', 'job_id']
 tools = [{'name': 'schedule_wakeup', 'description': 'Save one durable wake-up for this mission. Core owns the timer. Reuse request_id when retrying.', 'inputSchema': schema},
          {'name': 'schedule_job_wakeup', 'description': 'Resume after a Core durable job becomes terminal. Prefer this to polling.', 'inputSchema': job_schema}]
-if len(sys.argv) > 3:
-    print(json.dumps(schedule(sys.argv[3], json.loads(sys.argv[4]))))
+if len(sys.argv) > 4:
+    print(json.dumps(schedule(sys.argv[4], json.loads(sys.argv[5]))))
 else:
     for line in sys.stdin:
         try:

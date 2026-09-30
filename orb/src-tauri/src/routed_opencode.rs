@@ -22,7 +22,9 @@ pub async fn start(request: StartRequest, base: &str, token: &str) -> Result<(),
     let generation = *local_agents::launch_fence(&request.id)
         .lock()
         .map_err(|e| e.to_string())?;
-    start_fenced(request, base, token, Some(generation)).await
+    // This entry point is only used for a newly registered local origin.
+    // Core creates that immutable origin at run generation 1.
+    start_fenced(request, base, token, Some(generation), 1).await
 }
 
 pub async fn start_fenced(
@@ -30,6 +32,7 @@ pub async fn start_fenced(
     base: &str,
     token: &str,
     stop_generation: Option<u64>,
+    run_generation: u64,
 ) -> Result<(), String> {
     let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
     crate::local_wakeups::prepare(
@@ -38,6 +41,7 @@ pub async fn start_fenced(
             api_url: base.into(),
             token: token.into(),
         },
+        run_generation,
     )?;
     if request.harness != "opencode" {
         return local_agents::start_with_env_fenced(request, &launch_env, stop_generation);

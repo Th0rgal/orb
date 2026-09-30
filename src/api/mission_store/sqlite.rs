@@ -7897,6 +7897,22 @@ impl MissionStore for SqliteMissionStore {
         }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
     }
 
+    async fn cancel_mission_continuations_through(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock(); let tx = conn.transaction()?;
+            tx.execute("INSERT INTO mission_wakeup_fences (mission_id, stopped_generation) VALUES (?1, ?2) ON CONFLICT(mission_id) DO UPDATE SET stopped_generation = MAX(stopped_generation, excluded.stopped_generation)", params![mission.to_string(), generation as i64])?;
+            tx.execute("UPDATE automations SET active = 0 WHERE mission_id = ? AND json_extract(variables, '$.__wakeup_source') IS NOT NULL AND CAST(COALESCE(json_extract(variables, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?", params![mission.to_string(),generation as i64])?;
+            tx.execute("UPDATE board_outbox SET state = 'acknowledged', acknowledged_at = ? WHERE id IN (SELECT id FROM automation_executions WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND CAST(COALESCE(json_extract(variables_used, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?) AND state = 'pending'", params![now_string(),mission.to_string(),generation as i64])?;
+            tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND CAST(COALESCE(json_extract(variables_used, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ? AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true')", params![now_string(),mission.to_string(),generation as i64])?;
+            tx.commit()
+        }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
+    }
+
     async fn cancel_scheduled_delivery(&self, id: Uuid) -> Result<(), String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {

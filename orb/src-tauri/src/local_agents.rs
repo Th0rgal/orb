@@ -713,7 +713,7 @@ fn spawn_claude(
         }
         let mission_id = crate::interactions::session(&request.id);
         let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
-        let native_mission = request.id.clone();
+        let wakeup_command = crate::local_wakeups::command(&request.id);
         let prompt = plan.unwrap_or(&request.prompt).to_owned();
         let mut execution_approved = plan.is_none();
         let output = Arc::clone(text);
@@ -758,7 +758,7 @@ fn spawn_claude(
                                     if let Some(mut args) = wakeups.remove(id) {
                                         if block["is_error"] != true {
                                             args["request_id"] = json!(format!("claude-native:{id}"));
-                                            crate::local_wakeups::capture(&native_mission, args)?;
+                                            crate::local_wakeups::capture(wakeup_command.as_deref(), args)?;
                                         }
                                     }
                                 }

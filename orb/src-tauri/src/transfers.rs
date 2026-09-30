@@ -103,6 +103,7 @@ pub async fn local_agents_start_authorized(
         &permit.api_url,
         &permit.token,
         Some(stop_generation),
+        permit.generation,
     )
     .await?;
     if !permit.legacy {

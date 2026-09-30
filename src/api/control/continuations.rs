@@ -441,6 +441,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_offline_stop_preserves_newer_generation() {
+        let (dir, store, mut old) = fixture().await;
+        old.variables
+            .insert("__wakeup_run_generation".into(), "1".into());
+        store.update_automation(old.clone()).await.unwrap();
+        let mut new = old.clone();
+        new.id = Uuid::new_v4();
+        new.variables
+            .insert("__wakeup_run_generation".into(), "2".into());
+        stage(&store, &old, "old".into()).await.unwrap();
+        store.create_automation(new.clone()).await.unwrap();
+        stage(&store, &new, "new".into()).await.unwrap();
+        store
+            .cancel_mission_continuations_through(old.mission_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_automation_executions(old.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_automation_executions(new.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Pending
+        );
+        drop(store);
+        let store = SqliteMissionStore::new(dir.path().to_owned(), "test")
+            .await
+            .unwrap();
+        store
+            .cancel_mission_continuations_through(old.mission_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_automation_executions(new.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Pending
+        );
+    }
+
+    #[tokio::test]
     async fn continuation_stage_is_atomic_and_survives_restart() {
         let (dir, store, a) = fixture().await;
         let (one, two) = tokio::join!(
@@ -1153,10 +1192,16 @@ mod tests {
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct CancelRequest {
+    pub through_generation: Option<u64>,
+}
+
 pub async fn cancel_all(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
+    request: Option<Json<CancelRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     if control
@@ -1168,9 +1213,22 @@ pub async fn cancel_all(
     {
         return Err((StatusCode::NOT_FOUND, "Mission not found".into()));
     }
-    cancel_for_mission(&control.mission_store, id)
-        .await
-        .map_err(internal_error)?;
+    if let Some(generation) = request.and_then(|r| r.0.through_generation) {
+        if generation > i64::MAX as u64 {
+            return Err((StatusCode::BAD_REQUEST, "Invalid generation".into()));
+        }
+        let mutex = lock(id);
+        let _guard = mutex.lock().await;
+        control
+            .mission_store
+            .cancel_mission_continuations_through(id, generation)
+            .await
+            .map_err(internal_error)?;
+    } else {
+        cancel_for_mission(&control.mission_store, id)
+            .await
+            .map_err(internal_error)?;
+    }
     Ok(Json(serde_json::json!({"ok":true})))
 }
 

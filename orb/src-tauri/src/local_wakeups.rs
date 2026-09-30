@@ -9,8 +9,8 @@ use std::{
 
 static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn contexts() -> &'static Mutex<HashMap<String, PathBuf>> {
-    static MAP: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+fn contexts() -> &'static Mutex<HashMap<String, (PathBuf, u64)>> {
+    static MAP: OnceLock<Mutex<HashMap<String, (PathBuf, u64)>>> = OnceLock::new();
     MAP.get_or_init(Default::default)
 }
 fn account(c: &Connection) -> Result<PathBuf, String> {
@@ -39,28 +39,41 @@ fn account(c: &Connection) -> Result<PathBuf, String> {
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
-pub fn prepare(request: &mut StartRequest, c: &Connection) -> Result<(), String> {
+pub fn prepare(request: &mut StartRequest, c: &Connection, generation: u64) -> Result<(), String> {
     uuid::Uuid::parse_str(&request.id).map_err(|_| "Invalid mission ID")?;
     let root = account(c)?.join(&request.id);
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let script = root.join("wakeup_mcp.py");
+    let script = root.join(format!("wakeup-{generation}.py"));
+    use std::io::Write;
+    let generation_path = root.join("run-generation.tmp");
+    let mut generation_file = std::fs::File::create(&generation_path).map_err(|e| e.to_string())?;
+    write!(generation_file, "{generation}")
+        .and_then(|_| generation_file.sync_all())
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(generation_path, root.join("run-generation")).map_err(|e| e.to_string())?;
+    std::fs::File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
     std::fs::write(&script, include_str!("wakeup_mcp.py")).map_err(|e| e.to_string())?;
     contexts()
         .lock()
         .unwrap()
-        .insert(request.id.clone(), root.clone());
+        .insert(request.id.clone(), (root.clone(), generation));
     // Grok's installed CLI may not expose an injectable MCP transport. The
     // credential-free command is the same durable transport as the MCP tools.
-    request.prompt.push_str(&format!("\n\n[Orb scheduling] Core owns durable wake-ups. Use orb-wakeups MCP schedule_wakeup / schedule_job_wakeup. If MCP is unavailable, invoke python3 {} {} {} schedule_wakeup '<JSON with request_id, delay_seconds, prompt, reason>'. A pending_sync receipt is saved locally, not yet scheduled on Core. Never also start a native timer for the same request.", quote(&script.to_string_lossy()), quote(&root.to_string_lossy()), quote(&request.id)));
+    request.prompt.push_str(&format!("\n\n[Orb scheduling] Core owns durable wake-ups. Use orb-wakeups MCP schedule_wakeup / schedule_job_wakeup. If MCP is unavailable, invoke python3 {} {} {} {generation} schedule_wakeup '<JSON with request_id, delay_seconds, prompt, reason>'. A pending_sync receipt is saved locally, not yet scheduled on Core. Never also start a native timer for the same request.", quote(&script.to_string_lossy()), quote(&root.to_string_lossy()), quote(&request.id)));
     Ok(())
 }
 pub fn command(mission: &str) -> Option<Vec<String>> {
-    let root = contexts().lock().ok()?.get(mission)?.clone();
+    let (root, generation) = contexts().lock().ok()?.get(mission)?.clone();
     Some(vec![
         "python3".into(),
-        root.join("wakeup_mcp.py").to_string_lossy().into_owned(),
+        root.join(format!("wakeup-{generation}.py"))
+            .to_string_lossy()
+            .into_owned(),
         root.to_string_lossy().into_owned(),
         mission.into(),
+        generation.to_string(),
     ])
 }
 
@@ -110,7 +123,15 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
     let mut blocked: HashMap<String, String> = HashMap::new();
     let mut offline = false;
     let mut attempts = 0;
-    for (path, v) in files {
+    for (path, mut v) in files {
+        // Never upgrade legacy offline intent to the current server generation.
+        if v["cancel"] == true {
+            if v["body"]["through_generation"].is_null() {
+                v["body"]["through_generation"] = json!(0);
+            }
+        } else {
+            v["body"]["variables"]["__wakeup_local"] = json!("true");
+        }
         let mission = v["mission"].as_str().ok_or("Invalid wake-up mission")?;
         uuid::Uuid::parse_str(mission).map_err(|_| "Invalid wake-up mission")?;
         let confirmation = (v["cancel"] == true)
@@ -158,7 +179,7 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
                     let message = format!("Core refused wake-up ({})", r.status());
                     // 404 may mean the local-origin mission has not synced yet.
                     // Auth, conflicts, rate limits and network failures remain retryable.
-                    if matches!(r.status().as_u16(), 400 | 413 | 422) && v["cancel"] != true {
+                    if matches!(r.status().as_u16(), 400 | 410 | 413 | 422) && v["cancel"] != true {
                         std::fs::rename(&path, path.with_extension("rejected"))
                             .map_err(|e| e.to_string())?;
                         rejected = true;
@@ -193,8 +214,8 @@ async fn sync_at(connection: &Connection, root: PathBuf) -> Result<Value, String
 }
 
 /// Persist native print-mode ScheduleWakeup through exactly the same outbox.
-pub fn capture(mission: &str, args: Value) -> Result<(), String> {
-    let Some(command) = command(mission) else {
+pub fn capture(command: Option<&[String]>, args: Value) -> Result<(), String> {
+    let Some(command) = command else {
         return Err("No durable scheduling context for this native wake-up".into());
     };
     let result = std::process::Command::new(&command[0])
@@ -265,14 +286,23 @@ fn cancel_at(root: PathBuf, mission: String, cancel_token: Option<String>) -> Re
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos() as u64;
-    let value =
-        json!({"mission":mission,"created_ns":now,"cancel":true,"cancel_token":token,"body":{}});
+    let generation = match std::fs::read_to_string(root.join("run-generation")) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| "Invalid saved run generation")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.to_string()),
+    };
+    let value = json!({"mission":mission,"created_ns":now,"cancel":true,"cancel_token":token,"body":{"through_generation":generation}});
     let path = root.join(format!("cancel-{now}.tmp"));
     let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     file.write_all(value.to_string().as_bytes())
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
     std::fs::rename(&path, path.with_extension("json")).map_err(|e| e.to_string())?;
+    std::fs::File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -307,7 +337,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mission = uuid::Uuid::new_v4().to_string();
         let root = dir.path().join(&mission);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("run-generation"), "7").unwrap();
         cancel_at(root.clone(), mission.clone(), Some("first-stop".into())).unwrap();
+        let cancellation = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .find(|f| f.path().extension().is_some_and(|e| e == "json"))
+            .unwrap();
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(cancellation.path()).unwrap()).unwrap();
+        assert_eq!(saved["body"]["through_generation"], 7);
         let generation = *crate::local_agents::launch_fence(&mission).lock().unwrap();
         let receipt = std::fs::read_dir(&root)
             .unwrap()

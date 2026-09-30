@@ -9709,3 +9709,81 @@ async fn continuation_disabled_scheduler_is_not_advertised_or_accepted() {
     assert_eq!(denied["ok"], false);
     assert_eq!(denied["error"]["accepted"], "no");
 }
+
+#[tokio::test]
+async fn continuation_local_upload_and_stop_keep_original_generation() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "offline wake-up").await;
+    let store = &h.control.mission_store;
+    let old = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    continuations::stop_for_mission(store, mission.id)
+        .await
+        .unwrap();
+    store
+        .finish_mission_run(old.run_id, old.generation, Some("cancelled"))
+        .await
+        .unwrap();
+    let new = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    let body = |generation: Option<u64>| {
+        let mut value = json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"stop_policy":{"type":"after_first_fire"},"variables":{"__wakeup_source":"orb-local","__wakeup_local":"true"}});
+        if let Some(generation) = generation {
+            value["variables"]["__wakeup_run_generation"] = json!(generation.to_string());
+        }
+        serde_json::from_value(value).unwrap()
+    };
+    let stale = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(Some(old.generation))),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.0, StatusCode::GONE);
+    let legacy = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(None)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(legacy.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let fresh = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(Some(new.generation))),
+    )
+    .await
+    .unwrap()
+    .0;
+    let _ = continuations::cancel_all(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Some(Json(continuations::CancelRequest {
+            through_generation: Some(old.generation),
+        })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .get_automation(fresh.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    assert!(store
+        .wakeup_creation_allowed(mission.id, new.generation)
+        .await
+        .unwrap());
+}

@@ -287,7 +287,12 @@ fn live_native_wakeup_transport() {
         session_id: None,
         image_paths: vec![],
     };
-    crate::local_wakeups::prepare(&mut request, &connection).unwrap();
+    crate::local_wakeups::prepare(
+        &mut request,
+        &connection,
+        prior["generation"].as_u64().unwrap_or(1),
+    )
+    .unwrap();
     let command = crate::local_wakeups::command(&id).unwrap();
     let rejected_key = format!("invalid-job-{}", uuid::Uuid::new_v4());
     let invalid = std::process::Command::new(&command[0]).args(&command[1..])

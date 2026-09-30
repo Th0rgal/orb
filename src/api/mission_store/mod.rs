@@ -3040,6 +3040,15 @@ pub trait MissionStore: Send + Sync {
         Ok(true)
     }
 
+    async fn cancel_mission_continuations_through(
+        &self,
+        mission: Uuid,
+        generation: u64,
+    ) -> Result<(), String> {
+        let _ = (mission, generation);
+        Err("Generation-scoped cancellation requires a persistent store".into())
+    }
+
     async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
         for a in self.get_mission_automations(mission).await? {
             if a.variables.contains_key("__wakeup_source") {
