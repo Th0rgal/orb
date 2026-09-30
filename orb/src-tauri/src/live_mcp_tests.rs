@@ -41,14 +41,25 @@ fn live_native_mcp_roundtrip() {
         .parent()
         .unwrap()
         .join(format!("{harness}-receipt.json"));
-    let prompt = "Call sandboxed get_capabilities exactly once. Report ORB_MCP_LIVE_OK, then the role and mission_id from the actual tool result. Do not call other tools, change files, or start missions.".to_string();
+    let wakeup = std::env::var("ORB_MCP_LIVE_WAKEUP").as_deref() == Ok("1");
+    let prompt = if wakeup {
+        format!("Call sandboxed get_capabilities once, then orb-wakeups schedule_wakeup once with request_id=\"native-smoke-{}\", delay_seconds=3600, prompt=\"Reply WAKE_NATIVE_OK\", reason=\"Orb native scheduling smoke\". Report ORB_MCP_LIVE_OK, the role and mission_id from get_capabilities, and the real scheduling receipt. Do not call other tools, change files, sleep or start missions.", uuid::Uuid::new_v4())
+    } else {
+        "Call sandboxed get_capabilities exactly once. Report ORB_MCP_LIVE_OK, then the role and mission_id from the actual tool result. Do not call other tools, change files, or start missions.".to_string()
+    };
+    let workdir = config
+        .parent()
+        .unwrap()
+        .join("local-runs")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&workdir).unwrap();
     tauri::async_runtime::block_on(async {
         let started = local_origin::local_origin_launch(
             local_agents::StartRequest {
                 id: String::new(),
                 harness: harness.clone(),
                 bin: std::env::var("ORB_MCP_LIVE_BINARY").unwrap(),
-                cwd: String::new(),
+                cwd: workdir.to_string_lossy().into_owned(),
                 prompt: prompt.clone(),
                 model: std::env::var("ORB_MCP_LIVE_MODEL")
                     .ok()
@@ -104,6 +115,53 @@ fn live_native_mcp_roundtrip() {
                 );
                 // Let the native-origin outbox publish its terminal snapshot.
                 tokio::time::sleep(Duration::from_secs(3)).await;
+                if wakeup {
+                    assert!(
+                        poll.activities
+                            .iter()
+                            .any(|a| a.label.contains("schedule_wakeup") && a.done && !a.failed),
+                        "No completed native wake-up tool call"
+                    );
+                    let synced = crate::local_wakeups::local_wakeups_sync(connection.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(synced["pending"], json!([]), "Local wake-up did not sync");
+                    let http = reqwest::Client::new();
+                    let url = format!("{}/api/control/missions/{id}", connection.api_url);
+                    let mission: serde_json::Value = http
+                        .get(&url)
+                        .bearer_auth(&connection.token)
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    assert_eq!(mission["continuation"]["items"][0]["state"], "scheduled");
+                    crate::local_wakeups::local_wakeups_cancel(connection.clone(), id.clone())
+                        .await
+                        .unwrap();
+                    crate::local_wakeups::local_wakeups_sync(connection.clone())
+                        .await
+                        .unwrap();
+                    let cancelled: serde_json::Value = http
+                        .get(&url)
+                        .bearer_auth(&connection.token)
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    assert!(cancelled["continuation"].is_null());
+                    receipt(
+                        &config
+                            .parent()
+                            .unwrap()
+                            .join(format!("{harness}-wakeup-receipt.json")),
+                        &json!({"mission_id":id,"harness":harness,"registered":mission["continuation"],"cancelled":true}),
+                    );
+                }
                 println!("Orb native MCP validated: {harness} {id}");
                 break;
             }
@@ -190,5 +248,92 @@ fn live_native_mcp_resume() {
             assert!(Instant::now() < deadline, "Native resume timed out");
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    });
+}
+
+#[test]
+#[ignore = "Requires a dedicated live-test mission receipt and connection; invokes the real local helper and Core"]
+fn live_native_wakeup_transport() {
+    let config = std::path::PathBuf::from(std::env::var("ORB_MCP_LIVE_CONNECTION_FILE").unwrap());
+    let connection: Connection = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let harness = std::env::var("ORB_MCP_LIVE_HARNESS").unwrap();
+    let prior: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            config
+                .parent()
+                .unwrap()
+                .join(format!("{harness}-receipt.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let id = prior["mission_id"].as_str().unwrap().to_string();
+    let bindings = crate::local_bindings(None, None).unwrap();
+    let cwd = bindings[&id]["cwd"].as_str().unwrap();
+    assert!(Path::new(cwd)
+        .components()
+        .any(|part| part.as_os_str() == "local-runs"));
+    let mut request = local_agents::StartRequest {
+        id: id.clone(),
+        harness: harness.clone(),
+        bin: String::new(),
+        cwd: cwd.into(),
+        prompt: String::new(),
+        model: None,
+        session_id: None,
+        image_paths: vec![],
+    };
+    crate::local_wakeups::prepare(&mut request, &connection).unwrap();
+    let command = crate::local_wakeups::command(&id).unwrap();
+    let output = std::process::Command::new(&command[0]).args(&command[1..]).arg("schedule_wakeup").arg(json!({"request_id":format!("native-transport-{}", uuid::Uuid::new_v4()),"delay_seconds":3600,"prompt":"Reply WAKE_NATIVE_OK","reason":"Native transport smoke"}).to_string()).output().unwrap();
+    assert!(output.status.success(), "Local helper failed");
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("pending_sync"));
+    tauri::async_runtime::block_on(async {
+        let synced = crate::local_wakeups::local_wakeups_sync(connection.clone())
+            .await
+            .unwrap();
+        assert_eq!(synced["pending"], json!([]));
+        let http = reqwest::Client::new();
+        let url = format!("{}/api/control/missions/{id}", connection.api_url);
+        let registered: serde_json::Value = http
+            .get(&url)
+            .bearer_auth(&connection.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        // Cancel before assertions so a failed check cannot leave a live timer.
+        crate::local_wakeups::local_wakeups_cancel(connection.clone(), id.clone())
+            .await
+            .unwrap();
+        crate::local_wakeups::local_wakeups_sync(connection.clone())
+            .await
+            .unwrap();
+        assert_eq!(registered["continuation"]["items"][0]["state"], "scheduled");
+        let cancelled: serde_json::Value = http
+            .get(&url)
+            .bearer_auth(&connection.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(cancelled["continuation"].is_null());
+        receipt(
+            &config
+                .parent()
+                .unwrap()
+                .join("native-transport-receipt.json"),
+            &json!({"mission_id":id,"registered":registered["continuation"],"cancelled":true}),
+        );
     });
 }

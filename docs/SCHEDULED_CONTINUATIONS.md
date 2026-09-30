@@ -87,3 +87,11 @@ actual independent helper processes, request deduplication, MCP receipts and
 invalid requests. No deployment or live provider invocation is part of these tests.
 
 ACP wire format reference: https://agentclientprotocol.com/protocol/v1/session-setup
+
+Opt-in native checks in `orb/src-tauri/src/live_mcp_tests.rs` use a private
+`ORB_MCP_LIVE_CONNECTION_FILE` and dedicated `local-runs` directory. Set
+`ORB_MCP_LIVE_WAKEUP=1` for `live_native_mcp_roundtrip` to exercise the real CLI's
+wake-up MCP, synchronize its receipt and cancel the timer. The separate
+`live_native_wakeup_transport` check reuses that dedicated test mission to verify
+the Python helper → native sync → Core → cancellation path without a provider.
+Both tests are ignored by default and require an explicitly configured test Core.
