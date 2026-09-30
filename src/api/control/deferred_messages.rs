@@ -38,6 +38,15 @@ pub(crate) fn decode(content: &str) -> (String, Vec<(Uuid, String)>) {
         _ => (content.into(), vec![]),
     }
 }
+/// A single persisted continuation must keep its delivery identity after restart.
+pub(crate) fn delivery_id(content: &str) -> Uuid {
+    let messages = decode(content).1;
+    if messages.len() == 1 {
+        messages[0].0
+    } else {
+        Uuid::new_v4()
+    }
+}
 pub(crate) fn strip(content: &str) -> String {
     decode(content).0
 }
@@ -78,6 +87,14 @@ pub(crate) fn stream_payload(event: &super::AgentEvent) -> Result<String, serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn continuation_single_deferred_delivery_keeps_its_identity() {
+        let id = Uuid::new_v4();
+        let wrapped = encode(id, "remote receipt");
+        assert_eq!(delivery_id(&wrapped), id);
+        assert_eq!(delivery_id(&wrapped), id);
+        assert_eq!(strip(&wrapped), "remote receipt");
+    }
     #[test]
     fn identities_survive_identical_text_unicode_and_attachments() {
         let a = Uuid::new_v4();

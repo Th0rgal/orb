@@ -544,6 +544,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_remote_handoff_survives_restart_and_late_admission() {
+        let (dir, store, a) = fixture().await;
+        stage(&store, &a, "validate remotely".into()).await.unwrap();
+        let mut snapshot = store.list_scheduled_deliveries().await.unwrap().remove(0);
+        snapshot.status = ExecutionStatus::Running;
+        store
+            .update_automation_execution(snapshot.clone())
+            .await
+            .unwrap();
+        let job = Uuid::new_v4();
+        crate::remote_node::job_ledger::record(
+            dir.path(),
+            crate::remote_node::job_ledger::JobHandle {
+                mission_id: a.mission_id,
+                node_id: "test".into(),
+                job_id: job,
+                started_at: Utc::now(),
+                submission_sequence: 0,
+                accepted_at: Some(Utc::now()),
+                heartbeat_at: Some(Utc::now()),
+                disk_reservation_bytes: 0,
+                kind: crate::remote_node::job_ledger::JobHandleKind::RemoteBuild,
+                identity: None,
+                wait_for_completion: Some(true),
+                wake_on_terminal: true,
+            },
+        )
+        .await
+        .unwrap();
+        store
+            .update_mission_status(a.mission_id, MissionStatus::Active)
+            .await
+            .unwrap();
+        store
+            .begin_mission_run(a.mission_id, "test", None)
+            .await
+            .unwrap();
+        let parked = mission_should_park_on_remote_build(&store, dir.path(), a.mission_id).await;
+        assert_eq!(parked, Some(job));
+        park_scheduled_remote_execution(&store, a.mission_id, Some(snapshot.id), parked.unwrap())
+            .await;
+        // Admission can settle after the remote handoff; it must retain the alias.
+        snapshot
+            .variables_used
+            .insert("__delivery_accepted".into(), "true".into());
+        store
+            .update_automation_execution(snapshot.clone())
+            .await
+            .unwrap();
+        drop(store);
+        let store = SqliteMissionStore::new(dir.path().to_owned(), "test")
+            .await
+            .unwrap();
+        let next = remote_build_terminal_delivery_id(job);
+        assert_eq!(
+            store
+                .complete_turn_executions_for_mission(a.mission_id, Some(snapshot.id), false, None)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .complete_turn_executions_for_mission(a.mission_id, Some(next), true, None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.get_automation_executions(a.id, None).await.unwrap()[0].status,
+            ExecutionStatus::Success
+        );
+    }
+
+    #[tokio::test]
     async fn continuation_acknowledged_mission_still_receives_due_wakeup() {
         let (_dir, store, a) = fixture().await;
         store

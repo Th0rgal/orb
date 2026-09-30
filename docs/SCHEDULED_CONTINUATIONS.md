@@ -108,3 +108,5 @@ the Python helper → native sync → Core → cancellation path without a provi
 Both tests are ignored by default and require an explicitly configured test Core.
 
 Hosted and local turn completion uses the delivered message/occurrence ID, including crash and forced-stop paths. A predecessor cannot settle a later durable occurrence. Local connection recovery closes its process receipt without settling the occurrence until recovery finishes or its retry budget is exhausted.
+
+Hosted transport retries reuse the completed message identity and postpone settlement until recovery succeeds or is exhausted. A parked remote build hands its occurrence to the stable terminal-receipt message ID; the stored alias survives admission races and restarts. Deferred terminal receipts retain that ID when no control actor is running.

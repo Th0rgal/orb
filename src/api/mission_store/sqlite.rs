@@ -7786,7 +7786,7 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success', 'failed') THEN status ELSE ? END, webhook_payload = ?, variables_used = ?,
+                "UPDATE automation_executions SET status = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success', 'failed') THEN status ELSE ? END, webhook_payload = ?, variables_used = CASE WHEN json_type(variables_used, '$.__continuation_message_id') = 'text' THEN json_set(?3, '$.__continuation_message_id', json_extract(variables_used, '$.__continuation_message_id')) ELSE ?3 END,
                                                  completed_at = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN completed_at ELSE ? END, error = CASE WHEN trigger_source = 'durable_schedule' AND status IN ('success','failed') THEN error ELSE ? END, retry_count = ?
                  WHERE id = ? AND (trigger_source != 'durable_schedule' OR status NOT IN ('cancelled', 'skipped'))",
                 params![
@@ -7955,8 +7955,24 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             conn.execute("UPDATE automation_executions SET status = ?, completed_at = ?, error = ?
                 WHERE mission_id = ? AND ((trigger_source != 'durable_schedule' AND status IN ('pending','running'))
-                  OR (trigger_source = 'durable_schedule' AND status = 'running' AND id = ?))",
+                  OR (trigger_source = 'durable_schedule' AND status = 'running' AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?))",
                 params![if success { "success" } else { "failed" }, now_string(), error, mission_id.to_string(), occurrence.map(|id| id.to_string())])
+                .map(|n| n as u32).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    async fn handoff_scheduled_execution(
+        &self,
+        mission: Uuid,
+        from: Uuid,
+        to: Uuid,
+    ) -> Result<u32, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock().execute("UPDATE automation_executions SET variables_used = json_set(variables_used, '$.__continuation_message_id', ?)
+                WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND status = 'running'
+                AND COALESCE(json_extract(variables_used, '$.__continuation_message_id'), id) = ?",
+                params![to.to_string(), mission.to_string(), from.to_string()])
                 .map(|n| n as u32).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string())?
     }

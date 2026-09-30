@@ -3059,6 +3059,17 @@ pub trait MissionStore: Send + Sync {
         Ok(0)
     }
 
+    /// Move a running scheduled occurrence to the message that continues it.
+    async fn handoff_scheduled_execution(
+        &self,
+        mission: Uuid,
+        from: Uuid,
+        to: Uuid,
+    ) -> Result<u32, String> {
+        let _ = (mission, from, to);
+        Ok(0)
+    }
+
     /// Update the mission mode (Task/Assistant).
     async fn update_mission_mode(&self, id: Uuid, mode: MissionMode) -> Result<(), String> {
         let _ = (id, mode);
