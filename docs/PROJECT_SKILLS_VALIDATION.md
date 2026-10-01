@@ -62,7 +62,7 @@ Final command results:
 
 | Check | Result |
 | --- | --- |
-| Python project skill preparation | 27 passed, including review regressions |
+| Python project skill preparation | 28 passed, including review regressions |
 | Rust workspace tests | 2,867 library tests and 38 binary tests passed; 8 ignored; no failures |
 | Harness contract script | Passed, including 81 Python driver tests |
 | Capability matrix | Passed |
@@ -168,3 +168,7 @@ copies refresh instructions and references before discovery in the new cwd;
 deleted skills are removed in both roots. Replaced entries and aliases belonging
 to another project still fail without overwriting them. All 27 preparation tests
 pass on this fix. These are filesystem regressions, not desktop mission evidence.
+
+Ancestor collision regression checks every supported harness alias: an unmanaged
+parent skill with the same name blocks preparation in a nested cwd, preserving
+the original and creating no child discovery entry. All 28 preparation tests pass.

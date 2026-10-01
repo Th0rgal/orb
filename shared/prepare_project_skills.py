@@ -168,7 +168,7 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
         # same native name (notably Library's .opencode/skill). Be explicit
         # instead of silently relying on harness-specific precedence.
         for name, target in (skills.items() if not cleanup_only else ()):
-            for discovery_root in discovery_roots:
+            for discovery_root in dict.fromkeys((*discovery_roots, *cwd.parents)):
                 discovery_root = Path(discovery_root).resolve(strict=True)
                 for alias in ALIASES.get(harness, ()):
                     path = discovery_root / alias / name

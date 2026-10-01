@@ -146,6 +146,22 @@ class ProjectSkillsTest(unittest.TestCase):
         self.assertTrue(entry.is_symlink())
         self.assertFalse((self.cwd / '.opencode').exists())
 
+    def test_unmanaged_ancestor_skill_collisions_preserve_originals(self):
+        self.skill()
+        nested = self.cwd / 'subdir'
+        nested.mkdir()
+        for harness, aliases in skills.ALIASES.items():
+            for alias in aliases:
+                with self.subTest(harness=harness, alias=alias):
+                    entry = self.cwd / alias / 'orb-marker'
+                    entry.mkdir(parents=True)
+                    (entry / 'SKILL.md').write_text('USER-ANCESTOR-SKILL')
+                    with self.assertRaisesRegex(ValueError, 'collision'):
+                        skills.prepare(str(self.source), nested, harness, verify=False)
+                    self.assertEqual((entry / 'SKILL.md').read_text(), 'USER-ANCESTOR-SKILL')
+                    self.assertFalse((nested / skills.NATIVE[harness]).exists())
+                    shutil.rmtree(entry)
+
     def test_managed_manifest_traversal_is_refused_before_any_cleanup(self):
         for native in skills.NATIVE.values():
             root = self.cwd / native
