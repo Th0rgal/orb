@@ -155,19 +155,18 @@ fn prepare_codex_per_mission_home(
     // config.toml and native skills are written directly into this mission's
     // .codex directory during workspace preparation; copying shared versions
     // could point orchestrator/automation-manager at another mission.
-    for file_name in ["auth.json"] {
-        if let Err(e) = copy_file_if_exists(
-            &source_codex_dir.join(file_name),
-            &mission_codex_dir.join(file_name),
-        ) {
-            tracing::warn!(
-                mission_id = %mission_id,
-                source = %source_codex_dir.join(file_name).display(),
-                dest = %mission_codex_dir.join(file_name).display(),
-                error = %e,
-                "Failed to copy Codex auth file into per-mission home"
-            );
-        }
+    let file_name = "auth.json";
+    if let Err(e) = copy_file_if_exists(
+        &source_codex_dir.join(file_name),
+        &mission_codex_dir.join(file_name),
+    ) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            source = %source_codex_dir.join(file_name).display(),
+            dest = %mission_codex_dir.join(file_name).display(),
+            error = %e,
+            "Failed to copy Codex auth file into per-mission home"
+        );
     }
     let mut env = HashMap::new();
     env.insert("MISSION_ID".to_string(), mission_id.to_string());

@@ -398,6 +398,8 @@ impl LibraryStore {
     }
 
     /// Recursively collect .md files and references.
+    // async-recursion 1.1.1 generates #[must_use] on an already must-use Future.
+    #[allow(clippy::double_must_use)]
     #[async_recursion::async_recursion]
     async fn collect_skill_files_recursive(
         &self,
@@ -2223,6 +2225,8 @@ impl LibraryStore {
     }
 
     /// Recursively collect all files in a directory.
+    // async-recursion 1.1.1 generates #[must_use] on an already must-use Future.
+    #[allow(clippy::double_must_use)]
     #[async_recursion::async_recursion]
     async fn collect_files_recursive(
         base_dir: &Path,

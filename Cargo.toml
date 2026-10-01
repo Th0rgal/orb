@@ -36,7 +36,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 thiserror = "1"
 # systemd readiness + watchdog notifications (no-op off systemd)
 sd-notify = "0.4"
-async-trait = "0.1"
+async-trait = "0.1.92"
 futures = "0.3"
 
 # For tool implementations
