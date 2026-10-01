@@ -190,3 +190,61 @@ async fn idle_sync_fetches_manifest_once_per_tick() {
     assert_eq!(requests.load(Ordering::SeqCst), 2);
     server.abort();
 }
+
+#[tokio::test]
+async fn project_skill_original_edits_sync_to_core_and_another_replica() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = Store::new(
+        directory.path().join("core"),
+        directory.path().join("state"),
+    );
+    core.manifest().unwrap();
+    std::fs::create_dir_all(core.root.join("skills/review/references")).unwrap();
+    std::fs::create_dir_all(core.root.join("Context")).unwrap();
+    std::fs::write(
+        core.root.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: marker check\n---\nRead references/checklist.md",
+    )
+    .unwrap();
+    std::fs::write(
+        core.root.join("skills/review/references/checklist.md"),
+        "ORB-SKILLS-ORIGINAL",
+    )
+    .unwrap();
+    std::fs::write(
+        core.root.join("Context/architecture.md"),
+        "Original context",
+    )
+    .unwrap();
+    let (endpoint, task) = server(core.clone()).await;
+    let local = replica(directory.path(), "local", &endpoint);
+    let remote = replica(directory.path(), "remote", &endpoint);
+    assert!(local.tick().await.unwrap().ready);
+    assert!(remote.tick().await.unwrap().ready);
+    for (relative, updated) in [
+        ("skills/review/SKILL.md", "Updated skill instructions"),
+        (
+            "skills/review/references/checklist.md",
+            "ORB-SKILLS-UPDATED",
+        ),
+        ("Context/architecture.md", "Updated context"),
+    ] {
+        let original =
+            crate::project_context::resolve_reference(&format!("context/{relative}"), |path| {
+                local.store.root.join(path).exists()
+            })
+            .unwrap();
+        std::fs::write(local.store.root.join(original), updated).unwrap();
+        assert!(local.tick().await.unwrap().error.is_none());
+        assert!(remote.tick().await.unwrap().error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(core.root.join(relative)).unwrap(),
+            updated
+        );
+        assert_eq!(
+            std::fs::read_to_string(remote.store.root.join(relative)).unwrap(),
+            updated
+        );
+    }
+    task.abort();
+}

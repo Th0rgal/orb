@@ -79,6 +79,7 @@ import {
   localWorkspace,
   localDirectory,
   materializeMentions,
+  prepareProjectSkills,
   refreshLocalAgents,
   rememberBinding,
   startLocal,
@@ -2636,6 +2637,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       }
       try {
         const plan = await materializeMentions(project, text, chips);
+        await prepareProjectSkills(project, binding.cwd, binding.harness, binding.bin);
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);

@@ -2497,201 +2497,159 @@ pub async fn write_skills_to_workspace(
     workspace_dir: &Path,
     skills: &[SkillContent],
 ) -> anyhow::Result<()> {
-    if skills.is_empty() {
-        return Ok(());
-    }
-
-    let skills_dir = workspace_dir.join(".opencode").join("skill");
-    tokio::fs::create_dir_all(&skills_dir).await?;
-
-    for skill in skills {
-        let skill_dir = skills_dir.join(&skill.name);
-        tokio::fs::create_dir_all(&skill_dir).await?;
-
-        // Ensure skill content has required `name` field in frontmatter
-        let content_with_name = ensure_skill_name_in_frontmatter(&skill.content, &skill.name);
-
-        // Strip <encrypted> tags - deployed skills should have bare plaintext values
-        let content_for_workspace = strip_encrypted_tags(&content_with_name);
-
-        // Write SKILL.md
-        let skill_md_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
-
-        // Write additional files (preserving subdirectory structure)
-        for (relative_path, file_content) in &skill.files {
-            let file_path = skill_dir.join(relative_path);
-            // Create parent directories if needed (e.g., "references/guide.md")
-            if let Some(parent) = file_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            // Also strip encrypted tags from additional files
-            let file_content_stripped = strip_encrypted_tags(file_content);
-            tokio::fs::write(&file_path, file_content_stripped).await?;
-        }
-
-        tracing::debug!(
-            skill = %skill.name,
-            workspace = %workspace_dir.display(),
-            "Wrote skill to workspace"
-        );
-    }
-
-    tracing::info!(
-        count = skills.len(),
-        workspace = %workspace_dir.display(),
-        "Wrote skills to workspace"
-    );
-
-    Ok(())
+    write_managed_library_skills(&workspace_dir.join(".opencode/skill"), skills, false).await
 }
 
-/// Write skill files to the workspace's `.claude/skills/` directory.
-/// This makes skills available to Claude Code using its native skills format.
-/// Claude Code looks for skills in `.claude/skills/<name>/SKILL.md`
-///
-/// Note: `<encrypted>` tags are stripped from content before writing,
-/// leaving only the plaintext values for the agent to use.
+/// Library preparation owns only journaled entries, never a native directory.
+/// Project discovery links and user-managed skills survive every refresh.
 pub async fn write_claudecode_skills_to_workspace(
     workspace_dir: &Path,
     skills: &[SkillContent],
 ) -> anyhow::Result<()> {
-    let skills_dir = workspace_dir.join(".claude").join("skills");
-
-    tracing::debug!(
-        workspace = %workspace_dir.display(),
-        skills_dir = %skills_dir.display(),
-        skill_count = skills.len(),
-        skill_names = ?skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        "Writing Claude Code skills to workspace"
-    );
-
-    // Clean up old skills directory to remove stale skills
-    if skills_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&skills_dir).await;
-    }
-
-    if skills.is_empty() {
-        tracing::warn!(
-            workspace = %workspace_dir.display(),
-            "No skills to write for Claude Code"
-        );
-        return Ok(());
-    }
-
-    tokio::fs::create_dir_all(&skills_dir).await?;
-
-    for skill in skills {
-        let skill_dir = skills_dir.join(&skill.name);
-        tokio::fs::create_dir_all(&skill_dir).await?;
-
-        // Ensure skill content has required frontmatter fields for Claude Code
-        let content_with_frontmatter = ensure_claudecode_skill_frontmatter(
-            &skill.content,
-            &skill.name,
-            skill.description.as_deref(),
-        );
-
-        // Strip <encrypted> tags - deployed skills should have bare plaintext values
-        let content_for_workspace = strip_encrypted_tags(&content_with_frontmatter);
-
-        // Write SKILL.md
-        let skill_md_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
-
-        // Write additional files (preserving subdirectory structure)
-        for (relative_path, file_content) in &skill.files {
-            let file_path = skill_dir.join(relative_path);
-            // Create parent directories if needed (e.g., "references/guide.md")
-            if let Some(parent) = file_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            // Also strip encrypted tags from additional files
-            let file_content_stripped = strip_encrypted_tags(file_content);
-            tokio::fs::write(&file_path, file_content_stripped).await?;
-        }
-
-        tracing::debug!(
-            skill = %skill.name,
-            workspace = %workspace_dir.display(),
-            "Wrote Claude Code skill to workspace"
-        );
-    }
-
-    tracing::info!(
-        count = skills.len(),
-        workspace = %workspace_dir.display(),
-        "Wrote Claude Code skills to workspace"
-    );
-
-    Ok(())
+    write_managed_library_skills(&workspace_dir.join(".claude/skills"), skills, true).await
 }
 
-/// Write skill files to Codex's native skills directory.
-/// Codex looks for skills in `<codex_root>/skills/<name>/SKILL.md`.
 pub async fn write_codex_skills_to_workspace(
     codex_root: &Path,
     skills: &[SkillContent],
 ) -> anyhow::Result<()> {
-    let skills_dir = codex_root.join("skills");
+    write_managed_library_skills(&codex_root.join("skills"), skills, true).await
+}
 
-    tracing::debug!(
-        codex_root = %codex_root.display(),
-        skills_dir = %skills_dir.display(),
-        skill_count = skills.len(),
-        skill_names = ?skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        "Writing Codex skills"
-    );
-
-    // Clean up old skills directory to remove stale skills
-    if skills_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&skills_dir).await;
-    }
-
-    if skills.is_empty() {
-        tracing::warn!(codex_root = %codex_root.display(), "No skills to write for Codex");
-        return Ok(());
-    }
-
-    tokio::fs::create_dir_all(&skills_dir).await?;
-
-    for skill in skills {
-        let skill_dir = skills_dir.join(&skill.name);
-        tokio::fs::create_dir_all(&skill_dir).await?;
-
-        // Ensure skill content has required frontmatter fields for Codex
-        let content_with_frontmatter = ensure_claudecode_skill_frontmatter(
-            &skill.content,
-            &skill.name,
-            skill.description.as_deref(),
+async fn write_managed_library_skills(
+    root: &Path,
+    skills: &[SkillContent],
+    native: bool,
+) -> anyhow::Result<()> {
+    use fs2::FileExt;
+    use std::collections::BTreeMap;
+    // Refuse redirected native parents rather than writing outside the workspace.
+    for parent in root.ancestors().take(2) {
+        anyhow::ensure!(
+            !parent.is_symlink(),
+            "Native skills directory is a symlink: {}",
+            parent.display()
         );
-
-        // Strip <encrypted> tags - deployed skills should have bare plaintext values
-        let content_for_workspace = strip_encrypted_tags(&content_with_frontmatter);
-
-        // Write SKILL.md
-        let skill_md_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
-
-        // Write additional files (preserving subdirectory structure)
-        for (relative_path, file_content) in &skill.files {
-            let file_path = skill_dir.join(relative_path);
-            if let Some(parent) = file_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            let file_content_stripped = strip_encrypted_tags(file_content);
-            tokio::fs::write(&file_path, file_content_stripped).await?;
-        }
-
-        tracing::debug!(skill = %skill.name, codex_root = %codex_root.display(), "Wrote Codex skill");
     }
-
-    tracing::info!(
-        count = skills.len(),
-        codex_root = %codex_root.display(),
-        "Wrote Codex skills"
+    tokio::fs::create_dir_all(root).await?;
+    // Use the same cwd lock as project discovery preparation. Otherwise a
+    // concurrent writer could follow a newly installed project symlink.
+    let lock_path = root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("Invalid native skill root"))?
+        .join(".orb-project-skills.lock");
+    anyhow::ensure!(!lock_path.is_symlink(), "Managed skill lock is a symlink");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!(
+            "Library skills are being prepared in {}; retry the launch",
+            root.display()
+        )
+    })?;
+    let manifest = root.join(".orb-library-skills.json");
+    anyhow::ensure!(
+        !manifest.is_symlink(),
+        "Library skill manifest is a symlink"
     );
-
+    let previous: BTreeMap<String, BTreeMap<String, String>> = if manifest.exists() {
+        serde_json::from_slice(&std::fs::read(&manifest)?)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut desired = BTreeMap::new();
+    for skill in skills {
+        crate::project_context::valid_path(&skill.name).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!skill.name.contains('/'), "Invalid Library skill name");
+        let mut files = BTreeMap::new();
+        let content = if native {
+            ensure_claudecode_skill_frontmatter(
+                &skill.content,
+                &skill.name,
+                skill.description.as_deref(),
+            )
+        } else {
+            ensure_skill_name_in_frontmatter(&skill.content, &skill.name)
+        };
+        files.insert("SKILL.md".to_owned(), strip_encrypted_tags(&content));
+        for (path, content) in &skill.files {
+            crate::project_context::valid_path(path).map_err(anyhow::Error::msg)?;
+            files.insert(path.clone(), strip_encrypted_tags(content));
+        }
+        desired.insert(skill.name.clone(), files);
+    }
+    // Preflight all ownership before removing or writing any skill.
+    for (name, expected) in &previous {
+        crate::project_context::valid_path(name).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!name.contains('/'), "Invalid Library skill manifest");
+        let path = root.join(name);
+        if !path.exists() && !path.is_symlink() {
+            continue;
+        }
+        anyhow::ensure!(
+            !path.is_symlink(),
+            "Library skill replaced by a symlink: {}",
+            path.display()
+        );
+        let mut actual = BTreeMap::new();
+        for entry in walkdir::WalkDir::new(&path).follow_links(false) {
+            let entry = entry?;
+            anyhow::ensure!(
+                !entry.path().is_symlink(),
+                "User-managed symlink in Library skill: {}",
+                entry.path().display()
+            );
+            if entry.file_type().is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(&path)?
+                    .to_string_lossy()
+                    .into_owned();
+                actual.insert(
+                    relative,
+                    crate::project_context::digest(&std::fs::read(entry.path())?),
+                );
+            }
+        }
+        anyhow::ensure!(
+            actual == *expected,
+            "Library skill was edited outside Orb: {}. Preserve those edits before retrying",
+            path.display()
+        );
+    }
+    for name in desired.keys() {
+        let path = root.join(name);
+        anyhow::ensure!(
+            previous.contains_key(name) || (!path.exists() && !path.is_symlink()),
+            "Skill name collision at {}. Orb will not overwrite user-managed or project skills",
+            path.display()
+        );
+    }
+    for name in previous.keys() {
+        let path = root.join(name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(path).await?;
+        }
+    }
+    let mut next = BTreeMap::new();
+    for (name, files) in desired {
+        let mut hashes = BTreeMap::new();
+        for (relative, content) in files {
+            let path = root.join(&name).join(&relative);
+            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+            tokio::fs::write(&path, &content).await?;
+            hashes.insert(relative, crate::project_context::digest(content.as_bytes()));
+        }
+        next.insert(name, hashes);
+    }
+    let temporary = manifest.with_extension("tmp");
+    std::fs::write(&temporary, serde_json::to_vec(&next)?)?;
+    std::fs::rename(temporary, manifest)?;
     Ok(())
 }
 
@@ -7199,6 +7157,104 @@ WORKING_DIR = "/workspaces/mission-old"
         assert_eq!(
             relative,
             PathBuf::from("workspaces/mission-bf2b79ee/.sandboxed-sh/mcp-launchers/x.sh")
+        );
+    }
+}
+
+#[cfg(test)]
+mod managed_library_skill_tests {
+    use super::*;
+
+    fn skill(name: &str) -> SkillContent {
+        SkillContent {
+            name: name.into(),
+            description: Some("Disposable Library fixture".into()),
+            content: "Read references/check.md".into(),
+            files: vec![("references/check.md".into(), "LIBRARY-FIXTURE".into())],
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_library_skills_preserve_user_entries_and_clean_only_owned_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".claude/skills");
+        std::fs::create_dir_all(root.join("personal")).unwrap();
+        std::fs::write(root.join("personal/SKILL.md"), "user skill").unwrap();
+        std::fs::write(
+            directory.path().join(".claude/settings.json"),
+            "user config",
+        )
+        .unwrap();
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
+        assert!(root.join("fixture/references/check.md").is_file());
+        write_managed_library_skills(&root, &[skill("renamed")], true)
+            .await
+            .unwrap();
+        assert!(!root.join("fixture").exists());
+        write_managed_library_skills(&root, &[], true)
+            .await
+            .unwrap();
+        assert!(!root.join("renamed").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("personal/SKILL.md")).unwrap(),
+            "user skill"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(".claude/settings.json")).unwrap(),
+            "user config"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_library_skills_refuse_collisions_and_outside_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".codex/skills");
+        std::fs::create_dir_all(root.join("personal")).unwrap();
+        std::fs::write(root.join("personal/SKILL.md"), "user skill").unwrap();
+        assert!(
+            write_managed_library_skills(&root, &[skill("personal")], true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("collision")
+        );
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
+        std::fs::write(root.join("fixture/references/check.md"), "edited").unwrap();
+        assert!(write_managed_library_skills(&root, &[], true)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("edited outside"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("fixture/references/check.md")).unwrap(),
+            "edited"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_library_skills_never_follow_project_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".claude/skills");
+        let original = directory.path().join("project/skills/fixture");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::write(original.join("SKILL.md"), "synchronized source").unwrap();
+        std::os::unix::fs::symlink(&original, root.join("fixture")).unwrap();
+        assert!(
+            write_managed_library_skills(&root, &[skill("fixture")], true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("collision")
+        );
+        assert_eq!(
+            std::fs::read_to_string(original.join("SKILL.md")).unwrap(),
+            "synchronized source"
         );
     }
 }

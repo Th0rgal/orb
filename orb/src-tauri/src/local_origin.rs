@@ -373,6 +373,19 @@ pub async fn local_origin_launch(
         return Err("This directory already has a running local mission. Choose a separate directory or worktree.".into());
     }
 
+    crate::context_service::project_skills_prepare(
+        crate::context_service::Request {
+            endpoint: connection.api_url.clone(),
+            token: connection.token.clone(),
+            project: draft.project.clone(),
+            paths: vec![],
+        },
+        request.cwd.clone(),
+        request.harness.clone(),
+        Some(request.bin.clone()),
+    )
+    .await?;
+
     // Execution stays in the chosen directory; the journal above remains private.
     let snapshot = Snapshot {
         origin: Origin {
