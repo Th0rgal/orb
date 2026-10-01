@@ -323,6 +323,7 @@ mod protocol_tests {
                     json!({"run_id":run,"generation":1,"prompt":"wake"}).to_string(),
                 ),
                 (200, "{}".into()),
+                (200, json!({"project": null}).to_string()),
                 (
                     200,
                     json!({"contract_version":"1","token":"mcp1.fixture"}).to_string(),
@@ -424,6 +425,7 @@ mod protocol_tests {
                 json!({"run_id":new,"generation":6,"prompt":"hello"}).to_string(),
             ),
             (200, "{}".into()),
+            (200, json!({"project": null}).to_string()),
             (200, json!({"contract_version":"1","token":"mcp1.fixture"}).to_string()),
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),

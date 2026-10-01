@@ -129,7 +129,7 @@ it("links mentioned project folders to the live context so the agent's writes sy
   host.__TAURI_INTERNALS__={invoke:vi.fn().mockRejectedValue(new Error("Context is not available on this computer"))};
   const copied=await materializeMentions("minecraft","read @notes/foo.md",chips,read,async()=>[]);
   expect(copied.files).toEqual([{rel:".paloma/attach/notes/foo.md",content:"copied"}]);
-  expect((await materializeMentions("minecraft","read @context",chips,read,async()=>[])).prompt).toBe("read @context");
+  await expect(materializeMentions("minecraft","read @context",chips,read,async()=>[])).rejects.toThrow("Context is not available");
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
 
@@ -220,4 +220,31 @@ it('new native launches wait for persisted Stop recovery',async()=>{
   expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(false);
   release();await launch;expect(invoke.mock.calls.some(c=>c[0]==='local_run_launch')).toBe(true);
  }finally{replay.mockRestore();host.__TAURI_INTERNALS__=previous;}
+});
+
+
+it('project skill preflight runs without mentions and preserves actionable failures', async () => {
+ const { prepareProjectSkills } = await import('../src/localAgents');
+ const host = window as any, previous = host.__TAURI_INTERNALS__;
+ const invoke = vi.fn(async () => { throw new Error('Skill name collision at /work/.agents/skills/review. Your draft is kept.'); });
+ host.__TAURI_INTERNALS__ = { invoke };
+ try {
+  await expect(prepareProjectSkills('orb-project-skills-test', '/work', 'codex')).rejects.toThrow('Skill name collision');
+  expect(invoke).toHaveBeenCalledWith('project_skills_prepare', expect.objectContaining({
+   request: expect.objectContaining({ project: 'orb-project-skills-test', paths: [] }), cwd: '/work', harness: 'codex',
+  }));
+ } finally { host.__TAURI_INTERNALS__ = previous; }
+});
+
+
+it('typed @context/skills and @context/Context resolve to originals without attachment chips', async () => {
+ const host = window as any, previous = host.__TAURI_INTERNALS__;
+ const invoke = vi.fn().mockResolvedValue({root:'/synced/original',state:{},resolved_paths:['skills/review/SKILL.md','Context']});
+ host.__TAURI_INTERNALS__ = {invoke};
+ try {
+  const result = await materializeMentions('project', 'Edit @context/skills/review/SKILL.md and read @context/Context.', []);
+  expect(result.prompt).toBe('Edit /synced/original/skills/review/SKILL.md and read /synced/original/Context.');
+  expect(result.files).toEqual([]);
+  expect(invoke.mock.calls[0][1].request.paths).toEqual(['context/skills/review/SKILL.md','context/Context']);
+ } finally {host.__TAURI_INTERNALS__ = previous;}
 });
