@@ -42,9 +42,15 @@ def run(argv, *, data=None, env=None, cwd=None, timeout=60):
 def write(path, value, mode=0o600):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(path, "w", encoding="utf-8") as f:
-        os.fchmod(f.fileno(), mode)
-        f.write(value)
+    tmp = path.with_name(path.name + ".new-" + uuid.uuid4().hex)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(value)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def atomic_json(path, value):
