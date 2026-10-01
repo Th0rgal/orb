@@ -133,7 +133,11 @@ Fresh CI on that head exposed Rust 1.99 compatibility errors in unchanged code:
 236 generated `double_must_use` warnings and three style warnings. The fixes
 update `async-trait` to 0.1.92, handle three `async-recursion` generated-attribute
 warnings locally, remove two redundant closure borrows and simplify a
-single-element loop. No CI checks or branch protections were disabled.
+single-element loop. No CI checks or branch protections were disabled. Final-head CI Clippy passed
+after these compatibility fixes. A further Gemini review found auth-only settings
+writes could remove trust after inspection. Auth now merges only the selected
+type and saves atomically; two Rust regressions passed for trust/skills/MCP/user
+setting preservation and refusal to overwrite invalid configuration.
 
 Post-rebase frontend build passed; unit tests passed 788 tests with three
 skipped. This authentication rollout does not supply macOS Orb desktop or
