@@ -406,7 +406,7 @@ def rooted_file(filesystem, relative, value=None, mode=0o600):
         tmp = ".identity-" + uuid.uuid4().hex
         file = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
         try:
-            with os.fdopen(file, "w") as stream:
+            with os.fdopen(file, "wb" if isinstance(value, bytes) else "w") as stream:
                 os.fchmod(stream.fileno(), mode)
                 stream.write(value)
             os.replace(tmp, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)
@@ -431,13 +431,25 @@ def stage_containers(config, bundle):
             except FileNotFoundError: current = None
             if current != digest:
                 rooted_file(filesystem, managed + ".pending-bundle.json", json.dumps(bundle))
-                # Provision and install launch hooks inside the real container.
-                result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
-                    "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
-                    "cwd": "/root", "timeout_secs": 120})
-                if result.get("exit_code") != 0:
-                    reports.append({"workspace": workspace["name"], "status": "pending-retry"})
-                    continue
+            # Core copies its companion into new workspaces; a wrapped binary
+            # needs its native sibling too. Stage both from the trusted host.
+            native = Path(config.get("native_companion", "/usr/local/bin/sandboxed-mcp.identity-native"))
+            if native.is_file():
+                version = str(native.stat().st_mtime_ns) + ":" + str(native.stat().st_size)
+                try: installed = rooted_file(filesystem, managed + ".native-version")
+                except FileNotFoundError: installed = None
+                if installed != version:
+                    rooted_file(filesystem, "usr/local/bin/sandboxed-mcp.identity-native", native.read_bytes(), 0o755)
+                    rooted_file(filesystem, "usr/local/bin/sandboxed-mcp", native.read_bytes(), 0o755)
+                    rooted_file(filesystem, managed + ".native-version", version)
+            # Reconcile hooks even when credentials are unchanged, e.g. after
+            # a native deployment or an operator updated the helper itself.
+            result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
+                "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
+                "cwd": "/root", "timeout_secs": 120})
+            if result.get("exit_code") != 0:
+                reports.append({"workspace": workspace["name"], "status": "pending-retry"})
+                continue
             reports.append({"workspace": workspace["name"], "status": "current"})
         except Exception:
             # Retain other targets and do not expose API errors or bundle data.
@@ -455,7 +467,7 @@ def sync(config, apply):
         if t.get("user"):
             command = ["sudo", "-n", "-u", t["user"], "-H"] + command
         if t.get("ssh"):
-            command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10", "-i", config["ssh_identity"], t["ssh"], shlex.join(command)]
+            command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + config["known_hosts"], "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-i", config["ssh_identity"], t["ssh"], shlex.join(command)]
         try:
             out = run(command, data=json.dumps(bundle), timeout=180)
             reports.append({"target": t["name"], **json.loads(out)})
@@ -480,6 +492,8 @@ def apply_pending(root):
 
 def pull(config, root):
     command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+               "-o", "UserKnownHostsFile=" + config.get("known_hosts", str(Path.home() / ".ssh/known_hosts")),
+               "-o", "GlobalKnownHostsFile=/dev/null",
                "-o", "ConnectTimeout=10", "-i", config["ssh_identity"], config["source_ssh"],
                shlex.join([config["remote_python"], config["remote_script"], "export", "--config", config["remote_config"]])]
     bundle = json.loads(run(command, timeout=90))

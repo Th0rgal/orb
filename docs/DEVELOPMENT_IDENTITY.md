@@ -85,12 +85,15 @@ user-owned skills are preserved. General project skill selection remains owned
 by sandboxed.sh's Library/project-skills preparation, not this credential tool.
 
 Core also discovers ready container workspaces through its authenticated API.
-It stages the filtered bundle with owner-only permissions, then provisions and
+It stages the filtered bundle using no-follow directory handles and owner-only
+permissions, then provisions and
 validates it through `/api/workspaces/:id/exec` inside the container. Failed
 attempts retain pending data for the next timer run or companion launch. New
 containers must have Python, Git, gh, GnuPG and OpenSSH installed; enrollment
 converges on the next reconciliation. Host paths never enter container GPG
-configuration. The Core API owner session remains on Core and is refreshed
+configuration. Wrapped companions retain their native sibling inside each
+container; the reconciler refreshes both after a companion deployment.
+The Core API owner session remains on Core and is refreshed
 from the Bitwarden dashboard password only when needed.
 
 Enable the Core scheduler after a successful manual canary:
@@ -168,7 +171,8 @@ full mirror of coordinator-only Hermes skills.
 
 The Mac scheduler is `~/Library/LaunchAgents/md.thomas.sandboxed-development-identity.plist`.
 It runs the installed helper's `pull` command every 300 seconds and at load,
-with the private configuration in `<managed-root>/pull.json`. Inspect it with
+with the private configuration in `<managed-root>/pull.json`. The optional
+`known_hosts` field selects the Mac's pinned inventory (default `~/.ssh/known_hosts`). Inspect it with
 `launchctl print gui/$(id -u)/md.thomas.sandboxed-development-identity`; success
 reports are in `<managed-root>/sync.log`. A failure is in `sync-error.log` and
 leaves the previous generation active.

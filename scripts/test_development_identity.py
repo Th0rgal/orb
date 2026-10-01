@@ -135,6 +135,15 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(identity.rooted_file(image, "token"), "fixture-secret")
             self.assertEqual((image / "token").stat().st_mode & 0o777, 0o600)
 
+    def test_sync_transport_uses_configured_host_key_pins(self):
+        c = {"known_hosts":"/private/pins", "python":"python3", "script":"helper",
+             "ssh_identity":"/private/key", "targets":[{"name":"node", "ssh":"root@node", "root":"/profile"}]}
+        with patch.object(identity, "export_bundle", return_value=self.bundle()), patch.object(identity, "run", return_value='{}') as command:
+            identity.sync(c, True)
+        argv = command.call_args.args[0]
+        self.assertIn("UserKnownHostsFile=/private/pins", argv)
+        self.assertIn("GlobalKnownHostsFile=/dev/null", argv)
+
 
 if __name__ == "__main__":
     unittest.main()
