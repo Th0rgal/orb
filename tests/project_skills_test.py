@@ -89,6 +89,63 @@ class ProjectSkillsTest(unittest.TestCase):
             self.assertFalse((self.cwd / skills.NATIVE[harness] / 'orb-marker').exists())
             self.assertEqual((entry / 'SKILL.md').read_text(), 'Library skill')
 
+    def test_moved_cwd_accepts_owned_aliases_and_refreshes_copies(self):
+        original = self.skill()
+        mission = self.base / 'mission'
+        mission.mkdir()
+        for mode in ['link', 'adapter', 'fallback']:
+            with self.subTest(mode=mode):
+                if mode == 'adapter':
+                    (original / 'SKILL.md').write_text('Plain instructions.')
+                if mode == 'fallback':
+                    (original / 'SKILL.md').write_text('---\nname: orb-marker\ndescription: valid\n---\nInstructions')
+                    with patch.object(Path, 'symlink_to', side_effect=OSError('links unsupported')):
+                        skills.prepare(str(self.source), mission, 'claudecode', verify=False)
+                else:
+                    skills.prepare(str(self.source), mission, 'claudecode', verify=False)
+                config = mission / '.claude/settings.json'
+                config.write_text('USER-CONFIG')
+                (original / 'SKILL.md').write_text((original / 'SKILL.md').read_text() + '\nUPDATED-INSTRUCTIONS')
+                (original / 'references/marker.md').write_text('UPDATED-REFERENCE')
+                skills.prepare(str(self.source), self.cwd, 'opencode', verify=False, discovery_roots=[mission])
+                for directory, native in [(mission, '.claude/skills'), (self.cwd, '.opencode/skills')]:
+                    exposed = directory / native / original.name
+                    self.assertIn('UPDATED-INSTRUCTIONS', (exposed / 'SKILL.md').read_text())
+                    self.assertEqual((exposed / 'references/marker.md').read_text(), 'UPDATED-REFERENCE')
+                self.assertEqual(config.read_text(), 'USER-CONFIG')
+                shutil.rmtree(original)
+                skills.prepare(str(self.source), self.cwd, 'opencode', verify=False, discovery_roots=[mission])
+                self.assertFalse((mission / '.claude/skills/orb-marker').exists())
+                self.assertFalse((self.cwd / '.opencode/skills/orb-marker').exists())
+                original = self.skill()
+                shutil.rmtree(mission)
+                mission.mkdir()
+                shutil.rmtree(self.cwd)
+                self.cwd.mkdir()
+
+    def test_moved_cwd_preserves_replaced_or_other_project_aliases(self):
+        original = self.skill()
+        mission = self.base / 'mission'
+        mission.mkdir()
+        skills.prepare(str(self.source), mission, 'claudecode', verify=False)
+        entry = mission / '.claude/skills/orb-marker'
+        entry.unlink()
+        entry.mkdir()
+        (entry / 'SKILL.md').write_text('USER-REPLACEMENT')
+        with self.assertRaisesRegex(ValueError, 'collision'):
+            skills.prepare(str(self.source), self.cwd, 'opencode', verify=False, discovery_roots=[mission])
+        self.assertEqual((entry / 'SKILL.md').read_text(), 'USER-REPLACEMENT')
+        self.assertFalse((self.cwd / '.opencode').exists())
+        shutil.rmtree(entry)
+        entry.symlink_to(original, target_is_directory=True)
+        state = json.loads((mission / skills.MANIFEST).read_text())
+        state['source'] = str(self.base / 'other-project')
+        (mission / skills.MANIFEST).write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError, 'per-mission native skill'):
+            skills.prepare(str(self.source), self.cwd, 'opencode', verify=False, discovery_roots=[mission])
+        self.assertTrue(entry.is_symlink())
+        self.assertFalse((self.cwd / '.opencode').exists())
+
     def test_managed_manifest_traversal_is_refused_before_any_cleanup(self):
         for native in skills.NATIVE.values():
             root = self.cwd / native

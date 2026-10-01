@@ -69,11 +69,30 @@ def safe_parents(cwd, relative):
             raise ValueError(f"Native skill parent must be a real directory: {parent}")
 
 
+def owns_entry(directory, state, relative, target):
+    safe_parents(directory, relative)
+    if state["entries"].get(relative) != target:
+        return False
+    path = directory / relative
+    copy = state["copies"].get(relative)
+    return ((copy is not None and path.is_dir() and not path.is_symlink() and fingerprint(path) == copy)
+            or (copy is None and path.is_symlink() and os.readlink(path) == target))
+
+
 def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roots=()):
     cwd = Path(cwd).resolve(strict=True)
     source = str(Path(source).resolve(strict=True)) if source else None
     if source and cwd.is_relative_to(Path(source)) and any(Path(source).glob("skills/*/SKILL.md")):
         raise ValueError("Choose a working directory outside the synchronized project files; native discovery entries must not be synchronized as source files.")
+    # A moved mission still exposes its private directory to native discovery.
+    # Refresh its owned copies and cleanup before locking the new cwd; nesting
+    # directory locks would deadlock concurrent moves in opposite directions.
+    discovery_roots = tuple(dict.fromkeys(Path(root).resolve(strict=True) for root in discovery_roots))
+    for directory in discovery_roots:
+        if directory != cwd:
+            owned = read_state(directory)
+            if owned["entries"] and owned["source"] == source:
+                prepare(source, directory, harness, verify=False, cleanup_only=cleanup_only)
     lock_path = cwd / ".orb-project-skills.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "r+") as lock:
@@ -154,6 +173,9 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
                 for alias in ALIASES.get(harness, ()):
                     path = discovery_root / alias / name
                     if discovery_root != cwd and os.path.lexists(path):
+                        owned = read_state(discovery_root)
+                        if owned["source"] == source and owns_entry(discovery_root, owned, f"{alias}/{name}", target):
+                            continue
                         raise ValueError(f"Skill name collision at {path}. Rename the project skill; Orb will preserve the per-mission native skill.")
             for alias in ALIASES.get(harness, ()):
                 relative = f"{alias}/{name}"

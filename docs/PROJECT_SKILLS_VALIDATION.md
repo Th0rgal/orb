@@ -62,7 +62,7 @@ Final command results:
 
 | Check | Result |
 | --- | --- |
-| Python project skill preparation | 25 passed, including review regressions |
+| Python project skill preparation | 27 passed, including review regressions |
 | Rust workspace tests | 2,867 library tests and 38 binary tests passed; 8 ignored; no failures |
 | Harness contract script | Passed, including 81 Python driver tests |
 | Capability matrix | Passed |
@@ -161,3 +161,10 @@ Post-rebase frontend build passed; unit tests passed 788 tests with three
 skipped. This authentication rollout does not supply macOS Orb desktop or
 isolated test-deployment access, so the real mission coverage above remains
 outstanding.
+
+The moved-working-directory review regression verifies that manifest-owned aliases
+in the private mission directory remain usable. Its generated adapter/fallback
+copies refresh instructions and references before discovery in the new cwd;
+deleted skills are removed in both roots. Replaced entries and aliases belonging
+to another project still fail without overwriting them. All 27 preparation tests
+pass on this fix. These are filesystem regressions, not desktop mission evidence.
