@@ -7,6 +7,7 @@ The managed root stays outside mission directories and transferable project data
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -22,6 +23,8 @@ import time
 import urllib.request
 import urllib.error
 import uuid
+
+GENERATION_SCHEMA = 2
 
 FIELDS = ("GITHUB_TOKEN", "GITHUB_SSH_PRIVATE_KEY", "GITHUB_SSH_PUBLIC_KEY",
           "GIT_SIGNING_PRIVATE_KEY", "PALOMA_SSH_PRIVATE_KEY", "PALOMA_SSH_PUBLIC_KEY")
@@ -57,6 +60,12 @@ def atomic_json(path, value):
     tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
     write(tmp, json.dumps(value, indent=2) + "\n")
     os.replace(tmp, path)
+
+
+def bundle_digest(bundle):
+    # Version generated config semantics as well as source credential content.
+    encoded = json.dumps({"schema": GENERATION_SCHEMA, "bundle": bundle}, sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def validate_bundle(bundle):
@@ -144,24 +153,41 @@ unset _sdi_current _sdi_n
 
 
 def prepare_skills(root, directory):
-    """Install only the common managed skill; leave project skill selection alone."""
+    """Preserve project-owned entries and never traverse project symlinks."""
+    root = root.resolve()
     source = (root / "current/skill").resolve(strict=True)
-    directory = Path(directory)
-    for relative in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills"]:
-        dest = directory / relative / "development-identity"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.is_symlink():
-            if dest.resolve() == source: continue
-            if "development-identity" not in str(dest.resolve()):
-                raise ValueError("existing skill link belongs to another source")
-            dest.unlink()
-        elif dest.exists():
-            # A Library-selected or user-managed copy has priority over our
-            # discovery link. Never delete it or block a mission on this helper.
-            continue
-        dest.symlink_to(source, target_is_directory=True)
+    directory = Path(directory).resolve()
     receipt = json.loads((source.parent / "receipt.json").read_text())
-    atomic_json(directory / ".paloma/development-identity.json", receipt)
+    for relative in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills"]:
+        try:
+            with directory_fd(directory, Path(relative).parts, create=True) as fd:
+                name = "development-identity"
+                try:
+                    target = os.readlink(name, dir_fd=fd)
+                except FileNotFoundError:
+                    target = None
+                except OSError:
+                    continue  # Existing real directory/file belongs to the project.
+                if target is not None:
+                    resolved = (directory / relative / target).resolve()
+                    if resolved == source: continue
+                    # Only our own generation links are ours to refresh.
+                    if resolved.parent.parent != root or resolved.name != "skill" or not resolved.parent.name.startswith("g-"):
+                        continue
+                tmp = ".identity-" + uuid.uuid4().hex
+                try:
+                    os.symlink(str(source), tmp, dir_fd=fd)
+                    os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+                finally:
+                    try: os.unlink(tmp, dir_fd=fd)
+                    except FileNotFoundError: pass
+        except OSError:
+            # A symlinked/read-only discovery parent remains user-owned.
+            continue
+    try:
+        rooted_file(directory, ".paloma/development-identity.json", json.dumps(receipt))
+    except OSError:
+        pass  # Never write through a project-controlled metadata symlink.
 
 
 def managed_block(path, block):
@@ -241,7 +267,7 @@ def verify(root, network=True):
             raise RuntimeError("GitHub SSH authentication failed")
         run(["git", "ls-remote", "git@github.com:Th0rgal/sandboxed.sh.git", "HEAD"], env=env)
         run(["git", "ls-remote", "https://github.com/Th0rgal/sandboxed.sh.git", "HEAD"], env=env)
-        if shutil.which("gh"):
+        if shutil.which("gh", path=env.get("PATH")):
             if run(["gh", "api", "user", "--jq", ".login"], env=env).strip() != "Th0rgal":
                 raise RuntimeError("gh identity mismatch")
         else:
@@ -251,6 +277,29 @@ def verify(root, network=True):
             "signed_commit": "verified", "library_revision": json.loads((generation / "receipt.json").read_text())["library_revision"]}
 
 
+def assert_signing_identity(listing):
+    primaries, pending = [], None
+    for line in listing.splitlines():
+        fields = line.split(":")
+        if fields[0] in ("sec", "pub"):
+            pending = fields[0]
+        elif fields[0] in ("ssb", "sub"):
+            pending = None
+        elif fields[0] == "fpr" and pending is not None:
+            primaries.append((pending, fields[9]))
+            pending = None
+    if primaries != [("sec", FINGERPRINT)]:
+        raise ValueError("signing export must contain only the expected private identity")
+
+
+def validate_signing_payload(armor):
+    # show-only parses private-key metadata without importing secret material.
+    with tempfile.TemporaryDirectory(prefix="identity-key-check-") as directory:
+        listing = run(["gpg", "--homedir", directory, "--batch", "--with-colons",
+                       "--import-options", "show-only", "--import"], data=armor)
+        assert_signing_identity(listing)
+
+
 def prepare_generation(root, bundle):
     root = root.resolve()
     # Keep GnuPG's Unix socket pathname below platform limits.
@@ -258,6 +307,7 @@ def prepare_generation(root, bundle):
     stage.mkdir(mode=0o700)
     s = bundle["secrets"]
     try:
+        validate_signing_payload(s["GIT_SIGNING_PRIVATE_KEY"])
         write(stage / "github-token", s["GITHUB_TOKEN"])
         for private, name in [("GITHUB_SSH_PRIVATE_KEY", "github"), ("PALOMA_SSH_PRIVATE_KEY", "paloma")]:
             write(stage / "ssh" / name, s[private].rstrip() + "\n")
@@ -273,14 +323,13 @@ def prepare_generation(root, bundle):
         ssh = f"Host github.com\n  User git\n  IdentityFile {stage}/ssh/github\n"
         for host in bundle["ssh_hosts"]:
             ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {stage}/ssh/paloma\n"
-        ssh += f"Host *\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile {stage}/ssh/known_hosts\n  ConnectTimeout 10\n"
+        ssh += f"Host *\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile {stage}/ssh/known_hosts\n  GlobalKnownHostsFile /dev/null\n  ConnectTimeout 10\n"
         write(stage / "ssh/config", ssh)
         gpg = stage / "gnupg"
         gpg.mkdir(mode=0o700)
         run(["gpg", "--homedir", str(gpg), "--batch", "--import"], data=s["GIT_SIGNING_PRIVATE_KEY"])
         keys = run(["gpg", "--homedir", str(gpg), "--batch", "--with-colons", "--list-secret-keys"])
-        if FINGERPRINT not in keys:
-            raise RuntimeError("unexpected GPG fingerprint")
+        assert_signing_identity(keys)
         write(gpg / "gpg.conf", "batch\npinentry-mode loopback\n")
         write(stage / "gpg-sign", "#!/bin/sh\nexec gpg --homedir " + shlex.quote(str(gpg)) + ' --batch --pinentry-mode loopback "$@"\n', 0o700)
         helper = "#!/bin/sh\n[ \"$1\" = get ] || exit 0\nhost=\nprotocol=\nwhile IFS= read -r line; do\n case \"$line\" in host=*) host=${line#host=};; protocol=*) protocol=${line#protocol=};; esac\ndone\n[ \"$host\" = github.com ] && [ \"$protocol\" = https ] || exit 0\nprintf 'username=Th0rgal\\npassword='\ncat " + shlex.quote(str(stage / "github-token")) + "\nprintf '\\n'\n"
@@ -313,6 +362,23 @@ def prepare_generation(root, bundle):
         raise
 
 
+def active_profile_exists(root):
+    try:
+        generation = (root / "current").resolve(strict=True)
+        receipt = json.loads((generation / "receipt.json").read_text())
+        return (generation.parent == root.resolve() and receipt.get("signing_fingerprint") == FINGERPRINT
+                and all((generation / name).is_file() for name in
+                        ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml"])
+                and (generation / "gnupg").is_dir())
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        return False
+
+
+def publish_launchers(root):
+    write(root / "activate.sh", activation(root))
+    write(root / "launch", "#!/bin/sh\nexec " + shlex.join([sys.executable, str(Path(__file__).resolve()), "run", "--root", str(root.resolve()), "--"]) + ' "$@"\n', 0o700)
+
+
 def install(root, bundle, network=True):
     validate_bundle(bundle)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -320,14 +386,12 @@ def install(root, bundle, network=True):
     with open(root / ".lock", "a") as lock:
         os.chmod(root / ".lock", 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        encoded = json.dumps(bundle, sort_keys=True).encode()
         # Private change marker only; never include credential hashes in reports.
-        digest = hashlib.sha256(encoded).hexdigest()
+        digest = bundle_digest(bundle)
         marker = root / ".bundle-digest"
-        write(root / "activate.sh", activation(root))
-        write(root / "launch", "#!/bin/sh\nexec " + shlex.join([sys.executable, str(Path(__file__).resolve()), "run", "--root", str(root.resolve()), "--"]) + ' "$@"\n', 0o700)
-        if marker.exists() and marker.read_text() == digest and (root / "current").exists():
+        if marker.exists() and marker.read_text() == digest and active_profile_exists(root):
             report = verify(root, network)
+            publish_launchers(root)
             atomic_json(root / "status.json", {"last_success": int(time.time()), "library_revision": bundle["library_revision"]})
             return {"changed": False, **report}
         stage = prepare_generation(root, bundle)
@@ -345,6 +409,7 @@ def install(root, bundle, network=True):
         link = root / ("current-" + uuid.uuid4().hex)
         link.symlink_to(stage)
         os.replace(link, root / "current")
+        publish_launchers(root)
         write(marker, digest)
         atomic_json(root / "status.json", {"last_success": int(time.time()), "library_revision": bundle["library_revision"]})
         # Retain prior generations: running processes may still reference them.
@@ -361,6 +426,7 @@ def export_bundle(config):
               "ssh_hosts": config["ssh_hosts"], "library_revision": config["library_revision"],
               "skill": Path(config["skill"]).read_text()}
     validate_bundle(bundle)
+    validate_signing_payload(selected["GIT_SIGNING_PRIVATE_KEY"])
     github_login(selected["GITHUB_TOKEN"])
     return bundle
 
@@ -388,24 +454,28 @@ def core_request(config, method, path, body=None):
     return request(token)
 
 
-def rooted_file(filesystem, relative, value=None, mode=0o600):
-    """Access a container file without following any container-owned symlink.
-
-    Directory FDs also prevent a concurrent rename from redirecting a host
-    write outside the image. Only the container's namespace resolves links
-    when the normal execution API subsequently runs provisioning.
-    """
-    parts = Path(relative).parts
-    if not parts or Path(relative).is_absolute() or ".." in parts:
-        raise ValueError("invalid container-relative path")
+@contextlib.contextmanager
+def directory_fd(filesystem, parts, create=False):
     fd = os.open(filesystem, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in parts[:-1]:
-            if value is not None:
+        for part in parts:
+            if part in ("..", "/"): raise ValueError("invalid relative directory")
+            if create:
                 try: os.mkdir(part, 0o700, dir_fd=fd)
                 except FileExistsError: pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd); fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def rooted_file(filesystem, relative, value=None, mode=0o600):
+    """Access a file without following any container/project-owned symlink."""
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or ".." in parts:
+        raise ValueError("invalid relative path")
+    with directory_fd(filesystem, parts[:-1], create=value is not None) as fd:
         if value is None:
             file = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
             with os.fdopen(file, "r") as stream: return stream.read()
@@ -419,8 +489,6 @@ def rooted_file(filesystem, relative, value=None, mode=0o600):
         finally:
             try: os.unlink(tmp, dir_fd=fd)
             except FileNotFoundError: pass
-    finally:
-        os.close(fd)
 
 
 def stage_containers(config, bundle):
@@ -432,11 +500,10 @@ def stage_containers(config, bundle):
             rooted_file(filesystem, "usr/local/lib/sandboxed-sh/development_identity.py",
                         Path(config["script"]).read_text(), 0o755)
             managed = "root/.config/sandboxed-sh/development-identity/"
-            digest = hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest()
-            try: current = rooted_file(filesystem, managed + ".bundle-digest")
-            except FileNotFoundError: current = None
-            if current != digest:
-                rooted_file(filesystem, managed + ".pending-bundle.json", json.dumps(bundle))
+            digest = bundle_digest(bundle)
+            # Always offer the authoritative bundle. Inside the container,
+            # install can detect and repair an absent/damaged active profile.
+            rooted_file(filesystem, managed + ".pending-bundle.json", json.dumps(bundle))
             # Core copies its companion into new workspaces; a wrapped binary
             # needs its native sibling too. Stage both from the trusted host.
             native = Path(config.get("native_companion", "/usr/local/bin/sandboxed-mcp.identity-native"))
@@ -453,7 +520,12 @@ def stage_containers(config, bundle):
             result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
                 "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
                 "cwd": "/root", "timeout_secs": 120})
-            if result.get("exit_code") != 0 or rooted_file(filesystem, managed + ".bundle-digest") != digest:
+            try:
+                rooted_file(filesystem, managed + ".pending-bundle.json")
+                pending = True
+            except FileNotFoundError:
+                pending = False
+            if result.get("exit_code") != 0 or pending or rooted_file(filesystem, managed + ".bundle-digest") != digest:
                 reports.append({"workspace": workspace["name"], "status": "pending-retry"})
                 continue
             reports.append({"workspace": workspace["name"], "status": "current"})
@@ -494,7 +566,7 @@ def apply_pending(root):
     try:
         install(root, json.loads(data))
     except Exception:
-        if not (root / "current/receipt.json").is_file():
+        if not active_profile_exists(root):
             raise
         print("development-identity: update pending; using previous validated profile", file=sys.stderr)
         return

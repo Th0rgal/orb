@@ -70,8 +70,8 @@ class IdentityTests(unittest.TestCase):
             root = Path(d); generation = root / "generation"
             generation.mkdir(); (root / "current").symlink_to(generation)
             b = self.bundle()
-            (root / ".bundle-digest").write_text(identity.hashlib.sha256(json.dumps(b, sort_keys=True).encode()).hexdigest())
-            with patch.object(identity, "verify", return_value={"signed_commit":"verified"}), patch.object(identity, "prepare_generation") as prepare:
+            (root / ".bundle-digest").write_text(identity.bundle_digest(b))
+            with patch.object(identity, "active_profile_exists", return_value=True), patch.object(identity, "verify", return_value={"signed_commit":"verified"}), patch.object(identity, "prepare_generation") as prepare:
                 self.assertFalse(identity.install(root,b)["changed"])
                 prepare.assert_not_called()
 
@@ -149,10 +149,74 @@ class IdentityTests(unittest.TestCase):
             root = Path(d); pending = root / ".pending-bundle.json"
             pending.write_text(json.dumps(self.bundle()))
             (root / "current").mkdir(); (root / "current/receipt.json").write_text("{}")
-            with patch.object(identity, "install", side_effect=RuntimeError("offline")), patch.object(identity.sys, "stderr"):
+            with patch.object(identity, "install", side_effect=RuntimeError("offline")), patch.object(identity, "active_profile_exists", return_value=True), patch.object(identity.sys, "stderr"):
                 identity.apply_pending(root)
             self.assertTrue(pending.exists())
             self.assertTrue((root / "current/receipt.json").exists())
+
+    def test_first_install_failure_does_not_publish_launcher(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with patch.object(identity, "prepare_generation", side_effect=RuntimeError("offline")):
+                with self.assertRaises(RuntimeError): identity.install(root, self.bundle())
+            self.assertFalse((root / "launch").exists())
+            self.assertFalse((root / "activate.sh").exists())
+
+    def test_signing_key_listing_rejects_an_extra_primary(self):
+        expected = "sec:::::::::\nfpr:::::::::" + identity.FINGERPRINT + ":\n"
+        identity.assert_signing_identity(expected + "ssb:::::::::\nfpr:::::::::SUBKEY:\n")
+        with self.assertRaises(ValueError):
+            identity.assert_signing_identity(expected + "sec:::::::::\nfpr:::::::::OTHER:\n")
+        with self.assertRaises(ValueError):
+            identity.assert_signing_identity(expected + "pub:::::::::\nfpr:::::::::OTHER:\n")
+
+    def test_project_links_and_metadata_symlinks_are_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "identity"; generation = root / "g-000000000000"
+            (generation / "skill").mkdir(parents=True)
+            (root / "current").symlink_to(generation)
+            (generation / "receipt.json").write_text('{"library_revision":"test"}')
+            project = Path(d) / "project"; project.mkdir()
+            outside = Path(d) / "user-development-identity"; outside.mkdir()
+            (outside / "SKILL.md").write_text("personal")
+            owned = project / ".claude/skills/development-identity"
+            owned.parent.mkdir(parents=True); owned.symlink_to(outside)
+            (project / ".agents").symlink_to(outside)
+            (project / ".paloma").symlink_to(outside)
+            identity.prepare_skills(root, project)
+            self.assertEqual(owned.resolve(), outside.resolve())
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["SKILL.md"])
+
+    def test_missing_active_generation_is_repaired_even_with_matching_digest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); stage = root / "g-000000000000"; stage.mkdir()
+            (root / ".bundle-digest").write_text(identity.bundle_digest(self.bundle()))
+            (root / "current").symlink_to(root / "missing")
+            with patch.object(identity, "prepare_generation", return_value=stage), patch.object(identity, "verify", return_value={}):
+                self.assertTrue(identity.install(root, self.bundle())["changed"])
+            self.assertEqual((root / "current").resolve(), stage.resolve())
+
+    def test_gh_probe_uses_managed_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); (root / "receipt.json").write_text('{"library_revision":"test"}')
+            (root / "current").symlink_to(root)
+            output = "U " + identity.FINGERPRINT + " Thomas Marchand (agent) <agent@thomas.md>"
+            def execute(argv, **kwargs):
+                if argv[:2] == ["git", "log"]: return output
+                if argv[:2] == ["gh", "api"]: return "Th0rgal"
+                return ""
+            with patch.object(identity, "profile_env", return_value={"GH_TOKEN":"fixture", "PATH":"/managed/bin"}), patch.object(identity, "github_login", return_value="Th0rgal"), patch.object(identity, "run", side_effect=execute), patch.object(identity.subprocess, "run", return_value=subprocess.CompletedProcess([],1,"", "Hi Th0rgal! You've successfully authenticated")), patch.object(identity.shutil, "which", return_value="/managed/bin/gh") as which:
+                identity.verify(root)
+                which.assert_called_once_with("gh", path="/managed/bin")
+
+    def test_corrupt_receipt_and_cyclic_current_are_not_valid_profiles(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); generation = root / "g-000000000000"; generation.mkdir()
+            (root / "current").symlink_to(generation)
+            (generation / "receipt.json").write_text("[]")
+            self.assertFalse(identity.active_profile_exists(root))
+            (root / "current").unlink(); (root / "current").symlink_to(root / "current")
+            self.assertFalse(identity.active_profile_exists(root))
 
 
 if __name__ == "__main__":
