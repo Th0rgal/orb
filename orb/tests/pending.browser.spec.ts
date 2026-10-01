@@ -54,10 +54,10 @@ const evUser = { id: "e1", event_id: "e1", sequence: 1, event_type: "user_messag
 const evText = (t: string, seq: number) => ({ id: `t${seq}`, event_id: `t${seq}`, sequence: seq, event_type: "assistant_message", content: t, timestamp: "" });
 const evTool = (seq: number) => ({ id: `c${seq}`, event_id: `c${seq}`, sequence: seq, event_type: "tool_call", tool_call_id: `c${seq}`, name: "read", timestamp: "" });
 
-test("a running mission shows a compact startup status below the optimistic prompt", async ({ page }) => {
+test("a running mission announces its quiet startup status", async ({ page }) => {
   await setup(page, { status: "active", events: [evUser] });
   await expect(page.locator(".user")).toContainText("What's the status of Pareto audit?");
-  const status = page.locator(".agent-wait-status");
+  const status = page.locator('.scroll [role="status"]').filter({hasText:/Working on/});
   await expect(status).toBeVisible();
   await expect(status).toContainText(/^Working on .+/);
   const destination = (await status.textContent())!.replace(/^Working on /, "").replace(/…$/, "");
@@ -94,7 +94,7 @@ test("reduced motion keeps the state visible without moving anything", async ({ 
   await expect(turn).toHaveCount(1);
   expect(await turn.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
   // The status carries progress without dimming or animating the user message.
-  await expect(page.locator(".agent-wait-status")).toContainText("Working on");
+  await expect(page.locator('.scroll [role="status"]').filter({hasText:/Working on/})).toContainText("Working on");
   expect(Number(await turn.evaluate((el) => getComputedStyle(el).opacity))).toBe(1);
 });
 

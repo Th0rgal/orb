@@ -2,7 +2,7 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey} from './sideQuestionStorage';
-import {localBinding,restoreLocalBindings,refreshLocalAgents,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun} from './localAgents';
+import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun} from './localAgents';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
@@ -54,36 +54,58 @@ function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){
  const s=btwSession(parent);if(!s)throw new Error('Side session not found.');const version=connectionVersion();
  receive({type:'start',model:s.harness+' · '+s.model});
- if(s.local){await restoreLocalBindings();await reconcileLocalRun(s.id);const current=await getMission(s.id);if(['active','running','pending','queued','starting','resuming'].includes(current.status))follow(s.id);}
+ if(s.local){
+  await restoreLocalBindings();
+  await reconcileLocalRun(s.id);
+  if(signal.aborted||connectionVersion()!==version)return;
+  void getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming'].includes(m.status))follow(s.id);}).catch(()=>{});
+  // The native receipt owns completion; Core synchronization must not keep the UI busy.
+  const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
+  if(signal.aborted||connectionVersion()!==version)return;
+  s.active=false;save(parent,s);
+  if(state.error||state.exit_code||!state.text.trim())throw new Error(state.error||'The side agent stopped without a response.');
+  receive({type:'done',answer:state.text});return;
+ }
  let previous:string|undefined;
+ let streamedText='';
+ let wake:(()=>void)|undefined;
+ const publish=(text:string)=>{if(!signal.aborted&&connectionVersion()===version&&text!==previous){previous=text;receive({type:'snapshot',text} as SideEvent);}};
+ const streamText=()=>live.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'').join('\n\n');
  // Unfinished thoughts are never stored: only the live stream carries them.
  const live=new TranscriptReducer();
  setLiveThoughts(all=>({...all,[s.id]:[]}));
  const stopStream=s.local?undefined:streamMission(s.id,event=>{
-  if(event.type!=='thinking')return;
   live.apply(event);
+  streamedText=streamText();
+  if(streamedText)publish(streamedText);
+  if(event.type==='mission_status_changed'||event.type==='status')wake?.();
   setLiveThoughts(all=>({...all,[s.id]:thoughtsOf(live.items).map(item=>({...item}))}));
  },()=>{});
+ const abortWake=()=>wake?.();signal.addEventListener('abort',abortWake);
  try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
-  const mission=await getMission(s.id);
-  let text='';
-  if(s.local){const local=await import('./localAgents');await local.reconcileLocalRun(s.id);text=local.localLiveText(s.id);}
-  const events=await getMissionEvents(s.id);const reducer=new TranscriptReducer();
+  const [mission,events]=await Promise.all([getMission(s.id),getMissionEvents(s.id)]);
+  let text='';const reducer=new TranscriptReducer();
   for(const event of btwTurnEvents(events,s)){
    if(event.event_type==='assistant_message' && /^Remote \w+ job [0-9a-f-]{36} on node '[^']+' finished without assistant text/.test(event.content))continue;
    const e=storedToStream(event);if(e)reducer.apply(e);}
   setAgentItems(all=>({...all,[s.id]:reducer.items}));
   setRemoteActivities(all=>({...all,[s.id]:reducer.items.filter(i=>i.kind==='tool').map(i=>i.kind==='tool'?{id:i.callId,label:i.name,done:i.done,failed:false,detail:JSON.stringify({args:i.args,result:i.result})}:{id:'',label:'',done:true,failed:false})}));
   const recorded=reducer.items.filter(i=>i.kind==='text'&&!!i.text.replace(/[.\s…]/g,'')).map(i=>i.kind==='text'?i.text:'').join('\n\n');
-  text=recorded||text;
-  if(text!==previous){receive({type:'snapshot',text} as SideEvent);previous=text;}
   const active=['active','running','pending','queued','starting','resuming'].includes(mission.status);
+  text=recorded||text;
+  // A terminal persisted response is authoritative, even if shorter than a streamed draft.
+  if((active||!text)&&streamedText.length>text.length)text=streamedText;
+  publish(text);
   if(!active){s.active=false;save(parent,s);if(['failed','interrupted','cancelled'].includes(mission.status))throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);if(!text.trim())throw new Error('No response was captured from the side agent. Check its activity for tool errors, then retry.');receive({type:'done',answer:text});return;}
-  await new Promise(resolve=>setTimeout(resolve,700));
+  await new Promise<void>(resolve=>{
+   const timer=setTimeout(done,5000);
+   function done(){clearTimeout(timer);wake=undefined;resolve();}
+   wake=done;if(signal.aborted)done();
+  });
  }
- }finally{stopStream?.();}
+ }finally{stopStream?.();signal.removeEventListener('abort',abortWake);wake?.();}
 }
 export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[]){
  const version=connectionVersion();
@@ -104,7 +126,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   let prompt=makePrompt(snapshot.context);
   let binding=local?localBinding(parent):undefined;
   let bin='';
-  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');const installed=await refreshLocalAgents();bin=installed.find(r=>r.id===config.harness&&r.installed)?.path??'';if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
+  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');bin=(await localAgentForLaunch(config.harness))?.path??'';if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
   if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;

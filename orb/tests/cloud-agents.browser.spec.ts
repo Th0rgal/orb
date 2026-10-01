@@ -82,7 +82,8 @@ test('reopening Orb retains the provider identity, result and follow-up target',
  await expect(page.getByRole('link',{name:'Open in Cursor Cloud'})).toHaveAttribute('href','https://cursor.com/agents/bc-test');
  await expect(page.getByRole('button',{name:'Change machine',exact:true})).toHaveCount(0);
  await page.reload();
- if (!(await page.locator('button.row.agent').filter({hasText:'Cloud proof'}).isVisible())) await page.getByRole('button',{name:'Demo',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Demo',exact:true})).toBeVisible();
+ if (await page.getByRole('button',{name:'Demo',exact:true}).getAttribute('aria-expanded') !== 'true') await page.getByRole('button',{name:'Demo',exact:true}).click();
  await page.locator('button.row.agent').filter({hasText:'Cloud proof'}).click();
  await expect(page.getByText('Two.',{exact:true})).toBeVisible({timeout:10000});
  await expect(page.locator('.mission-lead .provider-logo > span')).toHaveCSS('width','15px');

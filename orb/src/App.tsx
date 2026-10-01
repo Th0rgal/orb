@@ -1,3 +1,6 @@
+import {trackScrollbarHover} from "./scrollbarHover";
+import {NextReminder} from "./AutomaticReminder";
+import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
 import { MessageCircle } from "./sidebarIcons";
 import {MentionPicker} from "./MentionPicker";
 import {MentionProjectContext} from "./PromptEditor";
@@ -15,7 +18,7 @@ import {createPlanProgress, type PlanProgressData} from "./PlanProgress";
 import { nativeComposerDrop } from "./composerDrop";
 import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
-import { startLocalOrigin } from "./localAgents";
+import { startLocalOrigin, localRunKnown, localAgentForLaunch } from "./localAgents";
 import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
 import { MachineLoadBadge, byLeastLoaded, recordFleet, recordMissions } from "./machineLoad";
 import { adoptTransferredWorkspace } from "./machineTransfer";
@@ -306,7 +309,9 @@ export function Composer(p: {
   /** Follow-up: the mission's harness. New agent uses the picker. */
   backend?: string;
   onDraft?: (text: string) => void;
-  onPending?: (draft: {text:string; images:DraftImage[]} | null) => void;
+  onPending?: (draft: {text:string; images:DraftImage[]; retry?:()=>void} | null) => void;
+  onSendError?: (error:string)=>void;
+  retainFailedMessage?:boolean;
   projectSlug?: string;
   /** Reports what the draft currently mentions; the draft text is the source. */
   onAttachments?: (next: AttachChip[]) => void;
@@ -341,7 +346,7 @@ export function Composer(p: {
         const next = insertAtCaret(text(), current, ta.selectionEnd ?? current, token);
         write(next.value); setCaret(next.caret); ta.setSelectionRange(next.caret, next.caret);
       }
-    } catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally { setUploading(false); }
   };
   let composerElement:HTMLDivElement|undefined;
@@ -585,7 +590,7 @@ export function Composer(p: {
     const project = p.projectSlug;
     const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
-    p.onPending?.({text:original,images:sentImages});
+    if(!sideMode)p.onPending?.({text:payload,images:sentImages,retry:()=>{uploaded=originalUploads;setText(original);setImages(sentImages);setMode(originalMode);void send();}});
     setSending(true);
     setText(""); setImages([]); ta.value=""; resize();
     let accepted = false;
@@ -607,14 +612,14 @@ export function Composer(p: {
         if (draftScope) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
         setMode(null);
       }
-    } catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally {
-      if (!accepted && draftScope === p.scope) {
+      if (!accepted && !p.retainFailedMessage && draftScope === p.scope) {
         uploaded = originalUploads;
         setMode(originalMode);setText(original);setImages(sentImages);
         ta.value=original;resize();
       }
-      setPendingSend(null);p.onPending?.(null);setSending(false);
+      setPendingSend(null);if(!sideMode)p.onPending?.(null);setSending(false);
       // The launch preview hides the composer. Restore visibility before focus.
       if (!accepted && draftScope === p.scope && ta.isConnected) ta.focus();
     }
@@ -861,7 +866,7 @@ export function Composer(p: {
         </button>
       </Show>
       <Show when={p.busy && p.onStop}>
-        <button class="send stop" onClick={p.onStop} title="Stop">
+        <button class="send stop" disabled={p.disabled} onClick={p.onStop} title="Stop">
           <Ic.StopIcon size={14} />
         </button>
       </Show>
@@ -1016,6 +1021,7 @@ export function floatingDock(el: HTMLDivElement) {
 }
 
 export default function App() {
+  onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [projects, setProjects] = createStore<typeof seed>([]);
@@ -1049,6 +1055,15 @@ export default function App() {
   const [createError, setCreateError] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [launchPreview, setLaunchPreview] = createSignal<LaunchReceipt | null>(null);
+  const [launchViewKey,setLaunchViewKey]=createSignal('');
+  let retryLaunch:(()=>void)|undefined;
+  const launchedViewKeys=new Map<string,string>();
+  const prepareLaunch=(draft:{text:string;images:DraftImage[];retry?:()=>void}|null)=>{
+    if(!draft){setLaunchPreview(null);return;}
+    retryLaunch=draft.retry;setCreateError(null);
+    if(!launchPreview())setLaunchViewKey(crypto.randomUUID());
+    setLaunchPreview({messageKey:`initial:${launchViewKey()}`,prompt:draft.text,images:draft.images,nodeId:newMachine(),destination:nodeLabel(newMachine())});
+  };
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
   const [newMachine, setNewMachine] = createSignal((localStorage.getItem(MACHINE_KEY) === "dgx-spark-admin" ? "core" : localStorage.getItem(MACHINE_KEY)) || "core");
@@ -1281,6 +1296,7 @@ export default function App() {
 
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
+    if(id===null){setLaunchPreview(null);setLaunchViewKey('');}
     if (id === "execution") id = "settings";
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
     navigationVersion++;
@@ -1373,8 +1389,7 @@ export default function App() {
   };
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
-    const rows = await refreshLocalAgents();
-    const row = rows.find((item) => item.id === pick.backend && item.installed && item.path);
+    const row = await localAgentForLaunch(pick.backend);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
     const plan = await materializeMentions(projectSlug, prompt, attachChips());
     const root = workingDirectory().trim() ? await localDirectory(workingDirectory()) : await localWorkspace(projectSlug);
@@ -1388,7 +1403,8 @@ export default function App() {
     const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setAttachChips([]);
-    rememberLaunch(m.id, {prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
+    rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
+    launchedViewKeys.set(m.id,launchViewKey());
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
     if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
     void refreshMissions();
@@ -1405,7 +1421,7 @@ export default function App() {
       const title = missionTitle(text);
       const launchNavigation = navigationVersion;
       const machine = newMachine();
-      const receipt = {prompt,images,nodeId:machine,destination:nodeLabel(machine)};
+      const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
       const pick = effectivePick();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
@@ -1445,6 +1461,7 @@ export default function App() {
         setAttachChips([]);
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
+        launchedViewKeys.set(m.id,launchViewKey());
         setMissions(prev => [m, ...prev.filter(old => old.id !== m.id)]);
         if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
         void refreshMissions();
@@ -1458,7 +1475,7 @@ export default function App() {
         setCreateRefusal(refusal.kind === "other" ? null : { refusal, project: projectSlug ?? null });
         // Returning false keeps the composer text exactly as typed.
         return false;
-      } finally { setCreating(false); setLaunchPreview(null); }
+      } finally { setCreating(false); }
     }
     setCreateError("Connect to a backend before starting a mission. Your draft is kept.");
     return false;
@@ -1612,6 +1629,7 @@ export default function App() {
                   }}>
                   <LiveProjectsSection
                     activityMissions={missions()}
+                    currentMission={openMission()?.id === currentMissionId() ? openMission() ?? undefined : undefined}
                     harnessChoices={harnessChoices()}
                     onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
                     selected={selected}
@@ -1656,9 +1674,11 @@ export default function App() {
           <button
             class={`gear-btn ${onSettings() ? "on" : ""}`}
             title="Settings (⌘,)"
+            aria-label="Settings"
             onClick={() => (onSettings() ? undefined : openSettings())}
           >
             <Ic.GearIcon />
+            <span>Settings</span>
           </button>
         </div>
         <div class="sb-resize" onPointerDown={startResize} />
@@ -1740,80 +1760,7 @@ export default function App() {
       </header>
 
       <main class="main">
-        <Switch>
-            <Match when={selected() === "cloud-agent"}>
-            <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
-              projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
-              onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
-              onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
-          </Match>
-          <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
-          <Match when={selected() === "settings" || selected() === "execution"}>
-            <Settings onOpenPage={open} />
-          </Match>
-          <Match when={selected() === "routing"}>
-            <RoutingSettings onOpenClient={() => open("settings")} />
-          </Match>
-          <Match when={selected() === "machines"}>
-            <Machines />
-          </Match>
-          <Match when={selected() === "providers"}>
-            <Providers />
-          </Match>
-          <Match when={currentMissionId()}>
-            {(id) => (
-              <Show when={id()} keyed>
-                {(mid) => <MissionView id={mid} initial={missions().find(m => m.id === mid)} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id, pct) => setPreviewContext({id, pct})} onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />}
-              </Show>
-            )}
-          </Match>
-          <Match when={currentController()}>
-            {(slug) => (
-              <Show when={slug()} keyed>
-                {(s) => <ControllerView slug={s.slug} id={s.id} />}
-              </Show>
-            )}
-          </Match>
-          <Match when={currentProjectSettings()}>
-            {(slug) => (
-              <Show when={slug()} keyed>
-                {(s) => <ProjectSettings slug={s} onOpenPage={open} onOpenMission={(id) => open(`m:${id}`)} />}
-              </Show>
-            )}
-          </Match>
-          <Match when={currentProjectFile()}>
-            {(pf) => (
-              <Show when={pf()} keyed>
-                {(f) => <ProjectFileView slug={f.slug} path={f.path} />}
-              </Show>
-            )}
-          </Match>
-          <Match when={currentFile()}>
-            {(f) => {
-              const save = (text: string) =>
-                setProjects(
-                  produce((ps) => {
-                    const file = ps
-                      .find((x) => x.id === f().pid)
-                      ?.folders.find((x) => x.id === f().fid)
-                      ?.files.find((x) => x.id === f().file.id);
-                    if (file) file.text = text;
-                  }),
-                );
-              return (
-                <div class="file-view">
-                  <Show when={mdSrc()} fallback={<MdView text={f().file.text} />}>
-                    <MdSource text={f().file.text} onInput={save} />
-                  </Show>
-                </div>
-              );
-            }}
-          </Match>
-          <Match when={true}>
-        <Show
-          when={current()}
-          keyed
-          fallback={
+        <Show when={selected()===null || creating()}><div style={{display:launchPreview()?"none":"contents"}}>
             <div class={`new-agent ${creating() ? "launching" : ""}`}>
               <div class="new-inner">
                 <div class="na-meta">
@@ -1834,6 +1781,7 @@ export default function App() {
                         onMachine={() => setEnvOpen("machine")} />
                     </Show>
                   </div>
+
                   <div class="na-drop" onPointerDown={(e) => e.stopPropagation()}>
                     <button class="na-drop-btn" onClick={() => setEnvOpen(envOpen() === "machine" ? null : "machine")}>
                       <Show when={newMachine() !== "local"} fallback={<Ic.LaptopIcon size={14} />}>
@@ -1964,20 +1912,18 @@ export default function App() {
                         </div>
                       </div>
                     </Show>
-                  </div>
+                  </div><WorkingDirectoryPicker machine={newMachine()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
-                <Show when={!launchPreview()}><label class="working-directory-field">
-                  <span>Working directory</span>
-                  <input aria-label="Working directory" value={workingDirectory()} placeholder="Default directory" spellcheck={false} disabled={creating()} onInput={event => chooseDirectory(event.currentTarget.value)} />
-                </label></Show>
-                {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
-                <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
+
+                {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
                 <div hidden={!!launchPreview()}>
                 <Composer
+
                   placeholder="Describe a task, / for commands, @ for context"
                   busy={creating()}
                   onSend={create}
-                  onPending={draft => setLaunchPreview(draft ? {prompt:draft.text,images:draft.images,nodeId:newMachine(),destination:nodeLabel(newMachine())} : null)}
+                  onPending={prepareLaunch}
+                  onSendError={setCreateError}
                   onStop={stop}
                   onDraft={(text) => { if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null); }}
                   autofocus
@@ -2022,7 +1968,81 @@ export default function App() {
                 </div>
               </div>
             </div>
-          }
+        </div></Show>
+        <Switch>
+            <Match when={selected() === "cloud-agent"}>
+            <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
+              projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
+              onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
+              onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+          </Match>
+          <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
+          <Match when={selected() === "settings" || selected() === "execution"}>
+            <Settings onOpenPage={open} />
+          </Match>
+          <Match when={selected() === "routing"}>
+            <RoutingSettings onOpenClient={() => open("settings")} />
+          </Match>
+          <Match when={selected() === "machines"}>
+            <Machines />
+          </Match>
+          <Match when={selected() === "providers"}>
+            <Providers />
+          </Match>
+          <Match when={currentMissionId() || (selected()===null && launchPreview())}>
+            <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>}>
+                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>
+              </Show>
+            }</Show>
+          </Match>
+          <Match when={currentController()}>
+            {(slug) => (
+              <Show when={slug()} keyed>
+                {(s) => <ControllerView slug={s.slug} id={s.id} />}
+              </Show>
+            )}
+          </Match>
+          <Match when={currentProjectSettings()}>
+            {(slug) => (
+              <Show when={slug()} keyed>
+                {(s) => <ProjectSettings slug={s} onOpenPage={open} onOpenMission={(id) => open(`m:${id}`)} />}
+              </Show>
+            )}
+          </Match>
+          <Match when={currentProjectFile()}>
+            {(pf) => (
+              <Show when={pf()} keyed>
+                {(f) => <ProjectFileView slug={f.slug} path={f.path} />}
+              </Show>
+            )}
+          </Match>
+          <Match when={currentFile()}>
+            {(f) => {
+              const save = (text: string) =>
+                setProjects(
+                  produce((ps) => {
+                    const file = ps
+                      .find((x) => x.id === f().pid)
+                      ?.folders.find((x) => x.id === f().fid)
+                      ?.files.find((x) => x.id === f().file.id);
+                    if (file) file.text = text;
+                  }),
+                );
+              return (
+                <div class="file-view">
+                  <Show when={mdSrc()} fallback={<MdView text={f().file.text} />}>
+                    <MdSource text={f().file.text} onInput={save} />
+                  </Show>
+                </div>
+              );
+            }}
+          </Match>
+          <Match when={true}>
+        <Show
+          when={current()}
+          keyed
+          fallback={null}
         >
           {(c) => (
             <>
@@ -2302,13 +2322,14 @@ function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} /></Show>}</Show>;
 }
 
-function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
-  const receipt = recalledLaunch(p.id);
+export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
+  const receipt = p.launch ?? recalledLaunch(p.id);
   let disposed=false;
   onCleanup(()=>{disposed=true;});
-  onCleanup(retainTranscript(p.id));
-  const cached = peekReadyTranscript(p.id);
+  createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
+  const cached = p.id ? peekReadyTranscript(p.id) : undefined;
   const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null);
+  createEffect(()=>{if(p.initial)setMission(p.initial);});
   createEffect(() => p.onMission?.(mission()));
   onCleanup(() => p.onMission?.(null));
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
@@ -2316,16 +2337,18 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
   const [sendError, setSendError] = createSignal<string | null>(null);
-  const [optimistic, setOptimistic] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean} | null>(null);
+  const [optimistic, setOptimistic] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;retry?:()=>void} | null>(null);
   let sendingId:ReturnType<typeof crypto.randomUUID>|undefined;
-  const beginSend = (draft:{text:string;images:DraftImage[]}|null) => {
-    if(!draft){setOptimistic(null);return;}
-    sendingId=crypto.randomUUID();
+  const beginSend = (draft:{text:string;images:DraftImage[];retry?:()=>void}|null) => {
+    if(!draft)return;
+    sendingId=sendError()&&optimistic()?.text===draft.text?optimistic()!.id:crypto.randomUUID();
+    setSendError(null);
     setOptimistic({...draft,id:sendingId,waiting:busy()});
   };
   createEffect(()=>{
     const ids=new Set(items().filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId??'':''));
-    // The canonical transcript now owns these identities.
+    // Remove the projection only after its canonical identity is visible.
+    if(optimistic()&&ids.has(optimistic()!.id))setOptimistic(null);
     forgetAcceptedLocalMessages(ids);
   });
   let sideQuestions: SideQuestionsHandle | undefined;
@@ -2344,7 +2367,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   let scroller: HTMLDivElement | undefined;
   let nearBottom = true;
-  cacheRemember(`m:${p.id}`);
+  createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
 
   const scrollIfPinned = () => {
     if (nearBottom && !scroller?.dataset.panelResizing) scroller?.scrollTo({ top: scroller.scrollHeight });
@@ -2361,6 +2384,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   });
 
   const refresh = async () => {
+    if(!p.id)return;
     try {
       const next=await getMission(p.id);
       if(disposed)return;
@@ -2393,7 +2417,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     });
   };
   const resync = async (fresh = false) => {
-    if(disposed)return;
+    if(disposed||!p.id)return;
     if (replaying) { refreshAgain ||= fresh; return; }
     replaying = true;
     held = [];
@@ -2459,7 +2483,8 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     onCleanup(() => timers.forEach(clearTimeout));
   }));
 
-  onMount(() => {
+  createEffect(on(()=>p.id, id => {
+    if(!id)return;
     const reload = async () => {
       if (refreshing()) return;
       setRefreshing(true);
@@ -2500,7 +2525,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
       stopStream();
       stopPoll();
     });
-  });
+  }));
 
   const localMissionId=createMemo(()=>mission()?.tags?.includes("placement:client")?p.id:null);
   createEffect(() => {
@@ -2522,7 +2547,9 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   });
   const clientPlaced = () => !!mission()?.tags?.includes("placement:client");
   const busy = () => {
+    if(!p.id)return !p.launchError;
     if (localRunActive(p.id)) return true;
+    if(clientPlaced()&&localRunKnown(p.id))return queuedLocalMessages(p.id).some(row=>row.state==='dispatching');
     const s = mission()?.status;
     return !!s && ["active","running","pending","queued","starting","resuming"].includes(s);
   };
@@ -2541,6 +2568,8 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
    * has to act on, which keeps its own banner.
    */
   const pending = () => {
+    if(sendError())return false;
+    if(!p.id)return !p.launchError;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     const phase = missionPhase(mission(), activity());
     return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
@@ -2554,7 +2583,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     const draft=optimistic();
     const projected:StreamItem[]=[];
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-    if(draft&&!draft.waiting&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
+    if(draft&&(!draft.waiting||sendError())&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
     const list = [...canonical,...projected];
     const live = localLiveText(p.id);
     // The server rewrites a local run's reply in place without re-emitting it,
@@ -2700,14 +2729,14 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
       >
         <div class="col" style={peekTranscriptHeight(p.id) && awaiting() ? { "min-height": `${peekTranscriptHeight(p.id)}px` } : undefined}>
           <Show
-            when={!awaiting() || !!receipt || items().length > 0}
+            when={!awaiting() || !!receipt || viewItems().length > 0}
             fallback={
               <>
                 <Show when={receipt}>
                   {(r) => (
                     <>
                       <LaunchStatus destination={missionDestination(mission(), r())} mission={mission()} goal={missionGoal(mission(), r())} />
-                      <UserTurn text={r().prompt} images={r().images} pending={pending()} onSend={sendEditedPrompt} />
+                      <UserTurn text={r().prompt} images={r().images} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} />
                       <Show when={pending()}>
                         <MissionPending destination={missionDestination(mission(), r())} label={phaseLabel()} />
                       </Show>
@@ -2718,8 +2747,11 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
               </>
             }
           >
-            <LaunchStatus submitting={localRunActive(p.id)} destination={missionDestination(mission(), receipt)} mission={mission()} goal={missionGoal(mission(), receipt)} activity={activity()} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
-            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={sendEditedPrompt} />
+
+            <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
+              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} />
+            </Show>
+            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
               <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
@@ -2738,6 +2770,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             </Show>
           </Show>
 
+          <NextReminder mission={p.id} busy={busy()} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
@@ -2749,16 +2782,19 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
               <ol><For each={items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && i.queued === true)}>{item => <li data-message-id={item.messageId}><UserTurn text={item.text} attached={item.attached} /></li>}</For></ol>
             </section>
           </Show>
-          <SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/>
+          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
           <QueuedMessages mission={p.id} editing={editingQueued()} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
             onOpenBtw={()=>sideQuestions?.open()}
             placeholder="Send follow-up"
+            disabled={!p.id}
             picker={false}
             busy={busy()}
             onPending={beginSend}
+            retainFailedMessage
+            onSendError={setSendError}
             onSend={async (text,images)=>{
               const id=editingQueued();
               if(!id)return sendMsg(text,images);
@@ -2776,9 +2812,10 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             projectSlug={mission()?.project ?? undefined}
             onAttachments={setFollowAttach}
           />
+          <Show when={p.launchError}><ErrorNotice title="Couldn’t send your message" error={p.launchError!}><button onClick={p.onRetryLaunch}>Retry</button></ErrorNotice></Show>
           <Show when={mission()?.local_sync_pending}><div class="dim" role="status">{mission()?.local_sync_error || "Saved on this computer · syncing to Core…"}</div></Show>
           <Show when={sendError() || error() || queueError()}>
-            <ErrorNotice error={(sendError() || error() || queueError())!} title={sendError() ? "Couldn’t send your message" : "Couldn’t load the conversation"} onDismiss={() => { setSendError(null); setError(null); setQueueError(null); }} />
+            <ErrorNotice error={(sendError() || error() || queueError())!} title={sendError() ? "Couldn’t send your message" : "Couldn’t load the conversation"} onDismiss={sendError() ? undefined : () => { setError(null); setQueueError(null); }}><Show when={sendError()&&optimistic()}><button onClick={()=>{const draft=optimistic();if(draft?.retry)draft.retry();else if(draft)void sendMsg(draft.text,draft.images,followAttach(),draft.id);}}>Retry</button></Show></ErrorNotice>
           </Show>
           <Show when={latestChecklist(items())?.tasks.length}>
             <button class="tasks-jump" onClick={() => { const tasks = scroller?.querySelector<HTMLElement>(".mission-tasks"); tasks?.scrollIntoView({ behavior: "smooth", block: "center" }); tasks?.focus({ preventScroll: true }); }}>Tasks</button>

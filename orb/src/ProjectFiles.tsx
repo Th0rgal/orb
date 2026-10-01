@@ -223,6 +223,8 @@ function useRowTip() {
 
 export function LiveProjectsSection(p: {
   activityMissions?: Mission[];
+  /** Details from the open conversation, including restored/local sessions. */
+  currentMission?: Mission;
   harnessChoices: HarnessChoice[];
   onFork: (mission: Mission) => void;
   selected: () => string | null;
@@ -249,7 +251,13 @@ export function LiveProjectsSection(p: {
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
-  const visibleMissions = (slug: string) => (missions[slug] ?? []).filter(m => !isArchived(m));
+  const visibleMissions = (slug: string) => {
+    const rows = (missions[slug] ?? []).filter(m => !isArchived(m));
+    const current = currentMission();
+    // A paginated project list may not contain an older open conversation.
+    return current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
+      ? [current, ...rows] : rows;
+  };
   // Missions per project slug; file listings per `${slug}:${dirPath}`.
   const [missions, setMissions] = createStore<Record<string, Mission[]>>({});
   const [dirErrors, setDirErrors] = createStore<Record<string, string | null>>({});
@@ -1125,15 +1133,60 @@ export function LiveProjectsSection(p: {
     setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null;
     if (!selected?.startsWith("m:")) return;
     selectionAnchor = selected.slice(2); setSelectedAgents([selectionAnchor]);
-    const mission = p.activityMissions?.find(m => m.id === selected.slice(2));
-    if (!mission?.project) return;
-    const slug = mission.project;
+  }));
+  const currentMission = createMemo(() => {
+    const selected = p.selected();
+    if (!selected?.startsWith("m:")) return undefined;
+    const id = selected.slice(2);
+    return (p.currentMission?.id === id ? p.currentMission : undefined)
+      ?? p.activityMissions?.find(m => m.id === id)
+      ?? Object.values(missions).flat().find(m => m.id === id)
+      ?? archivedMissions().find(m => m.id === id);
+  });
+  // Observe identity/location, not every polling update. This also runs when a
+  // restored conversation's metadata arrives after the initial selection.
+  const currentLocation = createMemo(() => {
+    const mission = currentMission();
+    return mission?.project ? JSON.stringify([mission.id, mission.project, missionFolder(mission), isArchived(mission)]) : null;
+  });
+  createEffect(on(currentLocation, location => {
+    if (!location) return;
+    const [, slug, folder, archived] = JSON.parse(location) as [string, string, string, boolean];
+    if (archived) {
+      setArchivesOpen(true); setArchiveExpanded(slug, true);
+      void loadArchives();
+      return;
+    }
     setExpanded(slug, true);
-    const parts = missionFolder(mission).split("/").filter(Boolean);
-    for (let i = 1; i <= parts.length; i++) setExpanded(`${slug}:${parts.slice(0, i).join("/")}`, true);
+    const parts = folder.split("/").filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) {
+      const path = parts.slice(0, i).join("/");
+      setExpanded(`${slug}:${path}`, true);
+      void loadDir(slug, path);
+    }
     void loadMissions(slug);
     void loadDir(slug, "");
-  }, {defer:true}));
+  }));
+  const currentParents = createMemo(() => {
+    const mission = currentMission();
+    if (!mission?.project || isArchived(mission)) return "";
+    const parents: string[] = [], seen = new Set([mission.id]);
+    const rows = missions[mission.project] ?? [];
+    let root = mission, parent = mission.parent_mission_id;
+    while (parent && !seen.has(parent)) {
+      seen.add(parent); parents.push(`m:${parent}`);
+      const ancestor = rows.find(m => m.id === parent);
+      if (ancestor) root = ancestor;
+      parent = ancestor?.parent_mission_id;
+    }
+    if (controllerRow(mission.project) && controllerLaunched(root)) parents.push(`c:${mission.project}`);
+    return JSON.stringify([mission.id, parents]);
+  });
+  createEffect(on(currentParents, value => {
+    if (!value) return;
+    const [, parents] = JSON.parse(value) as [string, string[]];
+    for (const id of parents) setExpanded(id, true);
+  }));
   const launchedToggle = (row: TreeRow<RowData>, d: RowData) => <Show when={d.launched}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
     aria-label={`${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}`}
     title={`${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}`}
@@ -1152,10 +1205,11 @@ export function LiveProjectsSection(p: {
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
     </button>;
-    if (d.kind === "project") return <div class="row project" data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
+    if (d.kind === "project") return <div class={`row project ${currentMission()?.project === d.slug ? "contains-current" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
       <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={() => toggleProject(d.slug)}>
         <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} />
         <span class="row-label">{d.label}</span>
+        <Show when={!row.expanded && currentMission()?.project === d.slug}><span class="current-location-label">Open</span></Show>
       </button>
       <Show when={row.expanded}><ContextBadge slug={d.slug}/></Show>
       <button class="row-action" aria-label={`Project actions for ${d.label}`} title="Project actions"
@@ -1193,7 +1247,7 @@ export function LiveProjectsSection(p: {
       </button>{launchedToggle(row, d)}</>;
     }
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined]));
-    return <><button aria-expanded={d.launched ? row.expanded : undefined}
+    return <><button aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched ? row.expanded : undefined}
       onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.kind === "file" && cutFile()?.slug === d.slug && cutFile()?.path === d.path ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
       onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); else {

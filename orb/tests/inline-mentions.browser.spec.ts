@@ -163,7 +163,7 @@ test("sending waits for the attachment catalog instead of silently dropping type
   const { posts, input } = await setup(page, ready);
   await input.fill("Use @notes.md please");
   await input.press("Enter");
-  await expect(page.locator(".launch-preview .user")).toContainText("Use @notes.md please");
+  await expect(page.locator(".scroll .user")).toContainText("Use @notes.md please");
   expect(posts).toHaveLength(0);
   release();
   await expect.poll(() => posts.length).toBe(1);

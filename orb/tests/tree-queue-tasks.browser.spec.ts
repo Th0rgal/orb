@@ -113,8 +113,8 @@ test("combined queue and checklist survives failure, identical sends, reload and
   await expect(page.getByRole("button",{name:"Plan",exact:true})).toHaveCount(0);
   await field.fill("@README");await page.getByRole("option",{name:"README.md",exact:true}).click();
   state.setReject(true);await field.fill("retry this @README.md");await field.press("Escape");await field.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("not accepted");await expect(field).toHaveValue("retry this @README.md");await expect(page.locator('.queued-messages')).toHaveCount(0);
-  await expect(field).toHaveValue(/@README\.md/);
+  await expect(page.getByRole("alert")).toContainText("not accepted");await expect(page.locator(".scroll .user").filter({hasText:"retry this @README.md"})).toHaveCount(1);await expect(page.locator('.queued-messages')).toHaveCount(0);
+  await expect(field).toHaveValue("");
   state.setReject(false);
   for(let i=0;i<2;i++){await field.fill("same text @README.md");await field.press("Escape");await field.press("Enter");await expect(field).toHaveValue("");}
   await expect(page.locator('.queued-messages li')).toHaveCount(2);
@@ -125,7 +125,9 @@ test("combined queue and checklist survives failure, identical sends, reload and
   await expect(page.locator('.st-text.live')).toHaveCount(1);
   await page.screenshot({path:"test-results/orb-queue-tasks-dark.png"});
   // The queue is restored from the API, with no browser-only queue cache.
-  await page.reload();await page.getByRole("button",{name:"test",exact:true}).click();await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
+  await page.reload();await expect(page.getByRole("button",{name:"test",exact:true})).toBeVisible();
+  if(await page.getByRole("button",{name:"test",exact:true}).getAttribute("aria-expanded")!=="true")await page.getByRole("button",{name:"test",exact:true}).click();
+  await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
   await expect(page.locator('.queued-messages li')).toHaveCount(2);
   state.setStatus("completed"); // Status alone never confirms delivery.
   await page.waitForTimeout(2200);await expect(page.locator('.queued-messages li')).toHaveCount(2);
@@ -142,8 +144,8 @@ test("retry after a lost HTTP receipt reuses the accepted message ID",async({pag
   await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
   const field=page.getByPlaceholder("Send follow-up");await expect(field).toBeVisible();
   state.loseNextReply();await field.fill("accepted but reply lost");await field.press("Enter");
-  await expect(page.getByRole("alert")).toBeVisible();await expect(field).toHaveValue("accepted but reply lost");
-  await field.press("Enter");await expect(field).toHaveValue("");
+  await expect(page.getByRole("alert")).toBeVisible();await expect(page.locator(".scroll .user").filter({hasText:"accepted but reply lost"})).toHaveCount(1);
+  await page.getByRole("button",{name:"Retry",exact:true}).click();await expect(field).toHaveValue("");
   await expect.poll(() => state.posts.length).toBe(2);expect(state.posts[0].client_message_id).toBe(state.posts[1].client_message_id);
   expect(state.pending).toHaveLength(1);await expect(page.locator('.queued-messages li')).toHaveCount(1);
 });
@@ -158,6 +160,6 @@ test("reserved attachment reference rejection keeps the follow-up draft and atta
   const prose="@README.md Quoted prose: "+"<!-- paloma:"+"attachment:malformed";
   await field.fill(prose);await field.press("Enter");
   await expect(page.getByRole("alert")).toContainText("reserved attachment reference");
-  await expect(field).toHaveValue(prose);await expect(field).toHaveValue(/@README\.md/);
+  await expect(page.locator(".scroll .user").filter({hasText:prose})).toHaveCount(1);await expect(field).toHaveValue("");
   await expect(page.locator('.queued-messages')).toHaveCount(0);
 });

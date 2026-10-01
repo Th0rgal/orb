@@ -26,6 +26,20 @@ const [connected, setConnected] = createSignal(!!getJwt());
 export const isConnected = connected;
 export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 
+let connectionSave = Promise.resolve();
+function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
+  const invoke=(window as any).__TAURI__?.core?.invoke;
+  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(()=>{});
+}
+export async function restoreDesktopConnection() {
+  const invoke=(window as any).__TAURI__?.core?.invoke;
+  if(!invoke)return;
+  // Migrate an existing web-origin login before consulting the desktop store.
+  if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
+  const saved=await invoke('desktop_connection_load').catch(()=>null);
+  if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token);
+}
+
 function disconnectNativeSync(){
   const invoke=(window as any).__TAURI_INTERNALS__?.invoke ?? (window as any).__TAURI__?.core?.invoke;
   if(!invoke||!getJwt())return;
@@ -37,6 +51,7 @@ export function setConnection(url: string, token: string) {
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
   setConnected(true);
+  persistDesktopConnection({api_url:getApiUrl(),token});
   invalidateReads();
   cacheReset();
   bumpConnectionVersion(v => v + 1);
@@ -46,6 +61,7 @@ export function clearConnection() {
   disconnectNativeSync();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
+  persistDesktopConnection(null);
   setConnected(false);
   if (!hadConnection) return;
   invalidateReads();
@@ -65,11 +81,7 @@ export async function login(password: string): Promise<void> {
   }
   const data = (await res.json()) as { token?: string };
   if (!data.token) throw new Error("Login response did not include a token");
-  localStorage.setItem(JWT_KEY, data.token);
-  setConnected(true);
-  invalidateReads();
-  cacheReset();
-  bumpConnectionVersion(v => v + 1);
+  setConnection(getApiUrl(), data.token);
 }
 
 export class ApiError extends Error {

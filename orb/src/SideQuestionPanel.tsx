@@ -1,3 +1,4 @@
+import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts} from "./btwAgent";
 import {btwConfig} from "./btwSettings";
@@ -22,9 +23,16 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [docked,setDocked]=createSignal(false);
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
  const [history,setHistory]=createSignal<SideExchange[]>([]),[open,setOpen]=createSignal(false),[busy,setBusy]=createSignal(false);
+ const [turnId,setTurnId]=createSignal(crypto.randomUUID());
+ const [preparing,setPreparing]=createSignal(false);
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  let scroll:HTMLDivElement|undefined;
+ // Sending explicitly returns to the latest turn, even after reading older replies.
+ const revealSentQuestion=()=>{
+  const current=key();
+  requestAnimationFrame(()=>{if(current===key()&&scroll)scroll.scrollTop=scroll.scrollHeight;});
+ };
  // The thread opens at its end, like the conversation, and follows new
  // text only while the reader is near the end.
  let shown='';
@@ -50,7 +58,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let stale=false;onCleanup(()=>{stale=true;});
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
-  setHistory(saved?.history??[]);setBusy(false);setOpen(saved?.open??false);
+  setHistory((saved?.history??[]).map(row=>({...row,id:row.id??crypto.randomUUID()})));setBusy(false);setOpen(saved?.open??false);
   setDocked(saved?.docked??false);setQuestion(saved?.pending?.question??'');
   setAnswer(saved?.pending?.answer??'');
   setError(saved?.pending ? saved.pending.error || 'Side question interrupted. Retry to request a complete answer.' : '');
@@ -67,7 +75,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(stale||controller.signal.aborted)return;
     if(event.type==='start')setModel(event.model);
     if(event.type==='snapshot')setAnswer(event.text);
-    if(event.type==='done'){setHistory(rows=>[...rows,{question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
+    if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(String(e));setBusy(false);}});
   }
   if(saved?.open&&saved.docked)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
@@ -82,7 +90,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  });
  side?.register(()=>{setDocked(true);setOpen(true);});
  onCleanup(()=>{abort?.abort();side?.register(undefined);});
- const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[])=>{
+ const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[],retryTurn=false)=>{
   text=text.trim();if(!text)return false;
   const selected=key();await ready;if(selected!==key())return false;
   if(busy()){
@@ -92,8 +100,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
    setQueue(rows=>[...rows,{id:crypto.randomUUID(),question:text,attachments}].slice(0,20));
    setOpen(true);if(docked())side?.show();setDraft('');
+   revealSentQuestion();
    return true;
   }
+  if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
   const current=key(),context=sideContext(p.items,true),controller=new AbortController();abort=controller;
   let attachments:SideAttachment[];
   setBusy(true);
@@ -103,6 +113,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   setPendingAttachments(attachments);
   setOpen(true);if(docked())side?.show();setBusy(true);setQuestion(text);setAnswer('');setError('');setDraft('');
+  revealSentQuestion();
   void askBtwAgent(p.mission,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
    if(event.type==='start')setModel(event.model);
@@ -110,7 +121,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(event.type==='delta')setAnswer(value=>value+event.text);
    if(event.type==='done'){
     setAnswer(event.answer);
-    const next=[...history(),{question:text,answer:event.answer,attachments}].slice(-20);
+    const next=[...history(),{id:turnId(),question:text,answer:event.answer,attachments}].slice(-20);
     setHistory(next);setBusy(false);
    }
   },attachments).catch(e=>{if(current===key()&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));})
@@ -127,7 +138,20 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  onMount(()=>window.addEventListener('keydown',escape));
  onCleanup(()=>window.removeEventListener('keydown',escape));
  const cancel=()=>{void stopBtw(p.mission).then(()=>{abort?.abort();setBusy(false);setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
- const retry=()=>{const asked=question(),files=pendingAttachments();setError('');void ask(asked,[],[],files);};
+ const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
+ // Reconcile the same turn through preparation, streaming and persistence.
+ const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
+ createEffect(()=>{
+  const rows=history().map((row,index)=>({...row,id:row.id??`saved:${loadedKey()}:${index}`}));
+  if((preparing()||busy()||error())&&!rows.some(row=>row.id===turnId()))rows.push({id:turnId(),question:question(),answer:answer(),attachments:pendingAttachments(),pending:preparing()||busy(),error:error()} as typeof rows[number]);
+  setTurns(reconcile(rows,{key:'id'}));
+ });
+ const prepareSend=(draft:{text:string}|null)=>{
+  if(!draft){setPreparing(false);return;}
+  if(busy())return;
+  setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setError('');setPreparing(true);
+  setOpen(true);if(docked())side?.show();revealSentQuestion();
+ };
  let inline!:HTMLDivElement;
  return <>
   <div ref={inline}/>
@@ -135,8 +159,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <Show when={open()}><Portal mount={docked() ? side?.target() : inline}><section class="btw-panel" aria-label="Side questions">
    <header><div><strong>Side question</strong></div><div class="btw-actions"><Show when={side}><button class="icon-btn" aria-label={docked()?"Move side question below conversation":"Move side question to right panel"} title={docked()?"Move below conversation":"Move to right panel"} onClick={()=>{if(docked()){setDocked(false);side?.hide();}else{setDocked(true);side?.show();}}}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d={docked()?"m11 9-3 3 3 3":"m8 9 3 3-3 3"}/></svg></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);if(docked())side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={scroll}>
-    <For each={history()}>{exchange=><article><UserTurn text={exchange.question} onSend={text=>ask(text,[],[],exchange.attachments??[])}/><MdView compact text={exchange.answer}/><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${exchange.answer}`)}>Use in agent draft ↗</button></article>}</For>
-    <Show when={busy()||error()}><article><UserTurn text={question()} onSend={text=>ask(text,[],[],pendingAttachments())}/><For each={btwThoughts(p.mission)}>{thought=><ThinkBlock item={thought}/>}</For><Show when={answer()}><MdView compact text={answer()}/></Show><Show when={busy()}><p class="dim" role="status">Side agent is working…</p></Show><Show when={error()}><p role="alert" class="error">{error()}</p><button onClick={retry} disabled={busy()}>Retry</button></Show></article></Show>
+    <For each={turns}>{exchange=><article data-side-turn={exchange.id}>
+     <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>
+     <Show when={exchange.pending}><For each={btwThoughts(p.mission)}>{thought=><ThinkBlock item={thought}/>}</For></Show>
+     <Show when={exchange.answer}><MdView compact text={exchange.answer}/></Show>
+     <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
+     <Show when={exchange.error}><p role="alert" class="error">{exchange.error}</p><button onClick={retry} disabled={busy()}>Retry</button></Show>
+     <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${exchange.answer}`)}>Use in agent draft ↗</button></Show>
+    </article>}</For>
     <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
      <header><span class="queue-count">{queue().length} Queued</span></header>
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
@@ -146,7 +176,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>
    <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
-   <div class="btw-composer-dock"><Composer sideQuestion picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span>/btw</span><span aria-hidden="true">·</span><span title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
+   <div class="btw-composer-dock"><Composer sideQuestion onPending={prepareSend} picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span>/btw</span><span aria-hidden="true">·</span><span title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
   </section></Portal></Show>
  </>;
 }

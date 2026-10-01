@@ -22,11 +22,11 @@ async function setup(page:Page, options:{reject?:boolean;legacy?:boolean;remoteS
   const timing:any={};(window as any).launchTiming=timing;
   document.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.target instanceof HTMLTextAreaElement&&!timing.start)timing.start=performance.now();},true);
   new MutationObserver(()=>{
-   const status=document.querySelector(".launch-preview .user.pending"),user=document.querySelector(".launch-preview .user");
+   const status=document.querySelector(".scroll .user.pending"),user=document.querySelector(".scroll .user");
    if(timing.start&&user&&status&&!timing.optimistic)timing.optimistic=performance.now()-timing.start;
    if(timing.response&&document.querySelector('textarea[placeholder$="Send follow-up"]')&&!timing.acceptedView)timing.acceptedView=performance.now()-timing.response;
   }).observe(document,{subtree:true,childList:true,attributes:true});
-  const fetcher=window.fetch.bind(window);window.fetch=async(input,init)=>{const response=await fetcher(input,init);if(String(input).endsWith("/api/control/missions")&&init?.method==="POST"&&response.ok)timing.response=performance.now();return response;};
+  const fetcher=window.fetch.bind(window);window.fetch=async(input,init)=>{const response=await fetcher(input,init);if(String(input).endsWith("/api/control/missions")&&init?.method==="POST"&&response.ok){timing.response=performance.now();if(document.querySelector('textarea[placeholder$="Send follow-up"]'))timing.acceptedView=0;}return response;};
  });
  await page.route("**/api/**",async route=>{
   const request=route.request(),url=new URL(request.url()),path=url.pathname;
@@ -77,7 +77,7 @@ const composerInput=(page:Page)=>page.getByPlaceholder(/Describe a task, \/ for 
  * — so assert against both, and use `.launch-status` directly only
  * where the test is specifically about the visible banner.
  */
-const phaseStatus=(page:Page)=>page.locator(".launch-status, .agent-wait-status").first();
+const phaseStatus=(page:Page)=>page.locator(".scroll .sr-only[role=status]").first();
 /** A `/goal` turn renders as a Goal tag plus the exact objective, never the raw slash command. */
 async function expectGoalTurn(page:Page,selector:string,text=objective){
  const turn=page.locator(`${selector}:not(.sk-user)`);await expect(turn).toHaveCount(1);
@@ -87,13 +87,13 @@ async function expectGoalTurn(page:Page,selector:string,text=objective){
 test("slow local POST shows prompt immediately; accepted mission opens before slow list refresh and reconciles history",async({page})=>{
  const state=await setup(page);
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
- await expectGoalTurn(page,".launch-preview .user");await expect(phaseStatus(page)).toContainText("Working on Core");
+ await expectGoalTurn(page,".scroll .user");await expect(phaseStatus(page)).toContainText("Working on Core");
  await input.dispatchEvent("keydown",{key:"Enter"});await expect.poll(()=>state.posts.length).toBe(1);
  await page.screenshot({path:"test-results/orb-launch-starting.png"});
  // The working indicator is the prompt itself now, and it must not move when
  // the user has asked for reduced motion.
  await page.emulateMedia({reducedMotion:"reduce"});await expect(page.locator(".user.pending")).toHaveCSS("animation-name","none");
- const previewBox = await page.locator(".launch-preview .user").boundingBox();
+ const previewBox = await page.locator(".scroll .user").boundingBox();
  await page.waitForTimeout(1000);state.releasePost();await expect(page.getByPlaceholder("Send follow-up")).toBeVisible({timeout:1500});
  await expectGoalTurn(page,".user");
  await expect(page.locator(".sk-transcript")).toHaveCount(0);
@@ -212,7 +212,7 @@ test("Grok remote launch is sent unchanged once the server advertises grok",asyn
  const menu=page.locator(".picks .menu");await expect(menu.getByRole("button",{name:/^Grok 1/})).toBeVisible();await expect(menu.getByRole("button",{name:/^Codex/})).toContainText("not on DGX Spark");
  await page.keyboard.press("Escape");
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
- await expectGoalTurn(page,".launch-preview .user");await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
+ await expectGoalTurn(page,".scroll .user");await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expect.poll(()=>state.posts.length).toBe(1);
  expect(state.posts[0]).toMatchObject({backend:"grok",model_override:"grok-4.6",remote_node_id:"dgx-spark",prompt,title:"Check remote startup without losing this…"});
  expect(state.posts[0]).not.toHaveProperty("remote_command");
@@ -220,9 +220,9 @@ test("Grok remote launch is sent unchanged once the server advertises grok",asyn
  await expect(page.locator(".under-loc")).toContainText("DGX Spark");
  await expect(page.locator(".under-harness")).toHaveText("Grok");
  await expect(page.locator(".under-model")).toHaveText("4.6");
- await expect(phaseStatus(page)).toContainText("Remote job accepted on DGX Spark");
- // Without transcript output or running evidence, acceptance stays explicit.
- await expect(page.locator(".launch-status")).toContainText("Remote job accepted");
+ await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
+ // Acceptance keeps the same quiet working state instead of inserting a banner.
+ await expect(page.locator(".launch-status")).toHaveCount(0);
  await expectGoalTurn(page,".user");state.releaseHistory();await expectGoalTurn(page,".user");
  await page.screenshot({path:"test-results/orb-remote-grok-accepted.png"});
 });
@@ -291,7 +291,7 @@ test("startup timing benchmark: repeated explicit launches get distinct request 
   if(i)await page.getByRole("button",{name:/New Agent/}).click();
   await page.evaluate(()=>{for(const key of Object.keys((window as any).launchTiming))delete (window as any).launchTiming[key];});
   const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
-  await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();
+  await expect(page.locator(".tb-title .goal-tag")).toBeVisible();
   samples.push(await page.evaluate(()=>{const {optimistic,acceptedView}=(window as any).launchTiming;return {optimistic,acceptedView};}));
  }
  const percentile=(key:"optimistic"|"acceptedView",q:number)=>samples.map(s=>s[key]).sort((a,b)=>a-b)[Math.ceil(samples.length*q)-1];
@@ -309,11 +309,11 @@ for(const status of ["failed","resuming"])test(`empty ${status} mission retains 
  await expect(page.locator(status==="failed"?".launch-pulse":".user.pending")).toHaveCount(status==="failed"?0:1);
 });
 
-for(const [phase,node_state,label] of [["observed",undefined,"Remote job accepted"],["observed","queued","Queued"],["observed","running","Working"],["unobserved",undefined,"Checking remote job"],["submit_ambiguous",undefined,"Checking submission"]] as const)test(`Active remote mission shows ${label} from durable job evidence`,async({page})=>{
+for(const [phase,node_state,label] of [["observed",undefined,"Remote job accepted"],["observed","queued","Queued"],["observed","running","Working"],["unobserved",undefined,"Checking remote job"],["submit_ambiguous",undefined,"Checking submission"]] as const)test(`Active remote mission keeps a stable working label for ${label}`,async({page})=>{
  await setup(page,{failed:true,emptyStatus:"active",remoteJob:{phase,node_state}});
  await page.getByRole("button",{name:"Test",exact:true}).click();
  await page.getByRole("button",{name:/Remote task/}).click();
- await expect(phaseStatus(page)).toContainText(`${label} on DGX Spark`);
+ await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expectGoalTurn(page,".user","Original saved objective");
 });
 
@@ -321,16 +321,16 @@ for(const harness of ["claudecode", "opencode"] as const)test(`supported remote 
  const state=await setup(page,{remoteSuccess:true});await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("button",{name:harness === "claudecode" ? "Claude Code 1" : "OpenCode 1",exact:true}).click();
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
- await expectGoalTurn(page,".launch-preview .user");
+ await expectGoalTurn(page,".scroll .user");
  await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expect.poll(()=>state.posts.length).toBe(1);
  expect(state.posts[0]).toMatchObject({backend:harness,model_override:harness === "claudecode" ? "claude-sonnet-4-6" : "builtin/smart",remote_node_id:"dgx-spark",prompt});
  expect(state.posts[0]).not.toHaveProperty("remote_command");expect(state.posts[0]).not.toHaveProperty("remote_async");
  await input.dispatchEvent("keydown",{key:"Enter"});
  await page.waitForTimeout(1000);expect(state.posts).toHaveLength(1);
- await expectGoalTurn(page,".launch-preview .user");
+ await expectGoalTurn(page,".scroll .user");
  state.releasePost();await expect(page.getByPlaceholder("Send follow-up")).toBeVisible({timeout:1500});
- await expect(phaseStatus(page)).toContainText("Remote job accepted on DGX Spark");
+ await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expectGoalTurn(page,".user");state.releaseHistory();await expectGoalTurn(page,".user");
  await page.screenshot({path:`test-results/orb-remote-${harness}-accepted.png`});
 });

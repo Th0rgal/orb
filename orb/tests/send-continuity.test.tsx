@@ -1,0 +1,55 @@
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import {render,screen,waitFor} from '@solidjs/testing-library';
+import {createSignal} from 'solid-js';
+import {NativeMissionView} from '../src/App';
+import type {Mission} from '../src/api';
+beforeEach(()=>{Object.defineProperty(HTMLElement.prototype,'scrollTo',{configurable:true,value:vi.fn()});});
+const state=vi.hoisted(()=>({event:undefined as undefined|((event:any)=>void)}));
+vi.mock('../src/stream',async()=>({...await vi.importActual('../src/stream'),streamMission:(_id:string,receive:(event:any)=>void)=>{state.event=receive;return ()=>{};}}));
+vi.mock('../src/api',async()=>({...await vi.importActual('../src/api'),sendMissionMessage:vi.fn(),getMission:vi.fn(async()=>({id:'accepted',status:'active',history:[],created_at:'',updated_at:''}))}));
+afterEach(()=>{vi.unstubAllGlobals();state.event=undefined;});
+it('keeps the initial bubble mounted across native identity allocation and canonical receipt',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([])));
+ const [id,setId]=createSignal('');
+ const [mission,setMission]=createSignal<Mission>();
+ const receipt={messageKey:'draft:one',prompt:'Keep this message visible',nodeId:'core',destination:'Core'};
+ const view=render(()=><NativeMissionView id={id()} initial={mission()} launch={receipt}/>);
+ const node=view.container.querySelector('.user');expect(node?.textContent).toContain(receipt.prompt);
+ expect(state.event).toBeUndefined();
+ setMission({id:'accepted',status:'active',history:[],created_at:'',updated_at:''});setId('accepted');
+ await waitFor(()=>expect(state.event).toBeTypeOf('function'));
+ state.event!({type:'user_message',data:{id:'canonical',content:receipt.prompt}});
+ await waitFor(()=>expect(screen.getAllByText(receipt.prompt)).toHaveLength(1));
+ expect(view.container.querySelector('.user')).toBe(node);
+});
+it('keeps the failed launch bubble in place and offers retry',()=>{
+ const [error,setError]=createSignal<string>();const retry=vi.fn();
+ const view=render(()=><NativeMissionView id="" launch={{messageKey:'draft:error',prompt:'Retain failed message',nodeId:'local',destination:'This computer'}} launchError={error()} onRetryLaunch={retry}/>);
+ const node=view.container.querySelector('.user');setError('Connection unavailable');
+ expect(view.container.querySelector('.user')).toBe(node);
+ screen.getByRole('button',{name:'Retry'}).click();expect(retry).toHaveBeenCalledOnce();
+});
+
+it('keeps a follow-up visible through a failed request and retries with the same identity',async()=>{
+ const {sendMissionMessage,getMission}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'followup',status:'awaiting_user',history:[],created_at:'',updated_at:''});
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
+ let reject!:(e:Error)=>void;
+ vi.mocked(sendMissionMessage).mockImplementationOnce(()=>new Promise((_resolve,fail)=>{reject=fail;}));
+ vi.mocked(sendMissionMessage).mockImplementationOnce(async(_id,_text,_attachments,id)=>({id:id!,queued:false}));
+ const view=render(()=><NativeMissionView id="followup" initial={{id:'followup',status:'awaiting_user',history:[],created_at:'',updated_at:''}}/>);
+ const input=screen.getByPlaceholderText('Send follow-up') as HTMLTextAreaElement;
+ const {fireEvent}=await import('@solidjs/testing-library');
+ fireEvent.input(input,{target:{value:'Keep my follow-up'}});fireEvent.keyDown(input,{key:'Enter'});
+ const node=view.container.querySelector('.user');expect(node?.textContent).toContain('Keep my follow-up');
+ await waitFor(()=>expect(reject).toBeTypeOf('function'));
+ reject(new Error('Network unavailable'));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Retry'})).toBeDefined());
+ expect(view.container.querySelector('.user')).toBe(node);expect(input.value).toBe('');
+ await waitFor(()=>expect(input.readOnly).toBe(false));
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ await waitFor(()=>expect(sendMissionMessage).toHaveBeenCalledTimes(2));
+ expect(vi.mocked(sendMissionMessage).mock.calls[1][3]).toBe(vi.mocked(sendMissionMessage).mock.calls[0][3]);
+ expect(view.container.querySelector('.user')).toBe(node);
+ expect(screen.getAllByText('Keep my follow-up')).toHaveLength(1);
+});

@@ -4,6 +4,7 @@ mod agent_software;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 
+mod connection_store;
 #[cfg(test)]
 mod live_mcp_tests;
 mod local_origin;
@@ -158,7 +159,10 @@ fn main() {
             interactions::local_interaction_answer,
             paloma_ssh_pubkey,
             session_preview::local_session_git,
+            connection_store::desktop_connection_load,
+            connection_store::desktop_connection_save,
             uploads::pick_upload_files,
+            uploads::pick_working_directory,
             uploads::read_upload_file,
             uploads::stage_upload_file,
             browse_local_files,

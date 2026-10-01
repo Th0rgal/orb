@@ -1,3 +1,4 @@
+import {restoreDesktopConnection} from "./api";
 import { render } from "solid-js/web";
 import App from "./App";
 import {FindBar} from "./FindBar";
@@ -7,4 +8,6 @@ import { startDiagnostics } from "./diagnostics";
 
 initTheme();
 startDiagnostics();
-render(() => <><App /><FindBar /></>, document.getElementById("root")!);
+void restoreDesktopConnection().finally(() => {
+  render(() => <><App /><FindBar /></>, document.getElementById("root")!);
+});

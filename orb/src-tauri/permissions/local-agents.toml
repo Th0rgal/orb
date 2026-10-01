@@ -2,6 +2,9 @@
 identifier = "allow-local-agents"
 description = "Detect local agent CLIs, copy project files into the local workspace, and run those CLIs"
 commands.allow = [
+  "desktop_connection_load",
+  "desktop_connection_save",
+  "pick_working_directory",
   "software_inventory",
   "software_update",
   "software_cancel",

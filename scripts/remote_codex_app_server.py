@@ -18,6 +18,10 @@ def emit(kind, **fields):
     print(json.dumps(dict(type=kind, **fields)), flush=True)
 
 
+def is_capacity_error(error):
+    return isinstance(error, dict) and error.get('codexErrorInfo') == 'serverOverloaded'
+
+
 GOAL_CONTROLS = ('pause', 'status', 'clear')
 
 
@@ -62,12 +66,15 @@ class NativeSession:
         self.seen_turns = set()
         self.text = {}
         self.pending_hint = None
+        self.capacity_retries = 0
         command = ['codex']
         if os.environ.get('SANDBOXED_MCP_WRAPPER'):
             command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
         for setting in config['settings']:
             command += ['-c', setting]
-        command += ['app-server', '--enable', 'goals']
+        # Match thread policy from process startup, before sandbox probing.
+        command += ['-c', 'approval_policy="never"', '-c', 'sandbox_mode="danger-full-access"',
+                    'app-server', '--enable', 'goals']
         self.child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=sys.stderr, text=True, bufsize=1)
         threading.Thread(target=self.read, daemon=True).start()
@@ -131,7 +138,25 @@ class NativeSession:
             turn = params['turn']
             self.turns.discard(turn['id'])
             if turn.get('status') == 'failed':
-                raise RuntimeError(str(turn.get('error', 'Native turn failed')))
+                error = turn.get('error', 'Native turn failed')
+                # Retry only explicit provider capacity failures after the turn has
+                # ended. Preserve the native thread and never replay the original
+                # task (it may already have executed tools). Native goals own their
+                # own continuation and budgets; do not create extra goal turns.
+                retries = getattr(self, 'capacity_retries', 0)
+                if not self.goal and is_capacity_error(error) and retries < 3:
+                    self.capacity_retries = retries + 1
+                    delay = (5, 15, 30)[retries]
+                    emit('item.completed', item={'type': 'agent_message',
+                         'id': 'capacity-retry-' + str(self.capacity_retries),
+                         'text': f'Model at capacity. Retrying in {delay}s in the same session ({self.capacity_retries}/3).'})
+                    time.sleep(delay)
+                    self.rpc('turn/start', {'threadId': self.thread_id, 'input': [{
+                        'type': 'text', 'text': 'The previous turn ended because the model was at capacity. '
+                        'Continue the same task from the existing conversation and working tree. '
+                        'Check what already completed; do not repeat completed actions.'}]})
+                    return
+                raise RuntimeError(str(error))
             if not self.goal:
                 emit('turn.completed')
                 self.goal_status = 'complete'
@@ -147,7 +172,11 @@ class NativeSession:
                                   status='failed' if item.get('status') == 'failed' else ('completed' if completed else 'in_progress'))
                 emit('item.completed' if completed else 'item.started', item=normalized)
         elif method == 'error' and not params.get('willRetry', False):
-            raise RuntimeError(str(params.get('error', 'Native Codex error')))
+            error = params.get('error', 'Native Codex error')
+            if not self.goal and is_capacity_error(error):
+                # The following terminal turn receipt owns retry/termination.
+                return
+            raise RuntimeError(str(error))
 
     def run(self):
         self.rpc('initialize', {'clientInfo': {'name': 'sandboxed-remote', 'version': '1'}, 'capabilities': {'experimentalApi': True}})

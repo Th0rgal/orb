@@ -410,8 +410,16 @@ fn watch_exit(
 
 #[tauri::command]
 pub fn local_agents_poll(id: String) -> Result<PollState, String> {
+    poll_generation(&id, None)
+}
+
+/// Read only the execution owned by the caller, under the same registry lock.
+pub fn poll_generation(id: &str, expected: Option<&str>) -> Result<PollState, String> {
     let map = runs().lock().map_err(|e| e.to_string())?;
-    let run = map.get(&id).ok_or_else(|| "no local run".to_string())?;
+    let run = map.get(id).ok_or_else(|| "no local run".to_string())?;
+    if expected.is_some_and(|generation| generation != run.generation) {
+        return Err("Local execution generation changed".into());
+    }
     let snapshot = PollState {
         text: run.text.snapshot(),
         activities: run.text.activities(),
@@ -694,7 +702,10 @@ fn spawn_claude(
         *slot = Some(fresh);
     }
     if let Some(command) = crate::local_wakeups::command(&request.id) {
-        cmd.arg("--mcp-config").arg(json!({"mcpServers":{"orb-wakeups":{"command":command[0],"args":command[1..]}}}).to_string());
+        cmd.arg("--mcp-config").arg(
+            json!({"mcpServers":{"orb-wakeups":{"command":command[0],"args":command[1..]}}})
+                .to_string(),
+        );
     }
     let mut child = cmd
         .spawn()
@@ -751,14 +762,23 @@ fn spawn_claude(
                     };
                     if let Some(blocks) = event["message"]["content"].as_array() {
                         for block in blocks {
-                            if event["type"] == "assistant" && block["type"] == "tool_use" && block["name"] == "ScheduleWakeup" {
-                                if let Some(id) = block["id"].as_str() { wakeups.insert(id.into(),block["input"].clone()); }
+                            if event["type"] == "assistant"
+                                && block["type"] == "tool_use"
+                                && block["name"] == "ScheduleWakeup"
+                            {
+                                if let Some(id) = block["id"].as_str() {
+                                    wakeups.insert(id.into(), block["input"].clone());
+                                }
                             } else if event["type"] == "user" && block["type"] == "tool_result" {
                                 if let Some(id) = block["tool_use_id"].as_str() {
                                     if let Some(mut args) = wakeups.remove(id) {
                                         if block["is_error"] != true {
-                                            args["request_id"] = json!(format!("claude-native:{id}"));
-                                            crate::local_wakeups::capture(wakeup_command.as_deref(), args)?;
+                                            args["request_id"] =
+                                                json!(format!("claude-native:{id}"));
+                                            crate::local_wakeups::capture(
+                                                wakeup_command.as_deref(),
+                                                args,
+                                            )?;
                                         }
                                     }
                                 }
@@ -946,9 +966,16 @@ fn spawn_piped(
     command.envs(env.iter().map(|(key, value)| (key, value)));
     if request.harness == "opencode" {
         if let Some(wake_command) = crate::local_wakeups::command(&request.id) {
-            let raw = env.iter().find(|(k,_)|k == "OPENCODE_CONFIG_CONTENT").map(|(_,v)|v.clone()).or_else(||std::env::var("OPENCODE_CONFIG_CONTENT").ok());
-            let mut config: Value = raw.and_then(|v|serde_json::from_str(&v).ok()).unwrap_or_else(||json!({}));
-            config["mcp"]["orb-wakeups"] = json!({"type":"local","command":wake_command,"enabled":true});
+            let raw = env
+                .iter()
+                .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                .map(|(_, v)| v.clone())
+                .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+            let mut config: Value = raw
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_else(|| json!({}));
+            config["mcp"]["orb-wakeups"] =
+                json!({"type":"local","command":wake_command,"enabled":true});
             command.env("OPENCODE_CONFIG_CONTENT", config.to_string());
         }
     }
@@ -1171,12 +1198,26 @@ fn spawn_codex(
     env: &[(String, String)],
 ) -> Result<Child, String> {
     let mut command = mission_command(request, env);
+    // Apply the same full-access policy before app-server startup and thread creation.
+    command.args([
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+    ]);
     if let Some(args) = crate::local_wakeups::command(&request.id) {
-        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.command={}", json!(args[0])));
-        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
+        command.arg("-c").arg(format!(
+            "mcp_servers.orb-wakeups.command={}",
+            json!(args[0])
+        ));
+        command
+            .arg("-c")
+            .arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
         // This private, mission-bound MCP must work under approvalPolicy=never,
         // just like the common sandboxed MCP installed by the launcher.
-        command.arg("-c").arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
+        command
+            .arg("-c")
+            .arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
     }
     let mut child = command
         .current_dir(&request.cwd)
@@ -2892,12 +2933,17 @@ printf '%s\n' '{"type":"result"}'
             session_id: None,
         };
         local_agents_start(request.clone()).unwrap();
+        let initial_generation = native_generation(&request.id).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !local_agents_poll(request.id.clone()).unwrap().done {
             assert!(Instant::now() < deadline, "fixture did not complete");
             thread::sleep(Duration::from_millis(10));
         }
         local_agents_start(request.clone()).expect("a finished run must not block a new turn");
+        assert!(
+            poll_generation(&request.id, Some(&initial_generation)).is_err(),
+            "initial-origin sync must not consume the follow-up's output"
+        );
         local_agents_stop(request.id).unwrap();
     }
 
@@ -2922,6 +2968,8 @@ printf '%s\n' '{"type":"result"}'
         })
         .unwrap();
         let generation = native_generation(&id).unwrap();
+        assert!(poll_generation(&id, Some("old-generation")).is_err());
+        assert!(poll_generation(&id, Some(&generation)).is_ok());
         stop_generation(&id, Some("old-generation")).unwrap();
         assert!(!local_agents_poll(id.clone()).unwrap().done);
         stop_generation(&id, Some(&generation)).unwrap();

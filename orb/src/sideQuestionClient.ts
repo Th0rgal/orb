@@ -3,7 +3,7 @@ import type { DraftImage } from "./imageAttachments";
 import { connectionVersion, getApiUrl, getJwt } from "./api";
 import type { StreamItem } from "./transcriptModel";
 export type SideAttachment = { name:string; data_base64:string; media_type:string };
-export type SideExchange = { question: string; answer: string; attachments?:SideAttachment[] };
+export type SideExchange = { id?: string; question: string; answer: string; attachments?:SideAttachment[] };
 export async function sideAttachments(images:DraftImage[], files:UploadedFile[]):Promise<SideAttachment[]> {
  const result:SideAttachment[]=images.map(image=>({name:image.name,data_base64:image.dataUrl.split(',')[1],media_type:image.type}));
  for(const file of files)result.push({name:file.source.name,data_base64:file.dataBase64??await encoded(file.source),media_type:file.source.file?.type||'application/octet-stream'});

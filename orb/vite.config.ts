@@ -25,6 +25,7 @@ function palomaPub(): Plugin {
 export default defineConfig({
   plugins: [solid(), palomaPub()],
   clearScreen: false,
-  server: { port: 1430, strictPort: true },
+  // Polling also detects edits made by agent processes without macOS file events.
+  server: { port: 1430, strictPort: true, watch: { usePolling: true, interval: 500, ignored: ["**/src-tauri/**", "**/target/**", "**/dist/**"] } },
   build: { target: "safari15" },
 });

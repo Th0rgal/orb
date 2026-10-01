@@ -2,7 +2,7 @@ vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:s
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
-vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:async()=>{},localLiveText:()=> 'Read fixture'}));
+vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
@@ -108,4 +108,25 @@ it('replaces an explicitly refused side session only through the btw route and r
  expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
  expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(history);
  expect(JSON.parse(vi.mocked(api).mock.calls.at(-1)![1]!.body as string).side_context_mode).toBe('incremental');
+});
+
+it('finishes a local side response without waiting for Core to persist terminal status',async()=>{
+ vi.mocked(localBinding).mockImplementation(id=>id==='native-parent'?{cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}:undefined);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='native-parent'?['placement:client']:[],created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'native-child'});
+ const receive=vi.fn();
+ await askBtwAgent('native-parent','Q','context',[],new AbortController().signal,receive);
+ expect(receive).toHaveBeenCalledWith({type:'done',answer:'Read fixture'});
+ expect(btwSession('native-parent')?.active).toBe(false);
+});
+
+
+it('reconciles a restored local side run before subscribing',async()=>{
+ const {reconcileLocalRun,followLocal}=await import('../src/localAgents');
+ vi.mocked(localBinding).mockImplementation(id=>id==='recovery-parent'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude'}:undefined);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='recovery-parent'?'active':'awaiting_user',history:[],tags:id==='recovery-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'recovery-child'});
+ await askBtwAgent('recovery-parent','Check progress','context',[],new AbortController().signal,()=>{});
+ expect(reconcileLocalRun).toHaveBeenCalledWith('recovery-child');
+ expect(vi.mocked(reconcileLocalRun).mock.invocationCallOrder.at(-1)).toBeLessThan(vi.mocked(followLocal).mock.invocationCallOrder.at(-1)!);
 });
