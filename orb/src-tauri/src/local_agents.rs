@@ -621,13 +621,56 @@ fn opencode_args(request: &StartRequest) -> Vec<String> {
 /// Launchers (notably Codex's Node shim) spawn another process. Stop must
 /// address a dedicated group, never the desktop's inherited process group.
 fn harness_command(bin: &str) -> Command {
-    let mut command = Command::new(bin);
+    // Operator provisioning is outside project files. This also covers local
+    // missions whose cwd is an existing checkout outside ~/.orb.
+    let identity = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config/sandboxed-sh/development-identity/launch"));
+    harness_command_with_identity(bin, identity.as_deref())
+}
+
+fn harness_command_with_identity(bin: &str, identity: Option<&Path>) -> Command {
+    let mut command = match identity.filter(|path| path.is_file()) {
+        Some(launcher) => {
+            let mut command = Command::new(launcher);
+            command.arg(bin);
+            command
+        }
+        None => Command::new(bin),
+    };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     command
+}
+
+#[cfg(test)]
+mod development_identity_tests {
+    use super::*;
+
+    #[test]
+    fn installed_identity_wraps_the_selected_harness_without_credentials_in_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = dir.path().join("launch");
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let mut command = harness_command_with_identity("/opt/codex", Some(&launcher));
+        command.args(["exec", "a task"]);
+        assert_eq!(command.get_program(), launcher.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["/opt/codex", "exec", "a task"]
+        );
+        assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn unconfigured_identity_preserves_the_original_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = harness_command_with_identity("codex", Some(&dir.path().join("absent")));
+        assert_eq!(command.get_program(), "codex");
+        assert_eq!(command.get_args().count(), 0);
+    }
 }
 
 fn mission_command(request: &StartRequest, env: &[(String, String)]) -> Command {

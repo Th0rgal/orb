@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Paloma development credentials every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=20s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
