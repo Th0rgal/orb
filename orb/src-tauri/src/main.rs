@@ -172,6 +172,7 @@ fn main() {
             voice::voice_release,
             context_service::project_context_file,
             context_service::project_context_prepare,
+            context_service::project_skills_prepare,
             context_service::project_context_status,
             context_service::project_context_subscribe,
             context_service::project_context_unsubscribe,

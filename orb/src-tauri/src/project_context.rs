@@ -124,6 +124,35 @@ pub async fn project_context_prepare(request: Request) -> Result<serde_json::Val
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({"root":replica.store.root,"state":state,"resolved_paths":resolved_paths}))
 }
+/// Preparation shares the live replica and never materializes a second file store.
+#[tauri::command]
+pub async fn project_skills_prepare(
+    request: Request,
+    cwd: String,
+    harness: String,
+    bin: Option<String>,
+) -> Result<(), String> {
+    let prepared = project_context_prepare(request).await?;
+    if let Some(error) = prepared["state"]["error"].as_str() {
+        return Err(format!(
+            "Synchronize project skills: {error}. Reconnect and retry; your draft is kept."
+        ));
+    }
+    let root = prepared["root"].as_str().ok_or("Missing project replica")?;
+    let mut command = Command::new("sh");
+    if let Some(bin) = bin {
+        command.env("ORB_PROJECT_SKILLS_HARNESS_BIN", bin);
+    }
+    let output = command
+        .args(["-c", include_str!("../../../shared/prepare_project_skills.sh"), "orb-project-skills", root, &harness, include_str!("../../../shared/prepare_project_skills.py"), &cwd])
+        .output()
+        .map_err(|e| format!("Prepare project skills requires Python 3: {e}. Install Python 3 and retry; your draft is kept."))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    Ok(())
+}
+
 fn ensure_worker(request: &Request, replica: &Replica) -> Result<(), String> {
     let config = replica.store.metadata.join("connection.json");
     let bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;

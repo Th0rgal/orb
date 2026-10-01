@@ -236,8 +236,9 @@ export async function materializeMentions(
     return chips.some(chip => chip.kind !== "controller" && chip.path?.replace(/\/$/, "") === bare);
   };
   for (const mention of mentions) if (projectPath(mention.value) && isSecretPath(mention.value.replace(/\/$/, ""))) throw new Error(`${mention.value} is not copied. Your draft is kept.`);
-  const contextMentions = mentions.filter(m => explicitContext(m.value) || projectPath(m.value));
-  const required = contextMentions.some(m => explicitContext(m.value));
+  const namespaceContext = (value: string) => value === "context" || value.startsWith("context/");
+  const contextMentions = mentions.filter(m => namespaceContext(m.value) || explicitContext(m.value) || projectPath(m.value));
+  const required = contextMentions.some(m => namespaceContext(m.value) || explicitContext(m.value));
   if (chips.some(c => c.project && c.project !== slug)) throw new Error("The referenced files belong to another project. Select them again.");
   let contextRoot: string | undefined;
   const contextPaths=new Map<string,string>();
@@ -542,4 +543,13 @@ function nativeRecovery(id: string): Promise<unknown> {
  const pending=invoke("local_run_reconcile",{id,connection:{api_url:getApiUrl(),token:getJwt()}}).finally(()=>{nativeRecoveries.delete(id);});
  nativeRecoveries.set(id,pending);
  return pending;
+}
+
+/** Sync and expose all project skills before launch; failures keep the draft. */
+export async function prepareProjectSkills(project: string, cwd: string, harness: string, bin?: string): Promise<void> {
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Project skills require the Orb desktop app. Your draft is kept.");
+  await invoke("project_skills_prepare", {
+    request: { endpoint: getApiUrl(), token: getJwt() ?? "", project, paths: [] }, cwd, harness, bin: bin ?? null,
+  });
 }

@@ -60,10 +60,7 @@ pub async fn remote(
     project: &str,
     node: &crate::remote_node::RemoteNodeConfig,
     text: &str,
-) -> Result<String, String> {
-    if !has_mentions(text) {
-        return Ok(text.into());
-    }
+) -> Result<(String, String), String> {
     if !super::projects_overview::is_plain_key(project) {
         return Err("Invalid context project".into());
     }
@@ -73,7 +70,23 @@ pub async fn remote(
         .working_dir
         .join(".sandboxed-sh/project-context-state")
         .join(project);
-    crate::project_context::Store::new(root, metadata).manifest()?;
+    let store = crate::project_context::Store::new(root, metadata);
+    let manifest = store.manifest()?;
+    let skill_path = |path: &str| {
+        let parts: Vec<_> = path.split('/').collect();
+        parts.len() == 3 && parts[0] == "skills" && parts[2] == "SKILL.md"
+    };
+    // Skill-free projects retain the old launch path. Historical skill files
+    // still require a replica refresh so deleting the last skill cleans links.
+    if !has_mentions(text)
+        && !manifest.entries.keys().any(|path| skill_path(path))
+        && !store
+            .history()?
+            .iter()
+            .any(|change| skill_path(&change.path))
+    {
+        return Ok((text.into(), String::new()));
+    }
     let endpoint = super::mission_runner::public_api_base_url_from_env()
         .ok_or("Remote context requires SANDBOXED_PUBLIC_URL")?;
     let token = super::context_auth::issue(&state.config, project, &node.id)?;
@@ -106,7 +119,10 @@ pub async fn remote(
         manifest: Manifest,
     }
     let prepared: Prepared = response.json().await.map_err(|e| e.to_string())?;
-    resolve(text, &prepared.root, &prepared.manifest)
+    Ok((
+        resolve(text, &prepared.root, &prepared.manifest)?,
+        prepared.root.to_string_lossy().into_owned(),
+    ))
 }
 #[cfg(test)]
 mod tests {
@@ -128,6 +144,38 @@ mod tests {
             "Read \"/project/context/AGENTS.md\""
         );
     }
+    #[test]
+    fn project_skills_and_context_references_resolve_to_original_tree() {
+        let mut manifest = Manifest::default();
+        for path in [
+            "skills",
+            "skills/review",
+            "skills/review/SKILL.md",
+            "skills/review/references/checklist.md",
+            "Context",
+            "Context/architecture.md",
+        ] {
+            manifest.entries.insert(
+                path.into(),
+                crate::project_context::Entry {
+                    hash: None,
+                    directory: !path.ends_with(".md"),
+                    revision: 1,
+                    size: 1,
+                },
+            );
+        }
+        assert_eq!(
+            resolve(
+                "Edit @context/skills/review/SKILL.md and read @context/Context",
+                Path::new("/synced/source"),
+                &manifest
+            )
+            .unwrap(),
+            "Edit \"/synced/source/skills/review/SKILL.md\" and read \"/synced/source/Context\""
+        );
+    }
+
     #[test]
     fn literal_attachment_does_not_fall_back_to_namespace_alias() {
         let mut manifest = Manifest::default();

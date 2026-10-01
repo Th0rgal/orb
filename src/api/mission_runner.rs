@@ -4193,20 +4193,18 @@ async fn run_mission_turn(
         Ok(message) => message,
         Err(error) => return AgentResult::failure(format!("Resolve attached paths: {error}"), 0),
     };
-    let user_message = if super::context_execution::has_mentions(&user_message) {
-        let project = if let Some(store) = mission_store.as_ref() {
-            store
-                .get_mission(mission_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|mission| mission.project.project)
-        } else {
-            None
-        };
-        let Some(project) = project else {
-            return AgentResult::failure("Context references require a project", 0);
-        };
+    let project = if let Some(store) = mission_store.as_ref() {
+        match store.get_mission(mission_id).await {
+            Ok(mission) => mission.and_then(|mission| mission.project.project),
+            Err(error) => {
+                return AgentResult::failure(format!("Read project identity: {error}"), 0)
+            }
+        }
+    } else {
+        None
+    };
+    let mut visible_source = String::new();
+    let user_message = if let Some(project) = project {
         if !super::projects_overview::is_plain_key(&project) {
             return AgentResult::failure("Invalid context project", 0);
         }
@@ -4221,22 +4219,49 @@ async fn run_mission_turn(
                 return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
             }
         };
-        let visible = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
+        visible_source = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
             .mount_project_context(&root, &project)
             .await
         {
             Ok(path) => path,
             Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
         };
-        match super::context_execution::resolve(&user_message, Path::new(&visible), &manifest) {
+        match super::context_execution::resolve(
+            &user_message,
+            Path::new(&visible_source),
+            &manifest,
+        ) {
             Ok(message) => message,
             Err(error) => {
                 return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
             }
         }
+    } else if super::context_execution::has_mentions(&user_message) {
+        return AgentResult::failure("Context references require a project", 0);
     } else {
         user_message
     };
+    let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
+    let skill_preparation = crate::workspace_exec::WorkspaceExec::new(workspace.clone())
+        .output(
+            &skill_cwd,
+            "sh",
+            &[
+                "-c".into(),
+                include_str!("../../shared/prepare_project_skills.sh").into(),
+                "orb-project-skills".into(),
+                visible_source,
+                backend_id.clone(),
+                include_str!("../../shared/prepare_project_skills.py").into(),
+            ],
+            HashMap::new(),
+        )
+        .await;
+    match skill_preparation {
+        Ok(output) if output.status.success() => {},
+        Ok(output) => return AgentResult::failure(String::from_utf8_lossy(&output.stderr).into_owned(), 0),
+        Err(error) => return AgentResult::failure(format!("Prepare project skills: {error}. Install Python 3 on the execution machine and retry."), 0),
+    }
 
     let attachment_dir = workspace::configured_project_dir(&workspace, &mission_work_dir);
     let user_message = match crate::api::mission_payload::materialize_turn(

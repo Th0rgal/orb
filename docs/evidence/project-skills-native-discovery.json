@@ -1,0 +1,290 @@
+{
+  "machine": "old-agent",
+  "platform": "Linux",
+  "fixture": "/tmp/orb-project-skills-discovery-ahe9zrd2",
+  "orb_project_ids": [],
+  "orb_mission_ids": [],
+  "model_task_executed": false,
+  "harnesses": {
+    "codex": {
+      "native_binary": "/usr/local/bin/codex",
+      "stages": [
+        {
+          "stage": "initial",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "add",
+          "discovered": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "rename",
+          "discovered": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "expected": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete_all",
+          "discovered": [],
+          "expected": [],
+          "passed": true
+        }
+      ],
+      "initial_symlink": true
+    },
+    "claudecode": {
+      "native_binary": "/usr/local/bin/claude",
+      "stages": [
+        {
+          "stage": "initial",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "add",
+          "discovered": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "rename",
+          "discovered": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "expected": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete_all",
+          "discovered": [],
+          "expected": [],
+          "passed": true
+        }
+      ],
+      "initial_symlink": true
+    },
+    "opencode": {
+      "native_binary": "/usr/local/bin/opencode",
+      "stages": [
+        {
+          "stage": "initial",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "add",
+          "discovered": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "rename",
+          "discovered": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "expected": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete_all",
+          "discovered": [],
+          "expected": [],
+          "passed": true
+        }
+      ],
+      "initial_symlink": true
+    },
+    "gemini": {
+      "native_binary": "/tmp/orb-project-skills-gemini/node_modules/.bin/gemini",
+      "stages": [
+        {
+          "stage": "initial",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "add",
+          "discovered": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "rename",
+          "discovered": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "expected": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete_all",
+          "discovered": [],
+          "expected": [],
+          "passed": true
+        }
+      ],
+      "initial_symlink": true
+    },
+    "grok": {
+      "native_binary": "/usr/local/bin/grok",
+      "stages": [
+        {
+          "stage": "initial",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "add",
+          "discovered": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-added",
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "rename",
+          "discovered": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "expected": [
+            "orb-marker",
+            "orb-renamed"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete",
+          "discovered": [
+            "orb-marker"
+          ],
+          "expected": [
+            "orb-marker"
+          ],
+          "passed": true
+        },
+        {
+          "stage": "delete_all",
+          "discovered": [],
+          "expected": [],
+          "passed": true
+        }
+      ],
+      "initial_symlink": true
+    }
+  }
+}
