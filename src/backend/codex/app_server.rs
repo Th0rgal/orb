@@ -287,7 +287,17 @@ impl AppServerSession {
         cwd: &str,
         workspace_exec: Option<&WorkspaceExec>,
     ) -> Result<Self> {
-        let mut args = vec!["app-server".to_string()];
+        // Match the thread policy at startup, including Linux sandbox probing.
+        let mut args: Vec<String> = [
+            "-c",
+            "approval_policy=\"never\"",
+            "-c",
+            "sandbox_mode=\"danger-full-access\"",
+            "app-server",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         for feat in &config.enabled_features {
             args.push("--enable".to_string());
             args.push(feat.clone());

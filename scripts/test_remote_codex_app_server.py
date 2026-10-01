@@ -1,6 +1,7 @@
 import contextlib
 import io
 import unittest
+from unittest.mock import patch, Mock
 import os
 import queue
 from scripts.remote_codex_app_server import NativeSession, goal_action
@@ -137,3 +138,46 @@ class NativeGoalTests(unittest.TestCase):
             self.assertEqual(session.goal_status, 'active')
             session.event({'method': 'thread/goal/updated', 'params': {'threadId': 'same-thread', 'goal': {'status': 'blocked'}}})
         self.assertEqual(session.goal_status, 'blocked')
+
+
+class NativeCapacityTests(unittest.TestCase):
+    def session(self, goal=False):
+        session = NativeSession.__new__(NativeSession)
+        session.thread_id = 'original'
+        session.goal = goal
+        session.turns = {'turn'}
+        session.rpc = Mock(return_value={})
+        return session
+
+    def test_capacity_notification_waits_for_terminal_receipt_and_retries_bounded(self):
+        session = self.session()
+        error = {'codexErrorInfo': 'serverOverloaded', 'message': 'At capacity'}
+        with patch('scripts.remote_codex_app_server.time.sleep') as sleep, contextlib.redirect_stdout(io.StringIO()):
+            session.event({'method': 'error', 'params': {'error': error, 'willRetry': False}})
+            session.rpc.assert_not_called()
+            receipt = {'method': 'turn/completed', 'params': {'turn': {'id': 'turn', 'status': 'failed', 'error': error}}}
+            for _ in range(3):
+                session.event(receipt)
+            with self.assertRaisesRegex(RuntimeError, 'serverOverloaded'):
+                session.event(receipt)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 30])
+        self.assertEqual(session.rpc.call_count, 3)
+        for call in session.rpc.call_args_list:
+            self.assertEqual(call.args[0], 'turn/start')
+            self.assertEqual(call.args[1]['threadId'], 'original')
+            self.assertIn('do not repeat', call.args[1]['input'][0]['text'])
+
+    def test_native_goal_and_unrelated_failures_are_not_retried(self):
+        for goal, code in [(True, 'serverOverloaded'), (False, 'other')]:
+            session = self.session(goal)
+            with self.assertRaises(RuntimeError):
+                session.event({'method': 'turn/completed', 'params': {'turn': {
+                    'id': 'turn', 'status': 'failed', 'error': {'codexErrorInfo': code}}}})
+            session.rpc.assert_not_called()
+
+    def test_launch_sets_full_access_before_app_server(self):
+        with patch('scripts.remote_codex_app_server.subprocess.Popen') as popen, patch('scripts.remote_codex_app_server.threading.Thread'):
+            NativeSession({'settings': []})
+        command = popen.call_args.args[0]
+        self.assertLess(command.index('approval_policy="never"'), command.index('app-server'))
+        self.assertLess(command.index('sandbox_mode="danger-full-access"'), command.index('app-server'))
