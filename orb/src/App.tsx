@@ -1,3 +1,6 @@
+import {trackScrollbarHover} from "./scrollbarHover";
+import {NextReminder} from "./AutomaticReminder";
+import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
 import { MessageCircle } from "./sidebarIcons";
 import {MentionPicker} from "./MentionPicker";
 import {MentionProjectContext} from "./PromptEditor";
@@ -1017,6 +1020,7 @@ export function floatingDock(el: HTMLDivElement) {
 }
 
 export default function App() {
+  onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);});
   const [projects, setProjects] = createStore<typeof seed>([]);
@@ -1776,6 +1780,7 @@ export default function App() {
                         onMachine={() => setEnvOpen("machine")} />
                     </Show>
                   </div>
+
                   <div class="na-drop" onPointerDown={(e) => e.stopPropagation()}>
                     <button class="na-drop-btn" onClick={() => setEnvOpen(envOpen() === "machine" ? null : "machine")}>
                       <Show when={newMachine() !== "local"} fallback={<Ic.LaptopIcon size={14} />}>
@@ -1906,16 +1911,14 @@ export default function App() {
                         </div>
                       </div>
                     </Show>
-                  </div>
+                  </div><WorkingDirectoryPicker machine={newMachine()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
-                <Show when={!launchPreview()}><label class="working-directory-field">
-                  <span>Working directory</span>
-                  <input aria-label="Working directory" value={workingDirectory()} placeholder="Default directory" spellcheck={false} disabled={creating()} onInput={event => chooseDirectory(event.currentTarget.value)} />
-                </label></Show>
+
                 {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
                 <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
                 <div hidden={!!launchPreview()}>
                 <Composer
+
                   placeholder="Describe a task, / for commands, @ for context"
                   busy={creating()}
                   onSend={create}
@@ -2764,6 +2767,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
           </Show>
 
+          <NextReminder mission={p.id} busy={busy()} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>

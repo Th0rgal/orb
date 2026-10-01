@@ -27,10 +27,21 @@ struct Record {
     /// Native generation of the initial run; never adopt a follow-up.
     #[serde(default)]
     native_generation: Option<String>,
+    #[serde(default)]
+    rejected: bool,
     error: Option<String>,
     /// Archive, restore and title changes confirmed by Core after synchronization.
     #[serde(default)]
     confirmed: Option<Confirmed>,
+}
+impl Record {
+    fn rejected(&self) -> bool {
+        self.rejected
+            || self
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("Core synchronization refused (409"))
+    }
 }
 /// Local work Core has not accepted yet is the only truth about itself.
 fn pending(r: &Record) -> bool {
@@ -145,6 +156,9 @@ async fn start_worker(path: PathBuf, c: Connection) {
         let mut last_session = None;
         loop {
             let Ok(mut record) = read(&path) else { break };
+            if record.rejected() {
+                break;
+            }
             // A completed initial snapshot is immutable; subsequent turns have their own receipts.
             if record.acked == record.snapshot.sequence && record.snapshot.status != "active" {
                 break;
@@ -217,6 +231,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
                         record.error =
                             Some(format!("Core synchronization refused ({status}): {detail}"));
                         if status.as_u16() == 409 {
+                            record.rejected = true;
                             // Never stop a successor or an unidentifiable legacy execution.
                             if let Some(generation) = generation.as_deref() {
                                 let _ = local_agents::stop_generation(&id, Some(generation));
@@ -263,6 +278,11 @@ pub async fn local_origin_list(connection: Connection) -> Result<Vec<Value>, Str
             continue;
         }
         let record = read(&path)?;
+        // Core owns successor history after refusing this initial receipt.
+        // Keep the journal for diagnostics, but never overlay or retry it.
+        if record.rejected() {
+            continue;
+        }
         // Fully synchronized history is served by Core; retain the disk journal.
         rows.push(view(&record));
         if pending(&record) {
@@ -380,6 +400,7 @@ pub async fn local_origin_launch(
         snapshot,
         acked: 0,
         native_generation: None,
+        rejected: false,
         error: None,
         confirmed: None,
     };
@@ -438,4 +459,29 @@ pub async fn local_origin_launch(
     let result = view(&record);
     start_worker(path, connection).await;
     Ok(result)
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+    #[test]
+    fn legacy_conflict_journal_is_retired_without_deleting_history() {
+        let record = json!({
+            "snapshot": {"origin": {
+                "id": uuid::Uuid::new_v4(), "run_id": uuid::Uuid::new_v4(),
+                "client_id": uuid::Uuid::new_v4(), "title": "test", "project": "test",
+                "backend": "codex", "model": null, "cwd": "/tmp", "prompt": "keep history",
+                "created_at": "2026-09-30T00:00:00Z", "tags": []
+            }, "sequence": 22, "text": "successor output", "status": "failed", "error": null},
+            "acked": 15, "error": "Core synchronization refused (409 Conflict)"
+        });
+        let rejected: Record = serde_json::from_value(record.clone()).unwrap();
+        assert!(rejected.rejected());
+        assert_eq!(rejected.snapshot.text, "successor output");
+        let mut offline = record;
+        offline["error"] = json!("Offline · saved on this computer");
+        assert!(!serde_json::from_value::<Record>(offline)
+            .unwrap()
+            .rejected());
+    }
 }

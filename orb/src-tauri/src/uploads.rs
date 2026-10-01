@@ -138,3 +138,16 @@ pub async fn stage_upload_file(
         .insert(path.clone());
     Ok(path.to_string_lossy().into_owned())
 }
+
+#[tauri::command]
+pub async fn pick_working_directory() -> Result<Option<String>, String> {
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Choose working folder")
+        .pick_folder()
+        .await
+    else {
+        return Ok(None);
+    };
+    let path = folder.path().canonicalize().map_err(|e| e.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
