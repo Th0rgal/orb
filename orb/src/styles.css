@@ -2419,14 +2419,14 @@ select.orb-select-native:disabled { cursor: default; }
 .software-machine-heading { padding:8px 0 4px;color:var(--fg-2);font-size:12px; }
 .software-machine-heading small { color:var(--fg-3);font-size:11px; }
 .software-entry { position:relative; }
-.software-entry summary, .software-runtime summary { display:grid;grid-template-columns:8px 100px 64px 70px minmax(0,1fr);align-items:center;gap:8px;min-height:28px;cursor:pointer;list-style:none;padding:2px 64px 2px 0;font-size:12px; }
+.software-entry summary, .software-runtime summary { display:grid;grid-template-columns:8px 100px 64px 70px minmax(0,1fr);align-items:center;gap:8px;min-height:28px;line-height:20px;cursor:pointer;list-style:none;padding:2px 64px 2px 0;font-size:12px; }
 .software-runtime summary { padding-right:0; }
 .software-entry summary::-webkit-details-marker,.software-runtime summary::-webkit-details-marker { display:none; }
 .software-entry summary::before,.software-runtime summary::before { content:'›';color:var(--fg-3);width:8px;flex:none; }
 .software-entry details[open] summary::before,.software-runtime[open] summary::before { transform:rotate(90deg); }
 .software-name { min-width:95px; }
 .software-version { color:var(--fg-3);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-.software-status { margin-left:auto;color:var(--fg-3);font-size:11px;text-align:right; }
+.software-status { white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-left:auto;color:var(--fg-3);font-size:11px;text-align:right; }
 .software-status.attention { color:#b8a568; }
 .software-status.failed,.software-error { color:var(--danger,#ce8585); }
 .software-actions { position:absolute;top:1px;right:0; }

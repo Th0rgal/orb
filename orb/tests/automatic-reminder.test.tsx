@@ -27,7 +27,8 @@ describe('automatic reminders',()=>{
  it('shows only unfired active one-shot reminders',()=>{
   const wake={active:true,trigger:{type:'interval',seconds:1800},stop_policy:{type:'after_first_fire'},created_at:'2026-09-30T10:00:00Z'};
   expect(nextReminder([wake])).toBe(Date.parse('2026-09-30T10:30:00Z'));
-  expect(nextReminder([{...wake,last_triggered_at:'2026-09-30T10:30:00Z'},{...wake,active:false}])).toBeUndefined();
+  expect(nextReminder([{...wake,last_triggered_at:'2026-09-30T10:05:00Z'}])).toBe(Date.parse('2026-09-30T10:35:00Z'));
+  expect(nextReminder([{...wake,active:false,last_triggered_at:'2026-09-30T10:30:00Z'}])).toBeUndefined();
  });
 });
 

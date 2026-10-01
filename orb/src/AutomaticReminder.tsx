@@ -35,8 +35,8 @@ export function AutomaticReminder(p: {text: string; reminder: Reminder}) {
 
 type Wakeup = {active: boolean; driver?: string; trigger: {type: string; seconds?: number}; stop_policy: {type: string}; created_at: string; last_triggered_at?: string | null; variables?: Record<string,string>};
 export function nextReminder(rows: Wakeup[]): number | undefined {
-  const dates = rows.filter(row => row.active && row.driver !== 'harness' && row.stop_policy.type === 'after_first_fire' && !row.last_triggered_at && row.trigger.type === 'interval')
-    .map(row => Date.parse(row.created_at) + (row.trigger.seconds ?? NaN) * 1000).filter(Number.isFinite);
+  const dates = rows.filter(row => row.active && row.driver !== 'harness' && row.stop_policy.type === 'after_first_fire' && row.trigger.type === 'interval')
+    .map(row => Date.parse(row.last_triggered_at ?? row.created_at) + (row.trigger.seconds ?? NaN) * 1000).filter(Number.isFinite);
   return dates.length ? Math.min(...dates) : undefined;
 }
 export function NextReminder(p: {mission: string; busy: boolean}) {

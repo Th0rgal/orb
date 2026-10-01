@@ -56,6 +56,8 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  receive({type:'start',model:s.harness+' · '+s.model});
  if(s.local){
   await restoreLocalBindings();
+  await reconcileLocalRun(s.id);
+  if(signal.aborted||connectionVersion()!==version)return;
   void getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming'].includes(m.status))follow(s.id);}).catch(()=>{});
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});

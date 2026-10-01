@@ -2583,7 +2583,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const draft=optimistic();
     const projected:StreamItem[]=[];
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-    if(draft&&!draft.waiting&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
+    if(draft&&(!draft.waiting||sendError())&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
     const list = [...canonical,...projected];
     const live = localLiveText(p.id);
     // The server rewrites a local run's reply in place without re-emitting it,
@@ -2748,6 +2748,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             }
           >
 
+            <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} />
             <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
