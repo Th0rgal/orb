@@ -77,7 +77,7 @@ const composerInput=(page:Page)=>page.getByPlaceholder(/Describe a task, \/ for 
  * — so assert against both, and use `.launch-status` directly only
  * where the test is specifically about the visible banner.
  */
-const phaseStatus=(page:Page)=>page.locator(".launch-status, .agent-wait-status, .scroll [role=status]").first();
+const phaseStatus=(page:Page)=>page.locator(".scroll .sr-only[role=status]").first();
 /** A `/goal` turn renders as a Goal tag plus the exact objective, never the raw slash command. */
 async function expectGoalTurn(page:Page,selector:string,text=objective){
  const turn=page.locator(`${selector}:not(.sk-user)`);await expect(turn).toHaveCount(1);
