@@ -219,6 +219,17 @@ class IdentityTests(unittest.TestCase):
             (root / "current").unlink(); (root / "current").symlink_to(root / "current")
             self.assertFalse(identity.active_profile_exists(root))
 
+    def test_skill_is_loaded_from_pinned_commit_not_dirty_checkout(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); skill = root / "skill/development-identity/SKILL.md"
+            skill.parent.mkdir(parents=True); skill.write_text("published skill")
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(root), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", *args], text=True, stderr=subprocess.DEVNULL)
+            git("init", "-q"); git("add", "."); git("commit", "-q", "-m", "fixture")
+            revision = git("rev-parse", "HEAD").strip()
+            skill.write_text("unpublished edit")
+            self.assertEqual(identity.pinned_skill({"skill":str(skill), "library_revision":revision}), "published skill")
+
 
 if __name__ == "__main__":
     unittest.main()

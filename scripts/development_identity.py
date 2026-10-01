@@ -416,6 +416,17 @@ def install(root, bundle, network=True):
         return {"changed": True, **report}
 
 
+def pinned_skill(config):
+    skill = Path(config["skill"]).resolve()
+    revision = config["library_revision"]
+    if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+        raise ValueError("Library revision must be a full immutable commit id")
+    repository = Path(run(["git", "-C", str(skill.parent), "rev-parse", "--show-toplevel"]).strip()).resolve()
+    relative = skill.relative_to(repository).as_posix()
+    # Read the published blob, never a dirty checkout with an older receipt.
+    return run(["git", "-C", str(repository), "show", revision + ":" + relative])
+
+
 def export_bundle(config):
     p = subprocess.run(config["bitwarden_command"], capture_output=True, text=True, timeout=60)
     if p.returncode:
@@ -424,7 +435,7 @@ def export_bundle(config):
     selected = {k: values[k] for k in FIELDS}
     bundle = {"secrets": selected, "known_hosts": Path(config["known_hosts"]).read_text(),
               "ssh_hosts": config["ssh_hosts"], "library_revision": config["library_revision"],
-              "skill": Path(config["skill"]).read_text()}
+              "skill": pinned_skill(config)}
     validate_bundle(bundle)
     validate_signing_payload(selected["GIT_SIGNING_PRIVATE_KEY"])
     github_login(selected["GITHUB_TOKEN"])
