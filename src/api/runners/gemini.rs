@@ -29,6 +29,83 @@ fn gemini_bootstrap_failure_class(error: &str) -> FailureClass {
     }
 }
 
+fn merge_gemini_auth_settings(contents: &str, selected: &str) -> Result<String, String> {
+    let mut settings: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|_| "Gemini settings.json is invalid JSON; fix it before retrying")?;
+    let root = settings
+        .as_object_mut()
+        .ok_or("Gemini settings.json must be an object")?;
+    let security = root
+        .entry("security")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("Gemini security settings must be an object")?;
+    let auth = security
+        .entry("auth")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("Gemini authentication settings must be an object")?;
+    auth.insert("selectedType".into(), selected.into());
+    serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())
+}
+
+async fn prepare_gemini_auth_settings(
+    exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    selected: &str,
+) -> Result<(), String> {
+    // Preserve folder trust, enabled skills, MCPs, and user settings. Never
+    // replace the document with auth-only JSON after native skill inspection.
+    let read = exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &[
+                "-c".into(),
+                r#"file="${HOME:-/root}/.gemini/settings.json"
+[ ! -L "$file" ] || exit 78
+if [ -e "$file" ]; then cat "$file"; else printf '{}'; fi"#
+                    .into(),
+            ],
+            Default::default(),
+        )
+        .await
+        .map_err(|_| "Cannot read Gemini settings.json")?;
+    if !read.status.success() {
+        return Err("Cannot read Gemini settings.json; check permissions and symlinks".into());
+    }
+    let contents =
+        std::str::from_utf8(&read.stdout).map_err(|_| "Gemini settings.json is not UTF-8")?;
+    let merged = merge_gemini_auth_settings(contents, selected)?;
+    let write = exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &[
+                "-c".into(),
+                r#"set -eu
+file="${HOME:-/root}/.gemini/settings.json"
+[ ! -L "$file" ] || exit 78
+mkdir -p "${HOME:-/root}/.gemini"
+tmp=$(mktemp "${HOME:-/root}/.gemini/.orb-auth.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+printf '%s' "$1" > "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$file""#
+                    .into(),
+                "orb-gemini-auth".into(),
+                merged,
+            ],
+            Default::default(),
+        )
+        .await
+        .map_err(|_| "Cannot save Gemini authentication settings")?;
+    if !write.status.success() {
+        return Err("Cannot save Gemini settings.json; check permissions and symlinks".into());
+    }
+    Ok(())
+}
+
 /// Run a single Gemini CLI turn for a mission.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_gemini_turn(
@@ -116,46 +193,27 @@ pub async fn run_gemini_turn(
         tracing::warn!("Failed to create ~/.gemini directory: {}", e);
     }
 
+    let selected_auth = match &gemini_creds {
+        GeminiCredentials::ApiKey(_) => Some("gemini-api-key"),
+        GeminiCredentials::OAuth { .. } => Some("oauth-personal"),
+        GeminiCredentials::None => None,
+    };
+    if let Some(selected) = selected_auth {
+        if let Err(error) =
+            prepare_gemini_auth_settings(&workspace_exec, mission_work_dir, selected).await
+        {
+            return AgentResult::failure(format!("Prepare Gemini authentication: {error}"), 0);
+        }
+    }
+
     // Configure auth in the container based on credential type
     let api_key = match &gemini_creds {
-        GeminiCredentials::ApiKey(key) => {
-            // Write settings.json for API key auth
-            if let Err(e) = workspace_exec
-                .output(
-                    mission_work_dir,
-                    "/bin/sh",
-                    &[
-                        "-c".to_string(),
-                        r#"echo '{"security":{"auth":{"selectedType":"gemini-api-key"}}}' > "${HOME:-/root}/.gemini/settings.json""#.to_string(),
-                    ],
-                    std::collections::HashMap::new(),
-                )
-                .await
-            {
-                tracing::warn!("Failed to write Gemini settings.json: {}", e);
-            }
-            Some(key.clone())
-        }
+        GeminiCredentials::ApiKey(key) => Some(key.clone()),
         GeminiCredentials::OAuth {
             access_token,
             refresh_token,
             expires_at,
         } => {
-            // Write settings.json for OAuth auth
-            if let Err(e) = workspace_exec
-                .output(
-                    mission_work_dir,
-                    "/bin/sh",
-                    &[
-                        "-c".to_string(),
-                        r#"echo '{"security":{"auth":{"selectedType":"oauth-personal"}}}' > "${HOME:-/root}/.gemini/settings.json""#.to_string(),
-                    ],
-                    std::collections::HashMap::new(),
-                )
-                .await
-            {
-                tracing::warn!("Failed to write Gemini settings.json for OAuth: {}", e);
-            }
             // Write OAuth credentials file for the CLI to pick up
             let oauth_creds = serde_json::json!({
                 "access_token": access_token,
@@ -688,5 +746,40 @@ mod tests {
             gemini_bootstrap_failure_class("no package manager is available"),
             FailureClass::AgentError
         );
+    }
+    #[test]
+    fn gemini_auth_merge_preserves_trust_skills_and_user_configuration() {
+        let original = serde_json::json!({
+            "security": {"folderTrust": {"enabled": false}, "auth": {"selectedType": "old", "enforcedType": "user-choice"}},
+            "skills": {"disabled": ["personal-disabled"]},
+            "mcpServers": {"personal": {"command": "user-mcp"}},
+            "ui": {"theme": "personal"}
+        });
+        for selected in ["gemini-api-key", "oauth-personal"] {
+            let merged: serde_json::Value = serde_json::from_str(
+                &merge_gemini_auth_settings(&original.to_string(), selected).unwrap(),
+            )
+            .unwrap();
+            let mut expected = original.clone();
+            expected["security"]["auth"]["selectedType"] = selected.into();
+            assert_eq!(merged, expected);
+            assert_eq!(merged["security"]["folderTrust"]["enabled"], false);
+        }
+    }
+
+    #[test]
+    fn gemini_auth_merge_refuses_invalid_existing_configuration() {
+        for invalid in [
+            "not JSON",
+            "[]",
+            r#"{"security":null}"#,
+            r#"{"security":{"auth":false}}"#,
+        ] {
+            assert!(merge_gemini_auth_settings(invalid, "gemini-api-key").is_err());
+        }
+        let merged: serde_json::Value =
+            serde_json::from_str(&merge_gemini_auth_settings("{}", "gemini-api-key").unwrap())
+                .unwrap();
+        assert_eq!(merged["security"]["auth"]["selectedType"], "gemini-api-key");
     }
 }

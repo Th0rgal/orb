@@ -34,6 +34,61 @@ pub async fn start_fenced(
     stop_generation: Option<u64>,
     run_generation: u64,
 ) -> Result<(), String> {
+    // Also covers scheduled wake-ups and resumes outside the composer.
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/api/control/missions/{}/digest",
+            base.trim_end_matches('/'),
+            request.id
+        ))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|_| "Cannot read the mission project before skill preparation")?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Cannot read the mission project ({}); reconnect and retry",
+            response.status()
+        ));
+    }
+    let mission: Value = response
+        .json()
+        .await
+        .map_err(|_| "Invalid mission project identity")?;
+    if let Some(project) = mission["project"]
+        .as_str()
+        .or_else(|| mission["project"]["project"].as_str())
+    {
+        crate::context_service::project_skills_prepare(
+            crate::context_service::Request {
+                endpoint: base.into(),
+                token: token.into(),
+                project: project.into(),
+                paths: vec![],
+            },
+            request.cwd.clone(),
+            request.harness.clone(),
+            Some(request.bin.clone()),
+        )
+        .await?;
+    } else {
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                include_str!("../../../shared/prepare_project_skills.sh"),
+                "orb-project-skills",
+                "",
+                &request.harness,
+                include_str!("../../../shared/prepare_project_skills.py"),
+                &request.cwd,
+            ])
+            .output()
+            .map_err(|e| format!("Prepare project skills: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+    }
     let mut launch_env = crate::mcp_launch::environment(&request.id, base, token).await?;
     crate::local_wakeups::prepare(
         &mut request,

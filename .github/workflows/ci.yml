@@ -181,6 +181,11 @@ jobs:
           scripts/test_remote_codex_app_server.py
           scripts/test_development_identity.py
 
+      - name: Test project skill preparation and ownership
+        run: |
+          python3 -m pip install --user 'PyYAML>=6,<7'
+          python3 -m unittest discover -s tests -p project_skills_test.py
+
       # The layout tests skip silently without Python Playwright and Chromium.
       - name: Install Python Playwright
         run: |

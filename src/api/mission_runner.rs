@@ -4090,6 +4090,54 @@ async fn run_mission_turn(
             "Failed to sync MCP binaries into workspace"
         );
     }
+    let project = if let Some(store) = mission_store.as_ref() {
+        match store.get_mission(mission_id).await {
+            Ok(mission) => mission.and_then(|mission| mission.project.project),
+            Err(error) => {
+                return AgentResult::failure(format!("Read project identity: {error}"), 0)
+            }
+        }
+    } else {
+        None
+    };
+    let mut visible_source = String::new();
+    let context_manifest = if let Some(project) = project {
+        if !super::projects_overview::is_plain_key(&project) {
+            return AgentResult::failure("Invalid context project", 0);
+        }
+        let root = super::mission_payload::project_files_root(&config.working_dir, &project);
+        let metadata = config
+            .working_dir
+            .join(".sandboxed-sh/project-context-state")
+            .join(&project);
+        let manifest = match crate::project_context::Store::new(root.clone(), metadata).manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
+            }
+        };
+        visible_source = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
+            .mount_project_context(&root, &project)
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
+        };
+        Some(manifest)
+    } else {
+        None
+    };
+    let skill_execution_dir = mission_working_directory
+        .as_deref()
+        .map(|wd| resolve_mission_working_directory(&workspace.path, workspace.workspace_type, wd))
+        .transpose();
+    let skill_execution_dir = match skill_execution_dir {
+        Ok(dir) => dir,
+        Err(error) => {
+            return AgentResult::failure(format!("Invalid skill working directory: {error}"), 0)
+        }
+    };
+
     let mission_work_dir_result = {
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
@@ -4105,6 +4153,7 @@ async fn run_mission_turn(
             Some(&config.working_dir),
             !pr_readonly,
             explicit_worktree.as_deref(),
+            Some((&visible_source, skill_execution_dir.as_deref())),
         )
         .await
     };
@@ -4127,6 +4176,8 @@ async fn run_mission_turn(
             return AgentResult::failure(e.to_string(), 0);
         }
     };
+
+    let skill_discovery_roots = vec![mission_work_dir.clone()];
 
     // Override with mission-specific working_directory (e.g. git worktree for orchestrated workers)
     let mission_work_dir = if workspace.workspace_type == WorkspaceType::Host && own_state {
@@ -4193,50 +4244,68 @@ async fn run_mission_turn(
         Ok(message) => message,
         Err(error) => return AgentResult::failure(format!("Resolve attached paths: {error}"), 0),
     };
-    let user_message = if super::context_execution::has_mentions(&user_message) {
-        let project = if let Some(store) = mission_store.as_ref() {
-            store
-                .get_mission(mission_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|mission| mission.project.project)
-        } else {
-            None
-        };
-        let Some(project) = project else {
-            return AgentResult::failure("Context references require a project", 0);
-        };
-        if !super::projects_overview::is_plain_key(&project) {
-            return AgentResult::failure("Invalid context project", 0);
-        }
-        let root = super::mission_payload::project_files_root(&config.working_dir, &project);
-        let metadata = config
-            .working_dir
-            .join(".sandboxed-sh/project-context-state")
-            .join(&project);
-        let manifest = match crate::project_context::Store::new(root.clone(), metadata).manifest() {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
-            }
-        };
-        let visible = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
-            .mount_project_context(&root, &project)
-            .await
-        {
-            Ok(path) => path,
-            Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
-        };
-        match super::context_execution::resolve(&user_message, Path::new(&visible), &manifest) {
+    let project_has_skills = context_manifest.as_ref().is_some_and(|manifest| {
+        manifest.entries.keys().any(|path| {
+            let parts: Vec<_> = path.split('/').collect();
+            parts.len() == 3 && parts[0] == "skills" && parts[2] == "SKILL.md"
+        })
+    });
+    let user_message = if let Some(manifest) = context_manifest {
+        match super::context_execution::resolve(
+            &user_message,
+            Path::new(&visible_source),
+            &manifest,
+        ) {
             Ok(message) => message,
             Err(error) => {
                 return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
             }
         }
+    } else if super::context_execution::has_mentions(&user_message) {
+        return AgentResult::failure("Context references require a project", 0);
     } else {
         user_message
     };
+    let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
+    if project_has_skills && matches!(backend_id.as_str(), "grok" | "gemini") {
+        let exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
+        let configured = get_backend_string_setting(&backend_id, "cli_path")
+            .or_else(|| {
+                if backend_id == "gemini" {
+                    std::env::var("GEMINI_CLI_PATH").ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| backend_id.clone());
+        let binary = if backend_id == "grok" {
+            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await
+        } else {
+            ensure_gemini_cli_available(&exec, &skill_cwd, &configured).await
+        };
+        match binary {
+            Ok(binary) => {
+                workspace
+                    .env_vars
+                    .insert("ORB_PROJECT_SKILLS_HARNESS_BIN".into(), binary);
+            }
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare project skills: {error}"), 0)
+            }
+        }
+    }
+    if let Err(error) = workspace::prepare_project_skills(
+        &workspace,
+        &skill_cwd,
+        &visible_source,
+        &backend_id,
+        false,
+        &skill_discovery_roots,
+    )
+    .await
+    {
+        return AgentResult::failure(format!("Prepare project skills: {error}"), 0);
+    }
 
     let attachment_dir = workspace::configured_project_dir(&workspace, &mission_work_dir);
     let user_message = match crate::api::mission_payload::materialize_turn(

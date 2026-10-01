@@ -6620,7 +6620,10 @@ async fn native_grok_auto_track_continuation(
     );
     assert!(!command.contains("--resume"));
     assert!(!command.contains("goal_complete"));
-    assert!(!command.contains("opencode"));
+    // The preparation wrapper names supported discovery directories; assert
+    // on the actual harness command rather than those embedded metadata names.
+    let native_command = command.rsplit(" || exit 78; ").next().unwrap();
+    assert!(!native_command.contains("opencode"));
     assert_eq!(created["backend"], "grok");
     assert!(h.state.proxy_api_keys.list().await.is_empty());
     *fixture.log.lock().unwrap() = concat!(

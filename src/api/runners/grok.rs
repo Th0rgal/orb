@@ -154,7 +154,7 @@ async fn copy_host_grok_cli_into_container(
     Ok(None)
 }
 
-async fn ensure_grok_cli_available(
+pub(crate) async fn ensure_grok_cli_available(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
     cli_path: &str,

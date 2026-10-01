@@ -13997,6 +13997,7 @@ async fn submit_leased_remote_job(
     plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
     let mut resolved_plan = plan.clone();
+    let mut project_skill_source = String::new();
     let prompt = match &mut resolved_plan {
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
@@ -14011,15 +14012,16 @@ async fn submit_leased_remote_job(
             mission.id,
             prompt,
         )?;
-        if super::context_execution::has_mentions(prompt) {
-            let project = mission
-                .project
-                .project
-                .as_deref()
-                .ok_or("Context references require a project")?;
-            *prompt = super::context_execution::remote(state, project, &node, prompt).await?;
+        if let Some(project) = mission.project.project.as_deref() {
+            let (resolved, source) =
+                super::context_execution::remote(state, project, &node, prompt).await?;
+            *prompt = resolved;
+            project_skill_source = source;
+        } else if super::context_execution::has_mentions(prompt) {
+            return Err("Context references require a project".into());
         }
     }
+
     let plan = &resolved_plan;
     let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
@@ -14033,6 +14035,17 @@ async fn submit_leased_remote_job(
         } else {
             fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
         };
+    // Run in the final execution cwd, before any harness command. A failed
+    // preparation exits the job clearly rather than starting without skills.
+    if !matches!(plan, RemoteHarnessPlan::Raw { .. }) {
+        workspace_prefix.push_str(&format!(
+            "sh -c {} orb-project-skills {} {} {} || exit 78; ",
+            shell_single_quote(include_str!("../../../shared/prepare_project_skills.sh")),
+            shell_single_quote(&project_skill_source),
+            shell_single_quote(&mission.backend),
+            shell_single_quote(include_str!("../../../shared/prepare_project_skills.py")),
+        ));
+    }
     let context_prompt = match plan {
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
