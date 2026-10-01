@@ -89,6 +89,21 @@ class ProjectSkillsTest(unittest.TestCase):
             self.assertFalse((self.cwd / skills.NATIVE[harness] / 'orb-marker').exists())
             self.assertEqual((entry / 'SKILL.md').read_text(), 'Library skill')
 
+    def test_managed_manifest_traversal_is_refused_before_any_cleanup(self):
+        for native in skills.NATIVE.values():
+            root = self.cwd / native
+            (root / 'personal').mkdir(parents=True)
+            (root / 'personal/SKILL.md').write_text('PERSONAL-SKILL')
+            config = root.parent / 'config'
+            config.write_text('USER-CONFIG')
+            for relative in [native + '/..', native + '/./personal', native + '/invalid_name']:
+                state = {'version': 1, 'source': None, 'entries': {relative: 'crafted'}, 'copies': {relative: skills.fingerprint(root.parent)}}
+                (self.cwd / skills.MANIFEST).write_text(json.dumps(state))
+                with self.assertRaisesRegex(ValueError, 'Invalid managed skill entry'):
+                    skills.prepare(None, str(self.cwd), 'codex')
+                self.assertEqual(config.read_text(), 'USER-CONFIG')
+                self.assertEqual((root / 'personal/SKILL.md').read_text(), 'PERSONAL-SKILL')
+
     def test_preserves_user_configuration_and_skills(self):
         self.skill()
         for native in skills.NATIVE.values():

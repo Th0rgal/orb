@@ -62,7 +62,7 @@ Final command results:
 
 | Check | Result |
 | --- | --- |
-| Python project skill preparation | 24 passed, including review regressions |
+| Python project skill preparation | 25 passed, including review regressions |
 | Rust workspace tests | 2,867 library tests and 38 binary tests passed; 8 ignored; no failures |
 | Harness contract script | Passed, including 81 Python driver tests |
 | Capability matrix | Passed |
@@ -120,7 +120,7 @@ Orb, Policy Lint, Capability Matrix, and Dashboard checks. Local Rust tests afte
 rebasing passed 2,867 library tests and 38 binary tests with eight ignored. The automatic review identified
 three lifecycle issues; fixes add early stale cleanup, per-mission discovery
 root checks, and staged/journaled Library updates with interruption recovery.
-All six Rust ownership/recovery regression tests passed; all 24 Python tests
+All six Rust ownership/recovery regression tests passed; all 25 Python tests
 and all 25 native discovery lifecycle checks passed on the reviewed code.
 
 The first lifecycle-fix head also passed 2,870 library tests and 38 binary tests with
@@ -141,7 +141,7 @@ setting preservation and refusal to overwrite invalid configuration.
 
 A final lifecycle review added refreshes for retained adapter/fallback copies
 across native aliases and full safe YAML parsing (including comments and
-malformed extra fields). The 24 Python tests cover these regressions and a clear
+malformed extra fields). The 25 Python tests cover these regressions and a clear
 missing-PyYAML error. YAML support is provisioned in Core images/container
 bootstrap and CI; desktop/existing leaf installations need PyYAML in the
 execution Python interpreter when skills use frontmatter.
@@ -152,6 +152,10 @@ recommended Debian indexes used that signer. Docker now uses Ubuntu's maintained
 Caddy package from its signed security/update archives; no signature checks were
 disabled. The downloaded Ubuntu 2.6.2 binary validated the shipped Caddyfile
 locally, and image builds validate it too.
+
+Managed manifest entries also reject traversal/noncanonical components and
+invalid skill names before cleanup. A regression preserves configuration and
+personal skills across crafted manifests for all five native paths.
 
 Post-rebase frontend build passed; unit tests passed 788 tests with three
 skipped. This authentication rollout does not supply macOS Orb desktop or

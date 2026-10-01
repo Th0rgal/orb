@@ -42,7 +42,8 @@ def read_state(directory):
     if state.get("version") != 1 or not isinstance(state.get("entries"), dict):
         raise ValueError(f"Invalid managed skill manifest: {path}")
     for relative, target in state["entries"].items():
-        if not any(relative.startswith(p + "/") for p in NATIVE.values()) or len(Path(relative).parts) != 3 or not isinstance(target, str):
+        path = Path(relative)
+        if not any(relative.startswith(p + "/") for p in NATIVE.values()) or len(path.parts) != 3 or str(path) != relative or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", path.name) or len(path.name) > 64 or not isinstance(target, str):
             raise ValueError(f"Invalid managed skill entry: {relative}")
     state.setdefault("copies", {})
     if not isinstance(state["copies"], dict) or any(p not in state["entries"] for p in state["copies"]):
