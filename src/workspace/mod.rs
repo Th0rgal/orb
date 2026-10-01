@@ -5069,7 +5069,12 @@ done
 if ! command -v curl >/dev/null 2>&1 || ! curl --version >/dev/null 2>&1; then
   echo "[sandboxed] baseline rootfs prereqs: installing curl/ca-certs/gnupg/git/jq/python3/build-essential"
   apt-get update -qq || true
-  apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg git jq python3 wget build-essential || true
+  apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg git jq python3 python3-yaml wget build-essential || true
+fi
+if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+  echo "[sandboxed] installing Python YAML support for native project skills"
+  apt-get update -qq || true
+  apt-get install -y -qq --no-install-recommends python3 python3-yaml || true
 fi
 if ! command -v node >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1; then
   echo "[sandboxed] baseline rootfs prereqs: installing Node.js 22 (NodeSource)"

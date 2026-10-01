@@ -98,7 +98,7 @@ def main():
     source = fixture / 'source'
     folder = source / 'skills/orb-marker'
     (folder / 'references').mkdir(parents=True)
-    (folder / 'SKILL.md').write_text('---\nname: orb-marker\ndescription: Perform the turquoise lantern check using the supporting reference.\n---\nRead references/marker.md. Report its marker and say turquoise lantern verified.\n')
+    (folder / 'SKILL.md').write_text('---\nname: orb-marker # synchronized project skill\ndescription: Perform the turquoise lantern check using the supporting reference.\n---\nRead references/marker.md. Report its marker and say turquoise lantern verified.\n')
     (folder / 'references/marker.md').write_text('ORB-PROJECT-SKILLS-7E981\n')
     private_gemini = fixture / 'gemini-private-user/.gemini'
     private_gemini.mkdir(parents=True)

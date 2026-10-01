@@ -127,11 +127,50 @@ class ProjectSkillsTest(unittest.TestCase):
         original = self.skill()
         for description in ['""', "''", 'null', '[]', '"unclosed', '|']:
             (original / 'SKILL.md').write_text(f'---\nname: orb-marker\ndescription: {description}\n---\nInstructions')
-            with self.assertRaisesRegex(ValueError, 'nonempty string description'):
+            with self.assertRaisesRegex(ValueError, 'frontmatter'):
                 self.prepare()
             self.assertFalse((self.cwd / '.agents/skills/orb-marker').exists())
         (original / 'SKILL.md').write_text('---\nname: orb-marker\ndescription: |\n  A multiline description.\n---\nInstructions')
         self.assertEqual(self.prepare()['skills'], 1)
+
+    def test_yaml_comments_and_blocks_are_parsed_and_invalid_metadata_is_refused(self):
+        original = self.skill(body='---\nname: "orb-marker" # project name\ndescription: >\n  A folded description.\nmetadata: {category: review}\n---\nInstructions')
+        self.prepare()
+        for header in ['name: orb-marker\ndescription: valid\nother: [unclosed', 'name: orb-marker\ndescription: 123', 'name: orb-marker\ndescription: true']:
+            (original / 'SKILL.md').write_text('---\n' + header + '\n---\nInstructions')
+            with self.assertRaisesRegex(ValueError, 'frontmatter'):
+                self.prepare()
+        (original / 'SKILL.md').write_text('---\nname: orb-marker\ndescription: valid')
+        with self.assertRaisesRegex(ValueError, 'Unclosed YAML frontmatter'):
+            self.prepare()
+
+    def test_retained_adapter_copies_refresh_across_harness_discovery_aliases(self):
+        original = self.skill(body='Original plain Markdown instructions.')
+        self.prepare('claudecode')
+        (original / 'SKILL.md').write_text('Updated plain Markdown instructions.')
+        (original / 'references/marker.md').write_text('UPDATED-REFERENCE')
+        self.prepare('opencode')
+        for native in ['.claude/skills', '.opencode/skills']:
+            self.assertIn('Updated plain Markdown instructions.', (self.cwd / native / 'orb-marker/SKILL.md').read_text())
+            self.assertEqual((self.cwd / native / 'orb-marker/references/marker.md').read_text(), 'UPDATED-REFERENCE')
+
+    def test_retained_filesystem_fallback_copies_refresh_when_switching_harness(self):
+        original = self.skill()
+        with patch.object(Path, 'symlink_to', side_effect=OSError('links unsupported')):
+            self.prepare('claudecode')
+        (original / 'SKILL.md').write_text((original / 'SKILL.md').read_text() + '\nUpdated instructions.\n')
+        (original / 'references/marker.md').write_text('UPDATED-REFERENCE')
+        self.prepare('opencode')
+        self.assertIn('Updated instructions.', (self.cwd / '.claude/skills/orb-marker/SKILL.md').read_text())
+        self.assertEqual((self.cwd / '.claude/skills/orb-marker/references/marker.md').read_text(), 'UPDATED-REFERENCE')
+        self.assertTrue((self.cwd / '.opencode/skills/orb-marker').is_symlink())
+
+    def test_missing_yaml_dependency_is_actionable_and_does_not_expose_skills(self):
+        self.skill()
+        with patch.dict('sys.modules', {'yaml': None}):
+            with self.assertRaisesRegex(ValueError, 'Install PyYAML'):
+                self.prepare()
+        self.assertFalse((self.cwd / '.agents/skills/orb-marker').exists())
 
     def test_compatible_native_name_collisions_are_explicit(self):
         self.skill()

@@ -57,7 +57,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # -- Core system deps --------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl jq unzip openssh-client ca-certificates gnupg \
+    git curl jq unzip openssh-client ca-certificates gnupg python3 python3-yaml \
     # nspawn / container workspaces
     systemd-container debootstrap \
     # Wayland app streaming and automation

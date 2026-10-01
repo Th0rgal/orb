@@ -108,28 +108,19 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
                     # copy. Its instructions explicitly direct edits home.
                     description = next((line.strip().lstrip("# ") for line in text.splitlines() if line.strip()), f"Project skill {folder.name}")
                     adapters[folder.name] = f"---\nname: {folder.name}\ndescription: {json.dumps(description[:1024])}\n---\n\nSource: {skill}. Edit the synchronized source and its supporting files there; this is a generated discovery copy.\n\n{text}"
-                name = re.search(r"^name:[ \t]*([^\r\n]+)", header[1] if header else "", re.M)
-                description = re.search(r"^description:[ \t]*([^\r\n]*)", header[1] if header else "", re.M)
-                native_name = name[1].strip() if name else ""
-                native_description = description[1].strip() if description else ""
-                valid_name = native_name.strip("\"'") == folder.name
-                if native_name.startswith(("\"", "'")):
-                    valid_name = valid_name and native_name.endswith(native_name[0])
-                valid_description = bool(native_description) and native_description.lower() not in ("null", "~", "true", "false", "[]", "{}")
-                if native_description.startswith(("\"", "'")):
-                    valid_description = len(native_description) > 2 and native_description.endswith(native_description[0]) and bool(native_description[1:-1].strip())
-                if native_description.startswith(("[", "{", "#")):
-                    valid_description = False
-                if native_description.startswith(("|", ">")):
-                    remaining = header[1][description.end():].splitlines()
-                    block = []
-                    for line in remaining:
-                        if line and not line[0].isspace():
-                            break
-                        block.append(line.strip())
-                    valid_description = any(block)
-                if header and (not valid_name or not valid_description):
-                    raise ValueError(f"Set frontmatter name: {folder.name} and a nonempty string description: in {skill}.")
+                if header:
+                    try:
+                        import yaml
+                    except ImportError:
+                        raise ValueError("Install PyYAML for Python 3 on the execution machine (python3-yaml on Debian/Ubuntu), then retry project skill preparation.") from None
+                    try:
+                        metadata = yaml.safe_load(header[1])
+                    except yaml.YAMLError as error:
+                        raise ValueError(f"Invalid YAML frontmatter in {skill}: {error}. Fix the YAML and retry.") from None
+                    if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str) or metadata["name"] != folder.name or not isinstance(metadata.get("description"), str) or not metadata["description"].strip():
+                        raise ValueError(f"Set frontmatter name: {folder.name} and a nonempty string description: in {skill}.")
+                elif text.startswith(("---\n", "---\r\n")):
+                    raise ValueError(f"Unclosed YAML frontmatter in {skill}. Add its closing --- delimiter and retry.")
                 fingerprint(folder)
                 skills[folder.name] = str(folder)
         if skills and harness not in NATIVE:
@@ -137,6 +128,10 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
 
         entries = state["entries"].copy()
         desired = {f"{NATIVE[harness]}/{name}": target for name, target in skills.items()} if harness in NATIVE and not cleanup_only else {}
+        # Other harnesses can scan previously used native aliases. Retained
+        # generated copies must all reflect the source before this launch.
+        if not cleanup_only:
+            desired.update({relative: skills[Path(relative).name] for relative in state["copies"] if Path(relative).name in skills})
         stale = {relative: target for relative, target in entries.items() if Path(relative).name not in skills}
         # Preflight every mutation before touching anything. A replaced managed
         # link is now user-owned: never remove or overwrite it.

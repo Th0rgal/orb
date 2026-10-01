@@ -53,7 +53,8 @@ Native discovery uses these managed entries in the execution directory:
 
 Entries normally link individual skill folders to the live synchronized tree.
 When links cannot be created, Orb generates source-labelled copies and refreshes
-those copies before launch/resume. Preparation does not replace `.claude`,
+those copies before launch/resume, including retained copies in previously used
+harness paths that another harness can also scan. Preparation does not replace `.claude`,
 `.codex`, `.opencode`, or any harness configuration file.
 
 `.orb-project-skills.json` tracks managed links and generated file hashes.
@@ -85,7 +86,11 @@ retain the persisted mission prompt and provide the preparation error.
 
 Skill preparation requires Python 3 on the execution machine when there are
 skills or managed entries to check. Projects without either skip the Python
-helper. Grok and Gemini require trusted working directories. Orb checks their native
+helper. Skills with YAML frontmatter also require PyYAML for that Python
+interpreter (`python3-yaml` on Debian/Ubuntu). Core images and new container
+bootstrap provision it; desktop and existing leaf-machine installations report
+an actionable dependency error if it is missing. Frontmatter is parsed as YAML
+before its required name/description strings are validated. Grok and Gemini require trusted working directories. Orb checks their native
 listings and refuses to launch if trust or configuration hides project skills.
 Orb does not change the user's trust configuration. Core resolves the selected
 Grok/Gemini CLI with the runner's existing availability/installation logic before
