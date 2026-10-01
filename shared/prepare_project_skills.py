@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 import subprocess
+import shlex
 
 NATIVE = {
     "codex": ".agents/skills",
@@ -232,7 +233,10 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
             # These harnesses silently omit workspace skills when the folder
             # is untrusted. Listing must confirm discovery before launching.
             binary = os.environ.get("ORB_PROJECT_SKILLS_HARNESS_BIN", harness)
-            arguments = [binary, "--cwd", str(cwd), "inspect", "--json"] if harness == "grok" else [binary, "skills", "list", "--all"]
+            # Runner availability checks can select an absolute binary or a
+            # runtime command such as `bun /path/to/gemini.js`.
+            command = [binary] if Path(binary).is_file() else shlex.split(binary)
+            arguments = command + (["--cwd", str(cwd), "inspect", "--json"] if harness == "grok" else ["skills", "list", "--all"])
             inspection = subprocess.run(arguments, cwd=cwd, capture_output=True, text=True, timeout=20)
             label = "Grok" if harness == "grok" else "Gemini"
             if inspection.returncode:

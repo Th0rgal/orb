@@ -4244,6 +4244,12 @@ async fn run_mission_turn(
         Ok(message) => message,
         Err(error) => return AgentResult::failure(format!("Resolve attached paths: {error}"), 0),
     };
+    let project_has_skills = context_manifest.as_ref().is_some_and(|manifest| {
+        manifest.entries.keys().any(|path| {
+            let parts: Vec<_> = path.split('/').collect();
+            parts.len() == 3 && parts[0] == "skills" && parts[2] == "SKILL.md"
+        })
+    });
     let user_message = if let Some(manifest) = context_manifest {
         match super::context_execution::resolve(
             &user_message,
@@ -4261,6 +4267,33 @@ async fn run_mission_turn(
         user_message
     };
     let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
+    if project_has_skills && matches!(backend_id.as_str(), "grok" | "gemini") {
+        let exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
+        let configured = get_backend_string_setting(&backend_id, "cli_path")
+            .or_else(|| {
+                if backend_id == "gemini" {
+                    std::env::var("GEMINI_CLI_PATH").ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| backend_id.clone());
+        let binary = if backend_id == "grok" {
+            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await
+        } else {
+            ensure_gemini_cli_available(&exec, &skill_cwd, &configured).await
+        };
+        match binary {
+            Ok(binary) => {
+                workspace
+                    .env_vars
+                    .insert("ORB_PROJECT_SKILLS_HARNESS_BIN".into(), binary);
+            }
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare project skills: {error}"), 0)
+            }
+        }
+    }
     if let Err(error) = workspace::prepare_project_skills(
         &workspace,
         &skill_cwd,

@@ -230,6 +230,17 @@ class ProjectSkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 78)
         self.assertIn('Install it on the execution machine', result.stderr)
 
+    def test_selected_harness_binary_and_runtime_prefix_are_used_for_native_inspection(self):
+        self.skill()
+        for harness, binary, expected in [
+            ('grok', '/custom/grok', ['/custom/grok']),
+            ('gemini', 'bun /custom/gemini.js', ['bun', '/custom/gemini.js']),
+        ]:
+            stdout = json.dumps({'skills': [{'name': 'orb-marker', 'enabled': True}]}) if harness == 'grok' else 'orb-marker [Enabled]'
+            with patch.dict('os.environ', {'ORB_PROJECT_SKILLS_HARNESS_BIN': binary}), patch.object(skills.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=stdout)) as run:
+                skills.prepare(str(self.source), str(self.cwd), harness)
+            self.assertEqual(run.call_args.args[0][:len(expected)], expected)
+
     def test_symlinked_parent_or_supporting_file_is_not_followed(self):
         original = self.skill()
         outside = self.base / 'outside'

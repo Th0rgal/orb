@@ -87,7 +87,9 @@ Skill preparation requires Python 3 on the execution machine when there are
 skills or managed entries to check. Projects without either skip the Python
 helper. Grok and Gemini require trusted working directories. Orb checks their native
 listings and refuses to launch if trust or configuration hides project skills.
-Orb does not change the user's trust configuration. Native entries are also
+Orb does not change the user's trust configuration. Core resolves the selected
+Grok/Gemini CLI with the runner's existing availability/installation logic before
+inspection, including configured paths and runtime prefixes. Native entries are also
 refused inside the synchronized source tree so discovery metadata cannot
 contaminate project-file synchronization.
 
