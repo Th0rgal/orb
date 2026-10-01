@@ -1198,6 +1198,13 @@ fn spawn_codex(
     env: &[(String, String)],
 ) -> Result<Child, String> {
     let mut command = mission_command(request, env);
+    // Apply the same full-access policy before app-server startup and thread creation.
+    command.args([
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+    ]);
     if let Some(args) = crate::local_wakeups::command(&request.id) {
         command.arg("-c").arg(format!(
             "mcp_servers.orb-wakeups.command={}",
