@@ -162,6 +162,35 @@ class ProjectSkillsTest(unittest.TestCase):
                     self.assertFalse((nested / skills.NATIVE[harness]).exists())
                     shutil.rmtree(entry)
 
+    def test_same_project_ancestor_copies_reconcile_edits_rename_and_deletion(self):
+        nested = self.cwd / 'subdir'
+        nested.mkdir()
+        for fallback in [False, True]:
+            with self.subTest(fallback=fallback):
+                original = self.skill(body=None if fallback else '# old')
+                if fallback:
+                    with patch.object(Path, 'symlink_to', side_effect=OSError('links unsupported')):
+                        self.prepare('claudecode')
+                else:
+                    self.prepare('claudecode')
+                (original / 'SKILL.md').write_text((original / 'SKILL.md').read_text() + '\n# new')
+                (original / 'references/marker.md').write_text('NEW-REFERENCE')
+                skills.prepare(str(self.source), nested, 'opencode', verify=False)
+                for directory, native in [(self.cwd, '.claude/skills'), (nested, '.opencode/skills')]:
+                    self.assertIn('# new', (directory / native / 'orb-marker/SKILL.md').read_text())
+                    self.assertEqual((directory / native / 'orb-marker/references/marker.md').read_text(), 'NEW-REFERENCE')
+                original.rename(original.with_name('renamed'))
+                (original.with_name('renamed') / 'SKILL.md').write_text('# renamed')
+                skills.prepare(str(self.source), nested, 'opencode', verify=False)
+                for directory in [self.cwd, nested]:
+                    for native in skills.NATIVE.values():
+                        self.assertFalse((directory / native / 'orb-marker').exists())
+                    self.assertIn('# renamed', (directory / '.opencode/skills/renamed/SKILL.md').read_text())
+                shutil.rmtree(original.with_name('renamed'))
+                skills.prepare(str(self.source), nested, 'opencode', verify=False)
+                for directory in [self.cwd, nested]:
+                    self.assertEqual(json.loads((directory / skills.MANIFEST).read_text())['entries'], {})
+
     def test_managed_manifest_traversal_is_refused_before_any_cleanup(self):
         for native in skills.NATIVE.values():
             root = self.cwd / native

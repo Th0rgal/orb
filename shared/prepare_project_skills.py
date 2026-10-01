@@ -79,7 +79,7 @@ def owns_entry(directory, state, relative, target):
             or (copy is None and path.is_symlink() and os.readlink(path) == target))
 
 
-def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roots=()):
+def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roots=(), _refresh_roots=True):
     cwd = Path(cwd).resolve(strict=True)
     source = str(Path(source).resolve(strict=True)) if source else None
     if source and cwd.is_relative_to(Path(source)) and any(Path(source).glob("skills/*/SKILL.md")):
@@ -87,12 +87,15 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
     # A moved mission still exposes its private directory to native discovery.
     # Refresh its owned copies and cleanup before locking the new cwd; nesting
     # directory locks would deadlock concurrent moves in opposite directions.
-    discovery_roots = tuple(dict.fromkeys(Path(root).resolve(strict=True) for root in discovery_roots))
-    for directory in discovery_roots:
-        if directory != cwd:
-            owned = read_state(directory)
-            if owned["entries"] and owned["source"] == source:
-                prepare(source, directory, harness, verify=False, cleanup_only=cleanup_only)
+    discovery_roots = tuple(dict.fromkeys((*(Path(root).resolve(strict=True) for root in discovery_roots), *cwd.parents)))
+    if _refresh_roots:
+        # Reconcile each root once, outermost first, without nested locks or
+        # recursive ancestor refreshes. Native scanners also walk ancestors.
+        for directory in sorted(discovery_roots, key=lambda path: len(path.parts)):
+            if directory != cwd:
+                owned = read_state(directory)
+                if owned["entries"] and owned["source"] == source:
+                    prepare(source, directory, harness, verify=False, cleanup_only=cleanup_only, _refresh_roots=False)
     lock_path = cwd / ".orb-project-skills.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "r+") as lock:
@@ -168,7 +171,7 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
         # same native name (notably Library's .opencode/skill). Be explicit
         # instead of silently relying on harness-specific precedence.
         for name, target in (skills.items() if not cleanup_only else ()):
-            for discovery_root in dict.fromkeys((*discovery_roots, *cwd.parents)):
+            for discovery_root in discovery_roots:
                 discovery_root = Path(discovery_root).resolve(strict=True)
                 for alias in ALIASES.get(harness, ()):
                     path = discovery_root / alias / name
