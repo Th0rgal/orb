@@ -57,7 +57,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # -- Core system deps --------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl jq unzip openssh-client ca-certificates gnupg python3 python3-yaml \
+    git curl jq unzip openssh-client ca-certificates gnupg python3 python3-yaml caddy \
     # nspawn / container workspaces
     systemd-container debootstrap \
     # Wayland app streaming and automation
@@ -80,13 +80,8 @@ RUN curl -fsSL https://bun.sh/install | bash \
     && install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun \
     && install -m 0755 /root/.bun/bin/bunx /usr/local/bin/bunx
 
-# -- Caddy (reverse proxy) ---------------------------------------------------
-RUN curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-      | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main" \
-      > /etc/apt/sources.list.d/caddy-stable.list \
-    && apt-get update && apt-get install -y --no-install-recommends caddy \
-    && rm -rf /var/lib/apt/lists/*
+# Caddy uses Ubuntu's signed security/update archives. The separate Cloudsmith
+# index is signed by an expired key; signature verification must stay enabled.
 
 # -- Copy Rust binaries from builder -----------------------------------------
 COPY --from=rust-builder /out/ /usr/local/bin/
@@ -112,6 +107,7 @@ RUN curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash \
 
 # -- Caddy config + entrypoint -----------------------------------------------
 COPY docker/Caddyfile /etc/caddy/Caddyfile
+RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

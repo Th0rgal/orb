@@ -146,6 +146,13 @@ missing-PyYAML error. YAML support is provisioned in Core images/container
 bootstrap and CI; desktop/existing leaf installations need PyYAML in the
 execution Python interpreter when skills use frontmatter.
 
+Adding YAML support invalidated the Docker runtime cache and exposed the
+existing Cloudsmith Caddy index's expired signing key. Both its Ubuntu and
+recommended Debian indexes used that signer. Docker now uses Ubuntu's maintained
+Caddy package from its signed security/update archives; no signature checks were
+disabled. The downloaded Ubuntu 2.6.2 binary validated the shipped Caddyfile
+locally, and image builds validate it too.
+
 Post-rebase frontend build passed; unit tests passed 788 tests with three
 skipped. This authentication rollout does not supply macOS Orb desktop or
 isolated test-deployment access, so the real mission coverage above remains
