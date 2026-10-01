@@ -48,11 +48,12 @@ class IdentityTests(unittest.TestCase):
             root = Path(d); generation = root / "generation"
             generation.mkdir(); (root / "current").symlink_to(generation)
             (generation / "github-token").write_text("fresh")
-            env = identity.profile_env(root, {"GH_TOKEN":"stale", "GITHUB_TOKEN":"stale", "GIT_CONFIG_COUNT":"1", "GIT_CONFIG_KEY_0":"remote.origin.pushurl", "GIT_CONFIG_VALUE_0":"blocked", "GIT_AUTHOR_EMAIL":"wrong"})
+            env = identity.profile_env(root, {"GH_TOKEN":"stale", "GITHUB_TOKEN":"stale", "GIT_CONFIG_COUNT":"1", "GIT_CONFIG_KEY_0":"remote.origin.pushurl", "GIT_CONFIG_VALUE_0":"blocked", "GIT_AUTHOR_EMAIL":"wrong", "GIT_CONFIG_PARAMETERS":"\'remote.origin.pushurl=blocked\'"})
             self.assertEqual(env["GH_TOKEN"], "fresh")
             self.assertEqual(env["GIT_CONFIG_VALUE_0"], "blocked")
             self.assertEqual(env["GIT_CONFIG_KEY_1"], "include.path")
             self.assertNotIn("GIT_AUTHOR_EMAIL", env)
+            self.assertEqual(env["GIT_CONFIG_PARAMETERS"], "\'remote.origin.pushurl=blocked\'")
 
     def test_shell_activation_does_not_emit_or_embed_token(self):
         with tempfile.TemporaryDirectory() as d:

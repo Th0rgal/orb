@@ -110,7 +110,7 @@ def profile_env(root, parent=None):
             env["PATH"] = str(nix_bin) + ":" + env.get("PATH", "/usr/bin:/bin")
     token = (generation / "github-token").read_text().strip()
     for key in ["GH_TOKEN", "GITHUB_TOKEN", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_CONFIG_PARAMETERS"]:
+                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]:
         env.pop(key, None)
     env.update(GH_TOKEN=token, GITHUB_TOKEN=token, GH_CONFIG_DIR=str(generation / "gh"),
                GNUPGHOME=str(generation / "gnupg"),
@@ -140,7 +140,7 @@ if [ -r "$_sdi_current/github-token" ]; then
   export GH_CONFIG_DIR="$_sdi_current/gh"
   export GNUPGHOME="$_sdi_current/gnupg"
   export GIT_SSH_COMMAND="ssh -F $_sdi_current/ssh/config"
-  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_PARAMETERS
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   _sdi_n=${{GIT_CONFIG_COUNT:-0}}
   case "$_sdi_n" in *[!0-9]*|'') _sdi_n=0;; esac
   export "GIT_CONFIG_KEY_$_sdi_n=include.path"
