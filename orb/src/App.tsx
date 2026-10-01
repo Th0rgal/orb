@@ -590,7 +590,7 @@ export function Composer(p: {
     const project = p.projectSlug;
     const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
-    if(!sideMode)p.onPending?.({text:original,images:sentImages,retry:()=>{uploaded=originalUploads;setText(original);setImages(sentImages);setMode(originalMode);void send();}});
+    if(!sideMode)p.onPending?.({text:payload,images:sentImages,retry:()=>{uploaded=originalUploads;setText(original);setImages(sentImages);setMode(originalMode);void send();}});
     setSending(true);
     setText(""); setImages([]); ta.value=""; resize();
     let accepted = false;
@@ -1059,7 +1059,7 @@ export default function App() {
   let retryLaunch:(()=>void)|undefined;
   const launchedViewKeys=new Map<string,string>();
   const prepareLaunch=(draft:{text:string;images:DraftImage[];retry?:()=>void}|null)=>{
-    if(!draft)return;
+    if(!draft){setLaunchPreview(null);return;}
     retryLaunch=draft.retry;setCreateError(null);
     if(!launchPreview())setLaunchViewKey(crypto.randomUUID());
     setLaunchPreview({messageKey:`initial:${launchViewKey()}`,prompt:draft.text,images:draft.images,nodeId:newMachine(),destination:nodeLabel(newMachine())});
@@ -1915,8 +1915,7 @@ export default function App() {
                   </div><WorkingDirectoryPicker machine={newMachine()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
 
-                {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
-                <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
+                {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
                 <div hidden={!!launchPreview()}>
                 <Composer
 

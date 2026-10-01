@@ -702,7 +702,10 @@ fn spawn_claude(
         *slot = Some(fresh);
     }
     if let Some(command) = crate::local_wakeups::command(&request.id) {
-        cmd.arg("--mcp-config").arg(json!({"mcpServers":{"orb-wakeups":{"command":command[0],"args":command[1..]}}}).to_string());
+        cmd.arg("--mcp-config").arg(
+            json!({"mcpServers":{"orb-wakeups":{"command":command[0],"args":command[1..]}}})
+                .to_string(),
+        );
     }
     let mut child = cmd
         .spawn()
@@ -759,14 +762,23 @@ fn spawn_claude(
                     };
                     if let Some(blocks) = event["message"]["content"].as_array() {
                         for block in blocks {
-                            if event["type"] == "assistant" && block["type"] == "tool_use" && block["name"] == "ScheduleWakeup" {
-                                if let Some(id) = block["id"].as_str() { wakeups.insert(id.into(),block["input"].clone()); }
+                            if event["type"] == "assistant"
+                                && block["type"] == "tool_use"
+                                && block["name"] == "ScheduleWakeup"
+                            {
+                                if let Some(id) = block["id"].as_str() {
+                                    wakeups.insert(id.into(), block["input"].clone());
+                                }
                             } else if event["type"] == "user" && block["type"] == "tool_result" {
                                 if let Some(id) = block["tool_use_id"].as_str() {
                                     if let Some(mut args) = wakeups.remove(id) {
                                         if block["is_error"] != true {
-                                            args["request_id"] = json!(format!("claude-native:{id}"));
-                                            crate::local_wakeups::capture(wakeup_command.as_deref(), args)?;
+                                            args["request_id"] =
+                                                json!(format!("claude-native:{id}"));
+                                            crate::local_wakeups::capture(
+                                                wakeup_command.as_deref(),
+                                                args,
+                                            )?;
                                         }
                                     }
                                 }
@@ -954,9 +966,16 @@ fn spawn_piped(
     command.envs(env.iter().map(|(key, value)| (key, value)));
     if request.harness == "opencode" {
         if let Some(wake_command) = crate::local_wakeups::command(&request.id) {
-            let raw = env.iter().find(|(k,_)|k == "OPENCODE_CONFIG_CONTENT").map(|(_,v)|v.clone()).or_else(||std::env::var("OPENCODE_CONFIG_CONTENT").ok());
-            let mut config: Value = raw.and_then(|v|serde_json::from_str(&v).ok()).unwrap_or_else(||json!({}));
-            config["mcp"]["orb-wakeups"] = json!({"type":"local","command":wake_command,"enabled":true});
+            let raw = env
+                .iter()
+                .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                .map(|(_, v)| v.clone())
+                .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+            let mut config: Value = raw
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_else(|| json!({}));
+            config["mcp"]["orb-wakeups"] =
+                json!({"type":"local","command":wake_command,"enabled":true});
             command.env("OPENCODE_CONFIG_CONTENT", config.to_string());
         }
     }
@@ -1180,11 +1199,18 @@ fn spawn_codex(
 ) -> Result<Child, String> {
     let mut command = mission_command(request, env);
     if let Some(args) = crate::local_wakeups::command(&request.id) {
-        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.command={}", json!(args[0])));
-        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
+        command.arg("-c").arg(format!(
+            "mcp_servers.orb-wakeups.command={}",
+            json!(args[0])
+        ));
+        command
+            .arg("-c")
+            .arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
         // This private, mission-bound MCP must work under approvalPolicy=never,
         // just like the common sandboxed MCP installed by the launcher.
-        command.arg("-c").arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
+        command
+            .arg("-c")
+            .arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
     }
     let mut child = command
         .current_dir(&request.cwd)
