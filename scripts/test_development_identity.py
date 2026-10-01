@@ -118,6 +118,23 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual((root / "sandboxed-mcp.identity-native").read_text(), "new binary")
                 self.assertIn('if [ "$1" = launch ]', companion.read_text())
 
+    def test_container_symlink_cannot_redirect_host_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            image = Path(d) / "image"; outside = Path(d) / "outside"
+            image.mkdir(); outside.mkdir(); (image / "root").symlink_to(outside)
+            with self.assertRaises(OSError): identity.rooted_file(image, "root/token", "fixture-secret")
+            self.assertFalse((outside / "token").exists())
+
+    def test_container_leaf_symlink_is_replaced_without_following(self):
+        with tempfile.TemporaryDirectory() as d:
+            image = Path(d) / "image"; image.mkdir()
+            outside = Path(d) / "outside"; outside.write_text("unchanged")
+            (image / "token").symlink_to(outside)
+            identity.rooted_file(image, "token", "fixture-secret")
+            self.assertEqual(outside.read_text(), "unchanged")
+            self.assertEqual(identity.rooted_file(image, "token"), "fixture-secret")
+            self.assertEqual((image / "token").stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

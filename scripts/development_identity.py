@@ -175,7 +175,7 @@ def managed_block(path, block):
         os.replace(tmp, path)
 
 
-def install_hooks(root, local=False, companion=None):
+def install_hooks(root, local=False, companion=None, container=False):
     hook = shlex.quote(str(root.resolve() / "activate.sh"))
     if local:
         home = Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -184,6 +184,11 @@ def install_hooks(root, local=False, companion=None):
         block = f'case "$PWD" in "$HOME"/.orb/*) [ ! -r {hook} ] || . {hook};; esac'
         for filename in [".zshenv", ".bash_profile", ".bashrc"]:
             managed_block(home / filename, block)
+    elif container:
+        write(Path("/etc/profile.d/sandboxed-development-identity.sh"),
+              f'[ ! -r {hook} ] || . {hook}\n', 0o644)
+        if companion is None and Path("/usr/local/bin/sandboxed-mcp").is_file():
+            companion = Path("/usr/local/bin/sandboxed-mcp")
     elif os.geteuid() == 0:
         block = "# Only fleet execution accounts; no operator shell takeover.\n"
         for username in ["sandboxed-node", "spark-admin"]:
@@ -377,51 +382,66 @@ def core_request(config, method, path, body=None):
     return request(token)
 
 
+def rooted_file(filesystem, relative, value=None, mode=0o600):
+    """Access a container file without following any container-owned symlink.
+
+    Directory FDs also prevent a concurrent rename from redirecting a host
+    write outside the image. Only the container's namespace resolves links
+    when the normal execution API subsequently runs provisioning.
+    """
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or ".." in parts:
+        raise ValueError("invalid container-relative path")
+    fd = os.open(filesystem, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            if value is not None:
+                try: os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError: pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = child
+        if value is None:
+            file = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            with os.fdopen(file, "r") as stream: return stream.read()
+        tmp = ".identity-" + uuid.uuid4().hex
+        file = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
+        try:
+            with os.fdopen(file, "w") as stream:
+                os.fchmod(stream.fileno(), mode)
+                stream.write(value)
+            os.replace(tmp, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)
+        finally:
+            try: os.unlink(tmp, dir_fd=fd)
+            except FileNotFoundError: pass
+    finally:
+        os.close(fd)
+
+
 def stage_containers(config, bundle):
     reports = []
     for workspace in core_request(config, "GET", "/api/workspaces"):
         if workspace.get("workspace_type") != "container" or workspace.get("status") != "ready": continue
         filesystem = Path(workspace["path"]).resolve()
-        if not (filesystem / "usr/bin/python3").exists():
-            reports.append({"workspace": workspace["name"], "status": "missing-python"})
-            continue
-        script = filesystem / "usr/local/lib/sandboxed-sh/development_identity.py"
-        write(script, Path(config["script"]).read_text(), 0o755)
-        managed = filesystem / "root/.config/sandboxed-sh/development-identity"
-        managed.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Provision at the next launch, from inside the actual container.
-        # No host absolute path is written into its GPG or Git configuration.
-        digest = hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest()
-        marker = managed / ".bundle-digest"
-        if not marker.exists() or marker.read_text() != digest:
-            atomic_json(managed / ".pending-bundle.json", bundle)
-        hook = '''if [ -r /root/.config/sandboxed-sh/development-identity/activate.sh ]; then
-  . /root/.config/sandboxed-sh/development-identity/activate.sh
-fi
-'''
-        write(filesystem / "etc/profile.d/sandboxed-development-identity.sh", hook, 0o644)
-        companion = filesystem / "usr/local/bin/sandboxed-mcp"
-        if companion.exists():
-            original = companion.with_name(companion.name + ".identity-native")
-            if b"# sandboxed-development-identity-wrapper" not in companion.read_bytes()[:200]:
-                shutil.copy2(companion, original)
-            body = '''#!/bin/sh
-# sandboxed-development-identity-wrapper
-if [ "$1" = launch ]; then
-  exec /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/local/bin/sandboxed-mcp.identity-native "$@"
-fi
-exec /usr/local/bin/sandboxed-mcp.identity-native "$@"
-'''
-            tmp = companion.with_name(companion.name + ".identity-new")
-            write(tmp, body, 0o755); os.replace(tmp, companion)
-        if (managed / ".pending-bundle.json").exists():
-            result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
-                "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/true",
-                "cwd": "/root", "timeout_secs": 120})
-            if result.get("exit_code") != 0:
-                reports.append({"workspace": workspace["name"], "status": "pending-retry"})
-                continue
-        reports.append({"workspace": workspace["name"], "status": "current"})
+        try:
+            rooted_file(filesystem, "usr/local/lib/sandboxed-sh/development_identity.py",
+                        Path(config["script"]).read_text(), 0o755)
+            managed = "root/.config/sandboxed-sh/development-identity/"
+            digest = hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest()
+            try: current = rooted_file(filesystem, managed + ".bundle-digest")
+            except FileNotFoundError: current = None
+            if current != digest:
+                rooted_file(filesystem, managed + ".pending-bundle.json", json.dumps(bundle))
+                # Provision and install launch hooks inside the real container.
+                result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
+                    "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
+                    "cwd": "/root", "timeout_secs": 120})
+                if result.get("exit_code") != 0:
+                    reports.append({"workspace": workspace["name"], "status": "pending-retry"})
+                    continue
+            reports.append({"workspace": workspace["name"], "status": "current"})
+        except Exception:
+            # Retain other targets and do not expose API errors or bundle data.
+            reports.append({"workspace": workspace["name"], "status": "provisioning-failed"})
     return reports
 
 
@@ -474,6 +494,7 @@ def main():
     p.add_argument("--apply", action="store_true")
     p.add_argument("--offline", action="store_true", help="skip network checks (tests only)")
     p.add_argument("--local", action="store_true")
+    p.add_argument("--container", action="store_true")
     p.add_argument("--companion", type=Path)
     args, command = p.parse_known_args()
     if args.action == "run":
@@ -483,7 +504,7 @@ def main():
         prepare_skills(args.root, Path.cwd())
         os.execvpe(command[0], command, profile_env(args.root))
     elif args.action == "hooks":
-        report = install_hooks(args.root, args.local, args.companion)
+        report = install_hooks(args.root, args.local, args.companion, args.container)
     elif args.action == "prepare":
         prepare_skills(args.root, Path.cwd())
         report = {"prepared": True}
