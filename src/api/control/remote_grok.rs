@@ -1413,11 +1413,7 @@ pub(crate) async fn continue_on_node(
         return Err(replacement());
     }
     let track_claim = if let Some(track) = mission.project.track.as_deref() {
-        let slug = mission
-            .project
-            .project
-            .as_deref()
-            .ok_or_else(&replacement)?;
+        let slug = mission.project.project.as_deref().ok_or_else(replacement)?;
         if track != crate::api::track_leases::generated_track_key(&mission_id.to_string()) {
             return Err(replacement());
         }
@@ -1425,7 +1421,7 @@ pub(crate) async fn continue_on_node(
             .projects
             .track(slug, track)
             .map_err(internal)?
-            .ok_or_else(&replacement)?;
+            .ok_or_else(replacement)?;
         if canonical.track != track {
             return Err(replacement());
         }

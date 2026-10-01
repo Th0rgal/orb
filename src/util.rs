@@ -500,6 +500,8 @@ pub async fn copy_dir_recursive_skip(
     copy_dir_recursive_inner(src, dst, 0, skip).await
 }
 
+// async-recursion 1.1.1 generates #[must_use] on an already must-use Future.
+#[allow(clippy::double_must_use)]
 #[async_recursion::async_recursion]
 async fn copy_dir_recursive_inner(
     src: &std::path::Path,
