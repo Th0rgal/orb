@@ -144,6 +144,16 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("UserKnownHostsFile=/private/pins", argv)
         self.assertIn("GlobalKnownHostsFile=/dev/null", argv)
 
+    def test_offline_pending_update_keeps_existing_profile_usable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); pending = root / ".pending-bundle.json"
+            pending.write_text(json.dumps(self.bundle()))
+            (root / "current").mkdir(); (root / "current/receipt.json").write_text("{}")
+            with patch.object(identity, "install", side_effect=RuntimeError("offline")), patch.object(identity.sys, "stderr"):
+                identity.apply_pending(root)
+            self.assertTrue(pending.exists())
+            self.assertTrue((root / "current/receipt.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -453,7 +453,7 @@ def stage_containers(config, bundle):
             result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
                 "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
                 "cwd": "/root", "timeout_secs": 120})
-            if result.get("exit_code") != 0:
+            if result.get("exit_code") != 0 or rooted_file(filesystem, managed + ".bundle-digest") != digest:
                 reports.append({"workspace": workspace["name"], "status": "pending-retry"})
                 continue
             reports.append({"workspace": workspace["name"], "status": "current"})
@@ -491,7 +491,13 @@ def apply_pending(root):
     pending = root / ".pending-bundle.json"
     if not pending.exists(): return
     data = pending.read_text()
-    install(root, json.loads(data))
+    try:
+        install(root, json.loads(data))
+    except Exception:
+        if not (root / "current/receipt.json").is_file():
+            raise
+        print("development-identity: update pending; using previous validated profile", file=sys.stderr)
+        return
     # A newer reconciliation may have replaced the pending generation.
     if pending.exists() and pending.read_text() == data: pending.unlink()
 
