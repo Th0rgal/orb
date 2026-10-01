@@ -1279,7 +1279,9 @@ export function LiveProjectsSection(p: {
         <div class="row note">No projects on the core backend.</div>
       </Show>
       <button class="section archive-section-toggle" aria-expanded={archivesOpen()} aria-controls="sidebar-archives" onClick={toggleArchives}>
-        <span class="archive-section-icon"><Show when={archivesLoading() && archivesOpen()} fallback={<SidebarIcon.Archive size={14} />}><span class="archive-loading-icon"><Ic.Spinner size={13} /></span></Show></span><span>Archived</span><SidebarIcon.ChevronRight size={12} class={`history-chevron ${archivesOpen() ? "open" : ""}`} />
+        <span class="archive-section-label">Archived</span>
+        <Show when={archivesLoading() && archivesOpen()}><span class="archive-loading-icon" aria-hidden="true"><Ic.Spinner size={13} /></span></Show>
+        <span class="archive-section-chevron"><SidebarIcon.ChevronRight size={12} class={`history-chevron ${archivesOpen() ? "open" : ""}`} /></span>
       </button>
       <Show when={archivesOpen()}>
         <div id="sidebar-archives" aria-busy={archivesLoading()} onKeyDown={moveKey}>

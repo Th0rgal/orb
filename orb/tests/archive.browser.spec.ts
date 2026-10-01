@@ -53,6 +53,7 @@ test('one collapsed archive spans projects, while completion stays in place; res
  await expect(page.getByRole('button',{name:/History ·/})).toHaveCount(0);
  await archives.click();
  const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await expect(archives.locator('.history-chevron')).toHaveCSS('transform','matrix(0, 1, -1, 0, 0, 0)');
  await expect(archiveTree.getByRole('button',{name:'Second project',exact:true})).toHaveAttribute('aria-expanded','false');
  await expect(archiveTree.getByRole('button',{name:/Archived nested conversation/})).toHaveCount(0);
  await archiveTree.getByRole('button',{name:'Second project',exact:true}).click();
