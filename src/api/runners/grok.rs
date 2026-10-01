@@ -1475,6 +1475,34 @@ fn grok_acp_update_is_terminal(update: &serde_json::Value) -> bool {
     )
 }
 
+tokio::task_local! { static GROK_WAKEUP_MCP: serde_json::Value; }
+
+// Reuse the mission-scoped generated configuration; never import a global
+// server whose MISSION_ID or service identity could belong to another run.
+fn grok_wakeup_mcp(config: &serde_json::Value) -> serde_json::Value {
+    let entry = &config["mcp"]["automation-manager"];
+    if entry["enabled"] == false {
+        return serde_json::json!([]);
+    }
+    let Some(command) = entry["command"].as_array() else {
+        return serde_json::json!([]);
+    };
+    let Some(program) = command.first().and_then(|v| v.as_str()) else {
+        return serde_json::json!([]);
+    };
+    let env: Vec<_> = entry["environment"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| serde_json::json!({"name":name,"value":value}))
+        })
+        .collect();
+    serde_json::json!([{"name":"automation-manager","command":program,"args":&command[1..],"env":env}])
+}
+
 /// Execute a turn over `grok agent stdio` (ACP JSON-RPC).
 ///
 /// Pre-prompt failures return a fallback decision. Uncertain native creation
@@ -1523,22 +1551,31 @@ async fn run_grok_acp_turn(
         .await
         .map_err(|e| format!("failed to spawn grok agent stdio: {e}"))?;
 
-    run_grok_acp_process(
-        Some(mission_store),
-        child,
-        &workspace_exec.translate_path_for_container(&crate::workspace::configured_project_dir(
-            workspace, work_dir,
-        )),
-        message,
-        model,
-        mission_id,
-        events_tx,
-        cancel,
-        session_id,
-        is_continuation,
-        GrokAcpIdlePolicy::default(),
-    )
-    .await
+    let config = tokio::fs::read(work_dir.join("opencode.json"))
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_default();
+    GROK_WAKEUP_MCP
+        .scope(
+            grok_wakeup_mcp(&config),
+            run_grok_acp_process(
+                Some(mission_store),
+                child,
+                &workspace_exec.translate_path_for_container(
+                    &crate::workspace::configured_project_dir(workspace, work_dir),
+                ),
+                message,
+                model,
+                mission_id,
+                events_tx,
+                cancel,
+                session_id,
+                is_continuation,
+                GrokAcpIdlePolicy::default(),
+            ),
+        )
+        .await
 }
 
 // Kept below discovery/auth so the real protocol and process lifecycle can be
@@ -1557,6 +1594,9 @@ async fn run_grok_acp_process(
     is_continuation: bool,
     idle_policy: GrokAcpIdlePolicy,
 ) -> Result<AgentResult, GrokAcpFallback> {
+    let mcp_servers = GROK_WAKEUP_MCP
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| serde_json::json!([]));
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -1713,7 +1753,7 @@ async fn run_grok_acp_process(
                     "jsonrpc": "2.0",
                     "id": GROK_ACP_SESSION_ID,
                     "method": "session/load",
-                    "params": { "sessionId": sid, "cwd": acp_cwd, "mcpServers": [] }
+                    "params": { "sessionId": sid, "cwd": acp_cwd, "mcpServers": mcp_servers }
                 }),
             )
             .await?;
@@ -1733,7 +1773,7 @@ async fn run_grok_acp_process(
                                     "jsonrpc": "2.0",
                                     "id": GROK_ACP_SESSION_ID,
                                     "method": "session/load",
-                                    "params": { "sessionId": sid, "cwd": acp_cwd, "mcpServers": [] }
+                                    "params": { "sessionId": sid, "cwd": acp_cwd, "mcpServers": mcp_servers }
                                 }),
                             )
                             .await?;
@@ -1778,7 +1818,7 @@ async fn run_grok_acp_process(
                     "jsonrpc": "2.0",
                     "id": GROK_ACP_SESSION_NEW_ID,
                     "method": "session/new",
-                    "params": { "cwd": acp_cwd, "mcpServers": [] }
+                    "params": { "cwd": acp_cwd, "mcpServers": mcp_servers }
                 }),
             )
             .await?;
@@ -1797,7 +1837,7 @@ async fn run_grok_acp_process(
                                     "jsonrpc": "2.0",
                                     "id": GROK_ACP_SESSION_NEW_ID,
                                     "method": "session/new",
-                                    "params": { "cwd": acp_cwd, "mcpServers": [] }
+                                    "params": { "cwd": acp_cwd, "mcpServers": mcp_servers }
                                 }),
                             )
                             .await?;
@@ -3942,5 +3982,28 @@ sys.exit(0 if sys.argv[1]=='success_without_id' else 1)
             "title": "Write `/tmp/x`",
             "content": [{ "type": "diff", "path": "/tmp/x", "oldText": "", "newText": "delta" }]
         })));
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    #[test]
+    fn grok_wakeup_mcp_uses_only_the_mission_scoped_server() {
+        let config = serde_json::json!({"mcp":{
+            "automation-manager":{"command":["/bin/automation-manager-mcp","--stdio"],"environment":{"MISSION_ID":"mission"}},
+            "unrelated":{"command":["/bin/unrelated"]}
+        }});
+        let servers = grok_wakeup_mcp(&config);
+        assert_eq!(servers.as_array().unwrap().len(), 1);
+        assert_eq!(
+            servers[0]["env"][0],
+            serde_json::json!({"name":"MISSION_ID","value":"mission"})
+        );
+        assert_eq!(servers[0]["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(
+            grok_wakeup_mcp(&serde_json::json!({})),
+            serde_json::json!([])
+        );
     }
 }

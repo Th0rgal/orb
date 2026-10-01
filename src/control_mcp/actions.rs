@@ -193,6 +193,7 @@ mod tests {
             role: Role::Executor,
             mission_id: Some(Uuid::new_v4()),
             project: None,
+            action_run_generation: None,
             session_id: Uuid::new_v4(),
             exp: usize::MAX,
         }

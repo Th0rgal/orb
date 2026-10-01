@@ -9,6 +9,7 @@
 
 pub(crate) mod btw_context;
 pub(crate) mod client_placement;
+pub(crate) mod continuations;
 pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
 #[cfg(test)]
@@ -212,7 +213,10 @@ fn take_for_parked_session(
 ) -> Option<(QueuedAt, super::mission_runner::QueuedMessage)> {
     fn plain(content: &str, agent: &Option<String>, source: &Option<String>) -> bool {
         agent.is_none()
-            && source.as_deref() != Some("scheduler")
+            && !matches!(
+                source.as_deref(),
+                Some("scheduler" | "scheduled-continuation")
+            )
             && !content.trim_start().starts_with('/')
     }
     if let Some(position) = queue
@@ -249,6 +253,23 @@ async fn pop_next_runnable_control_queue(
     let queued = queue.len();
     for _ in 0..queued {
         let entry = queue.pop_front()?;
+        if entry.4.as_deref() == Some("scheduled-continuation") {
+            let Some(mission_id) = entry.3 else { continue };
+            match store
+                .can_admit_scheduled_delivery(mission_id, entry.0)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    // Preserve work on transient store failures, but never launch
+                    // a scheduled message whose revocation cannot be checked.
+                    tracing::warn!(%mission_id, %error, "Scheduled dequeue validation failed");
+                    queue.push_back(entry);
+                    continue;
+                }
+            }
+        }
         let parked = match entry.3 {
             Some(mission_id) => {
                 let paused = store
@@ -413,14 +434,14 @@ fn remote_node_needs_on_demand_probe(
     true
 }
 
-fn wakeup_supersession_key(
+pub(crate) fn wakeup_supersession_key(
     source: Option<&str>,
     trigger: &mission_store::TriggerType,
 ) -> Option<String> {
     match source? {
         // Wall-clock wakeups all represent the mission's next timer and may
         // supersede one another regardless of which helper created them.
-        "claude-builtin" | "automation-manager" => Some("wall-clock".to_string()),
+        "claude-builtin" | "automation-manager" | "orb-local" => Some("wall-clock".to_string()),
         // Durable completions are independent. Only a replacement watcher for
         // the same job may supersede an older one.
         "durable-job-terminal" => match trigger {
@@ -6619,7 +6640,10 @@ async fn preserve_remote_wait_during_shutdown(
     }
 }
 
-async fn arm_unresolved_remote_build_wake(working_dir: &std::path::Path, mission_id: Uuid) -> bool {
+async fn arm_unresolved_remote_build_wake(
+    working_dir: &std::path::Path,
+    mission_id: Uuid,
+) -> Option<Uuid> {
     let job_id = match crate::remote_node::job_ledger::current_remote_build_wait_handle(
         working_dir,
         mission_id,
@@ -6627,22 +6651,50 @@ async fn arm_unresolved_remote_build_wake(working_dir: &std::path::Path, mission
     .await
     {
         Ok(Some(handle)) => handle.job_id,
-        Ok(None) => return false,
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(%mission_id, ?error, "remote-build handles could not be loaded before turn parking");
-            return false;
+            return None;
         }
     };
 
     match crate::remote_node::job_ledger::require_terminal_wake(working_dir, job_id, mission_id)
         .await
     {
-        Ok(true) => true,
-        Ok(false) => false,
+        Ok(true) => Some(job_id),
+        Ok(false) => None,
         Err(error) => {
             tracing::warn!(%mission_id, %job_id, ?error, "remote-build terminal wake could not be armed before turn parking");
-            false
+            None
         }
+    }
+}
+
+fn remote_build_terminal_delivery_id(job: Uuid) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("sandboxed:remote-build-terminal:{job}").as_bytes(),
+    )
+}
+
+async fn park_scheduled_remote_execution(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    message: Option<Uuid>,
+    job: Uuid,
+) {
+    let Some(message) = message else {
+        return;
+    };
+    if let Err(error) = store
+        .handoff_scheduled_executions(
+            mission,
+            vec![message],
+            remote_build_terminal_delivery_id(job),
+        )
+        .await
+    {
+        tracing::error!(%mission, %error, "Failed to preserve scheduled remote continuation identity");
     }
 }
 
@@ -6650,14 +6702,13 @@ async fn mission_should_park_on_remote_build(
     mission_store: &Arc<dyn MissionStore>,
     working_dir: &std::path::Path,
     mission_id: Uuid,
-) -> bool {
-    if !arm_unresolved_remote_build_wake(working_dir, mission_id).await
-        || !mission_has_unresolved_remote_build(working_dir, mission_id).await
-    {
-        return false;
+) -> Option<Uuid> {
+    let job = arm_unresolved_remote_build_wake(working_dir, mission_id).await?;
+    if !mission_has_unresolved_remote_build(working_dir, mission_id).await {
+        return None;
     }
     let Ok(Some(mission)) = mission_store.get_mission(mission_id).await else {
-        return false;
+        return None;
     };
     if matches!(
         mission.status,
@@ -6666,14 +6717,15 @@ async fn mission_should_park_on_remote_build(
             | MissionStatus::Blocked
             | MissionStatus::NotFeasible
     ) {
-        return false;
+        return None;
     }
     mission_store
         .get_active_mission_run(mission_id)
         .await
         .ok()
         .flatten()
-        .is_some_and(|run| run.execution_state != MissionExecutionState::Stopping)
+        .filter(|run| run.execution_state != MissionExecutionState::Stopping)
+        .map(|_| job)
 }
 
 pub async fn list_missions(
@@ -6791,6 +6843,9 @@ pub async fn list_missions(
         user_wait_starts_for_runs(control.mission_store.as_ref(), active_runs.values()).await;
     let (remote_handles, remote_outcomes) = remote_job_projection_inputs(&state).await;
     let now = chrono::Utc::now();
+    let continuation_summaries = continuations::summaries(&control.mission_store)
+        .await
+        .map_err(internal_error)?;
     let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
@@ -6817,6 +6872,14 @@ pub async fn list_missions(
         .collect();
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            continuations::attach_capabilities(
+                value,
+                state.config.automations_enabled && control.mission_store.is_persistent(),
+            );
+            value["continuation"] = continuation_summaries
+                .get(&id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             if let Some(t) = machine_transfer::committed(&control.mission_store, id)
                 .await
                 .map_err(internal_error)?
@@ -7804,6 +7867,15 @@ pub async fn get_mission(
                 let mut value = serde_json::to_value(&mission).map_err(internal_error)?;
                 value["execution_kind"] = serde_json::json!("hosted");
                 value["cloud"] = serde_json::to_value(execution).map_err(internal_error)?;
+                continuations::attach_capabilities(
+                    &mut value,
+                    state.config.automations_enabled && control.mission_store.is_persistent(),
+                );
+                value["continuation"] = continuations::summaries(&control.mission_store)
+                    .await
+                    .map_err(internal_error)?
+                    .remove(&id)
+                    .unwrap_or(serde_json::Value::Null);
                 return Ok(Json(value));
             }
 
@@ -7833,6 +7905,15 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
+            continuations::attach_capabilities(
+                &mut value,
+                state.config.automations_enabled && control.mission_store.is_persistent(),
+            );
+            value["continuation"] = continuations::summaries(&control.mission_store)
+                .await
+                .map_err(internal_error)?
+                .remove(&id)
+                .unwrap_or(serde_json::Value::Null);
             // Remote placement must be visible on the read model: the row's
             // workspace/backend describe a local harness that a raw remote
             // mission never runs.
@@ -12268,7 +12349,15 @@ pub(super) async fn create_mission_inner(
         .await
         {
             Ok(()) => {
-                dispatch_remote_job(&state, &control, &mission, remote_node_id, remote_plan).await
+                dispatch_remote_job(
+                    &state,
+                    &control,
+                    &mission,
+                    remote_node_id,
+                    remote_plan,
+                    None,
+                )
+                .await
             }
             Err(message) => Err(message),
         };
@@ -13564,11 +13653,8 @@ async fn deliver_remote_build_terminal_wake(
     }
 
     let content = remote_build_terminal_message(receipt);
+    let delivery_id = remote_build_terminal_delivery_id(receipt.job_id);
     if let Some(session) = live_session {
-        let delivery_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("sandboxed:remote-build-terminal:{}", receipt.job_id).as_bytes(),
-        );
         let (respond, response) = oneshot::channel();
         session
             .cmd_tx
@@ -13601,7 +13687,10 @@ async fn deliver_remote_build_terminal_wake(
     // returns. Repeating this write after a crash is idempotent.
     owner
         .mission_store
-        .set_deferred_goal(receipt.mission_id, Some(content))
+        .set_deferred_goal(
+            receipt.mission_id,
+            Some(deferred_messages::encode(delivery_id, &content)),
+        )
         .await?;
     owner
         .mission_store
@@ -13823,6 +13912,7 @@ async fn dispatch_remote_job(
     mission: &Mission,
     remote_node_id: &str,
     plan: &RemoteHarnessPlan,
+    scheduled_origin: Option<(Option<Uuid>, Uuid)>,
 ) -> Result<Mission, String> {
     let node = crate::remote_node::placement_for_selected_node(
         &state.config.remote_nodes,
@@ -13856,7 +13946,16 @@ async fn dispatch_remote_job(
             ));
         }
     }
-    let dispatched = submit_leased_remote_job(state, control, mission, node, job_id, plan).await;
+    let dispatched = async {
+        if let Some((message, previous_job)) = scheduled_origin {
+            control
+                .mission_store
+                .bind_scheduled_remote_job(mission.id, message, previous_job, job_id)
+                .await?;
+        }
+        submit_leased_remote_job(state, control, mission, node, job_id, plan).await
+    }
+    .await;
     if dispatched.is_err() {
         if let Err(error) = finish_remote_job_lease(
             control.mission_store.as_ref(),
@@ -15266,6 +15365,23 @@ async fn poll_remote_job(
                             status_reason = usage_limit_wait::USAGE_LIMIT_WAIT_REASON;
                         }
                     }
+                    // A terminal node receipt proves admission, even if its ACK
+                    // was lost. Quota waits remain running until their replay ends.
+                    let settled = (status_reason != usage_limit_wait::USAGE_LIMIT_WAIT_REASON)
+                        .then_some(success);
+                    if let Err(error) = owner
+                        .mission_store
+                        .complete_scheduled_remote_job(
+                            mission_id,
+                            job_id,
+                            settled,
+                            (settled == Some(false)).then(|| status_reason.to_string()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%mission_id, %job_id, %error, "Remote scheduled receipt persistence failed; retaining handle and retrying");
+                        continue;
+                    }
                     if should_finalize_remote_job(inactive_status) {
                         if let Err(error) = finalize_remote_mission(
                             &owner,
@@ -16203,6 +16319,7 @@ pub struct ClientTranscriptRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ClientStatusRequest {
+    pub scheduled_execution_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub generation: Option<u64>,
     pub status: String,
@@ -16301,9 +16418,25 @@ pub async fn set_client_mission_status(
     }
     let run =
         machine_transfer::check_client_receipt(&control, id, req.run_id, req.generation).await?;
+    // A stopped process also represents queue advancement or machine transfer.
+    // Explicit user Stop revokes wake-ups through continuations/cancel instead.
     control
         .mission_store
         .update_mission_status_with_reason(id, status, Some("client_runner"))
+        .await
+        .map_err(internal_error)?;
+    control
+        .mission_store
+        .complete_turn_executions_for_mission(
+            id,
+            req.scheduled_execution_id,
+            matches!(
+                status,
+                MissionStatus::Completed | MissionStatus::AwaitingUser
+            ),
+            matches!(status, MissionStatus::Failed | MissionStatus::Interrupted)
+                .then(|| "client_runner".to_string()),
+        )
         .await
         .map_err(internal_error)?;
     if let Some(run) = run {
@@ -19466,6 +19599,27 @@ async fn paloma_webhook_forwarder_loop(
                 in_flight.lock().await.remove(&(mission_id, status));
                 return;
             }
+            let wake = mission
+                .as_ref()
+                .map(|m| super::mission_horizon::wake_fields_for_mission(m, &working_dir));
+            // A worker of another mission reports to that mission. Without a
+            // conversation of its own or a bound project conversation, waking
+            // Hermes would only open a throwaway session that acts on its own
+            // (289 such sessions in two days started review missions nobody
+            // asked for). The transition is recorded as handled.
+            if let Some(m) = mission.as_ref() {
+                if super::mission_horizon::reports_to_parent_mission(m, wake.as_ref()) {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        parent = ?m.parent_mission_id,
+                        ?status,
+                        "status callback not sent: the mission reports to its parent mission"
+                    );
+                    markers.lock().await.set(mission_id, status);
+                    in_flight.lock().await.remove(&(mission_id, status));
+                    return;
+                }
+            }
             let mut remote_jobs = crate::remote_node::job_ledger::load(&working_dir)
                 .await
                 .unwrap_or_default()
@@ -19564,9 +19718,6 @@ async fn paloma_webhook_forwarder_loop(
             } else {
                 None
             };
-            let wake = mission
-                .as_ref()
-                .map(|m| super::mission_horizon::wake_fields_for_mission(m, &working_dir));
             let body = serde_json::json!({
                 // Idempotency / ordering (P#6): consumers dedupe on
                 // `event_id` and may order by `sequence`.
@@ -20266,6 +20417,16 @@ async fn automation_scheduler_loop(
     loop {
         tokio::time::sleep(check_interval).await;
         tick_count += 1;
+        if let Err(error) = continuations::deliver(
+            &mission_store,
+            &cmd_tx,
+            &events_tx,
+            telegram_bridge.as_ref(),
+        )
+        .await
+        {
+            tracing::error!(%error, "Scheduled continuation delivery failed");
+        }
 
         // Every ~60 seconds (12 ticks × 5s), run housekeeping sweeps.
         if tick_count.is_multiple_of(12) {
@@ -20641,6 +20802,19 @@ async fn automation_scheduler_loop(
             // Apply variable substitution
             let substituted_content = substitute_variables(&command_content, &context);
 
+            // One-shot continuations use the durable outbox. General automations
+            // retain their existing execution and notification behavior.
+            if automation.variables.contains_key("__wakeup_source") {
+                let mutex = continuations::lock(mission.id);
+                let _guard = mutex.lock().await;
+                if let Err(error) =
+                    continuations::stage(&mission_store, &automation, substituted_content).await
+                {
+                    tracing::error!(automation_id = %automation.id, %error, "Could not persist scheduled continuation");
+                }
+                continue;
+            }
+
             // Create execution record before execution
             let execution_id = Uuid::new_v4();
             let execution = AutomationExecution {
@@ -20719,7 +20893,7 @@ async fn automation_scheduler_loop(
                         // Message queued successfully – keep execution in Running
                         // status. The actual success/failure will be determined
                         // when the agent finishes processing and
-                        // complete_running_executions_for_mission is called.
+                        // complete_turn_executions_for_mission is called.
                         let mut exec = execution.clone();
                         exec.retry_count = retry_attempt;
                         if let Err(e) = mission_store.update_automation_execution(exec).await {
@@ -22205,7 +22379,7 @@ async fn agent_finished_automation_messages(
             resolve_agent_finished_target_mission(mission.id, mission.status, &automation);
 
         // Create an execution record in Running status – it will be
-        // completed by complete_running_executions_for_mission when the
+        // completed by complete_turn_executions_for_mission when the
         // target agent finishes processing.
         let execution_id = Uuid::new_v4();
         let execution = AutomationExecution {
@@ -22457,6 +22631,8 @@ async fn control_actor_loop(
     // Track which mission the main `running` task is actually working on.
     // This is different from `current_mission` which can change when user creates a new mission.
     let mut running_mission_id: Option<Uuid> = None;
+    let mut running_message_id: Option<Uuid> = None;
+    let mut running_execution_ids = Vec::new();
     // Backend captured for the currently executing primary turn. Updating a
     // mission's settings while it runs must not change watchdog semantics for
     // that in-flight process.
@@ -23022,6 +23198,33 @@ async fn control_actor_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
+                // Stop may revoke a delivery while its command is already in this
+                // channel. Reject it before client routing or admission can resume
+                // the interrupted mission. The actor serializes this with Stop.
+                let scheduled_target = match &cmd {
+                    ControlCommand::UserMessage { id, target_mission_id: Some(mid), source, .. }
+                        if source.as_deref() == Some("scheduled-continuation") => Some((*mid, *id)),
+                    ControlCommand::AdmitDispatch { command, .. } => match command.as_ref() {
+                        ControlCommand::UserMessage { id, target_mission_id: Some(mid), source, .. }
+                            if source.as_deref() == Some("scheduled-continuation") => Some((*mid, *id)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((mid, id)) = scheduled_target {
+                    let rejection = match mission_store.can_admit_scheduled_delivery(mid, id).await {
+                        Ok(true) => None,
+                        Ok(false) => Some("Scheduled continuation was revoked".to_string()),
+                        Err(error) => Some(format!("Could not validate scheduled continuation: {error}")),
+                    };
+                    if let Some(error) = rejection {
+                        let command = match cmd { ControlCommand::AdmitDispatch { command, .. } => *command, command => command };
+                        if let ControlCommand::UserMessage { respond, .. } = command {
+                            let _ = respond.send(UserMessageAck::Rejected(error));
+                        }
+                        continue;
+                    }
+                }
                 // Reject remote messages before admission can retag or reactivate
                 // the mission. The actual node continuation is the resume route.
                 let message_target = match &cmd {
@@ -23035,8 +23238,8 @@ async fn control_actor_loop(
                 if let Some(mid) = message_target {
                     if mission_store.get_mission(mid).await.ok().flatten().is_some_and(|m| client_placement::is_tagged(&m.project.tags)) {
                         let command = match cmd { ControlCommand::AdmitDispatch { command, .. } => *command, command => command };
-                        if let ControlCommand::UserMessage { id, content, respond, .. } = command {
-                            let ack = match worker_location::enqueue(&mission_store, mid, id, content).await {
+                        if let ControlCommand::UserMessage { id, content, source, respond, .. } = command {
+                            let ack = match worker_location::enqueue_with_source(&mission_store, mid, id, content, source.as_deref() == Some("scheduled-continuation")).await {
                                 Ok(()) => UserMessageAck::Queued,
                                 Err(error) => UserMessageAck::Rejected(error),
                             };
@@ -23052,7 +23255,7 @@ async fn control_actor_loop(
                             command => command,
                         };
                         if let ControlCommand::UserMessage { id, content, source, respond, .. } = rejected {
-                            if source.as_deref() == Some("task-board") {
+                            if matches!(source.as_deref(), Some("task-board" | "scheduled-continuation")) {
                                 if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
                                     let user = AuthUser { id:session_user_id.clone(), username:session_user_id.clone() };
                                     tokio::spawn(async move {
@@ -24404,6 +24607,8 @@ async fn control_actor_loop(
                                 };
                                 let turn_mission_store = mission_store.clone();
                                 let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                                running_message_id = Some(mid);
+                                running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                                 running = Some(tokio::spawn(async move {
                                     let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                         turn_mission_store,
@@ -25061,6 +25266,10 @@ async fn control_actor_loop(
                                 }
                             }
                         }
+                        if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
+                            let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
+                            continue;
+                        }
                         // Helper: cascade-cancel all child missions of the given parent.
                         async fn cancel_child_missions(
                             parent_id: Uuid,
@@ -25079,6 +25288,9 @@ async fn control_actor_loop(
                             for child in children {
                                 if matches!(child.status, MissionStatus::Completed | MissionStatus::Failed | MissionStatus::Interrupted | MissionStatus::NotFeasible) {
                                     continue;
+                                }
+                                if let Err(error) = continuations::stop_for_mission(mission_store, child.id).await {
+                                    tracing::error!(mission_id = %child.id, %error, "Failed to revoke child wake-ups during cascade cancellation");
                                 }
                                 // Cancel runner if running
                                 if let Some(runner) = parallel_runners.get_mut(&child.id) {
@@ -25895,6 +26107,8 @@ async fn control_actor_loop(
                                         };
                                         let turn_mission_store = mission_store.clone();
                                         let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                                        running_message_id = Some(mid);
+                                        running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                                         running = Some(tokio::spawn(async move {
                                             let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                                                 turn_mission_store,
@@ -26333,6 +26547,8 @@ async fn control_actor_loop(
                     // Save the running mission ID before clearing it - we need it for persist and auto-complete
                     // (current_mission can change if user clicks "New Mission" while task was running)
                     let completed_mission_id = running_mission_id;
+                    let completed_message_id = running_message_id.take();
+                    continuations::bind_turn(&mission_store, completed_mission_id, completed_message_id, std::mem::take(&mut running_execution_ids)).await;
                     let completed_cancellation_requested = running_cancel
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled);
@@ -26360,6 +26576,7 @@ async fn control_actor_loop(
                     // `match` closes — `agent_result` itself is out of scope
                     // by then. Empty string when the join errored.
                     let mut completed_agent_output = String::new();
+                    let mut completed_execution_outcome = None;
                     // Set when the mission was parked until a usage limit
                     // resets: it must not be finalized as failed afterwards.
                     let mut completed_usage_limit_wait = false;
@@ -26392,14 +26609,15 @@ async fn control_actor_loop(
                                 is_grok_acp_transport_failure(&agent_result);
                             completed_agent_output = agent_result.output.clone();
                             if let Some(run) = running_run.take() {
-                                completed_waiting_remote_job =
-                                    mission_should_park_on_remote_build(
+                                let parked_job = mission_should_park_on_remote_build(
                                         &mission_store,
                                         &config.working_dir,
                                         run.mission_id,
                                     )
                                     .await;
-                                let run_update = if completed_waiting_remote_job {
+                                completed_waiting_remote_job = parked_job.is_some();
+                                let run_update = if let Some(job) = parked_job {
+                                    park_scheduled_remote_execution(&mission_store, run.mission_id, completed_message_id, job).await;
                                     mission_store
                                         .heartbeat_mission_run(
                                             run.run_id,
@@ -26599,30 +26817,7 @@ async fn control_actor_loop(
                             });
                             if !completed_waiting_remote_job {
                                 if let Some(mission_id) = completed_mission_id {
-                                // Update automation executions based on agent outcome
-                                let error_msg = if agent_result.success {
-                                    None
-                                } else {
-                                    Some(
-                                        agent_result.terminal_reason
-                                            .map(|r| format!("{:?}", r))
-                                            .unwrap_or_else(|| "Agent execution failed".to_string()),
-                                    )
-                                };
-                                if let Err(e) = mission_store
-                                    .complete_running_executions_for_mission(
-                                        mission_id,
-                                        agent_result.success,
-                                        error_msg,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to complete running executions for mission {}: {}",
-                                        mission_id,
-                                        e
-                                    );
-                                }
+                                completed_execution_outcome = Some((agent_result.success, if agent_result.success { None } else { Some(agent_result.terminal_reason.map(|r| format!("{:?}", r)).unwrap_or_else(|| "Agent execution failed".to_string())) }));
 
                                 close_mission_desktop_sessions(
                                     &mission_store,
@@ -26651,8 +26846,9 @@ async fn control_actor_loop(
                             if let Some(mission_id) = completed_mission_id {
                                 // Mark running automation executions as failed
                                 if let Err(e2) = mission_store
-                                    .complete_running_executions_for_mission(
+                                    .complete_turn_executions_for_mission(
                                         mission_id,
+                                        completed_message_id,
                                         false,
                                         Some(format!("Task join failed: {}", e)),
                                     )
@@ -26704,6 +26900,7 @@ async fn control_actor_loop(
                     // Firing automations on these creates noisy retry loops.
                     if !completed_waiting_remote_job {
                         if let Some(mission_id) = completed_mission_id {
+                        let mut transport_requeued = false;
                         if completed_transport_failure
                             && !queue_has_pending_target_mission(&queue, mission_id)
                             && reserve_transport_auto_resume(
@@ -26733,8 +26930,9 @@ async fn control_actor_loop(
                                         %mission_id,
                                         "Auto-resuming mission after structured transport failure"
                                     );
+                                    transport_requeued = true;
                                     queue.push_back((
-                                        Uuid::new_v4(),
+                                        completed_message_id.unwrap_or_else(Uuid::new_v4),
                                         resume_message,
                                         None,
                                         Some(mission_id),
@@ -26753,6 +26951,13 @@ async fn control_actor_loop(
                                         mission_id: Some(mission_id),
                                         resumable: true,
                                     });
+                                }
+                            }
+                        }
+                        if !transport_requeued {
+                            if let Some((success, error)) = completed_execution_outcome {
+                                if let Err(error) = mission_store.complete_turn_executions_for_mission(mission_id, completed_message_id, success, error).await {
+                                    tracing::warn!(%mission_id, %error, "Failed to settle completed turn");
                                 }
                             }
                         }
@@ -27044,6 +27249,8 @@ async fn control_actor_loop(
                     let user_id_for_turn = control_hub.identities.read().await.get(&session_user_id).cloned();
                     let turn_mission_store = mission_store.clone();
                     let session_update_run = running_run.as_ref().map(crate::api::mission_store::SessionUpdateRun::from);
+                    running_message_id = Some(mid);
+                    running_execution_ids = deferred_messages::execution_ids(mid, &msg, msg_source.as_deref());
                     running = Some(tokio::spawn(async move {
                         let result = crate::api::runners::SESSION_UPDATE_RUN.scope(session_update_run, run_single_control_turn(
                             turn_mission_store,
@@ -27151,7 +27358,10 @@ async fn control_actor_loop(
                 let mut completed_missions = Vec::new();
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
+                    let completed_message_id = runner.inflight_message().map(|message| message.id);
+                    let completed_execution_ids = runner.inflight_message().map(|message| deferred_messages::execution_ids(message.id, &message.content, message.source.as_deref())).unwrap_or_default();
                     if runner.force_clear_cancelled_if_due() {
+                        continuations::bind_turn(&mission_store, Some(*mission_id), completed_message_id, completed_execution_ids).await;
                         tracing::warn!(
                             mission_id = %mission_id,
                             "Force-aborting stuck parallel runner after cancellation grace period"
@@ -27194,8 +27404,9 @@ async fn control_actor_loop(
                             });
                         }
                         if let Err(error) = mission_store
-                            .complete_running_executions_for_mission(
+                            .complete_turn_executions_for_mission(
                                 *mission_id,
+                                completed_message_id,
                                 false,
                                 Some(
                                     "Force-aborted stuck parallel runner after cancel timed out"
@@ -27213,6 +27424,7 @@ async fn control_actor_loop(
                         continue;
                     }
                     if runner.check_finished() {
+                        continuations::bind_turn(&mission_store, Some(*mission_id), completed_message_id, completed_execution_ids).await;
                         if let Some((_msg_id, user_msg, mut result)) = runner.poll_completion().await {
                             maybe_recover_soft_llm_error(&mut result);
                             // Same as the main runner: a usage limit on every
@@ -27226,13 +27438,15 @@ async fn control_actor_loop(
                             let durable_terminal_reason = result
                                 .terminal_reason
                                 .map(|reason| format!("{reason:?}"));
-                            let waiting_remote_job = mission_should_park_on_remote_build(
+                            let parked_job = mission_should_park_on_remote_build(
                                 &mission_store,
                                 &config.working_dir,
                                 *mission_id,
                             )
                             .await;
-                            if waiting_remote_job {
+                            let waiting_remote_job = parked_job.is_some();
+                            if let Some(job) = parked_job {
+                                park_scheduled_remote_execution(&mission_store, *mission_id, completed_message_id, job).await;
                                 if let Some(run) = runner.durable_run.as_ref() {
                                     if let Err(error) = mission_store
                                         .heartbeat_mission_run(
@@ -27327,33 +27541,6 @@ async fn control_actor_loop(
                                 completion_evidence: Some(completion_evidence.clone()),
                             });
 
-                            // Update automation executions based on agent outcome
-                            if !waiting_remote_job {
-                                let error_msg = if result.success {
-                                    None
-                                } else {
-                                    Some(
-                                        result.terminal_reason
-                                            .map(|r| format!("{:?}", r))
-                                            .unwrap_or_else(|| "Agent execution failed".to_string()),
-                                    )
-                                };
-                                if let Err(e) = mission_store
-                                    .complete_running_executions_for_mission(
-                                        *mission_id,
-                                        result.success,
-                                        error_msg,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to complete running executions for parallel mission {}: {}",
-                                        mission_id,
-                                        e
-                                    );
-                                }
-                            }
-
                             // Persist history for this mission
                             let entries: Vec<MissionHistoryEntry> = runner
                                 .history
@@ -27391,6 +27578,7 @@ async fn control_actor_loop(
                             ) || is_transport_failure_evidence(&completion_evidence);
                             let cancellation_requested = runner.cancellation_requested();
                             let was_queue_empty = runner.queue.is_empty();
+                            let mut transport_requeued = false;
                             if suppress_finished_automation
                                 && is_transport_failure_evidence(&completion_evidence)
                                 && !cancellation_requested
@@ -27412,13 +27600,42 @@ async fn control_actor_loop(
                                     *mission_id,
                                 )
                                 .await;
+                                transport_requeued = true;
                                 runner.queue_message(
-                                    Uuid::new_v4(),
+                                    completed_message_id.unwrap_or_else(Uuid::new_v4),
                                     resume_message,
                                     None,
                                     Some("transport_auto_resume".to_string()),
                                 );
                             }
+                            // Update automation executions based on agent outcome
+                            if !transport_requeued {
+                                let error_msg = if result.success {
+                                    None
+                                } else {
+                                    Some(
+                                        result.terminal_reason
+                                            .map(|r| format!("{:?}", r))
+                                            .unwrap_or_else(|| "Agent execution failed".to_string()),
+                                    )
+                                };
+                                if let Err(e) = mission_store
+                                    .complete_turn_executions_for_mission(
+                                        *mission_id,
+                                        completed_message_id,
+                                        result.success,
+                                        error_msg,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to complete running executions for parallel mission {}: {}",
+                                        mission_id,
+                                        e
+                                    );
+                                }
+                            }
+
                             // Grok /goal sentinel hook for the parallel-runner
                             // path. Same contract as the main-session hook
                             // above: runs before the AgentFinished automations
@@ -27867,6 +28084,7 @@ async fn control_actor_loop(
                         continue;
                     }
                 }
+                continuations::bind_turn(&mission_store, stuck_mid, running_message_id, std::mem::take(&mut running_execution_ids)).await;
                 running = None;
                 runner_force_abort_requested = false;
                 running_cancel = None;
@@ -27922,8 +28140,9 @@ async fn control_actor_loop(
                         });
                     }
                     if let Err(e) = mission_store
-                        .complete_running_executions_for_mission(
+                        .complete_turn_executions_for_mission(
                             mid,
+                            running_message_id.take(),
                             false,
                             Some("Force-aborted stuck runner after cancel timed out".to_string()),
                         )
@@ -29189,6 +29408,63 @@ pub async fn create_automation(
         ));
     }
 
+    // Queued MCP actions carry the generation captured before durable acceptance.
+    // Direct requests capture it before waiting behind Stop's transaction.
+    let wakeup_generation = if req.variables.contains_key("__wakeup_source") {
+        if !state.config.automations_enabled || !control.mission_store.is_persistent() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Durable scheduling is disabled on this server".into(),
+            ));
+        }
+        Some(match req.variables.get("__wakeup_run_generation") {
+            Some(value) => value.parse::<u64>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid originating wake-up generation".into(),
+                )
+            })?,
+            None if req.variables.contains_key("__wakeup_local") => {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Local wake-up is missing its originating run generation".into(),
+                ))
+            }
+            None => control
+                .mission_store
+                .get_latest_mission_run(mission_id)
+                .await
+                .map_err(internal_error)?
+                .map_or(0, |run| run.generation),
+        })
+    } else {
+        None
+    };
+    let continuation_lock = continuations::lock(mission_id);
+    let _continuation_guard = continuation_lock.lock().await;
+    let automation_id = req
+        .variables
+        .get("__wakeup_request_id")
+        .map(|key| Uuid::new_v5(&mission_id, key.as_bytes()))
+        .unwrap_or_else(Uuid::new_v4);
+    if let Some(existing) = control
+        .mission_store
+        .get_automation(automation_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Ok(Json(existing));
+    }
+    if let Some(generation) = wakeup_generation {
+        if !control
+            .mission_store
+            .wakeup_creation_allowed(mission_id, generation)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err((if req.variables.contains_key("__wakeup_local") {StatusCode::GONE} else {StatusCode::CONFLICT}, "Wake-up creation belongs to a stopped or superseded mission generation; resume the mission first".into()));
+        }
+    }
     // Validate the command exists in the library if CommandSource::Library
     if let mission_store::CommandSource::Library { ref name } = req.command_source {
         validate_library_command(&state, name).await?;
@@ -29236,6 +29512,25 @@ pub async fn create_automation(
         None
     };
 
+    let last_triggered_at = if let (Some(due), mission_store::TriggerType::Interval { seconds }) =
+        (req.variables.get("__wakeup_due_at"), &trigger)
+    {
+        let due = chrono::DateTime::parse_from_rfc3339(due)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wake-up due time".into()))?;
+        let seconds = i64::try_from(*seconds)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wake-up delay".into()))?;
+        Some(
+            due.checked_sub_signed(
+                chrono::Duration::try_seconds(seconds)
+                    .ok_or((StatusCode::BAD_REQUEST, "Wake-up delay out of range".into()))?,
+            )
+            .ok_or((StatusCode::BAD_REQUEST, "Wake-up date out of range".into()))?
+            .to_rfc3339(),
+        )
+    } else {
+        last_triggered_at
+    };
+
     // Build the complete Automation struct
     let fresh_session = req
         .fresh_session
@@ -29256,11 +29551,17 @@ pub async fn create_automation(
     }
 
     let automation = mission_store::Automation {
-        id: Uuid::new_v4(),
+        id: automation_id,
         mission_id,
         command_source: req.command_source,
         trigger,
-        variables: req.variables,
+        variables: {
+            let mut variables = req.variables;
+            if let Some(generation) = wakeup_generation {
+                variables.insert("__wakeup_run_generation".into(), generation.to_string());
+            }
+            variables
+        },
         active: true,
         stop_policy: req
             .stop_policy
@@ -29411,7 +29712,7 @@ pub async fn create_automation(
             };
 
             // Record the execution in Running status – it will be completed
-            // by complete_running_executions_for_mission when the agent
+            // by complete_turn_executions_for_mission when the agent
             // finishes processing.
             let execution_id = Uuid::new_v4();
             let execution = mission_store::AutomationExecution {
@@ -29478,7 +29779,11 @@ pub async fn update_automation(
 ) -> Result<Json<mission_store::Automation>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
+    let original = require_automation(&control.mission_store, automation_id).await?;
+    let mutex = continuations::lock(original.mission_id);
+    let _guard = mutex.lock().await;
     let mut automation = require_automation(&control.mission_store, automation_id).await?;
+    let was_wakeup = automation.variables.contains_key("__wakeup_source");
 
     // Validate the command exists in the library if CommandSource::Library is being updated
     if let Some(mission_store::CommandSource::Library { name }) = req.command_source.as_ref() {
@@ -29556,6 +29861,14 @@ pub async fn update_automation(
         }
     }
 
+    if was_wakeup && !automation.active {
+        continuations::ensure_cancellable(&control.mission_store, automation_id).await?;
+        control
+            .mission_store
+            .cancel_scheduled_delivery(automation_id)
+            .await
+            .map_err(internal_error)?;
+    }
     // Update automation in the store
     control
         .mission_store
@@ -29574,6 +29887,17 @@ pub async fn delete_automation(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
+    let automation = require_automation(&control.mission_store, automation_id).await?;
+    let mutex = continuations::lock(automation.mission_id);
+    let _guard = mutex.lock().await;
+    if automation.variables.contains_key("__wakeup_source") {
+        continuations::ensure_cancellable(&control.mission_store, automation_id).await?;
+        control
+            .mission_store
+            .cancel_scheduled_delivery(automation_id)
+            .await
+            .map_err(internal_error)?;
+    }
     let deleted = control
         .mission_store
         .delete_automation(automation_id)
@@ -30725,7 +31049,7 @@ pub async fn webhook_receiver(
             // Message queued successfully – keep execution in Running
             // status. The actual success/failure will be determined
             // when the agent finishes processing and
-            // complete_running_executions_for_mission is called.
+            // complete_turn_executions_for_mission is called.
             if let Err(e) = mission_store
                 .update_automation_last_triggered(automation.id)
                 .await
@@ -32540,7 +32864,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(mission_should_park_on_remote_build(&store, dir.path(), mission.id).await);
+        assert!(
+            mission_should_park_on_remote_build(&store, dir.path(), mission.id)
+                .await
+                .is_some()
+        );
         store
             .heartbeat_mission_run(
                 run.run_id,
@@ -32550,7 +32878,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!mission_should_park_on_remote_build(&store, dir.path(), mission.id).await);
+        assert!(
+            mission_should_park_on_remote_build(&store, dir.path(), mission.id)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

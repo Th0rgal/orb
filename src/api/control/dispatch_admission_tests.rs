@@ -61,10 +61,19 @@ impl Harness {
         dir: FixtureDir,
         nodes: Vec<crate::remote_node::RemoteNodeConfig>,
     ) -> Self {
+        Self::with_directory_and_automations(dir, nodes, true).await
+    }
+
+    async fn with_directory_and_automations(
+        dir: FixtureDir,
+        nodes: Vec<crate::remote_node::RemoteNodeConfig>,
+        enabled: bool,
+    ) -> Self {
         let path = dir.path();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::new(path.to_path_buf());
         config.port = listener.local_addr().unwrap().port();
+        config.automations_enabled = enabled;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
@@ -181,6 +190,10 @@ impl Harness {
             .nest("/projects", crate::api::projects_overview::routes())
             .route("/missions", axum::routing::post(create_mission))
             .route("/missions/:id", axum::routing::get(get_mission))
+            .route(
+                "/missions/:id/automations",
+                axum::routing::post(create_automation),
+            )
             .route("/missions/:id/resume", axum::routing::post(resume_mission))
             .route(
                 "/missions/:id/board/tasks",
@@ -9161,4 +9174,616 @@ async fn relocated_worker_keeps_parent_metadata_without_inheriting_location() {
         assert_eq!(request.config_profile.as_deref(), Some("override"));
         assert_eq!(request.backend.as_deref(), Some("grok"));
     }
+}
+
+#[tokio::test]
+async fn continuation_parent_stop_revokes_child_and_rejects_late_creation() {
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let parent = store
+        .create_mission(
+            Some("wake parent"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    let child = store
+        .create_mission_with_parent(
+            Some("wake child"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut timers = Vec::new();
+    for mission in [parent.id, child.id] {
+        let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"stop_policy":{"type":"after_first_fire"},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":Uuid::new_v4().to_string()}})).unwrap();
+        timers.push(
+            create_automation(
+                State(h.state.clone()),
+                Extension(h.user.clone()),
+                Path(mission),
+                Json(req),
+            )
+            .await
+            .unwrap()
+            .0,
+        );
+    }
+    let child_timer = timers.last().unwrap();
+    continuations::stage(store, child_timer, "stale queued wake".into())
+        .await
+        .unwrap();
+    let mut occurrence = store
+        .get_automation_executions(child_timer.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    occurrence.status = mission_store::ExecutionStatus::Running;
+    store
+        .update_automation_execution(occurrence.clone())
+        .await
+        .unwrap();
+    let _ = cancel_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+    )
+    .await
+    .unwrap();
+    for timer in timers {
+        assert!(
+            !store
+                .get_automation(timer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert!(!store
+            .wakeup_creation_allowed(timer.mission_id, 0)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_mission(timer.mission_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MissionStatus::Interrupted
+        );
+    }
+    let (respond, response) = oneshot::channel();
+    h.control
+        .cmd_tx
+        .send(ControlCommand::UserMessage {
+            id: occurrence.id,
+            content: "stale queued wake".into(),
+            agent: None,
+            target_mission_id: Some(child.id),
+            strict: true,
+            source: Some("scheduled-continuation".into()),
+            respond,
+        })
+        .await
+        .unwrap();
+    let ack = tokio::time::timeout(std::time::Duration::from_secs(5), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ack, UserMessageAck::Rejected(reason) if reason.contains("revoked")));
+    assert_eq!(
+        store.get_mission(child.id).await.unwrap().unwrap().status,
+        MissionStatus::Interrupted
+    );
+    let late = serde_json::from_value(json!({"command_source":{"type":"inline","content":"late"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"late"}})).unwrap();
+    let result = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(child.id),
+        Json(late),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn continuation_cloud_detail_includes_pending_wakeup() {
+    use crate::api::cloud_agents::{Execution, Phase, Provider, Selection, Turn};
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let id = Uuid::new_v4();
+    let mut turn = Turn::new("initial".into(), "test".into());
+    turn.phase = Phase::ResponseComplete;
+    store
+        .save_cloud_execution(
+            Execution {
+                parent_mission_id: None,
+                mission_id: id,
+                request_key: id.to_string(),
+                request_signature: "test".into(),
+                revision: 0,
+                selection: Selection {
+                    provider: Provider::CursorCloud,
+                    account: "test".into(),
+                    repository: None,
+                    git_ref: None,
+                    model: None,
+                    model_params: vec![],
+                },
+                external_id: None,
+                external_url: None,
+                turns: vec![turn],
+            },
+            None,
+            Some("cloud wake".into()),
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"cloud-wake"}})).unwrap();
+    let automation = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(req),
+    )
+    .await
+    .unwrap()
+    .0;
+    let detail = get_mission(State(h.state.clone()), Extension(h.user.clone()), Path(id))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(detail["execution_kind"], "hosted");
+    assert_eq!(detail["scheduling"]["owner"], "sandboxed");
+    assert_eq!(detail["scheduling"]["transport"], "unavailable");
+    assert_eq!(detail["continuation"]["count"], 1);
+    assert_eq!(
+        detail["continuation"]["items"][0]["id"],
+        automation.id.to_string()
+    );
+}
+
+#[tokio::test]
+async fn continuation_remote_node_terminal_receipt_settles_execution() {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let fixture = spawn_fixture_node(
+        "scheduled-native",
+        "REMOTE_SCHEDULED_NATIVE_TEST_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    h.state.fleet.record_heartbeat(
+        "scheduled-native",
+        serde_json::from_value(json!({
+            "node_id":"scheduled-native", "online":true, "capacity_total":1, "capacity_available":1,
+            "active_leases":0, "version":"test", "managed_auth":["grok"]
+        }))
+        .unwrap(),
+    );
+    let response = h.state.http_client.post(format!("{}/missions", h.url)).json(&json!({
+        "project":"lido", "writer":false, "backend":"grok", "model_override":"grok-4.6", "remote_node_id":"scheduled-native", "prompt":"ready"
+    })).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = &h.control.mission_store;
+    let sid = store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id
+        .unwrap();
+    let end = format!("{{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"{sid}\"}}\n");
+    // Reconstruct the durable state after node acceptance but before the
+    // process persisted the scheduled prompt or scheduler ACK.
+    let lost_req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"lost ACK"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"lost-remote-ack"}})).unwrap();
+    let lost = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(lost_req),
+    )
+    .await
+    .unwrap()
+    .0;
+    continuations::stage(store, &lost, "lost ACK".into())
+        .await
+        .unwrap();
+    let mut unacked = store
+        .get_automation_executions(lost.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    unacked.status = mission_store::ExecutionStatus::Running;
+    store
+        .update_automation_execution(unacked.clone())
+        .await
+        .unwrap();
+    let accepted_job = Uuid::parse_str(
+        fixture.submissions.lock().unwrap()[0]["job_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    store
+        .bind_scheduled_remote_job(id, Some(unacked.id), Uuid::new_v4(), accepted_job)
+        .await
+        .unwrap();
+    continuations::deliver(store, &h.control.cmd_tx, &h.control.events_tx, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.submissions.lock().unwrap().len(),
+        1,
+        "lost ACK must not submit another job"
+    );
+    assert_eq!(
+        store
+            .get_automation_executions(lost.id, None)
+            .await
+            .unwrap()[0]
+            .variables_used["__delivery_accepted"],
+        "true"
+    );
+    *fixture.log.lock().unwrap() = end.clone();
+    fixture.set_state("succeeded");
+    wait_until("initial remote receipt", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
+    assert_eq!(
+        store
+            .get_automation_executions(lost.id, None)
+            .await
+            .unwrap()[0]
+            .status,
+        mission_store::ExecutionStatus::Success
+    );
+    let req = serde_json::from_value(json!({"command_source":{"type":"inline","content":"scheduled wake"},"trigger":{"type":"interval","seconds":600},"variables":{"__wakeup_source":"automation-manager","__wakeup_request_id":"remote-wake"}})).unwrap();
+    let automation = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(req),
+    )
+    .await
+    .unwrap()
+    .0;
+    continuations::stage(store, &automation, "scheduled wake".into())
+        .await
+        .unwrap();
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    continuations::deliver(store, &h.control.cmd_tx, &h.control.events_tx, None)
+        .await
+        .unwrap();
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    let job = fixture.submissions.lock().unwrap()[1]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let execution = store
+        .get_automation_executions(automation.id, None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(execution.status, mission_store::ExecutionStatus::Running);
+    assert_eq!(execution.variables_used["__remote_job_id"], job);
+    *fixture.log.lock().unwrap() = end;
+    fixture.set_state("succeeded");
+    wait_until("scheduled remote terminal receipt", 20, || async {
+        store
+            .get_automation_executions(automation.id, None)
+            .await
+            .unwrap()[0]
+            .status
+            == mission_store::ExecutionStatus::Success
+    })
+    .await;
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn continuation_queued_mcp_action_keeps_origin_across_stop_and_resume() {
+    use crate::control_mcp::{gateway, Role};
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "queued wake-up").await;
+    let store = &h.control.mission_store;
+    let run = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Executor,
+            mission_id: Some(mission.id),
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let call = |key: &str| gateway::Call {
+        name: "schedule_wakeup".into(),
+        arguments: json!({"prompt":"wake","reason":"test","delay_seconds":600,"idempotency_key":key}),
+    };
+    let accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call("old")),
+    )
+    .await
+    .0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let id = accepted["result"]["action_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Hold queued dispatch while the originating run stops and a new run starts.
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT principal FROM mcp_actions_v1 WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let saved: gateway::Principal = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved.action_run_generation, Some(run.generation));
+        assert_eq!(
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET state='test_held' WHERE id=?1 AND state='queued'",
+                [&id]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    continuations::stop_for_mission(store, mission.id)
+        .await
+        .unwrap();
+    store
+        .finish_mission_run(run.run_id, run.generation, Some("cancelled"))
+        .await
+        .unwrap();
+    let resumed = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    assert!(resumed.generation > run.generation);
+    h.state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mcp_actions_v1 SET state='queued' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":id}),
+            }),
+        )
+        .await
+        .0;
+        if !matches!(
+            receipt["result"]["state"].as_str(),
+            Some("queued" | "dispatching")
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_ne!(receipt["result"]["state"], "completed", "{receipt}");
+    assert!(store.list_active_automations().await.unwrap().is_empty());
+    let fresh = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(call("fresh")),
+    )
+    .await
+    .0;
+    let id = fresh["result"]["action_id"].clone();
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id":id}),
+            }),
+        )
+        .await
+        .0;
+        if receipt["result"]["state"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(receipt["result"]["state"], "completed", "{receipt}");
+    let timers = store.list_active_automations().await.unwrap();
+    assert_eq!(timers.len(), 1);
+    assert_eq!(
+        timers[0].variables["__wakeup_run_generation"],
+        resumed.generation.to_string()
+    );
+}
+
+#[tokio::test]
+async fn continuation_disabled_scheduler_is_not_advertised_or_accepted() {
+    use crate::control_mcp::{gateway, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let h = Harness::with_directory_and_automations(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        vec![],
+        false,
+    )
+    .await;
+    let mission = active_mission(&h, "disabled scheduling").await;
+    let detail = get_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(detail["scheduling"]["durable"], false);
+    assert_eq!(detail["scheduling"]["transport"], "unavailable");
+    let request=serde_json::from_value(json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":60},"variables":{"__wakeup_source":"automation-manager"}})).unwrap();
+    assert_eq!(
+        create_automation(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(mission.id),
+            Json(request)
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            role: Role::Executor,
+            mission_id: Some(mission.id),
+            project: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    let caps = gateway::capabilities(State(h.state.clone()), Extension(principal.clone()))
+        .await
+        .0;
+    assert!(!caps["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "schedule_wakeup" || t["name"] == "schedule_job_wakeup"));
+    let denied=gateway::call(State(h.state.clone()),Extension(principal),Json(gateway::Call{name:"schedule_wakeup".into(),arguments:json!({"prompt":"wake","reason":"test","delay_seconds":60,"idempotency_key":"disabled"})})).await.0;
+    assert_eq!(denied["ok"], false);
+    assert_eq!(denied["error"]["accepted"], "no");
+}
+
+#[tokio::test]
+async fn continuation_local_upload_and_stop_keep_original_generation() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "offline wake-up").await;
+    let store = &h.control.mission_store;
+    let old = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    continuations::stop_for_mission(store, mission.id)
+        .await
+        .unwrap();
+    store
+        .finish_mission_run(old.run_id, old.generation, Some("cancelled"))
+        .await
+        .unwrap();
+    let new = store
+        .begin_mission_run(mission.id, "test", None)
+        .await
+        .unwrap();
+    let body = |generation: Option<u64>| {
+        let mut value = json!({"command_source":{"type":"inline","content":"wake"},"trigger":{"type":"interval","seconds":600},"stop_policy":{"type":"after_first_fire"},"variables":{"__wakeup_source":"orb-local","__wakeup_local":"true"}});
+        if let Some(generation) = generation {
+            value["variables"]["__wakeup_run_generation"] = json!(generation.to_string());
+        }
+        serde_json::from_value(value).unwrap()
+    };
+    let stale = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(Some(old.generation))),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.0, StatusCode::GONE);
+    let legacy = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(None)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(legacy.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let fresh = create_automation(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(body(Some(new.generation))),
+    )
+    .await
+    .unwrap()
+    .0;
+    let _ = continuations::cancel_all(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Some(Json(continuations::CancelRequest {
+            through_generation: Some(old.generation),
+        })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .get_automation(fresh.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    assert!(store
+        .wakeup_creation_allowed(mission.id, new.generation)
+        .await
+        .unwrap());
 }

@@ -237,6 +237,7 @@ export function LiveProjectsSection(p: {
   onNewProject: (anchor: HTMLButtonElement) => void;
 }) {
   const activity = createMemo(() => folderActivity(p.activityMissions ?? []));
+  const scheduledActivity = createMemo(() => folderActivity(p.activityMissions ?? [], m => missionStatusPresentation(m.status, undefined, m.continuation).tone === "scheduled"));
   const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
@@ -1206,7 +1207,7 @@ export function LiveProjectsSection(p: {
     </button>;
     if (d.kind === "project") return <div class={`row project ${currentMission()?.project === d.slug ? "contains-current" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
       <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} onPointerEnter={() => warmIntent(d.slug)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug)} onBlur={cancelIntent} onClick={() => toggleProject(d.slug)}>
-        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} />
+        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} />
         <span class="row-label">{d.label}</span>
         <Show when={!row.expanded && currentMission()?.project === d.slug}><span class="current-location-label">Open</span></Show>
       </button>
@@ -1223,7 +1224,7 @@ export function LiveProjectsSection(p: {
     </div>;
     if (d.kind === "folder") return <div class="row folder" data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
       <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={() => toggleDir(d.slug, d.path!)}>
-        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
+        <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
       </button>
       <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
         onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
@@ -1253,7 +1254,7 @@ export function LiveProjectsSection(p: {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null);
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={!d.launched}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
     {launchedToggle(row, d)}</>;

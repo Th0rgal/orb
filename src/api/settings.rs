@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Multipart, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -23,6 +23,11 @@ use super::routes::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_settings).put(update_settings))
+        .route("/ssh-hosts", get(list_ssh_hosts).post(create_ssh_host))
+        .route(
+            "/ssh-hosts/:id",
+            put(update_ssh_host).delete(delete_ssh_host),
+        )
         .route("/llm-roles", get(get_llm_roles))
         .route("/library-remote", put(update_library_remote))
         .route("/backup", get(download_backup))
@@ -392,6 +397,7 @@ async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(),
 /// Files included in the backup (relative to .sandboxed-sh/)
 const BACKUP_FILES: &[&str] = &[
     "settings.json",
+    "ssh-hosts.json",
     "ai_providers.json",
     "backend_config.json",
     "workspaces.json",
@@ -731,4 +737,89 @@ async fn restore_backup(
         restored_files,
         errors,
     }))
+}
+
+// The address book inherits the enclosing settings router's authentication policy.
+use crate::settings::ssh_hosts::{Address as SshAddress, Error as SshError, Host as SshHost};
+fn ssh_error(error: SshError) -> (StatusCode, String) {
+    match error {
+        SshError::Invalid => (
+            StatusCode::BAD_REQUEST,
+            "Invalid SSH address. Check host, user and port (1–65535).".into(),
+        ),
+        SshError::Conflict => (
+            StatusCode::CONFLICT,
+            "This address changed or already exists. Reload before editing.".into(),
+        ),
+        SshError::NotFound => (
+            StatusCode::NOT_FOUND,
+            "SSH address no longer exists. Reload the list.".into(),
+        ),
+        SshError::Io(e) => {
+            tracing::error!(error = %e, "SSH address book persistence failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not persist the SSH address book.".into(),
+            )
+        }
+    }
+}
+async fn list_ssh_hosts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SshHost>>, (StatusCode, String)> {
+    state
+        .settings
+        .ssh_hosts
+        .list()
+        .await
+        .map(Json)
+        .map_err(ssh_error)
+}
+async fn create_ssh_host(
+    State(state): State<Arc<AppState>>,
+    Json(address): Json<SshAddress>,
+) -> Result<Json<SshHost>, (StatusCode, String)> {
+    state
+        .settings
+        .ssh_hosts
+        .create(address)
+        .await
+        .map(Json)
+        .map_err(ssh_error)
+}
+#[derive(Deserialize)]
+struct SshHostUpdate {
+    revision: u64,
+    #[serde(flatten)]
+    address: SshAddress,
+}
+async fn update_ssh_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<SshHostUpdate>,
+) -> Result<Json<SshHost>, (StatusCode, String)> {
+    state
+        .settings
+        .ssh_hosts
+        .update(&id, update.revision, update.address)
+        .await
+        .map(Json)
+        .map_err(ssh_error)
+}
+#[derive(Deserialize)]
+struct SshHostRevision {
+    revision: u64,
+}
+async fn delete_ssh_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<SshHostRevision>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .settings
+        .ssh_hosts
+        .remove(&id, query.revision)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(ssh_error)
 }

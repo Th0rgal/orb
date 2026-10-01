@@ -126,17 +126,29 @@ export class TranscriptReducer {
             live = true;
           }
         } else {
+          // Positions count code points. Almost every op appends, which needs
+          // no per-character copy of the bubble: on a long reply that copy
+          // took the reducer to half a second per batch.
+          let chars: string[] | undefined;
+          const length = () => { chars ??= Array.from(text); return chars.length; };
+          const splice = (start: number, remove: number, insert: string) => {
+            chars ??= Array.from(text);
+            chars.splice(Math.max(0, start), Math.max(0, remove), insert);
+            text = chars.join("");
+            chars = undefined;
+          };
           for (const op of (Array.isArray(d.ops) ? d.ops : []) as Record<string, unknown>[]) {
-            const chars = Array.from(text);
             if (op.type === "insert") {
               // This synthetic bubble carries a full snapshot even on reconnect,
               // when a fresh producer buffer emits insert(0, accumulated_text).
-              if (bubble === "text_delta_latest" && op.pos === 0) { snapshot = str(op.text); text = snapshot; }
-              else { const pos = typeof op.pos === "number" ? op.pos : chars.length; chars.splice(Math.max(0,pos),0,str(op.text)); text=chars.join(""); }
+              if (bubble === "text_delta_latest" && op.pos === 0) { snapshot = str(op.text); text = snapshot; chars = undefined; }
+              // UTF-16 length bounds the code-point count, so this needs no scan.
+              else if (typeof op.pos !== "number" || op.pos >= text.length || op.pos >= length()) { text += str(op.text); chars = undefined; }
+              else splice(op.pos, 0, str(op.text));
             } else if (op.type === "replace") {
-              const range = Array.isArray(op.range) ? op.range as number[] : [0,chars.length];
-              if (bubble === "text_delta_latest" && range[0] === 0) { snapshot = str(op.text); text = snapshot; }
-              else { chars.splice(Math.max(0,range[0]),Math.max(0,range[1]-range[0]),str(op.text)); text=chars.join(""); }
+              const range = Array.isArray(op.range) ? op.range as number[] : [0, length()];
+              if (bubble === "text_delta_latest" && range[0] === 0) { snapshot = str(op.text); text = snapshot; chars = undefined; }
+              else splice(range[0], range[1] - range[0], str(op.text));
             } else if (op.type === "finalize") live = false;
           }
         }

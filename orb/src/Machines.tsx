@@ -1,3 +1,4 @@
+import { SshAddressBook } from "./SshAddressBook";
 import { AgentSoftware } from "./AgentSoftware";
 import { ResourceIcon } from "./ResourceIcon";
 import { readHistory, saveHistory, freshSamples, historyScope } from "./resourceCache";
@@ -9,7 +10,7 @@ import { createStore, produce } from "solid-js/store";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
-import { getRemoteNodes, getApiUrl, getJwt, isConnected, type RemoteNodeView } from "./api";
+import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isConnected, type RemoteNodeView } from "./api";
 
 export type Machine = {
   id: string;
@@ -92,6 +93,11 @@ function FleetRow(p: { node?: RemoteNodeView; core?: Metrics; live?: boolean; hi
 }
 
 export function Machines() {
+  return <For each={[connectionVersion()]}>{() => <MachinesPage />}</For>;
+}
+
+function MachinesPage() {
+  const [legacyBackend, setLegacyBackend] = createSignal(false);
   const cacheScope = historyScope();
   const [list, setList] = createStore<Machine[]>([...MACHINES.map((m) => ({ ...m })), ...loadCustom()]);
   const [draft, setDraft] = createSignal<Draft | null>(null);
@@ -184,7 +190,7 @@ export function Machines() {
     setTimeout(() => setCopied(false), 1400);
   };
 
-  const editable = () => (isConnected() ? list.filter((m) => m.custom) : list.slice(1));
+  const editable = () => (isConnected() ? (legacyBackend() ? list.filter((m) => m.custom) : []) : list.slice(1));
 
   const remove = (id: string) => {
     setList(produce((ls) => {
@@ -243,9 +249,9 @@ export function Machines() {
     <div class="page">
       <div class="page-head">
         <h2>Machines</h2>
-        <button class="s-btn" onClick={() => setDraft(empty())}>
+        <Show when={!isConnected() || legacyBackend()}><button class="s-btn" onClick={() => setDraft(empty())}>
           <Ic.PlusIcon size={14} /> Add
-        </button>
+        </button></Show>
       </div>
       <p class="s-lead">
         {isConnected()
@@ -253,6 +259,7 @@ export function Machines() {
           : "New Agent runs on one of these over Paloma SSH. Connect a backend in Settings to see the live fleet."}
       </p>
 
+      <Show when={isConnected()}><SshAddressBook onUnsupported={setLegacyBackend} /></Show>
       <h3 class="s-section-title">Local</h3>
       <LocalMachine />
       <h3 class="s-section-title">Remote</h3>

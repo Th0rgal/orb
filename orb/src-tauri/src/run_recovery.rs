@@ -111,7 +111,7 @@ async fn recover(c: &Connection, id: &str, cwd: &str) -> Result<(), String> {
     // A completed app-server can remain alive to serve snapshots. Retire it
     // before checking for processes outside this native runner.
     if local_agents::local_agents_poll(id.to_string()).is_ok() {
-        local_agents::local_agents_stop(id.to_string())?;
+        local_agents::stop_generation(id, None)?;
     }
     inspect_and_settle(c, id, cwd, &transfers::local_machine_identity()?).await
 }
@@ -162,6 +162,9 @@ pub async fn local_run_launch(
     mut request: local_agents::StartRequest,
     connection: Connection,
 ) -> Result<Value, String> {
+    let stop_generation = *local_agents::launch_fence(&request.id)
+        .lock()
+        .map_err(|e| e.to_string())?;
     request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let guard = lock(&request.id)?;
     if local_agents::workspace_busy(std::path::Path::new(&request.cwd))? {
@@ -199,7 +202,13 @@ pub async fn local_run_launch(
             .ok_or("Missing run generation")?,
     };
     let id = request.id.clone();
-    if let Err(error) = transfers::local_agents_start_authorized(request, permit).await {
+    if let Err(error) =
+        transfers::local_agents_start_authorized(request, permit, stop_generation).await
+    {
+        if error == local_agents::LAUNCH_CANCELLED {
+            settle(&connection, &id, &receipt).await?;
+            return Err(error);
+        }
         if error == local_agents::DIRECTORY_BUSY {
             // Another launch won the directory after preflight. The atomic
             // native guard proves this attempt spawned nothing; release only
@@ -247,11 +256,17 @@ mod protocol_tests {
     use super::*;
     use std::io::{Read, Write};
     fn server(responses: Vec<(u16, String)>) -> (Connection, std::thread::JoinHandle<Vec<Value>>) {
+        server_with_stop(responses, None)
+    }
+    fn server_with_stop(
+        responses: Vec<(u16, String)>,
+        stop: Option<(usize, String)>,
+    ) -> (Connection, std::thread::JoinHandle<Vec<Value>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let mut requests = vec![];
-            for (status, body) in responses {
+            for (index, (status, body)) in responses.into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -278,6 +293,11 @@ mod protocol_tests {
                 } else {
                     serde_json::from_slice(&payload).unwrap()
                 });
+                if let Some((at, id)) = &stop {
+                    if index == *at {
+                        local_agents::local_agents_stop(id.clone()).unwrap();
+                    }
+                }
                 write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
             requests
@@ -285,11 +305,54 @@ mod protocol_tests {
         (
             Connection {
                 api_url: format!("http://{address}"),
-                token: "test".into(),
+                token: "test.eyJzdWIiOiJvcmItdGVzdCJ9.fixture".into(),
             },
             handle,
         )
     }
+    #[test]
+    fn stop_during_permit_acquisition_prevents_spawn_and_settles_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let run = uuid::Uuid::new_v4().to_string();
+        let (connection, server) = server_with_stop(
+            vec![
+                (409, "No active run on this computer".into()),
+                (
+                    200,
+                    json!({"run_id":run,"generation":1,"prompt":"wake"}).to_string(),
+                ),
+                (200, "{}".into()),
+                (
+                    200,
+                    json!({"contract_version":"1","token":"mcp1.fixture"}).to_string(),
+                ),
+                (200, "{}".into()),
+            ],
+            Some((1, id.clone())),
+        );
+        let request = local_agents::StartRequest {
+            id: id.clone(),
+            harness: "grok".into(),
+            bin: "/must-not-start".into(),
+            cwd: root.path().to_str().unwrap().into(),
+            prompt: "wake".into(),
+            session_id: None,
+            model: None,
+            image_paths: vec![],
+        };
+        let error =
+            tauri::async_runtime::block_on(local_run_launch(request, connection)).unwrap_err();
+        assert_eq!(error, local_agents::LAUNCH_CANCELLED);
+        assert!(stopped(&id).unwrap());
+        assert!(lock(&id).is_ok());
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests.last().unwrap(),
+            &json!({"status":"interrupted","run_id":run,"generation":1})
+        );
+    }
+
     #[test]
     fn rejected_launch_does_not_spawn_and_is_safe_to_retry() {
         let root = tempfile::tempdir().unwrap();

@@ -272,6 +272,15 @@ pub async fn enqueue(
     id: Uuid,
     content: String,
 ) -> Result<(), String> {
+    enqueue_with_source(store, target, id, content, false).await
+}
+pub async fn enqueue_with_source(
+    store: &Arc<dyn MissionStore>,
+    target: Uuid,
+    id: Uuid,
+    content: String,
+    scheduled: bool,
+) -> Result<(), String> {
     store
         .enqueue_board_outbox(BoardOutboxItem {
             id,
@@ -279,7 +288,7 @@ pub async fn enqueue(
             task_id: None,
             delivery_kind: CLIENT_DELIVERY.into(),
             idempotency_key: format!("client:{target}:{id}"),
-            payload: serde_json::json!({"target_mission_id":target,"id":id,"content":content}),
+            payload: serde_json::json!({"target_mission_id":target,"id":id,"content":content,"scheduled":scheduled}),
             state: "pending".into(),
             attempts: 0,
             created_at: now_string(),

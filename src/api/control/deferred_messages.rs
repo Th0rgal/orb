@@ -38,6 +38,16 @@ pub(crate) fn decode(content: &str) -> (String, Vec<(Uuid, String)>) {
         _ => (content.into(), vec![]),
     }
 }
+/// Keep every logical message in a deferred batch; dispatch retains its own ID.
+pub(crate) fn execution_ids(outer: Uuid, content: &str, source: Option<&str>) -> Vec<Uuid> {
+    if source == Some("scheduler") {
+        let messages = decode(content).1;
+        if !messages.is_empty() {
+            return messages.into_iter().map(|(id, _)| id).collect();
+        }
+    }
+    vec![outer]
+}
 pub(crate) fn strip(content: &str) -> String {
     decode(content).0
 }
@@ -78,6 +88,19 @@ pub(crate) fn stream_payload(event: &super::AgentEvent) -> Result<String, serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn continuation_deferred_execution_keeps_identity_without_reusing_dispatch_id() {
+        let id = Uuid::new_v4();
+        let outer = Uuid::new_v4();
+        let wrapped = encode(id, "remote receipt");
+        assert_eq!(execution_ids(outer, &wrapped, Some("scheduler")), vec![id]);
+        assert_eq!(execution_ids(outer, &wrapped, Some("user")), vec![outer]);
+        assert_eq!(
+            execution_ids(outer, "plain goal", Some("scheduler")),
+            vec![outer]
+        );
+        assert_eq!(strip(&wrapped), "remote receipt");
+    }
     #[test]
     fn identities_survive_identical_text_unicode_and_attachments() {
         let a = Uuid::new_v4();

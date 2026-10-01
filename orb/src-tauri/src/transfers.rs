@@ -71,6 +71,7 @@ pub struct Permit {
 pub async fn local_agents_start_authorized(
     request: crate::local_agents::StartRequest,
     permit: Permit,
+    stop_generation: u64,
 ) -> Result<(), String> {
     let id = uuid::Uuid::parse_str(&request.id).map_err(|_| "Invalid mission identity")?;
     if !permit.legacy && permit.client_id != local_machine_identity()? {
@@ -97,7 +98,14 @@ pub async fn local_agents_start_authorized(
         }
     }
     let mission_id = request.id.clone();
-    crate::routed_opencode::start(request, &permit.api_url, &permit.token).await?;
+    crate::routed_opencode::start_fenced(
+        request,
+        &permit.api_url,
+        &permit.token,
+        Some(stop_generation),
+        permit.generation,
+    )
+    .await?;
     if !permit.legacy {
         let generation = crate::local_agents::native_generation(&mission_id);
         tauri::async_runtime::spawn(async move {

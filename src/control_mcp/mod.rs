@@ -7,6 +7,7 @@ pub mod gateway;
 pub mod launch;
 mod orchestrator;
 pub mod protocol;
+mod scheduling;
 mod schema;
 mod workspace_ops;
 
@@ -73,7 +74,9 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "list_cloud_accounts"
         | "get_cloud_execution"
         | "get_workspace_job" => (Executor, false),
-        "ask_mission"
+        "schedule_wakeup"
+        | "schedule_job_wakeup"
+        | "ask_mission"
         | "start_mission"
         | "send_message_to_mission"
         | "answer_mission_question"
@@ -159,7 +162,10 @@ pub fn registry() -> Vec<Tool> {
         (Handler::Assistant, assistant::AssistantMcp::tools()),
         (
             Handler::Orchestrator,
-            orchestrator::OrchestratorMcp::get_tools(),
+            orchestrator::OrchestratorMcp::get_tools()
+                .into_iter()
+                .chain(scheduling::tools())
+                .collect(),
         ),
     ] {
         for mut definition in definitions {

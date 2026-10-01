@@ -207,6 +207,8 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
+  continuation?: import("./continuations").ContinuationSummary | null;
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
   /** "hermes" when a controller created it; its controller session then follows. */
@@ -940,11 +942,11 @@ export async function appendClientTranscript(id: string, role: "user" | "assista
   });
 }
 
-export async function setClientMissionStatus(id: string, status: "completed" | "failed" | "interrupted" | "awaiting_user", receipt?: ClientRunReceipt): Promise<void> {
+export async function setClientMissionStatus(id: string, status: "completed" | "failed" | "interrupted" | "awaiting_user", receipt?: ClientRunReceipt, scheduledExecutionId?: string): Promise<void> {
   await api(`/api/control/missions/${id}/client-status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, ...(receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id))) }),
+    body: JSON.stringify({ status, ...(scheduledExecutionId ? {scheduled_execution_id: scheduledExecutionId} : {}), ...(receipt ?? await import("./clientRuns").then(m => m.clientRunReceipt(id))) }),
   });
 }
 
