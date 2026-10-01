@@ -3,7 +3,7 @@ import { machineIdentity, nativeInvoke } from './clientRuns';
 import { localBinding, localDirectory, recordLocalFailure, refreshLocalAgents, rememberBinding, restoreLocalBindings } from './localAgents';
 import { enqueueLocalMessage } from './localMessageQueue';
 
-type Delivery = {id:ReturnType<typeof crypto.randomUUID>;target_mission_id?:string;content:string};
+type Delivery = {id:ReturnType<typeof crypto.randomUUID>;target_mission_id?:string;content:string;scheduled?:boolean};
 /** One inbox poll per computer, independent of the number of sessions.
  * Acknowledge only after saving locally; receipt tombstones prevent replays. */
 export function startClientDelegations(missions: () => Mission[]) {
@@ -42,7 +42,7 @@ export function startClientDelegations(missions: () => Mission[]) {
             binding = {cwd,harness:mission.backend,bin:harness.path,model:mission.model_override??undefined};
             rememberBinding(id,binding);
           }
-          await enqueueLocalMessage({id,...binding,prompt:message.content},message.content,{id:message.id,delegated:true,waiting:false});
+          await enqueueLocalMessage({id,...binding,prompt:message.content},message.content,{id:message.id,delegated:true,waiting:false,scheduled:message.scheduled});
           if (!valid()) return;
           await post(id,{op:'received',message_id:message.id});
         } catch (error) { if (valid()) recordLocalFailure(id,error); }

@@ -562,76 +562,70 @@ fn mint_internal_service_jwt() -> Option<String> {
     .ok()
 }
 
+pub(crate) async fn register_claude_builtin_wakeup(
+    mission_id: Uuid,
+    request_id: String,
+    delay_seconds: u64,
+    prompt: String,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    let api_base = localhost_api_base_url_from_env().ok_or("Wake-up unavailable: PORT is unset")?;
+    let delay = delay_seconds.clamp(
+        CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS,
+        CLAUDE_BUILTIN_WAKEUP_MAX_SECONDS,
+    );
+    let body = serde_json::json!({
+        "command_source": { "type": "inline", "content": prompt },
+        "trigger": { "type": "interval", "seconds": delay },
+        "stop_policy": { "type": "after_first_fire" }, "fresh_session": "keep",
+        "variables": {"__wakeup_reason":reason,"__wakeup_source":"claude-builtin","__wakeup_request_id":request_id},
+        "start_immediately": false,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client
+        .post(format!(
+            "{api_base}/api/control/missions/{mission_id}/automations"
+        ))
+        .json(&body);
+    if let Some(token) = mint_internal_service_jwt() {
+        request = request.bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Wake-up registration failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Wake-up registration failed ({})",
+            response.status()
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid wake-up receipt: {e}"))
+}
+
 pub(crate) fn spawn_claude_builtin_wakeup_automation(
     mission_id: Uuid,
     delay_seconds: u64,
     prompt: String,
     reason: String,
 ) {
-    let Some(api_base) = localhost_api_base_url_from_env() else {
-        tracing::warn!(
-            mission_id = %mission_id,
-            "Observed Claude built-in ScheduleWakeup but PORT env is unset; cannot create wakeup automation"
-        );
-        return;
-    };
-
-    let delay = delay_seconds.clamp(
-        CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS,
-        CLAUDE_BUILTIN_WAKEUP_MAX_SECONDS,
-    );
-
     tokio::spawn(async move {
-        let url = format!(
-            "{}/api/control/missions/{}/automations",
-            api_base, mission_id
-        );
-
-        let mut variables: HashMap<String, String> = HashMap::new();
-        variables.insert("__wakeup_reason".to_string(), reason.clone());
-        variables.insert("__wakeup_source".to_string(), "claude-builtin".to_string());
-
-        let body = serde_json::json!({
-            "command_source": { "type": "inline", "content": prompt },
-            "trigger": { "type": "interval", "seconds": delay },
-            "stop_policy": { "type": "after_first_fire" },
-            "fresh_session": "keep",
-            "variables": variables,
-            "start_immediately": false,
-        });
-
-        let client = reqwest::Client::new();
-        let mut request = client.post(&url).json(&body);
-        if let Some(token) = mint_internal_service_jwt() {
-            request = request.header("Authorization", format!("Bearer {}", token));
-        }
-
-        match request.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(
-                    mission_id = %mission_id,
-                    delay_seconds = delay,
-                    reason = %reason,
-                    "Created interval automation for Claude built-in ScheduleWakeup"
-                );
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                tracing::error!(
-                    mission_id = %mission_id,
-                    status = %status,
-                    body = %body,
-                    "Failed to create wakeup automation for Claude built-in ScheduleWakeup"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    mission_id = %mission_id,
-                    error = %e,
-                    "HTTP error creating wakeup automation for Claude built-in ScheduleWakeup"
-                );
-            }
+        if let Err(error) = register_claude_builtin_wakeup(
+            mission_id,
+            Uuid::new_v4().to_string(),
+            delay_seconds,
+            prompt,
+            reason,
+        )
+        .await
+        {
+            tracing::error!(%mission_id, %error, "Wake-up was not registered");
         }
     });
 }

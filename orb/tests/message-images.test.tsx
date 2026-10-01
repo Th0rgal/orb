@@ -23,7 +23,7 @@ it("reusing an edited prompt keeps its image attachments",()=>{
  const editor=screen.getByRole('textbox');
  expect((editor as HTMLTextAreaElement).value).toBe('Original');
  fireEvent.input(editor,{target:{value:'Revised'}});
- fireEvent.click(screen.getByRole('button',{name:'Send follow-up'}));
+ fireEvent.click(screen.getByRole('button',{name:'Send again'}));
  expect(reuse).toHaveBeenCalledWith('Revised\n\n[Image #1] [Uploaded: /tmp/a.png]');
 });
 
@@ -63,6 +63,24 @@ it("editing and resending preserves a nonconsecutive image number",()=>{
  const editor=screen.getByRole('textbox');
  expect((editor as HTMLTextAreaElement).value).toBe('Inspect [Image #3]');
  fireEvent.input(editor,{target:{value:'Revised [Image #3]'}});
- fireEvent.click(screen.getByRole('button',{name:'Send follow-up'}));
+ fireEvent.click(screen.getByRole('button',{name:'Send again'}));
  expect(reuse).toHaveBeenCalledWith('Revised [Image #3]\n\n[Image #3] [Uploaded: /tmp/a.png]');
+});
+
+it("opens attached images full-window, navigates with arrow keys and closes with Escape",async()=>{
+ const a='data:image/png;base64,YQ==',b='data:image/png;base64,Yg==';
+ render(()=><UserTurn text="Compare" images={[{id:'a',name:'a.png',type:'image/png',reference:1,dataUrl:a},{id:'b',name:'b.png',type:'image/png',reference:2,dataUrl:b}]}/>);
+ await waitFor(()=>expect(screen.getByAltText('Image #2').getAttribute('src')).toBe(b));
+ fireEvent.click(screen.getByRole('button',{name:'Image #1'}));
+ const dialog=await screen.findByRole('dialog');
+ expect(dialog.querySelector('.lightbox-image')?.getAttribute('src')).toBe(a);
+ expect(dialog.textContent).toContain('1 / 2');
+ fireEvent.keyDown(window,{key:'ArrowRight'});
+ await waitFor(()=>expect(dialog.querySelector('.lightbox-image')?.getAttribute('src')).toBe(b));
+ fireEvent.keyDown(window,{key:'ArrowRight'});
+ expect(dialog.textContent).toContain('2 / 2');
+ fireEvent.keyDown(window,{key:'ArrowLeft'});
+ await waitFor(()=>expect(dialog.textContent).toContain('1 / 2'));
+ fireEvent.keyDown(document.activeElement ?? dialog,{key:'Escape'});
+ await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());
 });

@@ -191,6 +191,28 @@ pub async fn project_context_sync(request: Request) -> Result<serde_json::Value,
     }
     Ok(serde_json::json!({"root":replica.store.root,"state":state}))
 }
+#[derive(Default)]
+struct SyncCadence {
+    previous: Vec<u8>,
+    unchanged: u32,
+}
+impl SyncCadence {
+    fn observe(&mut self, state: Vec<u8>, urgent: bool) {
+        self.unchanged = if !urgent && state == self.previous {
+            self.unchanged.saturating_add(1)
+        } else {
+            0
+        };
+        self.previous = state;
+    }
+    fn reset(&mut self) {
+        self.unchanged = 0;
+    }
+    fn seconds(&self) -> u64 {
+        (2_u64 << self.unchanged.min(3)).min(15)
+    }
+}
+
 pub fn worker_entry() -> bool {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).and_then(|s| s.to_str()) != Some("--orb-context-worker") {
@@ -217,7 +239,33 @@ pub fn worker_entry() -> bool {
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
+        // Notifications are hints. A bounded periodic reconciliation remains authoritative.
+        use notify::Watcher;
+        let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+        let root = initial.store.root.clone();
+        let config_path = config.clone();
+        let callback_wake = wake.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+                Ok(event)
+                    if !matches!(event.kind, notify::EventKind::Access(_))
+                        && event
+                            .paths
+                            .iter()
+                            .any(|path| path.starts_with(&root) || path == &config_path) =>
+                {
+                    callback_wake.notify_one()
+                }
+                Err(_) => callback_wake.notify_one(),
+                _ => {}
+            })
+            .ok();
+        if let Some(watcher) = watcher.as_mut() {
+            let _ = watcher.watch(&initial.store.root, notify::RecursiveMode::Recursive);
+            let _ = watcher.watch(&initial.store.metadata, notify::RecursiveMode::NonRecursive);
+        }
         runtime.block_on(async {
+            let mut cadence = SyncCadence::default();
             loop {
                 // Removing this connection file revokes the worker. Refresh credentials on each pass.
                 let Ok(bytes) = std::fs::read(&config) else {
@@ -226,6 +274,10 @@ pub fn worker_entry() -> bool {
                 if let Ok(request) = serde_json::from_slice::<Request>(&bytes) {
                     if let Ok(replica) = replica(&request) {
                         if let Ok(state) = replica.tick().await {
+                            cadence.observe(
+                                serde_json::to_vec(&state).unwrap_or_default(),
+                                state.error.is_some() || !state.pending.is_empty(),
+                            );
                             if state.error.as_ref().is_some_and(|error| {
                                 error.contains("HTTP 401") || error.contains("HTTP 403")
                             }) {
@@ -242,7 +294,16 @@ pub fn worker_entry() -> bool {
                         }
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(cadence.seconds()),
+                    wake.notified(),
+                )
+                .await
+                .is_ok()
+                {
+                    cadence.reset();
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
             }
         });
         Ok(())
@@ -294,6 +355,14 @@ pub async fn project_context_file(
         }
         let content = String::from_utf8(bytes).map_err(|_| "This is a binary file")?;
         return Ok(serde_json::json!({"content":content,"revision":entry.revision}));
+    }
+    if matches!(operation.as_str(), "move" | "copy") {
+        let destination = content.ok_or("Destination is required")?;
+        store.transfer_file(&path, &destination, operation == "copy")?;
+        tokio::spawn(async move {
+            let _ = replica.tick().await;
+        });
+        return Ok(serde_json::json!({"path":destination}));
     }
     if !matches!(operation.as_str(), "write" | "mkdir" | "delete") {
         return Err("Unknown context operation".into());
@@ -370,6 +439,20 @@ pub async fn project_context_file(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_sync_backs_off_but_changes_and_pending_writes_reset_it() {
+        let mut cadence = SyncCadence::default();
+        for _ in 0..10 {
+            cadence.observe(vec![1], false);
+        }
+        assert_eq!(cadence.seconds(), 15);
+        cadence.observe(vec![2], false);
+        assert_eq!(cadence.seconds(), 2);
+        for _ in 0..10 {
+            cadence.observe(vec![2], true);
+        }
+        assert_eq!(cadence.seconds(), 2);
+    }
     #[test]
     fn supervisor_refreshes_credentials_atomically_without_spawning_a_second_worker() {
         use std::os::unix::fs::PermissionsExt;

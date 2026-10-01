@@ -10,6 +10,11 @@ function nativeInvoke(): Invoke | undefined {
   return (window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__?.core?.invoke;
 }
 export function hasNativePicker() { return !!nativeInvoke(); }
+export async function pickNativeDirectory(path: string): Promise<string | null> {
+  const invoke = nativeInvoke();
+  if (!invoke) throw new Error("Choose a folder in the Orb desktop app.");
+  return invoke<string | null>("pick_working_directory", { path: path || null });
+}
 export async function pickNativeFiles(): Promise<UploadSource[]> {
   const invoke = nativeInvoke();
   if (!invoke) throw new Error("Use the desktop app to attach a local file path.");

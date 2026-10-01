@@ -24,6 +24,19 @@ struct Record {
     snapshot: Snapshot,
     acked: u64,
     error: Option<String>,
+    #[serde(default)]
+    native_generation: Option<String>,
+    #[serde(default)]
+    rejected: bool,
+}
+impl Record {
+    fn rejected(&self) -> bool {
+        self.rejected
+            || self
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("Core synchronization refused (409"))
+    }
 }
 fn account(c: &Connection) -> Result<PathBuf, String> {
     use base64::Engine;
@@ -133,8 +146,17 @@ async fn start_worker(path: PathBuf, c: Connection) {
         let mut last_session = None;
         loop {
             let Ok(mut record) = read(&path) else { break };
+            if record.rejected() {
+                break;
+            }
             let id = record.snapshot.origin.id.to_string();
-            if let Ok(p) = local_agents::local_agents_poll(id.clone()) {
+            // A journal owns its initial generation, never a later follow-up.
+            let poll = record
+                .native_generation
+                .as_deref()
+                .ok_or_else(|| "No owned native generation".to_string())
+                .and_then(|generation| local_agents::poll_generation(&id, Some(generation)));
+            if let Ok(p) = poll {
                 if p.session_id.is_some() && p.session_id != last_session {
                     if let Ok(bindings) = crate::local_bindings(None, None) {
                         let mut binding = bindings[&id].clone();
@@ -175,7 +197,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
                 };
-                let generation = local_agents::native_generation(&id);
+                let generation = record.native_generation.clone();
                 let response = client
                     .post(format!(
                         "{}/api/control/local-origins",
@@ -195,7 +217,10 @@ async fn start_worker(path: PathBuf, c: Connection) {
                         record.error = Some(format!("Core synchronization refused ({status})"));
                         if status.as_u16() == 409 {
                             // A definitive ownership rejection fences only this native generation.
-                            let _ = local_agents::stop_generation(&id, generation.as_deref());
+                            record.rejected = true;
+                            if let Some(generation) = generation.as_deref() {
+                                let _ = local_agents::stop_generation(&id, Some(generation));
+                            }
                         }
                         let _ = write(&path, &record);
                         if matches!(status.as_u16(), 401 | 403) {
@@ -238,6 +263,10 @@ pub async fn local_origin_list(connection: Connection) -> Result<Vec<Value>, Str
             continue;
         }
         let record = read(&path)?;
+        // A rejected initial receipt must not shadow Core's follow-up history.
+        if record.rejected() {
+            continue;
+        }
         // Fully synchronized history is served by Core; retain the disk journal.
         rows.push(view(&record));
         if record.acked < record.snapshot.sequence || record.snapshot.status == "active" {
@@ -319,6 +348,8 @@ pub async fn local_origin_launch(
         snapshot,
         acked: 0,
         error: None,
+        native_generation: None,
+        rejected: false,
     };
     write(&path, &record)?;
     crate::local_bindings(
@@ -335,7 +366,33 @@ pub async fn local_origin_launch(
         record.snapshot.error = Some(error);
         write(&path, &record)?;
     }
+    record.native_generation = local_agents::native_generation(&id.to_string());
+    write(&path, &record)?;
     let result = view(&record);
     start_worker(path, connection).await;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_conflict_journal_is_retired_without_owning_a_followup() {
+        let record: Record = serde_json::from_value(json!({
+            "snapshot": {
+                "origin": {"id": uuid::Uuid::new_v4(), "run_id": uuid::Uuid::new_v4(),
+                    "client_id": uuid::Uuid::new_v4(), "title": "test", "project": "test",
+                    "backend": "codex", "model": null, "cwd": "/tmp", "prompt": "test",
+                    "created_at": "2026-09-30T15:39:42Z", "tags": []},
+                "sequence": 20, "text": "", "status": "failed", "error": "initialize closed the stream"
+            },
+            "acked": 15, "error": "Core synchronization refused (409 Conflict)"
+        })).unwrap();
+        assert!(record.rejected());
+        assert!(record.native_generation.is_none());
+        let mut offline = record;
+        offline.error = Some("Offline · saved on this computer".into());
+        assert!(!offline.rejected());
+    }
 }

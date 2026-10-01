@@ -983,6 +983,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(control::list_active_automations),
         )
         .route("/api/control/automations/:id", get(control::get_automation))
+        .route("/api/control/automations/:id/action", post(control::continuations::action))
+        .route("/api/control/missions/:id/continuations/cancel", post(control::continuations::cancel_all))
         .route(
             "/api/control/automations/:id",
             axum::routing::patch(control::update_automation),

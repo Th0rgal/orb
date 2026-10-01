@@ -108,3 +108,14 @@ it('settles missing tool results at turn end without claiming success',()=>{
  const updated=applyStreamEvent(items,{type:'tool_result',data:{tool_call_id:'fetch',result:{error:'403'}}});
  expect(updated.find(item=>item.kind==='tool')).toMatchObject({done:true,unresolved:false,result:{error:'403'}});
 });
+
+it("ignores live remote status without finalizing the agent response",()=>{
+ const status="Remote job 5f05b38e-b117-41f5-98ea-f94d1700ab62 on node 'dgx-spark' is now running";
+ let items=buildTranscript([snap("Je vérifie."),tool]);
+ items=applyStreamEvent(items,final(status,"status"));
+ expect(texts(items)).toMatchObject([{text:"Je vérifie.",live:true}]);
+ expect(items.find(x=>x.kind==="tool")).toMatchObject({done:false});
+ items=applyStreamEvent(items,final("Voici le résultat.","answer"));
+ expect(texts(items)).toMatchObject([{text:"Voici le résultat.",live:false}]);
+ expect(buildTranscript([ev("assistant_message",{content:status,success:false})])[0].kind).toBe("error");
+});

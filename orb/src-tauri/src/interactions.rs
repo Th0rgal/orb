@@ -5,6 +5,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{mpsc, Mutex, OnceLock};
 
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+pub fn initialize(app: tauri::AppHandle) {
+    let _ = APP.set(app);
+}
+fn changed(id: &str) {
+    use tauri::Emitter;
+    if let Some(app) = APP.get() {
+        let _ = app.emit("orb-interaction-changed", id);
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct Request {
     pub id: String,
@@ -67,12 +78,16 @@ pub fn local_interaction_answer(
         .send(answer)
         .map_err(|_| "The session is no longer waiting.".to_string())?;
     map.pending.remove(&id);
+    drop(map);
+    changed(&id);
     Ok(())
 }
 pub fn cancel(id: &str) {
     if let Ok(mut p) = pending().lock() {
         p.sessions.remove(id);
         p.pending.remove(id);
+        drop(p);
+        changed(id);
     }
 }
 pub fn begin(id: &str) -> Session {
@@ -102,6 +117,8 @@ pub fn finish(session: &Session) {
     if store.sessions.get(&session.mission) == Some(&session.generation) {
         store.sessions.remove(&session.mission);
         store.pending.remove(&session.mission);
+        drop(store);
+        changed(&session.mission);
     }
 }
 pub fn ask(session: &Session, method: &str, params: Value) -> Result<Value, String> {
@@ -125,6 +142,7 @@ pub fn ask(session: &Session, method: &str, params: Value) -> Result<Value, Stri
             .pending
             .insert(session.mission.clone(), Pending { request, reply: tx });
     }
+    changed(&session.mission);
     rx.recv().map_err(|_| "The request was cancelled.".into())
 }
 #[cfg(test)]
@@ -175,4 +193,9 @@ mod tests {
         assert!(worker.join().unwrap().is_err());
         assert!(local_interaction("cancel-test".into()).unwrap().is_none());
     }
+}
+
+#[tauri::command]
+pub fn local_interaction_events_supported() -> bool {
+    true
 }

@@ -1,12 +1,16 @@
 import {createSignal,batch} from 'solid-js';
+import {mergeById} from './poll';
 import {connectionVersion,getMission,appendClientTranscript,setClientMissionStatus} from './api';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;delegated?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
-const [entries,setEntries]=createSignal<QueuedLocalMessage[]>([]);
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>};
+const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
+// IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
+// heartbeat does not invalidate every mounted conversation and its markdown.
+const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(previous,rows));
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
 export const acceptedLocalMessages=(mission:string)=>accepted().filter(row=>row.mission===mission);
@@ -21,13 +25,13 @@ async function locked<T>(key:string,action:()=>Promise<T>):Promise<T>{
 async function read(key:string){return await readSideThread<QueuedLocalMessage[]>(key)??[];}
 async function write(key:string,rows:QueuedLocalMessage[]){await saveSideThread(key,rows);if(key===storageKey())setEntries(rows);}
 async function update(key:string,id:string,change:(row:QueuedLocalMessage)=>void){await locked(key,async()=>{const rows=await read(key);const row=rows.find(r=>r.id===id);if(row){change(row);await write(key,rows);}});}
-export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean}={}){
+export async function enqueueLocalMessage(request:StartLocal,text:string,options:{id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
  await locked(key,async()=>{
   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
   if(seen.includes(id))return;
   const rows=await read(key);
-  if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated});
+  if(!rows.some(row=>row.id===id))rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled});
   await write(key,rows);
   if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
  });
@@ -70,7 +74,12 @@ export async function sendQueuedNow(mission:string){
  stopping.add(runKey);
  try {
   if(!(await read(key)).some(row=>row.mission===mission&&row.state==='queued'))return;
-  await stopLocal(mission);
+  // An idle/recovered conversation has nothing to stop. Only an explicit
+  // missing-run response grants recovery; transport failures remain failures.
+  let running = false;
+  try { running = !(await pollLocal(mission)).done; }
+  catch (error) { if (!/no local run/i.test(String(error))) throw error; }
+  if (running) await stopLocal(mission);
   // The follower saves the partial answer before closing its run receipt.
   const follower=settling.get(runKey);
   if(follower)await follower;else await recoverLocalLaunch(mission);
@@ -152,6 +161,12 @@ export function startLocalQueueWorker(){
      if(row.result)await persistResult(row).catch(error=>syncFailed(row,error));else follow(row);
      continue;
     }
+    if(row.state==='dispatching'&&!row.error&&Date.now()-(row.claimedAt??0)>30_000){
+     await update(key,row.id,stored=>{
+      if(stored.state==='dispatching'&&!stored.error)stored.error='Launch confirmation was lost. Check the previous run before retrying; this message will not be sent again automatically.';
+     });
+     continue;
+    }
     if(row.state!=='queued')continue;
     const binding=localBinding(row.mission);if(!binding)continue;
     try {
@@ -176,4 +191,11 @@ export function startLocalQueueWorker(){
  };
  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();const timer=setInterval(onWake,1000);
  return ()=>{stopped=true;clearInterval(timer);window.removeEventListener(wakeEvent,onWake);};
+}
+
+/** Stop removes automatic continuations still waiting on this computer. */
+export async function cancelQueuedWakeups(mission:string) {
+ const key=storageKey();
+ await locked(key,async()=>{const rows=await read(key);await write(key,rows.filter(r=>r.mission!==mission||!r.scheduled||r.state==='dispatching'||r.state==='accepted'));});
+ wake();
 }

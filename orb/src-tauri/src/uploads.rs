@@ -18,6 +18,18 @@ pub struct Selection {
 }
 
 #[tauri::command]
+pub async fn pick_working_directory(path: Option<String>) -> Option<String> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Choose working directory");
+    if let Some(path) = path.filter(|path| std::path::Path::new(path).is_dir()) {
+        dialog = dialog.set_directory(path);
+    }
+    dialog
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub async fn pick_upload_files() -> Result<Vec<Selection>, String> {
     let files = rfd::AsyncFileDialog::new()
         .set_title("Attach files or images")

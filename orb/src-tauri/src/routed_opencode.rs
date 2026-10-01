@@ -19,6 +19,7 @@ fn configuration(base: &str, route: &str, mission: &str) -> Value {
 }
 
 pub async fn start(mut request: StartRequest, base: &str, token: &str) -> Result<(), String> {
+    crate::local_wakeups::prepare(&mut request, &crate::run_recovery::Connection { api_url: base.into(), token: token.into() })?;
     if request.harness != "opencode" {
         return local_agents::local_agents_start(request);
     }

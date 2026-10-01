@@ -431,6 +431,9 @@ export async function stopLocal(id: string): Promise<void> {
   const invoke = tauriInvoke();
   if (invoke) {
     await invoke("local_agents_stop", { id });
+    await import("./localMessageQueue").then(m => m.cancelQueuedWakeups(id));
+    try { await invoke("local_wakeups_cancel", { mission: id, connection: { api_url: getApiUrl(), token: getJwt() } }); }
+    catch (error) { if (!/unknown command|command .*not found/i.test(String(error))) throw error; }
   }
   setRunning((prev) => ({ ...prev, [id]: false }));
 }

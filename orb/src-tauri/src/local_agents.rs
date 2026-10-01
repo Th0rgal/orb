@@ -346,8 +346,15 @@ fn watch_exit(
 
 #[tauri::command]
 pub fn local_agents_poll(id: String) -> Result<PollState, String> {
+    poll_generation(&id, None)
+}
+
+pub fn poll_generation(id: &str, expected: Option<&str>) -> Result<PollState, String> {
     let map = runs().lock().map_err(|e| e.to_string())?;
-    let run = map.get(&id).ok_or_else(|| "no local run".to_string())?;
+    let run = map.get(id).ok_or_else(|| "no local run".to_string())?;
+    if expected.is_some_and(|generation| generation != run.generation) {
+        return Err("Local run generation changed".into());
+    }
     let snapshot = PollState {
         text: run.text.snapshot(),
         activities: run.text.activities(),
@@ -558,6 +565,8 @@ fn spawn_claude(
         .stderr(Stdio::piped())
         .args([
             "--print",
+            "--disallowedTools",
+            "CronCreate,CronDelete,CronList",
             "--output-format",
             "stream-json",
             "--verbose",
@@ -574,6 +583,9 @@ fn spawn_claude(
         cmd.arg("--session-id").arg(&fresh);
         *slot = Some(fresh);
     }
+    if let Some(command) = crate::local_wakeups::command(&request.id) {
+        cmd.arg("--mcp-config").arg(json!({"mcpServers":{"orb-wakeups":{"command":command[0],"args":command[1..]}}}).to_string());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to start Claude Code: {e}"))?;
@@ -581,6 +593,7 @@ fn spawn_claude(
         let mut stdin = child.stdin.take().ok_or("Claude stdin missing")?;
         let stdout = child.stdout.take().ok_or("Claude stdout missing")?;
         let mission_id = crate::interactions::session(&request.id);
+        let native_mission = request.id.clone();
         let prompt = plan.unwrap_or(&request.prompt).to_owned();
         let mut execution_approved = plan.is_none();
         let output = Arc::clone(text);
@@ -597,11 +610,28 @@ fn spawn_claude(
                 let mut implement_after_result = false;
                 let mut claude_text = ClaudeText::default();
                 let mut background = ClaudeBackground::default();
+                let mut wakeups: HashMap<String, Value> = HashMap::new();
                 for line in BufReader::new(stdout).lines() {
                     let line = line.map_err(|e| e.to_string())?;
                     let Ok(event) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
+                    if let Some(blocks) = event["message"]["content"].as_array() {
+                        for block in blocks {
+                            if event["type"] == "assistant" && block["type"] == "tool_use" && block["name"] == "ScheduleWakeup" {
+                                if let Some(id) = block["id"].as_str() { wakeups.insert(id.into(),block["input"].clone()); }
+                            } else if event["type"] == "user" && block["type"] == "tool_result" {
+                                if let Some(id) = block["tool_use_id"].as_str() {
+                                    if let Some(mut args) = wakeups.remove(id) {
+                                        if block["is_error"] != true {
+                                            args["request_id"] = json!(format!("claude-native:{id}"));
+                                            crate::local_wakeups::capture(&native_mission, args)?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     output.claude_activity(&event);
                     if event["type"] != "stream_event"
                         || matches!(
@@ -732,6 +762,14 @@ fn spawn_piped(
         command.env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#);
     }
     command.envs(env.iter().map(|(key, value)| (key, value)));
+    if request.harness == "opencode" {
+        if let Some(wake_command) = crate::local_wakeups::command(&request.id) {
+            let raw = env.iter().find(|(k,_)|k == "OPENCODE_CONFIG_CONTENT").map(|(_,v)|v.clone()).or_else(||std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+            let mut config: Value = raw.and_then(|v|serde_json::from_str(&v).ok()).unwrap_or_else(||json!({}));
+            config["mcp"]["orb-wakeups"] = json!({"type":"local","command":wake_command,"enabled":true});
+            command.env("OPENCODE_CONFIG_CONTENT", config.to_string());
+        }
+    }
     command.env("NO_COLOR", "1");
     let mut child = command
         .current_dir(&request.cwd)
@@ -934,7 +972,12 @@ fn spawn_codex(
     error: &Arc<Mutex<Option<String>>>,
     done: &Arc<AtomicBool>,
 ) -> Result<Child, String> {
-    let mut child = harness_command(&request.bin)
+    let mut command = harness_command(&request.bin);
+    if let Some(args) = crate::local_wakeups::command(&request.id) {
+        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.command={}", json!(args[0])));
+        command.arg("-c").arg(format!("mcp_servers.orb-wakeups.args={}", json!(args[1..])));
+    }
+    let mut child = command
         .current_dir(&request.cwd)
         .arg("app-server")
         .args(["--enable", "goals"])
@@ -2202,6 +2245,8 @@ printf '%s\n' '{"type":"result"}'
         })
         .unwrap();
         let generation = native_generation(&id).unwrap();
+        assert!(poll_generation(&id, Some("old-generation")).is_err());
+        assert!(!poll_generation(&id, Some(&generation)).unwrap().done);
         stop_generation(&id, Some("old-generation")).unwrap();
         assert!(!local_agents_poll(id.clone()).unwrap().done);
         stop_generation(&id, Some(&generation)).unwrap();

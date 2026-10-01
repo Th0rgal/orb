@@ -397,7 +397,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   bottom: 14px;
 }
 .sidebar-tree { --indent: 16px; --rail: 14px; --tree: color-mix(in srgb, var(--fg) 18%, transparent); }
-.tree-entry { position: relative; }
+.tree-entry { position: relative; padding-bottom: 1px; }
 .tree-entry > .row { padding-left: calc(6px + var(--depth) * var(--indent)); }
 .tree-connectors { position: absolute; inset: 0; pointer-events: none; }
 .tree-connectors i { position: absolute; left: calc(var(--rail) + var(--column) * var(--indent)); border-left: 1px solid var(--tree); }
@@ -603,8 +603,8 @@ code {
 .dock .error-notice { position: relative; z-index: 1; }
 /* Fade the transcript beneath the controls without darkening the space above
    the composer. Use the surface color so this also works in light themes. */
-.dock .under { position: relative; }
-.dock .under::before {
+.dock :is(.under, .cloud-conversation-meta) { position: relative; }
+.dock :is(.under, .cloud-conversation-meta)::before {
   content: "";
   position: absolute;
   inset: -18px -24px -24px;
@@ -1535,7 +1535,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .prompt-editor { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: 0; color: var(--fg); font: inherit; line-height: inherit; resize: none; min-height: 1lh; max-height: none; display: block; padding: 0; }
 .user.editing { content-visibility: visible; width:var(--editing-width); max-width:100%; box-sizing:border-box; }
 .prompt-editor-actions .send { flex: none; margin-left: auto; }
-.prompt-editor-actions { position: absolute; right: 8px; bottom: calc(100% + 4px); display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 4px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-elev); z-index: 2; white-space: normal; }
+.prompt-editor-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--stroke); white-space: normal; }
 .prompt-editor-actions > span { flex: 1; color: var(--fg-3); font-size: 11px; }
 
 /* Files: conversation stays mounted beside the read-only workbench. */
@@ -1663,7 +1663,6 @@ button.fork-trigger:hover { color: var(--fg); }
 .message-image img { width:100%;height:100%;object-fit:cover; }
 .message-image > span { position:absolute;bottom:3px;right:3px;background:#141414d9;color:#eee;font-size:10px;line-height:16px;padding:0 4px;border-radius: var(--radius-xs); }
 .message-image:not(:disabled):hover { border-color:var(--fg-3); }
-.message-image-preview { display:block;max-width:100%;max-height:70vh;object-fit:contain;margin:auto; }
 
 .md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); }
 .md .md-code-block pre { margin: 0; padding: 12px 44px 12px 14px; background: transparent; }
@@ -2232,8 +2231,9 @@ select.orb-select-native:disabled { cursor: default; }
 .followup-queue header { display:flex; align-items:center; gap:8px; min-height:20px; }
 .queue-hint { color:var(--fg-4); font-size:12px; }
 .queue-options { position:relative; display:flex; align-items:center; gap:10px; margin-left:auto; }
-.queue-action { color:var(--fg-2); font:inherit; }
-.queue-action:hover { color:var(--fg); }
+.queue-action { padding:2px 8px; border:1px solid var(--stroke); border-radius:var(--radius-sm); background:var(--bg-btn); color:var(--fg-2); font:inherit; cursor:pointer; }
+.queue-action:hover:not(:disabled) { background:var(--hover); color:var(--fg); }
+.queue-action:disabled { opacity:.5; cursor:default; }
 .queue-menu-toggle { width:20px; height:20px; display:grid; place-items:center; border-radius:50%; background:var(--bg-btn); color:var(--fg-3); }
 .queue-menu-toggle svg { width:12px; height:12px; }
 .queue-menu { position:absolute; z-index:50; right:0; bottom:calc(100% + 8px); width:240px; padding:10px; border:1px solid var(--stroke); border-radius:var(--radius-md); background:var(--menu-bg); box-shadow:var(--shadow-lg); }
@@ -2483,6 +2483,20 @@ select.orb-select-native:disabled { cursor: default; }
 
 .queue-menu-help { max-width: 240px; padding: 8px; font-size: 12px; line-height: 1.5; color: var(--fg-3); }
 .project-option .row-project-color svg { color: inherit; }
+.composer-image img { cursor: zoom-in; }
 
-.working-directory-field { display:flex; align-items:center; gap:12px; margin:12px 0; color:var(--fg-2); font-size:12px; }
-.working-directory-field input { flex:1; min-width:0; border:1px solid var(--border); border-radius:6px; padding:7px 10px; background:transparent; color:var(--fg); font:inherit; }
+/* A saved prompt must not turn the floating composer into a second transcript. */
+.queue-message-preview summary { cursor: pointer; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: pre-wrap; }
+.queue-message-preview[open] summary { display: block; white-space: nowrap; text-overflow: ellipsis; }
+.queue-message-preview[open] > div { margin-top: 6px; }
+.dock:has(.followup-queue)::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--bg) 18px); }
+.prompt-editor-actions .send { width: auto; padding: 0 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
+.resend-status { color: var(--fg-3); font-size: 12px; margin: -12px 10px 20px; }
+.resend-status button { margin-left: 10px; text-decoration: underline; }
+
+
+.working-directory { display:inline-flex; align-items:center; min-width:0; }
+.working-directory .model { min-width:0; max-width:160px; }
+.working-directory .model svg { flex-shrink:0; }
+.working-directory-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.working-directory-reset { flex-shrink:0; color:var(--fg-3); padding:2px; display:flex; }

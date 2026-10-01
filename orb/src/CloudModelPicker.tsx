@@ -17,21 +17,21 @@ export function modelChoices(models:CloudModel[]) {
   });
  });
 }
-export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:ModelParam[];disabled?:boolean;onChange:(model:string,params:ModelParam[])=>void;onError:(error:string)=>void;onRepositories?:(repos:{url:string}[])=>void}){
+export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:ModelParam[];disabled?:boolean;onChange:(model:string,params:ModelParam[])=>void;onError:(error:string)=>void;onRepositories?:(repos:{url:string}[])=>void;onRepositoriesLoading?:(loading:boolean)=>void}){
  const provider = createMemo(()=>p.provider);
  const [models,setModels]=createSignal<CloudModel[]>([]),[open,setOpen]=createSignal(false),[loading,setLoading]=createSignal(true);
  createEffect(()=>{
   const selectedProvider=provider();
   if(selectedProvider==='grok_bot')return;
   let current=true; // provider changes discard late discovery replies
-  setModels([]);setLoading(true);
+  setModels([]);setLoading(true);p.onRepositories?.([]);p.onRepositoriesLoading?.(true);
   void api<{models:{items:CloudModel[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
    if(!current)return;setModels(data.models.items ?? []);p.onRepositories?.(data.repositories?.items ?? []);
    if(!p.model){
     const selected=data.models.items?.find(m=>m.id===(selectedProvider==='chatgpt'?'gpt-6-pro':'default')) ?? data.models.items?.[0];
     if(selected)p.onChange(selected.id,selected.variants?.find(v=>v.isDefault)?.params ?? selected.variants?.[0]?.params ?? []);
    }
-  }).catch(error=>{if(current)p.onError(String(error));}).finally(()=>{if(current)setLoading(false);});
+  }).catch(error=>{if(current)p.onError(String(error));}).finally(()=>{if(current){setLoading(false);p.onRepositoriesLoading?.(false);}});
   onCleanup(()=>{current=false;});
  });
  const value=()=>JSON.stringify({id:p.model,params:p.params});

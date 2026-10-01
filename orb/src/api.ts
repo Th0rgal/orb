@@ -1,3 +1,5 @@
+import { sharedRead, invalidateReads } from "./sharedReads";
+import { cacheReset } from "./pageCache";
 import type { ClientRunReceipt } from "./clientRuns";
 import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
@@ -33,6 +35,8 @@ export function setConnection(url: string, token: string) {
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
   setConnected(true);
+  invalidateReads();
+  cacheReset();
   bumpConnectionVersion(v => v + 1);
 }
 
@@ -42,6 +46,8 @@ export function clearConnection() {
   localStorage.removeItem(JWT_KEY);
   setConnected(false);
   if (!hadConnection) return;
+  invalidateReads();
+  cacheReset();
   bumpConnectionVersion(v => v + 1);
 }
 
@@ -59,6 +65,8 @@ export async function login(password: string): Promise<void> {
   if (!data.token) throw new Error("Login response did not include a token");
   localStorage.setItem(JWT_KEY, data.token);
   setConnected(true);
+  invalidateReads();
+  cacheReset();
   bumpConnectionVersion(v => v + 1);
 }
 
@@ -66,14 +74,20 @@ export class ApiError extends Error {
   constructor(public status: number, public detail: string) { super(`${status} ${detail}`.trim()); }
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+export function api<T>(path: string, init?: RequestInit): Promise<T> {
+  // Explicit signals/options retain independent cancellation semantics.
+  if (!init) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
+  if (init.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  return apiRequest<T>(path, init);
+}
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
     ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
   };
-  const res = await fetch(`${getApiUrl()}${path}`, { ...init, headers });
+  const res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? (!init?.method || init.method.toUpperCase() === 'GET' ? AbortSignal.timeout(30_000) : undefined) });
   if (res.status === 401) {
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
@@ -82,7 +96,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const text = (await res.text().catch(() => "")).trim();
     throw new ApiError(res.status, text);
   }
-  return res.json().catch(() => undefined as unknown as T);
+  const result = await res.json().catch(() => undefined as unknown as T);
+  if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+  return result;
 }
 
 export interface RemoteNodeView {
@@ -166,6 +182,8 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
+  continuation?: import("./continuations").ContinuationSummary | null;
   execution_kind?: "hosted";
   cloud?: import("./cloudAgentApi").CloudExecution;
   local_sync_pending?: boolean;
@@ -826,6 +844,13 @@ export async function sendMissionMessage(
   });
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
+    // Side conversations must keep their archive, parent and sidebar identity.
+    // Their caller handles this explicit refusal through the dedicated /btw route.
+    if (isBtwMission(mission)) throw error;
+    if (["active", "pending", "waiting_background"].includes(mission.status) ||
+        ["queued", "running"].includes(mission.remote_job?.node_state ?? "")) {
+      throw new Error("This mission still has a remote job. Wait for it to finish or stop it before retrying. Your draft is kept.");
+    }
     const body = remoteReplacementBody(mission, text, attachments, clientMessageId);
     remoteReplacements.set(replacementKey, body);
     return createReplacement(body);

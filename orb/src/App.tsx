@@ -1,4 +1,9 @@
+import { WorkingDirectory } from "./WorkingDirectory";
+import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
+import { ReplayBuffer } from "./replayBuffer";
+import { applyStreamEvents } from "./transcriptModel";
+import { prependWithAnchor } from "./scrollAnchor";
 import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage, CloudConversation } from "./CloudAgents";
@@ -11,7 +16,7 @@ import { nativeComposerDrop } from "./composerDrop";
 import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
 import { startLocalOrigin } from "./localAgents";
-import { ChangeMachine } from "./ChangeMachine";
+import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
@@ -26,6 +31,7 @@ import { atQuery, chipToAttachment, filterAttach, insertMention, loadAttachItems
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasFocusScope } from "./focusScope";
+import { Lightbox } from "./Lightbox";
 import { For, Show, Switch, Match, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { JSX } from "solid-js";
@@ -44,7 +50,7 @@ import { latestChecklist } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { DEFAULT_EFFORT_LABEL, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
-import { refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
+import { olderTranscript, type TranscriptSnap, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
@@ -263,8 +269,11 @@ function AgentTurn(p: { turn: Extract<Turn, { role: "agent" }>; streaming?: bool
   );
 }
 
+const draftLightbox = (images: DraftImage[]) => images.map((image, index) => ({ src: image.dataUrl, label: image.reference ? `Image #${image.reference}` : `Image ${index + 1}` }));
+
 function OptimisticMessage(p: {draft:{text:string; images:DraftImage[]}}) {
-  return <div class="optimistic-message" aria-label="Pending message"><div class="user"><Show when={p.draft.images.length}><div class="message-images"><For each={p.draft.images}>{(image,index)=><div class="message-image"><img src={image.dataUrl} alt={`Image #${image.reference ?? index()+1}`}/><span>#{image.reference ?? index()+1}</span></div>}</For></div></Show><span>{p.draft.text}</span></div><span class="composer-pending-status" role="status">Waiting for confirmation…</span></div>;
+  const [viewing,setViewing]=createSignal<number|null>(null);
+  return <div class="optimistic-message" aria-label="Pending message"><div class="user"><Show when={p.draft.images.length}><div class="message-images"><For each={p.draft.images}>{(image,index)=><button type="button" class="message-image" aria-label={`Open image #${image.reference ?? index()+1}`} onClick={()=>setViewing(index())}><img src={image.dataUrl} alt={`Image #${image.reference ?? index()+1}`}/><span>#{image.reference ?? index()+1}</span></button>}</For></div></Show><Show when={viewing()!==null}><Lightbox items={draftLightbox(p.draft.images)} index={viewing()!} onClose={()=>setViewing(null)}/></Show><span>{p.draft.text}</span></div><span class="composer-pending-status" role="status">Waiting for confirmation…</span></div>;
 }
 
 export function Composer(p: {
@@ -278,6 +287,7 @@ export function Composer(p: {
   onStop?: () => void;
   textOnly?: boolean;
   controls?: JSX.Element;
+  directoryControl?: JSX.Element;
   disabled?: boolean;
   autofocus?: boolean;
   tall?: boolean;
@@ -366,6 +376,7 @@ export function Composer(p: {
     catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
   };
   const [images, setImages] = createSignal<DraftImage[]>([]);
+  const [viewing, setViewing] = createSignal<number | null>(null);
   const [sending, setSending] = createSignal(false);
   const [pendingSend, setPendingSend] = createSignal<{text:string; images:DraftImage[]} | null>(null);
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
@@ -772,6 +783,7 @@ export function Composer(p: {
               </div>
             </Show>
           </div>
+          {p.directoryControl}
           {/* Effort, after harness and model. Only rendered for a harness the
               core actually accepts an effort for — everything else has
               model_effort forced to null server-side. */}
@@ -921,7 +933,7 @@ export function Composer(p: {
       <Show when={uploadError()}><div class="composer-upload-status error" role="alert">{uploadError()}</div></Show>
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <div class="composer-field">
-        <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show>
+        <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show><Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
         <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
         <textarea readOnly={sending()}
           ref={ta}
@@ -1020,7 +1032,7 @@ export function floatingDock(el: HTMLDivElement) {
 
 export default function App() {
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
-  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);});
+  createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);onCleanup(startLocalWakeups());const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);});
   const [projects, setProjects] = createStore<typeof seed>([]);
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = localStorage.getItem("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
   createEffect(() => { localStorage.setItem("orb.selectedConversation",selected() ?? ""); });
@@ -1617,6 +1629,7 @@ export default function App() {
                     rows[next].focus();
                   }}>
                   <LiveProjectsSection
+                    activityMissions={missions()}
                     harnessChoices={harnessChoices()}
                     onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
                     selected={selected}
@@ -1968,10 +1981,6 @@ export default function App() {
                     </Show>
                   </div>
                 </div>
-                <label class="working-directory-field">
-                  <span>Working directory</span>
-                  <input aria-label="Working directory" value={workingDirectory()} placeholder="Default directory" spellcheck={false} disabled={creating()} onInput={event => chooseDirectory(event.currentTarget.value)} />
-                </label>
                 {/* One preview from attachment preparation through acceptance; failures restore the composer. */}
                 <Show when={launchPreview()}>{(receipt) => <div class="launch-preview"><UserTurn text={receipt().prompt} images={receipt().images} pending /><MissionPending destination={receipt().destination} label="Working" /></div>}</Show>
                 <div hidden={!!launchPreview()}>
@@ -1985,6 +1994,7 @@ export default function App() {
                   autofocus
                   tall
                   scope="new-agent"
+                  directoryControl={<WorkingDirectory value={workingDirectory()} local={newMachine() === "local"} scope={directoryKey()} disabled={creating()} onChange={chooseDirectory} />}
                   uploadTarget={newMachine()}
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}
@@ -2178,10 +2188,16 @@ function MissionDock(p: {
   };
   onMount(() => window.addEventListener("pointerdown", close));
   onCleanup(() => window.removeEventListener("pointerdown", close));
+  // Warm the machine list once the conversation is idle so the menu opens filled.
+  createEffect(on(() => p.mission?.id, id => {
+    if (!id) return;
+    const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
+    onCleanup(() => clearTimeout(timer));
+  }));
   return (
     <div class="under">
       <div class="fork-anchor">
-        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
+        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
           <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
           {p.destination} <Ic.ChevronDown size={10} />
         </button>
@@ -2298,6 +2314,8 @@ function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
 function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
   const receipt = recalledLaunch(p.id);
   const cached = peekReadyTranscript(p.id);
+  const [historySnapshot, setHistorySnapshot] = createSignal<TranscriptSnap | undefined>(cached);
+  const [loadingOlder, setLoadingOlder] = createSignal(false);
   const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null);
   createEffect(() => p.onMission?.(mission()));
   onCleanup(() => p.onMission?.(null));
@@ -2355,17 +2373,29 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   let refreshAgain = false;
   const [refreshing, setRefreshing] = createSignal(false);
   let held: StreamEvent[] = [];
-  const applyLive = (ev: StreamEvent) => {
-    setItems((cur) => {
-      const next = applyStreamEvent(cur, ev);
-      if (next !== cur) {
-        putTranscriptItems(p.id, next);
-        queueMicrotask(scrollIfPinned);
-      }
+  const recentEvents = new ReplayBuffer();
+  const [canReplayHistory, setCanReplayHistory] = createSignal(true);
+  let liveBatch: StreamEvent[] = [];
+  let liveTimer: ReturnType<typeof setTimeout> | undefined;
+  const applyLiveBatch = (events: StreamEvent[]) => {
+    if (!events.length) return;
+    recentEvents.push(events);
+    setCanReplayHistory(recentEvents.available);
+    setItems(cur => {
+      const next = applyStreamEvents(cur, events);
+      if (next !== cur) { putTranscriptItems(p.id, next); queueMicrotask(scrollIfPinned); }
       return next;
     });
   };
+  const applyLive = (event: StreamEvent) => applyLiveBatch([event]);
+  const flushLive = () => {
+    clearTimeout(liveTimer); liveTimer = undefined;
+    const events = liveBatch; liveBatch = [];
+    if (replaying) held.push(...events); else applyLiveBatch(events);
+  };
+  onCleanup(() => { clearTimeout(liveTimer); liveBatch = []; });
   const resync = async (fresh = false) => {
+    flushLive();
     if (replaying) { refreshAgain ||= fresh; return; }
     replaying = true;
     held = [];
@@ -2373,6 +2403,8 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     try {
       const snap = await (fresh ? refreshTranscript(p.id) : loadTranscript(p.id));
       history = snap.stream;
+      setHistorySnapshot(snap);
+      recentEvents.reset(); setCanReplayHistory(true);
       // Absence from a queue snapshot is not proof of delivery: the event
       // logger can lag dequeue. Keep known pending entries until their ID is
       // explicitly delivered, including while a reconnect replay is in flight.
@@ -2400,6 +2432,36 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     }
   };
 
+  const loadOlder = async () => {
+    const snapshot = historySnapshot();
+    if (!snapshot?.hasMore || replaying || loadingOlder() || !canReplayHistory()) return;
+    flushLive();
+    setLoadingOlder(true); replaying = true; held = [];
+    try {
+      const older = await olderTranscript(p.id, snapshot);
+      // The same reducer handles replay and live events; never mutate its output.
+      let next = older.items;
+      for (const event of recentEvents.events) next = applyStreamEvent(next, event);
+      prependWithAnchor(scroller, () => { setItems(next); setHistorySnapshot(older); });
+      putTranscript(p.id, older); setError(null);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally {
+      replaying = false; setLoadingOlder(false);
+      const queued = held; held = [];
+      for (const event of queued) applyLive(event);
+      if (refreshAgain) { refreshAgain = false; void resync(true); }
+    }
+  };
+
+  // Core rewrites a local run's reply in place and never streams it, so a
+  // transcript read mid-run stays partial. Re-read once the native worker
+  // (2s cadence) has posted the final snapshot.
+  createEffect(on(() => localRunActive(p.id), (active, was) => {
+    if (active || !was) return;
+    const timers = [3000, 8000].map(ms => setTimeout(() => void resync(true), ms));
+    onCleanup(() => timers.forEach(clearTimeout));
+  }));
+
   onMount(() => {
     const reload = async () => {
       if (refreshing()) return;
@@ -2419,11 +2481,15 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
               status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
           }
-          void refresh();
+          flushLive(); void refresh();
           return;
         }
         if (replaying) held.push(ev);
-        else applyLive(ev);
+        else {
+          liveBatch.push(ev);
+          if (!['text_delta', 'thinking', 'text_op'].includes(ev.type) || liveBatch.length >= 128) flushLive();
+          else if (liveTimer == null) liveTimer = setTimeout(flushLive, 16);
+        }
       },
       () => void resync(),
     );
@@ -2449,7 +2515,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
       await import("./localAgents").then(m => m.restoreLocalBindings());
       if (localBinding(id)) await reconcileLocalRun(id);
     };
-    const refreshLocal = () => { void reconcile().catch(console.error); };
+    const refreshLocal = () => reconcile().catch(console.error);
     refreshLocal();
     const stop = pollWhileVisible(refreshLocal, 2000);
     onCleanup(stop);
@@ -2489,14 +2555,24 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt);
     const known = new Set(canonical.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId:undefined));
-    const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.waiting||row.state==='accepted'||row.state==='dispatching')];
+    const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const draft=optimistic();
     const projected:StreamItem[]=[];
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
     if(draft&&!draft.waiting&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
     const list = [...canonical,...projected];
     const live = localLiveText(p.id);
-    const withLive = live && !list.some(item => item.kind === "text" && item.text === live) ? [...list, { kind: "text" as const, key: `local:${p.id}`, text: live, live: localRunActive(p.id) }] : list;
+    // The server rewrites a local run's reply in place without re-emitting it,
+    // so a transcript fetched mid-run holds a prefix of the live text.
+    let stale = -1;
+    for (let i = list.length - 1; i >= 0 && list[i].kind !== "user"; i--) {
+      const item = list[i];
+      if (item.kind === "text" && live.startsWith(item.text)) { stale = i; break; }
+    }
+    const liveItem = { kind: "text" as const, key: `local:${p.id}`, text: live, live: localRunActive(p.id) };
+    const withLive = !live || list.some(item => item.kind === "text" && item.text === live) ? list
+      : stale >= 0 ? list.map((item, i) => i === stale ? liveItem : item)
+      : [...list, liveItem];
     if (busy()) return withLive;
     // Terminal mission: force-close any bubble left open by a dropped
     // assistant_message finalizer.
@@ -2511,9 +2587,9 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
-  const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach()) => {
+  const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>) => {
     setSendError(null);
-    const attemptId=sendingId??crypto.randomUUID();sendingId=undefined;
+    const attemptId=explicitId??sendingId??crypto.randomUUID();if(!explicitId)sendingId=undefined;
     if (clientPlaced()) {
       const sendVersion=connectionVersion(),sendMission=p.id;
       try {
@@ -2540,7 +2616,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,waiting:optimistic()?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
@@ -2555,7 +2631,7 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     if (retryMessage?.key !== key) retryMessage = { key, id: attemptId };
     try {
       const sent = imagePrompt(text, await stageRemoteImages(images, mission()), images);
-      const result = await sendMissionMessage(p.id, sent, attachments, retryMessage.id);
+      const result = await sendMissionMessage(p.id, sent, attachments, explicitId ?? retryMessage.id);
       retryMessage = null;
       if (result.replacement) {
         const replacement = result.replacement;
@@ -2578,12 +2654,25 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
     }
   };
 
-  const sendEditedPrompt = async (text: string) => {
-    if (clientPlaced() && busy()) throw new Error("Wait for the local agent to finish or stop it before sending this follow-up.");
-    // The inline editor sends only this message's existing attachments, not
-    // unrelated context chips or an unsent draft in the main composer.
-    const accepted = await sendMsg(text, [], []);
-    if (!accepted) throw new Error(sendError() || "The message was not sent. Your draft is kept.");
+  const [resend, setResend] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string;waiting:boolean;state:"sending"|"accepted"|"error";error?:string}>();
+  const resendKnown = () => !!resend() && (items().some(i=>i.kind==='user'&&i.messageId===resend()!.id)||queuedLocalMessages(p.id).some(row=>row.id===resend()!.id));
+  const deliverResend = async () => {
+    const row=resend();if(!row||row.state==='sending')return;
+    setResend({...row,state:"sending",error:undefined});
+    const version=connectionVersion();
+    const accepted=await sendMsg(row.text,[],[],row.id);
+    if(version!==connectionVersion())return;
+    setResend({...row,state:accepted?"accepted":"error",error:accepted?undefined:sendError()||"Couldn’t send. Retry uses the same message identity."});
+    if(!accepted)setSendError(null);
+  };
+  const sendEditedPrompt = (text: string) => {
+    // One pending resend owns its identity even across ambiguous network failures.
+    if(resend()?.state==='sending')return true;
+    if(resend()?.state==='error'&&!resendKnown())return false;
+    setResend({id:crypto.randomUUID(),text,waiting:busy(),state:"accepted"});
+    nearBottom=true;
+    queueMicrotask(scrollIfPinned);
+    void deliverResend();
     return true;
   };
 
@@ -2628,7 +2717,14 @@ function NativeMissionView(p: { id: string; onPlan?: (id:string,data:PlanProgres
             }
           >
             <LaunchStatus submitting={localRunActive(p.id)} destination={missionDestination(mission(), receipt)} mission={mission()} goal={missionGoal(mission(), receipt)} activity={activity()} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+            <Show when={historySnapshot()?.hasMore}><button class="s-btn" disabled={loadingOlder() || !canReplayHistory()} title={!canReplayHistory() ? "Earlier messages will be available when this response is saved" : undefined} onClick={() => void loadOlder()}>{loadingOlder() ? 'Loading earlier messages…' : 'Load earlier messages'}</button></Show>
             <Transcript items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={sendEditedPrompt} />
+            <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
+              <UserTurn text={row().text}/>
+              <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
+                <Show when={row().state==='error'}><button onClick={()=>void deliverResend()}>Retry</button></Show>
+              </div>
+            </div>}</Show>
             <Show when={clientPlaced() && localActivities(p.id).length}>
               <AgentActivity items={localActivities(p.id)} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
             </Show>

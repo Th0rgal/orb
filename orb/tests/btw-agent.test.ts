@@ -91,3 +91,21 @@ it('rejects generated empty-output status instead of claiming an answer',async()
  vi.mocked(api).mockResolvedValue({id:'empty-status-child'});
  await expect(askBtwAgent('empty-status-parent','Q','latest',[],new AbortController().signal,()=>{})).rejects.toThrow('No response was captured');
 });
+
+it('replaces an explicitly refused side session only through the btw route and rearchives side history',async()=>{
+ const {ApiError}=await import('../src/api');
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Status answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='replace-parent'?'active':'completed',history:[],tags:id==='replace-parent'?[]:['btw-parent:replace-parent'],title:'Main',created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValueOnce({id:'old-side'}).mockResolvedValueOnce({id:'new-side'});
+ await askBtwAgent('replace-parent','Initial','first',[],new AbortController().signal,()=>{});
+ vi.mocked(sendMissionMessage).mockRejectedValueOnce(new ApiError(409,'REMOTE_RESUME_REQUIRES_REPLACEMENT: no session'));
+ const history=[{question:'Initial',answer:'Prior answer'}];
+ await askBtwAgent('replace-parent','Status now?','delta',history as any,new AbortController().signal,()=>{});
+ expect(btwSession('replace-parent')?.id).toBe('new-side');
+ expect(vi.mocked(api).mock.calls.every(([path])=>path==='/api/control/missions/replace-parent/btw/agent')).toBe(true);
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(history);
+ expect(JSON.parse(vi.mocked(api).mock.calls.at(-1)![1]!.body as string).side_context_mode).toBe('incremental');
+});

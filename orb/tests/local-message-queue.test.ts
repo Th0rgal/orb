@@ -1,13 +1,14 @@
+import {createRoot,createComputed} from 'solid-js';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({store:new Map<string,unknown>(),active:true,launch:vi.fn(),follow:vi.fn(),save:vi.fn(),status:vi.fn(),append:vi.fn(),version:1,recover:vi.fn(),failure:vi.fn()}));
+const mocks=vi.hoisted(()=>({store:new Map<string,unknown>(),active:true,launch:vi.fn(),follow:vi.fn(),save:vi.fn(),status:vi.fn(),append:vi.fn(),version:1,recover:vi.fn(),failure:vi.fn(),poll:vi.fn(),stopNative:vi.fn()}));
 vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,getMission:async()=>({status:mocks.active?'active':'awaiting_user',tags:['placement:client']}),appendClientTranscript:mocks.append,setClientMissionStatus:mocks.status}));
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
-vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:async()=>({done:!mocks.active}),reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:async()=>{mocks.active=false;}}));
+vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
 import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
-beforeEach(()=>{vi.useFakeTimers();mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
+beforeEach(()=>{vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
 afterEach(()=>{stop?.();vi.useRealTimers();});
 it('persists active-run followups and drains them in order using the latest session',async()=>{
  await enqueueLocalMessage(request,'first');await enqueueLocalMessage({...request,prompt:'second'},'second');
@@ -144,6 +145,47 @@ it('Send now recovers an already-ended run without trying to close a missing rec
  expect(mocks.recover).toHaveBeenCalledWith('mission');
  expect(mocks.status).not.toHaveBeenCalled();
 });
+
+// IndexedDB returns fresh object identities on every read. An unchanged poll
+// must not rebuild the transcript, markdown, plan and token estimates.
+it('does not invalidate conversation subscribers when idle polls are unchanged',async()=>{
+ let renders=0,dispose!:()=>void;
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1);
+ createRoot(d=>{dispose=d;createComputed(()=>{queuedLocalMessages('mission');renders++;});});
+ try {
+  const initial=renders;await vi.advanceTimersByTimeAsync(5000);
+  expect(renders).toBe(initial);
+  await enqueueLocalMessage(request,'waiting');await vi.advanceTimersByTimeAsync(1);
+  const changed=renders;expect(changed).toBeGreaterThan(initial);
+  await vi.advanceTimersByTimeAsync(5000);expect(renders).toBe(changed);
+  await removeQueuedMessage(queuedLocalMessages('mission')[0].id);
+  expect(renders).toBeGreaterThan(changed);
+ } finally {dispose();}
+});
+
+it('Send now recovers an absent native runner without calling stop',async()=>{
+ await enqueueLocalMessage(request,'saved');
+ mocks.poll.mockRejectedValue(new Error('no local run'));
+ await sendQueuedNow('mission');
+ expect(mocks.stopNative).not.toHaveBeenCalled();
+ expect(mocks.recover).toHaveBeenCalledWith('mission');
+ expect(mocks.launch).not.toHaveBeenCalled();
+});
+it('Send now does not treat a transport failure as proof that the runner stopped',async()=>{
+ await enqueueLocalMessage(request,'saved');
+ mocks.poll.mockRejectedValue(new Error('IPC disconnected'));
+ await expect(sendQueuedNow('mission')).rejects.toThrow('IPC disconnected');
+ expect(mocks.recover).not.toHaveBeenCalled();
+ expect(mocks.stopNative).not.toHaveBeenCalled();
+});
+it('surfaces a persisted unconfirmed claim after restart without launching it again',async()=>{
+ const id=await enqueueLocalMessage(request,'saved');
+ for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===id){row.state='dispatching';row.claimedAt=Date.now()-31000;}
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(100);
+ expect(queuedLocalMessages('mission')[0].error).toMatch(/confirmation was lost/);
+ expect(mocks.launch).not.toHaveBeenCalled();
+});
+
 
 it('does not replay a delegated message after completion when its server acknowledgement was lost',async()=>{
  mocks.active=false;

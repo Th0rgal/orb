@@ -1,0 +1,40 @@
+import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { createSignal } from 'solid-js';
+import { beforeEach, expect, it, vi } from 'vitest';
+import { WorkingDirectory } from '../src/WorkingDirectory';
+const picker = vi.hoisted(() => vi.fn());
+vi.mock('../src/uploads', () => ({ hasNativePicker: () => true, pickNativeDirectory: picker }));
+beforeEach(() => picker.mockReset());
+it('opens the native picker and preserves the folder on cancel', async () => {
+  const change = vi.fn();
+  picker.mockResolvedValueOnce(null).mockResolvedValueOnce('/Users/thomas/work');
+  render(() => <WorkingDirectory value="/tmp/existing" local scope="local" disabled={false} onChange={change} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Choose working directory' }));
+  await waitFor(() => expect(picker).toHaveBeenCalledWith('/tmp/existing'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Choose working directory' }).hasAttribute('disabled')).toBe(false));
+  expect(change).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Choose working directory' }));
+  await waitFor(() => expect(change).toHaveBeenCalledWith('/Users/thomas/work'));
+});
+it('discards a folder picked for a different destination', async () => {
+  let finish!: (path: string) => void;
+  picker.mockReturnValue(new Promise<string>(resolve => { finish = resolve; }));
+  const [scope, setScope] = createSignal('local');
+  const change = vi.fn();
+  render(() => <WorkingDirectory value="" local scope={scope()} disabled={false} onChange={change} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Choose working directory' }));
+  setScope('remote'); finish('/tmp/local');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Choose working directory' }).hasAttribute('disabled')).toBe(false));
+  expect(change).not.toHaveBeenCalled();
+});
+it('edits remote paths without opening a local picker and can reset', async () => {
+  const change = vi.fn();
+  render(() => <WorkingDirectory value="/srv/project" local={false} scope="remote" disabled={false} onChange={change} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Choose working directory' }));
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: '/srv/other' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+  expect(change).toHaveBeenCalledWith('/srv/other');
+  expect(picker).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Use default directory' }));
+  expect(change).toHaveBeenLastCalledWith('');
+});

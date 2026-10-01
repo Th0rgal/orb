@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "./poll";
 import {rememberApprovedPlan} from "./PlanProgress";
 import {For,Show,createEffect,createSignal,onCleanup,untrack} from 'solid-js';
 import {MdView} from './Markdown';
@@ -53,8 +54,20 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    if(next?.id!==request()?.id){setAnswers({});setFeedback('');setError('');}
    setRequest(next && !answered.has(next.id) ? next : null);
   }catch{/* Old native builds do not advertise this capability. */}};
-  void refresh();const timer=setInterval(refresh,350);
-  onCleanup(()=>{live=false;clearInterval(timer);});
+  const listen = (window as any).__TAURI__?.event?.listen as undefined | ((event: string, cb: (event: {payload: string}) => void) => Promise<() => void>);
+  let unlisten: (() => void) | undefined;
+  let stop = pollWhileVisible(refresh, 350); // Older native binaries still work.
+  if (listen) void listen('orb-interaction-changed', event => { if (event.payload === id) void refresh(); }).then(dispose => {
+    if (!live) { dispose(); return; }
+    unlisten = dispose;
+    // Version handshake: only slow polling when the native side supports events.
+    void invoke('local_interaction_events_supported', {}).then(() => {
+      if (!live) return;
+      stop(); stop = pollWhileVisible(refresh, 10_000); void refresh();
+    }).catch(() => {});
+  }).catch(() => {});
+  void refresh();
+  onCleanup(()=>{live=false;stop();unlisten?.();});
  });
  const reply=async(action?:string)=>{
   const current=request();if(!current||sending())return;
