@@ -63,6 +63,32 @@ class ProjectSkillsTest(unittest.TestCase):
         self.prepare('chatgpt_ui')
         self.assertEqual(json.loads((self.cwd / skills.MANIFEST).read_text())['entries'], {})
 
+    def test_cleanup_phase_removes_stale_entries_before_library_takes_old_name(self):
+        old = self.skill('old')
+        self.prepare('claudecode')
+        shutil.rmtree(old)
+        self.skill('new')
+        skills.prepare(str(self.source), str(self.cwd), 'claudecode', verify=False, cleanup_only=True)
+        self.assertFalse((self.cwd / '.claude/skills/old').is_symlink())
+        self.assertFalse((self.cwd / '.claude/skills/new').exists())
+        library = self.cwd / '.claude/skills/old'
+        library.mkdir()
+        (library / 'SKILL.md').write_text('Library owns the old name')
+        self.prepare('claudecode')
+        self.assertEqual((library / 'SKILL.md').read_text(), 'Library owns the old name')
+
+    def test_per_mission_skill_roots_are_checked_for_custom_cwd(self):
+        self.skill()
+        mission = self.base / 'mission'
+        for harness, alias in [('codex', '.codex/skills'), ('claudecode', '.claude/skills')]:
+            entry = mission / alias / 'orb-marker'
+            entry.mkdir(parents=True)
+            (entry / 'SKILL.md').write_text('Library skill')
+            with self.assertRaisesRegex(ValueError, 'per-mission native skill'):
+                skills.prepare(str(self.source), str(self.cwd), harness, verify=False, discovery_roots=[mission])
+            self.assertFalse((self.cwd / skills.NATIVE[harness] / 'orb-marker').exists())
+            self.assertEqual((entry / 'SKILL.md').read_text(), 'Library skill')
+
     def test_preserves_user_configuration_and_skills(self):
         self.skill()
         for native in skills.NATIVE.values():

@@ -61,9 +61,15 @@ Preparation removes deleted/renamed entries across previously used harnesses.
 Existing native entries and changed generated copies cause an explicit collision
 error instead of being overwritten. Compatible local discovery aliases are
 checked as well, including OpenCode's singular `.opencode/skill` Library path.
+Core checks the actual per-mission native roots when its execution directory
+differs from its private state directory. It removes stale project entries
+before Library preparation so Library skills can reuse deleted names.
 Library skill writers likewise track only their own entries rather than deleting
 an entire native skills directory. Untracked legacy Library entries are preserved;
 a same-name collision requires resolving ownership rather than automatic adoption.
+Library updates stage complete supporting files and journal old/new hashes before
+replacing directories. A subsequent launch recovers an interrupted owned update
+while still refusing outside edits.
 
 A working directory with managed skills is bound to its source project. Another
 project, or a project-less mission, cannot launch there or beneath it. Choose a

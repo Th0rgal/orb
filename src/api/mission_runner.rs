@@ -4090,6 +4090,54 @@ async fn run_mission_turn(
             "Failed to sync MCP binaries into workspace"
         );
     }
+    let project = if let Some(store) = mission_store.as_ref() {
+        match store.get_mission(mission_id).await {
+            Ok(mission) => mission.and_then(|mission| mission.project.project),
+            Err(error) => {
+                return AgentResult::failure(format!("Read project identity: {error}"), 0)
+            }
+        }
+    } else {
+        None
+    };
+    let mut visible_source = String::new();
+    let context_manifest = if let Some(project) = project {
+        if !super::projects_overview::is_plain_key(&project) {
+            return AgentResult::failure("Invalid context project", 0);
+        }
+        let root = super::mission_payload::project_files_root(&config.working_dir, &project);
+        let metadata = config
+            .working_dir
+            .join(".sandboxed-sh/project-context-state")
+            .join(&project);
+        let manifest = match crate::project_context::Store::new(root.clone(), metadata).manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
+            }
+        };
+        visible_source = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
+            .mount_project_context(&root, &project)
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
+        };
+        Some(manifest)
+    } else {
+        None
+    };
+    let skill_execution_dir = mission_working_directory
+        .as_deref()
+        .map(|wd| resolve_mission_working_directory(&workspace.path, workspace.workspace_type, wd))
+        .transpose();
+    let skill_execution_dir = match skill_execution_dir {
+        Ok(dir) => dir,
+        Err(error) => {
+            return AgentResult::failure(format!("Invalid skill working directory: {error}"), 0)
+        }
+    };
+
     let mission_work_dir_result = {
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
@@ -4105,6 +4153,7 @@ async fn run_mission_turn(
             Some(&config.working_dir),
             !pr_readonly,
             explicit_worktree.as_deref(),
+            Some((&visible_source, skill_execution_dir.as_deref())),
         )
         .await
     };
@@ -4127,6 +4176,8 @@ async fn run_mission_turn(
             return AgentResult::failure(e.to_string(), 0);
         }
     };
+
+    let skill_discovery_roots = vec![mission_work_dir.clone()];
 
     // Override with mission-specific working_directory (e.g. git worktree for orchestrated workers)
     let mission_work_dir = if workspace.workspace_type == WorkspaceType::Host && own_state {
@@ -4193,39 +4244,7 @@ async fn run_mission_turn(
         Ok(message) => message,
         Err(error) => return AgentResult::failure(format!("Resolve attached paths: {error}"), 0),
     };
-    let project = if let Some(store) = mission_store.as_ref() {
-        match store.get_mission(mission_id).await {
-            Ok(mission) => mission.and_then(|mission| mission.project.project),
-            Err(error) => {
-                return AgentResult::failure(format!("Read project identity: {error}"), 0)
-            }
-        }
-    } else {
-        None
-    };
-    let mut visible_source = String::new();
-    let user_message = if let Some(project) = project {
-        if !super::projects_overview::is_plain_key(&project) {
-            return AgentResult::failure("Invalid context project", 0);
-        }
-        let root = super::mission_payload::project_files_root(&config.working_dir, &project);
-        let metadata = config
-            .working_dir
-            .join(".sandboxed-sh/project-context-state")
-            .join(&project);
-        let manifest = match crate::project_context::Store::new(root.clone(), metadata).manifest() {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                return AgentResult::failure(format!("Prepare shared context: {error}"), 0)
-            }
-        };
-        visible_source = match crate::workspace_exec::WorkspaceExec::new(workspace.clone())
-            .mount_project_context(&root, &project)
-            .await
-        {
-            Ok(path) => path,
-            Err(error) => return AgentResult::failure(format!("Mount shared context: {error}"), 0),
-        };
+    let user_message = if let Some(manifest) = context_manifest {
         match super::context_execution::resolve(
             &user_message,
             Path::new(&visible_source),
@@ -4242,25 +4261,17 @@ async fn run_mission_turn(
         user_message
     };
     let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
-    let skill_preparation = crate::workspace_exec::WorkspaceExec::new(workspace.clone())
-        .output(
-            &skill_cwd,
-            "sh",
-            &[
-                "-c".into(),
-                include_str!("../../shared/prepare_project_skills.sh").into(),
-                "orb-project-skills".into(),
-                visible_source,
-                backend_id.clone(),
-                include_str!("../../shared/prepare_project_skills.py").into(),
-            ],
-            HashMap::new(),
-        )
-        .await;
-    match skill_preparation {
-        Ok(output) if output.status.success() => {},
-        Ok(output) => return AgentResult::failure(String::from_utf8_lossy(&output.stderr).into_owned(), 0),
-        Err(error) => return AgentResult::failure(format!("Prepare project skills: {error}. Install Python 3 on the execution machine and retry."), 0),
+    if let Err(error) = workspace::prepare_project_skills(
+        &workspace,
+        &skill_cwd,
+        &visible_source,
+        &backend_id,
+        false,
+        &skill_discovery_roots,
+    )
+    .await
+    {
+        return AgentResult::failure(format!("Prepare project skills: {error}"), 0);
     }
 
     let attachment_dir = workspace::configured_project_dir(&workspace, &mission_work_dir);

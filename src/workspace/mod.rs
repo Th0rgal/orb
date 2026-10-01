@@ -2516,6 +2516,130 @@ pub async fn write_codex_skills_to_workspace(
     write_managed_library_skills(&codex_root.join("skills"), skills, true).await
 }
 
+type LibrarySkillHashes =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LibrarySkillUpdate {
+    previous: LibrarySkillHashes,
+    next: LibrarySkillHashes,
+    stage: String,
+}
+
+fn library_skill_hashes(path: &Path) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut actual = std::collections::BTreeMap::new();
+    for entry in walkdir::WalkDir::new(path).follow_links(false) {
+        let entry = entry?;
+        anyhow::ensure!(
+            !entry.path().is_symlink(),
+            "User-managed symlink in Library skill: {}",
+            entry.path().display()
+        );
+        if entry.file_type().is_file() {
+            actual.insert(
+                entry
+                    .path()
+                    .strip_prefix(path)?
+                    .to_string_lossy()
+                    .into_owned(),
+                crate::project_context::digest(&std::fs::read(entry.path())?),
+            );
+        }
+    }
+    Ok(actual)
+}
+
+// The durable journal covers the gap between removing an old directory and
+// installing its fully staged replacement. Recovery accepts only old/new owned
+// hashes or a missing entry; outside edits are never overwritten.
+fn finish_library_skill_update(root: &Path, update: &LibrarySkillUpdate) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        update.stage.starts_with(".orb-library-stage-")
+            && Uuid::parse_str(&update.stage[".orb-library-stage-".len()..]).is_ok(),
+        "Invalid Library staging directory"
+    );
+    let stage = root.parent().unwrap().join(&update.stage);
+    anyhow::ensure!(
+        !stage.is_symlink(),
+        "Library staging directory is a symlink"
+    );
+    for name in update.previous.keys().chain(update.next.keys()) {
+        crate::project_context::valid_path(name).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!name.contains('/'), "Invalid Library update name");
+        let path = root.join(name);
+        if path.exists() || path.is_symlink() {
+            let actual = library_skill_hashes(&path)?;
+            anyhow::ensure!(
+                update.previous.get(name) == Some(&actual)
+                    || update.next.get(name) == Some(&actual),
+                "Library skill was edited outside Orb: {}. Preserve those edits before retrying",
+                path.display()
+            );
+        }
+        if let Some(next) = update.next.get(name) {
+            let staged = stage.join(name);
+            let already_installed = path.exists() && library_skill_hashes(&path)? == *next;
+            anyhow::ensure!(already_installed || (staged.exists() && library_skill_hashes(&staged)? == *next),
+                "Incomplete Library staging directory: {}. Restore the staged files before retrying", staged.display());
+        }
+    }
+    for name in update.previous.keys() {
+        if !update.next.contains_key(name) && root.join(name).exists() {
+            std::fs::remove_dir_all(root.join(name))?;
+        }
+    }
+    for (name, hashes) in &update.next {
+        let path = root.join(name);
+        if path.exists() && library_skill_hashes(&path)? == *hashes {
+            continue;
+        }
+        if path.exists() {
+            std::fs::remove_dir_all(&path)?;
+        }
+        std::fs::rename(stage.join(name), path)?;
+    }
+    write_file_atomic(
+        &root.join(".orb-library-skills.json"),
+        serde_json::to_string(&update.next)?,
+    )?;
+    std::fs::remove_file(root.join(".orb-library-skills.pending.json"))?;
+    if stage.exists() {
+        std::fs::remove_dir_all(stage)?;
+    }
+    Ok(())
+}
+
+fn stage_library_skill_update(
+    root: &Path,
+    previous: LibrarySkillHashes,
+    desired: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+) -> anyhow::Result<LibrarySkillUpdate> {
+    let stage_name = format!(".orb-library-stage-{}", Uuid::new_v4());
+    let stage = root.parent().unwrap().join(&stage_name);
+    std::fs::create_dir(&stage)?;
+    let mut next = std::collections::BTreeMap::new();
+    for (name, files) in desired {
+        let mut hashes = std::collections::BTreeMap::new();
+        for (relative, content) in files {
+            let path = stage.join(&name).join(&relative);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            write_file_atomic(&path, &content)?;
+            hashes.insert(relative, crate::project_context::digest(content.as_bytes()));
+        }
+        next.insert(name, hashes);
+    }
+    let update = LibrarySkillUpdate {
+        previous,
+        next,
+        stage: stage_name,
+    };
+    write_file_atomic(
+        &root.join(".orb-library-skills.pending.json"),
+        serde_json::to_string(&update)?,
+    )?;
+    Ok(update)
+}
+
 async fn write_managed_library_skills(
     root: &Path,
     skills: &[SkillContent],
@@ -2557,6 +2681,15 @@ async fn write_managed_library_skills(
         !manifest.is_symlink(),
         "Library skill manifest is a symlink"
     );
+    let pending = root.join(".orb-library-skills.pending.json");
+    anyhow::ensure!(
+        !pending.is_symlink(),
+        "Library pending manifest is a symlink"
+    );
+    if pending.exists() {
+        let update = serde_json::from_slice(&std::fs::read(&pending)?)?;
+        finish_library_skill_update(root, &update)?;
+    }
     let previous: BTreeMap<String, BTreeMap<String, String>> = if manifest.exists() {
         serde_json::from_slice(&std::fs::read(&manifest)?)?
     } else {
@@ -2596,26 +2729,7 @@ async fn write_managed_library_skills(
             "Library skill replaced by a symlink: {}",
             path.display()
         );
-        let mut actual = BTreeMap::new();
-        for entry in walkdir::WalkDir::new(&path).follow_links(false) {
-            let entry = entry?;
-            anyhow::ensure!(
-                !entry.path().is_symlink(),
-                "User-managed symlink in Library skill: {}",
-                entry.path().display()
-            );
-            if entry.file_type().is_file() {
-                let relative = entry
-                    .path()
-                    .strip_prefix(&path)?
-                    .to_string_lossy()
-                    .into_owned();
-                actual.insert(
-                    relative,
-                    crate::project_context::digest(&std::fs::read(entry.path())?),
-                );
-            }
-        }
+        let actual = library_skill_hashes(&path)?;
         anyhow::ensure!(
             actual == *expected,
             "Library skill was edited outside Orb: {}. Preserve those edits before retrying",
@@ -2630,26 +2744,8 @@ async fn write_managed_library_skills(
             path.display()
         );
     }
-    for name in previous.keys() {
-        let path = root.join(name);
-        if path.exists() {
-            tokio::fs::remove_dir_all(path).await?;
-        }
-    }
-    let mut next = BTreeMap::new();
-    for (name, files) in desired {
-        let mut hashes = BTreeMap::new();
-        for (relative, content) in files {
-            let path = root.join(&name).join(&relative);
-            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-            tokio::fs::write(&path, &content).await?;
-            hashes.insert(relative, crate::project_context::digest(content.as_bytes()));
-        }
-        next.insert(name, hashes);
-    }
-    let temporary = manifest.with_extension("tmp");
-    std::fs::write(&temporary, serde_json::to_vec(&next)?)?;
-    std::fs::rename(temporary, manifest)?;
+    let update = stage_library_skill_update(root, previous, desired)?;
+    finish_library_skill_update(root, &update)?;
     Ok(())
 }
 
@@ -2947,40 +3043,6 @@ pub async fn sync_skills_to_dir(
     context_name: &str,
     library: &LibraryStore,
 ) -> anyhow::Result<()> {
-    let skills_dir = target_dir.join(".opencode").join("skill");
-
-    // Clean up skills that are no longer in the allowlist
-    if skills_dir.exists() {
-        let allowed: std::collections::HashSet<&str> =
-            skill_names.iter().map(|s| s.as_str()).collect();
-
-        if let Ok(mut entries) = tokio::fs::read_dir(&skills_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if !allowed.contains(name) {
-                            tracing::info!(
-                                skill = %name,
-                                context = %context_name,
-                                "Removing skill no longer in allowlist"
-                            );
-                            let _ = tokio::fs::remove_dir_all(&path).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if skill_names.is_empty() {
-        tracing::debug!(
-            context = %context_name,
-            "No skills to sync"
-        );
-        return Ok(());
-    }
-
     let skills_to_write = collect_skill_contents(skill_names, context_name, library).await;
 
     write_skills_to_workspace(target_dir, &skills_to_write).await?;
@@ -3702,8 +3764,55 @@ pub async fn prepare_mission_workspace_with_skills_backend(
         app_working_dir,
         allow_git_mutations,
         None,
+        None,
     )
     .await
+}
+
+pub(crate) async fn prepare_project_skills(
+    workspace: &Workspace,
+    cwd: &Path,
+    source: &str,
+    backend: &str,
+    cleanup_only: bool,
+    discovery_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
+    let roots: Vec<_> = discovery_roots
+        .iter()
+        .map(|p| exec.translate_path_for_container(p))
+        .collect();
+    let env = HashMap::from([
+        (
+            "ORB_PROJECT_SKILLS_CLEANUP_ONLY".into(),
+            if cleanup_only { "1" } else { "0" }.into(),
+        ),
+        (
+            "ORB_PROJECT_SKILLS_DISCOVERY_ROOTS".into(),
+            serde_json::to_string(&roots)?,
+        ),
+    ]);
+    let output = exec
+        .output(
+            cwd,
+            "sh",
+            &[
+                "-c".into(),
+                include_str!("../../shared/prepare_project_skills.sh").into(),
+                "orb-project-skills".into(),
+                source.into(),
+                backend.into(),
+                include_str!("../../shared/prepare_project_skills.py").into(),
+            ],
+            env,
+        )
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3719,6 +3828,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
     app_working_dir: Option<&Path>,
     allow_git_mutations: bool,
     explicit_worktree: Option<&Path>,
+    project_skills: Option<(&str, Option<&Path>)>,
 ) -> anyhow::Result<PathBuf> {
     // Mission workspace directory lives under the selected workspace root.
     // This keeps filesystem and config effects scoped to the mission.
@@ -3727,6 +3837,16 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
     let root = mission_workspace_root_for_workspace(workspace, mission_id);
     let dir = mission_workspace_dir_for_root(&root, mission_id);
     prepare_workspace_dir(&dir).await?;
+    // Reconcile deleted project entries before Library's ownership checks.
+    // Cleanup does not expose new skills; final preparation checks the freshly
+    // written Library roots before launching the harness.
+    if let Some((source, execution_dir)) = project_skills {
+        let cwd = configured_project_dir(workspace, execution_dir.unwrap_or(&dir));
+        prepare_project_skills(workspace, &dir, source, backend_id, true, &[]).await?;
+        if cwd != dir {
+            prepare_project_skills(workspace, &cwd, source, backend_id, true, &[]).await?;
+        }
+    }
     // Record placement only after initial directory creation succeeds. A failed
     // first preparation must remain retryable, while a recorded directory that
     // later disappears still fails the source-loss guard above.
@@ -6615,6 +6735,7 @@ WORKING_DIR = "/workspaces/mission-old"
                 None,
                 true,
                 Some(&worktree),
+                None,
             )
             .await
             .unwrap();
@@ -6639,6 +6760,7 @@ WORKING_DIR = "/workspaces/mission-old"
                 None,
                 true,
                 Some(&arbitrary),
+                None,
             )
             .await
             .is_err());
@@ -6656,6 +6778,7 @@ WORKING_DIR = "/workspaces/mission-old"
                 None,
                 true,
                 Some(&worktree),
+                None,
             )
             .await
             .is_err());
@@ -7255,6 +7378,137 @@ mod managed_library_skill_tests {
         assert_eq!(
             std::fs::read_to_string(original.join("SKILL.md")).unwrap(),
             "synchronized source"
+        );
+    }
+    #[tokio::test]
+    async fn interrupted_library_updates_resume_before_ownership_checks() {
+        use std::collections::BTreeMap;
+        // Simulate interruption before replacement, during its directory gap,
+        // and after installation but before recording the new manifest.
+        for phase in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join(".claude/skills");
+            write_managed_library_skills(&root, &[skill("fixture")], true)
+                .await
+                .unwrap();
+            let previous = serde_json::from_slice(
+                &std::fs::read(root.join(".orb-library-skills.json")).unwrap(),
+            )
+            .unwrap();
+            let files = BTreeMap::from([
+                ("SKILL.md".into(), "Updated instructions".into()),
+                ("references/check.md".into(), "Updated reference".into()),
+            ]);
+            let update = stage_library_skill_update(
+                &root,
+                previous,
+                BTreeMap::from([("fixture".into(), files)]),
+            )
+            .unwrap();
+            if phase > 0 {
+                std::fs::remove_dir_all(root.join("fixture")).unwrap();
+            }
+            if phase > 1 {
+                std::fs::rename(
+                    root.parent().unwrap().join(&update.stage).join("fixture"),
+                    root.join("fixture"),
+                )
+                .unwrap();
+            }
+            // A normal subsequent launch recovers the journal, then can clean
+            // the skill using the recovered ownership hashes.
+            write_managed_library_skills(&root, &[], true)
+                .await
+                .unwrap();
+            assert!(!root.join("fixture").exists());
+            assert!(!root.join(".orb-library-skills.pending.json").exists());
+            assert!(!root.parent().unwrap().join(&update.stage).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_library_update_preserves_outside_edits() {
+        use std::collections::BTreeMap;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".claude/skills");
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
+        let previous =
+            serde_json::from_slice(&std::fs::read(root.join(".orb-library-skills.json")).unwrap())
+                .unwrap();
+        stage_library_skill_update(
+            &root,
+            previous,
+            BTreeMap::from([(
+                "fixture".into(),
+                BTreeMap::from([("SKILL.md".into(), "Next version".into())]),
+            )]),
+        )
+        .unwrap();
+        std::fs::write(root.join("fixture/SKILL.md"), "User edit").unwrap();
+        assert!(write_managed_library_skills(&root, &[], true)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("edited outside"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("fixture/SKILL.md")).unwrap(),
+            "User edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_cleanup_allows_library_to_reuse_deleted_skill_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let cwd = directory.path().join("cwd");
+        std::fs::create_dir_all(source.join("skills/fixture")).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(
+            source.join("skills/fixture/SKILL.md"),
+            "Project instructions",
+        )
+        .unwrap();
+        let workspace = Workspace::default_host(cwd.clone());
+        prepare_project_skills(
+            &workspace,
+            &cwd,
+            source.to_str().unwrap(),
+            "claudecode",
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        std::fs::remove_dir_all(source.join("skills/fixture")).unwrap();
+        prepare_project_skills(
+            &workspace,
+            &cwd,
+            source.to_str().unwrap(),
+            "claudecode",
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        write_claudecode_skills_to_workspace(&cwd, &[skill("fixture")])
+            .await
+            .unwrap();
+        prepare_project_skills(
+            &workspace,
+            &cwd,
+            source.to_str().unwrap(),
+            "claudecode",
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join(".claude/skills/fixture/references/check.md"))
+                .unwrap(),
+            "LIBRARY-FIXTURE"
         );
     }
 }

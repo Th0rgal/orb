@@ -67,7 +67,7 @@ def safe_parents(cwd, relative):
             raise ValueError(f"Native skill parent must be a real directory: {parent}")
 
 
-def prepare(source, cwd, harness, verify=True):
+def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roots=()):
     cwd = Path(cwd).resolve(strict=True)
     source = str(Path(source).resolve(strict=True)) if source else None
     if source and cwd.is_relative_to(Path(source)) and any(Path(source).glob("skills/*/SKILL.md")):
@@ -135,7 +135,7 @@ def prepare(source, cwd, harness, verify=True):
             raise ValueError(f"{harness} has no supported project skill discovery mechanism. Select Codex, Claude Code, OpenCode, Gemini or Grok, or remove project skills.")
 
         entries = state["entries"].copy()
-        desired = {f"{NATIVE[harness]}/{name}": target for name, target in skills.items()} if harness in NATIVE else {}
+        desired = {f"{NATIVE[harness]}/{name}": target for name, target in skills.items()} if harness in NATIVE and not cleanup_only else {}
         stale = {relative: target for relative, target in entries.items() if Path(relative).name not in skills}
         # Preflight every mutation before touching anything. A replaced managed
         # link is now user-owned: never remove or overwrite it.
@@ -151,7 +151,13 @@ def prepare(source, cwd, harness, verify=True):
         # Compatible discovery aliases can contain a different skill with the
         # same native name (notably Library's .opencode/skill). Be explicit
         # instead of silently relying on harness-specific precedence.
-        for name, target in skills.items():
+        for name, target in (skills.items() if not cleanup_only else ()):
+            for discovery_root in discovery_roots:
+                discovery_root = Path(discovery_root).resolve(strict=True)
+                for alias in ALIASES.get(harness, ()):
+                    path = discovery_root / alias / name
+                    if discovery_root != cwd and os.path.lexists(path):
+                        raise ValueError(f"Skill name collision at {path}. Rename the project skill; Orb will preserve the per-mission native skill.")
             for alias in ALIASES.get(harness, ()):
                 relative = f"{alias}/{name}"
                 path = cwd / relative
@@ -181,6 +187,8 @@ def prepare(source, cwd, harness, verify=True):
             state["entries"].pop(relative)
             state["copies"].pop(relative, None)
             save()
+        if cleanup_only:
+            return {"skills": len(skills), "source": source}
         for relative, target in desired.items():
             path = cwd / relative
             content = adapters.get(Path(relative).name)
@@ -242,7 +250,7 @@ def prepare(source, cwd, harness, verify=True):
 if __name__ == "__main__":
     try:
         source, harness, *directory = sys.argv[1:]
-        print(json.dumps(prepare(source or None, directory[0] if directory else os.getcwd(), harness)))
+        print(json.dumps(prepare(source or None, directory[0] if directory else os.getcwd(), harness, cleanup_only=os.environ.get("ORB_PROJECT_SKILLS_CLEANUP_ONLY") == "1", discovery_roots=json.loads(os.environ.get("ORB_PROJECT_SKILLS_DISCOVERY_ROOTS", "[]")))))
     except Exception as error:
         print(f"Prepare project skills: {error} Fix the project files or working directory and retry; your draft is kept.", file=sys.stderr)
         sys.exit(78)

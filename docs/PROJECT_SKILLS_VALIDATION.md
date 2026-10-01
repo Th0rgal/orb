@@ -31,7 +31,7 @@ native copy replaced the link. Trust was exercised only for disposable fixtures
 using private test settings; application preparation does not modify trust settings.
 
 A second reproducible native probe, `scripts/project_skills_discovery_probe.py`,
-ran under `/tmp/orb-project-skills-discovery-ahe9zrd2`. Each of the five real native
+ran under `/tmp/orb-project-skills-discovery-xf0z7_gc`. Each of the five real native
 scanners detected initial symlink discovery, an added adapted plain Markdown
 skill, rename cleanup, deletion, and cleanup after deleting the final original.
 All 25 stage checks passed. Raw filtered discovery names, expected names and
@@ -62,7 +62,7 @@ Final command results:
 
 | Check | Result |
 | --- | --- |
-| Python project skill preparation | 17 passed |
+| Python project skill preparation | 19 passed, including review regressions |
 | Rust workspace tests | 2,907 passed, 8 ignored, no failures |
 | Harness contract script | Passed, including 81 Python driver tests |
 | Capability matrix | Passed |
@@ -106,7 +106,24 @@ procedure and an authenticated Orb desktop available:
    test `@context/Context` reading/editing, project isolation, user configuration
    preservation and concurrent launches.
 
-The GitHub CLI is unauthenticated. `git push --dry-run` failed because it could
-not obtain an HTTPS username. Opening the requested PR remains blocked on
-GitHub authentication; this is not a filesystem sandbox or approval-policy
-failure.
+## GitHub delivery
+
+After the development identity rollout, GitHub authentication succeeded as
+`Th0rgal`. The branch was rebased without conflicts onto `master` at `d5fa2c58`.
+The implementation is tracked in [PR #998](https://github.com/Th0rgal/sandboxed.sh/pull/998).
+Commits use `Thomas Marchand (agent) <agent@thomas.md>` and OpenPGP fingerprint
+`30EAE29B6766A7A70A4DEB4BF480B9A3F84BE648`; GitHub verified the implementation
+commit's signature as valid.
+
+The initial signed head passed GitHub Format, Clippy, Test, Harness Contract,
+Orb, Policy Lint, Capability Matrix, and Dashboard checks. Local Rust tests after
+rebasing passed 2,907 tests with eight ignored. The automatic review identified
+three lifecycle issues; fixes add early stale cleanup, per-mission discovery
+root checks, and staged/journaled Library updates with interruption recovery.
+All six Rust ownership/recovery regression tests passed; all 19 Python tests
+and all 25 native discovery lifecycle checks passed on the reviewed code.
+
+Post-rebase frontend build passed; unit tests passed 788 tests with three
+skipped. This authentication rollout does not supply macOS Orb desktop or
+isolated test-deployment access, so the real mission coverage above remains
+outstanding.
