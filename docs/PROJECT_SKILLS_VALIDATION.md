@@ -63,7 +63,7 @@ Final command results:
 | Check | Result |
 | --- | --- |
 | Python project skill preparation | 20 passed, including review regressions |
-| Rust workspace tests | 2,907 passed, 8 ignored, no failures |
+| Rust workspace tests | 2,867 library tests and 38 binary tests passed; 8 ignored; no failures |
 | Harness contract script | Passed, including 81 Python driver tests |
 | Capability matrix | Passed |
 | Frontend build and unit tests | Build passed; 767 passed, 3 skipped |
@@ -117,14 +117,14 @@ commit's signature as valid.
 
 The initial signed head passed GitHub Format, Clippy, Test, Harness Contract,
 Orb, Policy Lint, Capability Matrix, and Dashboard checks. Local Rust tests after
-rebasing passed 2,907 tests with eight ignored. The automatic review identified
+rebasing passed 2,867 library tests and 38 binary tests with eight ignored. The automatic review identified
 three lifecycle issues; fixes add early stale cleanup, per-mission discovery
 root checks, and staged/journaled Library updates with interruption recovery.
 All six Rust ownership/recovery regression tests passed; all 20 Python tests
 and all 25 native discovery lifecycle checks passed on the reviewed code.
 
-The first lifecycle-fix head also passed 2,910 local Rust workspace tests with
-eight ignored. A subsequent review required using the configured/installed
+The first lifecycle-fix head also passed 2,870 library tests and 38 binary tests with
+eight ignored. Counts exclude duplicate nested subprocess test output. A subsequent review required using the configured/installed
 Grok/Gemini CLI for Core inspection; preparation now uses the same availability
 helpers as the actual runners and supports runtime command prefixes. A Python
 regression checks the selected native command.
