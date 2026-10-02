@@ -339,8 +339,8 @@ pub fn enforce_proxy_selection(
     body_program: Option<&serde_json::Value>,
 ) -> Result<Option<&'static str>, String> {
     let Some(selection) = selection else {
-        return if header.is_some() {
-            Err("Explicit cyber headers require an execution-bound key".into())
+        return if header.is_some() || body_program.is_some() {
+            Err("Explicit cyber programs require an execution-bound key".into())
         } else {
             Ok(None)
         };
@@ -379,6 +379,14 @@ mod authority_tests {
         )
         .is_err());
         assert!(enforce_proxy_selection(None, "gpt-6.1-sol", Some("standard"), None).is_err());
+        assert!(enforce_proxy_selection(
+            None,
+            "gpt-6.1-sol",
+            None,
+            Some(&serde_json::json!("daybreak_blue"))
+        )
+        .is_err());
+        assert!(enforce_proxy_selection(None, "gpt-6.1-sol", None, None).is_ok());
         assert!(enforce_proxy_selection(
             Some(&Selection::default()),
             "gpt-6.1-sol",
