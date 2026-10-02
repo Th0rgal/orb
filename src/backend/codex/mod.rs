@@ -429,7 +429,7 @@ async fn send_message_streaming_app_server(
                 let _ = session_arc.shutdown().await;
                 return Err(anyhow::anyhow!("access_program_not_enabled: the account does not advertise this cyber program for the selected model. No turn was started."));
             }
-            if plan_source.trim().starts_with("/goal") {
+            if parse_goal_prefix(plan_source).0 {
                 let _ = session_arc.shutdown().await;
                 return Err(anyhow::anyhow!("unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."));
             }

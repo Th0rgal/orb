@@ -1358,6 +1358,12 @@ fn drive_codex(
         rpc(stdin, reader, "thread/start", params)?
     };
     let resolved_model = model.or_else(|| started.get("model").and_then(Value::as_str));
+    let goal_objective = prompt
+        .trim()
+        .strip_prefix("/goal")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty());
     let cyber_program = cyber_access.native(resolved_model.unwrap_or(""))?;
     if let Some(program) = cyber_program {
         let account = rpc(stdin, reader, "account/read", json!({"refreshToken":false}))?;
@@ -1387,7 +1393,7 @@ fn drive_codex(
         if !accepted.is_some_and(|values| values.iter().any(|v| v.as_str() == Some(program))) {
             return Err("access_program_not_enabled: the selected account does not advertise this cyber program for this model. No turn was started.".into());
         }
-        if prompt.trim().starts_with("/goal") {
+        if goal_objective.is_some() {
             return Err("unsupported_access_program: native goal continuations do not confirm per-turn cyber selection. Choose Automatic explicitly for this goal.".into());
         }
     }
@@ -1399,12 +1405,6 @@ fn drive_codex(
     if let Ok(mut slot) = session_out.lock() {
         *slot = Some(thread_id.clone());
     }
-    let goal_objective = prompt
-        .trim()
-        .strip_prefix("/goal")
-        .filter(|rest| rest.starts_with(char::is_whitespace))
-        .map(str::trim)
-        .filter(|rest| !rest.is_empty());
     let mut goal_mode = goal_objective.is_some();
     let plan_prompt = prompt
         .trim()
@@ -2440,6 +2440,37 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             extract_text(r#"{"type":"text","part":{"text":"OpenCode"}}"#).as_deref(),
             Some("OpenCode")
         );
+    }
+
+    #[test]
+    fn cyber_access_goal_guard_uses_the_native_command_boundary() {
+        for prompt in ["/goal", "/goalkeeper", "/goal Work"] {
+            let events = [
+                json!({"id":"orb-initialize","result":{}}),
+                json!({"id":"orb-thread/start","result":{"model":"gpt-6.1-sol","modelProvider":"openai","thread":{"id":"thread"}}}),
+                json!({"id":"orb-account/read","result":{"account":{"type":"chatgpt"}}}),
+                json!({"id":"orb-model/list","result":{"data":[{"model":"gpt-6.1-sol","availableAccessPrograms":{"cyber":["standard"]}}]}}),
+                json!({"id":"orb-turn/start","result":{}}),
+                json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}),
+            ];
+            let input = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            let mut sent = Vec::new();
+            let result = drive_codex(
+                &mut sent, &mut std::io::Cursor::new(input), prompt, &[],
+                Some("gpt-6.1-sol"), crate::cyber_access::Mode::Standard,
+                "/tmp", None, &Output::default(), &Mutex::new(None),
+                &crate::interactions::begin("cyber-goal-boundary"),
+            );
+            let sent = String::from_utf8(sent).unwrap();
+            if prompt == "/goal Work" {
+                assert!(result.unwrap_err().contains("unsupported_access_program"));
+                assert!(!sent.contains("turn/start"));
+            } else {
+                result.unwrap();
+                assert!(sent.contains("turn/start"));
+                assert!(!sent.contains("thread/goal/set"));
+            }
+        }
     }
 
     #[test]
