@@ -4961,6 +4961,8 @@ struct FixtureNode {
     /// Latency the node adds before acknowledging a submission — models a
     /// loaded DGX whose accept round-trip spans a scheduler pass.
     submit_delay: Arc<std::sync::Mutex<std::time::Duration>>,
+    status_delay: Arc<std::sync::Mutex<std::time::Duration>>,
+    status_requests: Arc<std::sync::atomic::AtomicUsize>,
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -4983,6 +4985,8 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     let submissions: Arc<std::sync::Mutex<Vec<Value>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let submit_delay = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+    let status_delay = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+    let status_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log = Arc::new(std::sync::Mutex::new(String::new()));
     let app = axum::Router::new()
         .route(
@@ -5017,10 +5021,16 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
             axum::routing::get({
                 let state = state.clone();
                 let submissions = submissions.clone();
+                let status_delay = status_delay.clone();
+                let status_requests = status_requests.clone();
                 move |axum::extract::Path(job_id): axum::extract::Path<Uuid>| {
                     let state = state.clone();
                     let submissions = submissions.clone();
+                    let delay = *status_delay.lock().unwrap();
+                    let status_requests = status_requests.clone();
                     async move {
+                        status_requests.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(delay).await;
                         let state = state.lock().unwrap().clone();
                         let mission_id = submissions
                             .lock()
@@ -5101,6 +5111,8 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
         cancels,
         submissions,
         submit_delay,
+        status_delay,
+        status_requests,
         log,
         _server: server,
     }
@@ -7185,6 +7197,60 @@ async fn native_grok_auto_track_continuation(
         .iter()
         .all(|automation| automation.driver
             == crate::api::mission_store::AutomationDriver::HarnessLoop));
+}
+
+#[tokio::test]
+async fn remote_queue_status_wait_does_not_hold_admission() {
+    use std::sync::atomic::Ordering;
+    let fixture =
+        spawn_fixture_node("slow-queue-status", "REMOTE_QUEUE_STATUS_TOKEN", "queued").await;
+    *fixture.status_delay.lock().unwrap() = std::time::Duration::from_secs(2);
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let mission = h.writer(MissionStatus::Failed, None).await;
+    let id = Uuid::new_v4();
+    let entry = remote_queue::Entry {
+        user_id: h.user.id.clone(),
+        node_id: fixture.node.id.clone(),
+        session_id: None,
+        job_id: Some(Uuid::new_v4()),
+        assignment: json!({}),
+        message: QueuedMessage {
+            id,
+            content: "waiting".into(),
+            mission_id: Some(mission.id),
+            agent: None,
+            source: None,
+            inflight: false,
+            queue_error: None,
+        },
+    };
+    h.state.projects.lock().unwrap().execute(
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![h.user.id,id.to_string(),mission.id.to_string(),serde_json::to_string(&entry).unwrap()],
+    ).unwrap();
+    let placement = remote_grok::RemotePlacement {
+        node_id: fixture.node.id.clone(),
+        job_id: entry.job_id.unwrap(),
+        live: false,
+    };
+    let (delivery, ()) = tokio::join!(
+        remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, mission.id, placement, id),
+        async {
+            wait_until("status query starts", 2, || async {
+                fixture.status_requests.load(Ordering::SeqCst) > 0
+            })
+            .await;
+            let _guard = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                DISPATCH_ADMISSION.lock(),
+            )
+            .await
+            .expect("node status must not hold global admission");
+            remote_queue::finish(&h.state.projects, &h.user.id, id, "deleted").unwrap();
+        }
+    );
+    assert!(delivery.is_err());
+    assert!(!remote_queue::is_waiting(&h.state.projects, &h.user.id, id).unwrap());
 }
 
 #[tokio::test]

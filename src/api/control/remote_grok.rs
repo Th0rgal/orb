@@ -1369,6 +1369,33 @@ async fn continue_inner(
     message_id: Option<Uuid>,
     queued: bool,
 ) -> Result<Mission, (StatusCode, String)> {
+    // Node I/O may time out. Never hold global admission while observing a
+    // previously submitted job; its queue identity is revalidated below.
+    let observed_job = if queued {
+        let snapshot = super::remote_queue::waiting(&state.projects, Some(user_id))
+            .map_err(internal)?
+            .into_iter()
+            .find(|entry| {
+                entry.message.id == message_id.unwrap()
+                    && entry.message.mission_id == Some(mission_id)
+            });
+        if let Some(entry) = snapshot.filter(|entry| entry.job_id.is_some()) {
+            let job = entry.job_id.unwrap();
+            let node = state.config.remote_nodes.node(&entry.node_id).ok_or((
+                StatusCode::CONFLICT,
+                "Queued message node is no longer configured".into(),
+            ))?;
+            let token = std::env::var(&node.token_env).map_err(internal)?;
+            Some((
+                job,
+                RemoteNodeClient::default().get_job(node, &token, job).await,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let _admission = super::DISPATCH_ADMISSION.lock().await;
     let _file_guard = super::dispatch_admission::durable_lock(&state.config)
         .await
@@ -1406,12 +1433,13 @@ async fn continue_inner(
             // A crash may occur between node acceptance and the prompt event.
             // Ask about the bound job, never create a second job for that ID.
             let accepted = {
-                let node = state.config.remote_nodes.node(&entry.node_id).ok_or((
-                    StatusCode::CONFLICT,
-                    "Queued message node is no longer configured".into(),
-                ))?;
-                let token = std::env::var(&node.token_env).map_err(internal)?;
-                match RemoteNodeClient::default().get_job(node, &token, job).await {
+                let (_, observation) = observed_job
+                    .filter(|(observed, _)| *observed == job)
+                    .ok_or((
+                        StatusCode::CONFLICT,
+                        "Queued job changed during recovery; retrying its current identity".into(),
+                    ))?;
+                match observation {
                     Ok(status) if status.job_id == job && status.mission_id == mission_id => {
                         if status.started_at.is_none()
                             && status.state != "succeeded"
