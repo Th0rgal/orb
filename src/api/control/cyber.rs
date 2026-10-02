@@ -395,6 +395,44 @@ mod authority_tests {
         )
         .is_err());
     }
+    #[tokio::test]
+    async fn coalescing_preserves_legacy_defaults_and_successor_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::new(dir.path().to_path_buf());
+        let store = mission_store::InMemoryMissionStore::new();
+        let mut existing = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        existing.backend = "codex".into();
+        let mut req: CreateMissionRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        write(dir.path(), existing.id, Mode::Standard).unwrap();
+        assert_eq!(
+            verify_coalesced_attachments(&config, &req, &existing)
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        existing.backend = "claudecode".into();
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        existing.backend = "codex".into();
+        req.cyber_access = Some(Mode::Standard);
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        req.cyber_access = None;
+        let source = Uuid::new_v4();
+        write(dir.path(), source, Mode::Standard).unwrap();
+        req.supersedes_mission_id = Some(source);
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        req.cyber_access = Some(Mode::Automatic);
+        assert_eq!(
+            verify_coalesced_attachments(&config, &req, &existing)
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+    }
+
     #[test]
     fn client_permit_rejects_stale_or_unadvertised_selection() {
         let saved = Selection {

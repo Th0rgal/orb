@@ -10840,11 +10840,20 @@ fn verify_coalesced_attachments(
     req: &CreateMissionRequest,
     existing: &Mission,
 ) -> Result<(), (StatusCode, String)> {
-    if let Some(mode) = req.cyber_access {
+    if existing.backend == "codex" || req.cyber_access.is_some() {
+        let requested_mode = match (req.cyber_access, req.supersedes_mission_id) {
+            (Some(mode), _) => mode,
+            (None, Some(source)) if existing.backend == "codex" => {
+                cyber::read(&config.working_dir, source)
+                    .map_err(internal_error)?
+                    .mode
+            }
+            _ => cyber::Mode::Automatic,
+        };
         if cyber::read(&config.working_dir, existing.id)
             .map_err(internal_error)?
             .mode
-            != mode
+            != requested_mode
         {
             return Err((StatusCode::CONFLICT,"The existing mission has a different cyber selection. Use its settings or a distinct idempotency key/title.".into()));
         }
