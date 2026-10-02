@@ -3653,6 +3653,7 @@ fn belongs_to_a_mission(cgroup: &str, own_cgroup: &str) -> bool {
                 || process.split('/').any(|unit| {
                     unit == "sandboxed-node.service"
                         || (unit.starts_with("sandboxed-node@") && unit.ends_with(".service"))
+                        || (unit.starts_with("sandboxed-node-job-") && unit.ends_with(".scope"))
                 })
         }
         // Missing/unrecognized cgroup data is not proof of safe ownership.
@@ -3694,6 +3695,7 @@ mod companion_recycling_tests {
             "/system.slice/sandboxed-node.service",
             "/system.slice/sandboxed-node.service/job-123",
             "/system.slice/sandboxed-node@sepolia.service/job-123",
+            "/user.slice/user-996.slice/user@996.service/app.slice/sandboxed-node-job-cd158650d29d4830a4a0207bb45dd681.scope",
         ] {
             assert!(belongs_to_a_mission(&format!("0::{group}\n"), own));
         }
