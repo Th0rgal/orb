@@ -9977,6 +9977,41 @@ async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_m
             .as_deref(),
         Some("gpt-6.1-sol")
     );
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved = cyber::read(&h.state.config.working_dir, m.id).unwrap();
+    let stale = serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","model":"gpt-daybreak-blue-latest","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let error = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(stale),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(m.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        cyber::read(&h.state.config.working_dir, m.id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
     let bad = h
         .control
         .mission_store

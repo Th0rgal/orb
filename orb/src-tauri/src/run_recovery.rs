@@ -172,7 +172,7 @@ pub async fn local_run_launch(
     }
     recover(&connection, &request.id, &request.cwd).await?;
     let client_id = transfers::local_machine_identity()?;
-    let response=post(&connection,&request.id,"client-run",json!({"op":"begin","cyber_access":request.cyber_access,"cyber_revision":request.cyber_revision,"client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
+    let response=post(&connection,&request.id,"client-run",json!({"op":"begin","model":request.model,"cyber_access":request.cyber_access,"cyber_revision":request.cyber_revision,"client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -376,7 +376,7 @@ mod protocol_tests {
             cwd: root.path().to_str().unwrap().into(),
             prompt: "follow-up".into(),
             session_id: None,
-            model: None,
+            model: Some("selected-model".into()),
             image_paths: vec![],
         };
         let error =
@@ -387,6 +387,7 @@ mod protocol_tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1]["op"], "begin");
+        assert_eq!(requests[1]["model"], "selected-model");
     }
     #[test]
     fn recovery_closes_only_the_inspected_generation() {

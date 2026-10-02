@@ -932,6 +932,7 @@ pub async fn operate(
 
 #[derive(Deserialize)]
 pub struct ClientRunRequest {
+    pub model: Option<String>,
     pub cyber_access: Option<cyber::Mode>,
     pub cyber_revision: Option<Uuid>,
     pub message_id: Option<Uuid>,
@@ -1098,6 +1099,11 @@ pub async fn client_run(
             cyber::validate_client_selection(&saved, req.cyber_access, req.cyber_revision)
                 .map_err(conflict)?;
             cyber::program_for_model(saved.mode, m.model_override.as_deref()).map_err(conflict)?;
+            // A stale local binding may name another explicit model. Client
+            // defaults are resolved and checked by Codex before turn/start.
+            if let Some(model) = req.model.as_deref() {
+                saved.mode.program(model).map_err(conflict)?;
+            }
             Some(saved.mode)
         } else {
             None
