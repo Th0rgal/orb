@@ -85,14 +85,7 @@ pub async fn get(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok())
     {
-        if !mission
-            .project
-            .tags
-            .iter()
-            .any(|tag| tag == client_placement::TAG)
-            && receipt.revision == selection.revision
-            && mission.model_override.as_deref() == Some(receipt.requested_model.as_str())
-        {
+        if receipt_is_current(&mission, &selection, &receipt) {
             result["status"] = serde_json::json!("confirmed");
             result["confirmed_program"] = serde_json::json!(receipt.program);
             result["confirmed_model"] = serde_json::json!(receipt.model);
@@ -190,6 +183,13 @@ struct Receipt {
     requested_model: String,
     program: String,
     model: String,
+}
+fn receipt_is_current(mission: &Mission, selection: &Selection, receipt: &Receipt) -> bool {
+    let default_model = resolve_codex_default_model();
+    mission.backend == "codex"
+        && !client_placement::is_tagged(&mission.project.tags)
+        && receipt.revision == selection.revision
+        && mission.model_override.as_deref().unwrap_or(&default_model) == receipt.requested_model
 }
 fn receipt_path(root: &FsPath, id: Uuid) -> PathBuf {
     path(root, id).with_extension("receipt.json")
@@ -399,6 +399,40 @@ mod authority_tests {
         )
         .is_err());
     }
+    #[tokio::test]
+    async fn default_model_receipt_confirms_only_current_codex_remote_execution() {
+        let store = mission_store::InMemoryMissionStore::new();
+        let mut mission = store
+            .create_mission(None, None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let selection = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        let receipt = Receipt {
+            revision: selection.revision,
+            requested_model: resolve_codex_default_model(),
+            program: "standard".into(),
+            model: resolve_codex_default_model(),
+        };
+        assert!(receipt_is_current(&mission, &selection, &receipt));
+        mission.project.tags.push(client_placement::TAG.into());
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.project.tags.clear();
+        mission.backend = "claudecode".into();
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.backend = "codex".into();
+        mission.model_override = Some("another-model".into());
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.model_override = None;
+        assert!(!receipt_is_current(
+            &mission,
+            &Selection::default(),
+            &receipt
+        ));
+    }
+
     #[tokio::test]
     async fn coalescing_preserves_legacy_defaults_and_successor_inheritance() {
         let dir = tempfile::tempdir().unwrap();
