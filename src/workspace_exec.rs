@@ -1173,6 +1173,45 @@ mod tests {
     }
 
     #[test]
+    fn privileged_nsenter_always_selects_target_root_before_payload() {
+        let workspace =
+            crate::workspace::Workspace::new_container("fixture".into(), "/tmp/fixture".into());
+        let mut exec = WorkspaceExec::new(workspace);
+        exec.require_target_root = true;
+        let command = exec
+            .build_nsenter_command(
+                "42",
+                std::path::Path::new("/tmp/fixture"),
+                "/usr/bin/true",
+                &[],
+                HashMap::new(),
+                false,
+                false,
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+                None,
+            )
+            .unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let root = args.iter().position(|arg| arg == "--root").unwrap();
+        let shell = args.iter().position(|arg| arg == "/bin/sh").unwrap();
+        assert!(root < shell);
+    }
+
+    #[test]
+    fn privileged_setup_rejects_host_execution() {
+        let workspace = crate::workspace::Workspace::default_host("/tmp/fixture".into());
+        assert!(WorkspaceExec::new(workspace)
+            .with_required_target_root()
+            .is_err());
+    }
+
+    #[test]
     fn pty_nsenter_target_root_guard_precedes_shell_payload() {
         let mut args = vec!["--pid".to_string()];
         append_nsenter_target_root_arg(&mut args, true);
@@ -1188,6 +1227,7 @@ mod tests {
 #[derive(Debug, Clone)]
 pub struct WorkspaceExec {
     pub workspace: Workspace,
+    require_target_root: bool,
 }
 
 /// Child process spawned inside a PTY.
@@ -1332,7 +1372,25 @@ impl Drop for PtyChild {
 
 impl WorkspaceExec {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            require_target_root: false,
+        }
+    }
+
+    /// Privileged setup must use the container root regardless of legacy defaults.
+    pub fn with_required_target_root(mut self) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.workspace.workspace_type == WorkspaceType::Container
+                && use_nspawn_for_workspace(&self.workspace),
+            "Rooted setup requires an isolated nspawn container; host fallback is refused"
+        );
+        self.require_target_root = true;
+        Ok(self)
+    }
+
+    fn use_target_root(&self) -> bool {
+        self.require_target_root || env_var_bool(NSENTER_USE_TARGET_ROOT_ENV, false)
     }
 
     /// Bind only the project's files into the live container namespace.
@@ -2042,7 +2100,7 @@ impl WorkspaceExec {
         // existing deployment doesn't break on upgrade; once a host is
         // verified, set `SANDBOXED_SH_NSENTER_USE_TARGET_ROOT=1` in the env
         // file to flip the safe default on.
-        let use_target_root = env_var_bool(NSENTER_USE_TARGET_ROOT_ENV, false);
+        let use_target_root = self.use_target_root();
         if use_target_root {
             // `--root` with no arg = use the *target* process's root, i.e.
             // the container rootfs. After this flag the new shell can only
@@ -2605,10 +2663,7 @@ impl WorkspaceExec {
         // Keep PTY launches under the same target-root guard as non-PTY
         // nsenter. Entering only the mount namespace still retains the host
         // root directory, allowing absolute paths to escape the container.
-        append_nsenter_target_root_arg(
-            &mut nsenter_args,
-            env_var_bool(NSENTER_USE_TARGET_ROOT_ENV, false),
-        );
+        append_nsenter_target_root_arg(&mut nsenter_args, self.use_target_root());
         nsenter_args.extend(["/bin/sh".to_string(), "-lc".to_string(), shell_cmd]);
 
         // Same cgroup-escape hatch as build_nsenter_command, PTY edition:

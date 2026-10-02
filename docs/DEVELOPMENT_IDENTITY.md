@@ -176,3 +176,5 @@ with the private configuration in `<managed-root>/pull.json`. The optional
 `launchctl print gui/$(id -u)/md.thomas.sandboxed-development-identity`; success
 reports are in `<managed-root>/sync.log`. A failure is in `sync-error.log` and
 leaves the previous generation active.
+
+Container hook reconciliation requires Core’s `/api/workspaces/:id/exec-rooted` endpoint. It forces target-root namespace attachment regardless of the legacy nsenter setting. Older Core versions return 404 and leave reconciliation pending; upgrade Core before enabling container reconciliation. A missing generated `skill/SKILL.md` also triggers profile repair.

@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/build", post(build_workspace))
         .route("/:id/sync", post(sync_workspace))
         .route("/:id/exec", post(exec_workspace_command))
+        .route("/:id/exec-rooted", post(exec_rooted_workspace_command))
         // Debug endpoints for template development
         .route("/:id/debug", get(get_workspace_debug))
         .route("/:id/rerun-init", post(rerun_init_script))
@@ -1353,6 +1354,25 @@ async fn exec_workspace_command(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<ExecCommandRequest>,
 ) -> Result<Json<ExecCommandResponse>, (StatusCode, String)> {
+    exec_workspace_command_inner(state, id, req, false).await
+}
+
+// A distinct route fails closed on older Core versions (404), rather than
+// silently ignoring a new JSON flag and executing setup against the host root.
+async fn exec_rooted_workspace_command(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(req): Json<ExecCommandRequest>,
+) -> Result<Json<ExecCommandResponse>, (StatusCode, String)> {
+    exec_workspace_command_inner(state, id, req, true).await
+}
+
+async fn exec_workspace_command_inner(
+    state: Arc<super::routes::AppState>,
+    id: Uuid,
+    req: ExecCommandRequest,
+    require_target_root: bool,
+) -> Result<Json<ExecCommandResponse>, (StatusCode, String)> {
     let workspace = require_workspace(&state.workspaces, id).await?;
 
     // For container workspaces, ensure container is ready
@@ -1384,6 +1404,12 @@ async fn exec_workspace_command(
     // command itself. The outer tokio timeout is a belt-and-braces guard for
     // exec-layer hangs (e.g. a wedged container boot).
     let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
+    let exec = if require_target_root {
+        exec.with_required_target_root()
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?
+    } else {
+        exec
+    };
     let args = vec![
         "-k".to_string(),
         "5".to_string(),

@@ -219,6 +219,30 @@ class IdentityTests(unittest.TestCase):
             (root / "current").unlink(); (root / "current").symlink_to(root / "current")
             self.assertFalse(identity.active_profile_exists(root))
 
+    def test_missing_skill_requires_repair(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); generation = root / "g-000000000000"; generation.mkdir()
+            (root / "current").symlink_to(generation)
+            (generation / "receipt.json").write_text(json.dumps({"signing_fingerprint": identity.FINGERPRINT}))
+            for name in ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml", "skill/SKILL.md"]:
+                path = generation / name; path.parent.mkdir(exist_ok=True); path.write_text("fixture")
+            (generation / "gnupg").mkdir()
+            self.assertTrue(identity.active_profile_exists(root))
+            (generation / "skill/SKILL.md").unlink()
+            self.assertFalse(identity.active_profile_exists(root))
+
+    def test_container_setup_uses_rooted_endpoint_and_old_core_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); script = root / "helper.py"; script.write_text("fixture")
+            workspace = {"id": "test", "name": "test", "workspace_type": "container", "status": "ready", "path": str(root)}
+            def request(config, method, endpoint, *args):
+                if method == "GET": return [workspace]
+                self.assertEqual(endpoint, "/api/workspaces/test/exec-rooted")
+                raise RuntimeError("HTTP 404: older Core")
+            with patch.object(identity, "core_request", side_effect=request), patch.object(identity, "rooted_file"):
+                result = identity.stage_containers({"script": str(script), "native_companion": str(root / "absent")}, self.bundle())
+            self.assertNotEqual(result[0]["status"], "current")
+
     def test_skill_is_loaded_from_pinned_commit_not_dirty_checkout(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); skill = root / "skill/development-identity/SKILL.md"

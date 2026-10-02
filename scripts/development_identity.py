@@ -368,7 +368,7 @@ def active_profile_exists(root):
         receipt = json.loads((generation / "receipt.json").read_text())
         return (generation.parent == root.resolve() and receipt.get("signing_fingerprint") == FINGERPRINT
                 and all((generation / name).is_file() for name in
-                        ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml"])
+                        ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml", "skill/SKILL.md"])
                 and (generation / "gnupg").is_dir())
     except (OSError, ValueError, RuntimeError, AttributeError):
         return False
@@ -528,7 +528,7 @@ def stage_containers(config, bundle):
                     rooted_file(filesystem, managed + ".native-version", version)
             # Reconcile hooks even when credentials are unchanged, e.g. after
             # a native deployment or an operator updated the helper itself.
-            result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec", {
+            result = core_request(config, "POST", f"/api/workspaces/{workspace['id']}/exec-rooted", {
                 "command": "/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py run -- /usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py hooks --container",
                 "cwd": "/root", "timeout_secs": 120})
             try:
