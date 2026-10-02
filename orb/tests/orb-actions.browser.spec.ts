@@ -48,7 +48,7 @@ async function setup(page: Page, options: Options = {}) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
-    if(path === "/api/control/cyber-capabilities") return route.fulfill({json:{version:1}});
+    if(path === "/api/control/cyber-capabilities") return route.fulfill({json:{version:2}});
     if(path === "/api/model-routing/chains") return route.fulfill({json:[{id:"builtin/smart",name:"Smart (Default)"}]});
     if (path === "/api/control/missions" && request.method() === "POST") {
       posts.push(request.postDataJSON());

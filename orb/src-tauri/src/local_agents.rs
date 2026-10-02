@@ -29,7 +29,7 @@ const HARNESSES: &[(&str, &str)] = &[
 
 #[tauri::command]
 pub fn local_agents_cyber_capabilities() -> u32 {
-    1
+    2
 }
 
 #[derive(Debug, Deserialize)]

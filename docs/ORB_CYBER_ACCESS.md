@@ -55,7 +55,7 @@ again after import.
 ## Rollout and verification
 
 Deploy Core before using the updated Orb client. New clients check Core capability
-version 1; local runs also require the updated native IPC capability. Old clients
+version 2; local runs also require native IPC capability version 2. Older version 1 implementations cannot validate the atomic client selection and are rejected before launch. Old clients
 continue their existing Automatic behavior. Remote drivers are embedded in Core,
 so this change requires no account credentials or key distribution to leaf nodes.
 

@@ -312,7 +312,7 @@ pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<(Selection,
 
 pub async fn capabilities() -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"version":1,"request_field":"cyber_access","native_goals_explicit":false}),
+        serde_json::json!({"version":2,"request_field":"cyber_access","native_goals_explicit":false}),
     )
 }
 

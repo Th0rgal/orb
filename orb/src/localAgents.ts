@@ -573,6 +573,6 @@ export async function prepareProjectSkills(project: string, cwd: string, harness
 }
 
 async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof tauriInvoke>>){
- try {if(await invoke("local_agents_cyber_capabilities")===1)return;}catch{}
+ try {if(await invoke("local_agents_cyber_capabilities")===2)return;}catch{}
  throw Error("Update Orb desktop before requesting a cyber program on this computer. Your selection was not silently omitted.");
 }
