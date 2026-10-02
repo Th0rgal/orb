@@ -2690,7 +2690,7 @@ async fn write_managed_library_skills(
         let update = serde_json::from_slice(&std::fs::read(&pending)?)?;
         finish_library_skill_update(root, &update)?;
     }
-    let previous: BTreeMap<String, BTreeMap<String, String>> = if manifest.exists() {
+    let mut previous: BTreeMap<String, BTreeMap<String, String>> = if manifest.exists() {
         serde_json::from_slice(&std::fs::read(&manifest)?)?
     } else {
         BTreeMap::new()
@@ -2736,14 +2736,54 @@ async fn write_managed_library_skills(
             path.display()
         );
     }
-    for name in desired.keys() {
+    // Older Orb versions wrote native skills without an ownership manifest.
+    // Adopt only an exact full-tree match; never infer ownership from SKILL.md
+    // alone. Explicit project ownership wins even when its contents match.
+    let cwd = root.parent().and_then(Path::parent).unwrap();
+    let project_manifest = cwd.join(".orb-project-skills.json");
+    anyhow::ensure!(
+        !project_manifest.is_symlink(),
+        "Project skill manifest is a symlink"
+    );
+    let project_state: serde_json::Value = if project_manifest.exists() {
+        serde_json::from_slice(&std::fs::read(&project_manifest)?)?
+    } else {
+        serde_json::Value::Null
+    };
+    desired.retain(|name, files| {
         let path = root.join(name);
-        anyhow::ensure!(
-            previous.contains_key(name) || (!path.exists() && !path.is_symlink()),
-            "Skill name collision at {}. Orb will not overwrite user-managed or project skills",
-            path.display()
-        );
-    }
+        if previous.contains_key(name) || (!path.exists() && !path.is_symlink()) {
+            return true;
+        }
+        let relative = path.strip_prefix(cwd).unwrap().to_string_lossy();
+        let project_owned = project_state
+            .get("entries")
+            .and_then(|entries| entries.get(relative.as_ref()))
+            .is_some();
+        let expected: BTreeMap<_, _> = files
+            .iter()
+            .map(|(file, content)| {
+                (
+                    file.clone(),
+                    crate::project_context::digest(content.as_bytes()),
+                )
+            })
+            .collect();
+        if !project_owned
+            && !path.is_symlink()
+            && path.is_dir()
+            && library_skill_hashes(&path).is_ok_and(|actual| actual == expected)
+        {
+            previous.insert(name.clone(), expected);
+            tracing::info!(skill = %name, "Adopted unchanged legacy Library skill");
+            return true;
+        }
+        // Existing user/project skills take precedence. In particular, do not
+        // follow their links, delete extra files, or claim future ownership.
+        tracing::warn!(skill = %name, path = %path.display(),
+            "Preserving existing native skill; skipping same-name Library skill");
+        false
+    });
     let update = stage_library_skill_update(root, previous, desired)?;
     finish_library_skill_update(root, &update)?;
     Ok(())
@@ -7336,17 +7376,18 @@ mod managed_library_skill_tests {
     }
 
     #[tokio::test]
-    async fn managed_library_skills_refuse_collisions_and_outside_edits() {
+    async fn managed_library_skills_preserve_collisions_and_refuse_outside_edits() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join(".codex/skills");
         std::fs::create_dir_all(root.join("personal")).unwrap();
         std::fs::write(root.join("personal/SKILL.md"), "user skill").unwrap();
+        write_managed_library_skills(&root, &[skill("personal")], true)
+            .await
+            .unwrap();
         assert!(
-            write_managed_library_skills(&root, &[skill("personal")], true)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("collision")
+            !std::fs::read_to_string(root.join(".orb-library-skills.json"))
+                .unwrap()
+                .contains("personal")
         );
         write_managed_library_skills(&root, &[skill("fixture")], true)
             .await
@@ -7363,6 +7404,63 @@ mod managed_library_skill_tests {
         );
     }
 
+    #[tokio::test]
+    async fn managed_library_skills_adopt_only_exact_legacy_trees() {
+        for custom in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join(".claude/skills");
+            write_managed_library_skills(&root, &[skill("fixture")], true)
+                .await
+                .unwrap();
+            std::fs::remove_file(root.join(".orb-library-skills.json")).unwrap();
+            if custom {
+                std::fs::write(root.join("fixture/custom.txt"), "keep").unwrap();
+            }
+            for _ in 0..2 {
+                write_managed_library_skills(&root, &[skill("fixture")], true)
+                    .await
+                    .unwrap();
+            }
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(root.join(".orb-library-skills.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest.get("fixture").is_some(), !custom);
+            write_managed_library_skills(&root, &[], true)
+                .await
+                .unwrap();
+            assert_eq!(root.join("fixture").exists(), custom);
+            if custom {
+                assert_eq!(
+                    std::fs::read_to_string(root.join("fixture/custom.txt")).unwrap(),
+                    "keep"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_library_skills_do_not_adopt_matching_project_copies() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".claude/skills");
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
+        std::fs::remove_file(root.join(".orb-library-skills.json")).unwrap();
+        std::fs::write(
+            directory.path().join(".orb-project-skills.json"),
+            r#"{"entries":{".claude/skills/fixture":"project/skills/fixture"}}"#,
+        )
+        .unwrap();
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
+        write_managed_library_skills(&root, &[], true)
+            .await
+            .unwrap();
+        assert!(root.join("fixture/SKILL.md").is_file());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn managed_library_skills_never_follow_project_links() {
@@ -7373,12 +7471,13 @@ mod managed_library_skill_tests {
         std::fs::create_dir_all(&original).unwrap();
         std::fs::write(original.join("SKILL.md"), "synchronized source").unwrap();
         std::os::unix::fs::symlink(&original, root.join("fixture")).unwrap();
+        write_managed_library_skills(&root, &[skill("fixture")], true)
+            .await
+            .unwrap();
         assert!(
-            write_managed_library_skills(&root, &[skill("fixture")], true)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("collision")
+            !std::fs::read_to_string(root.join(".orb-library-skills.json"))
+                .unwrap()
+                .contains("fixture")
         );
         assert_eq!(
             std::fs::read_to_string(original.join("SKILL.md")).unwrap(),
