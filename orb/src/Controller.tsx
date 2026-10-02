@@ -270,7 +270,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
   };
 
   return (
-    <div class="col" style={{ flex: 1, "min-height": 0, display: "flex", "flex-direction": "column" }}>
+    <div class="col cr-view" style={{ flex: 1, "min-height": 0, display: "flex", "flex-direction": "column" }}>
     <div class="scroll">
       <div class="col cr-page">
         <Show when={view()} fallback={error() ? <p class="s-lead">{error()}</p> : <ControllerSkeleton />}>

@@ -236,6 +236,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 .cron-glyph.paused { color: var(--fg-3); }
 @keyframes cron-spin { to { transform: rotate(360deg); } }
 .row.cron .cron-next { display: inline; font-family: var(--sans); font-variant-numeric: tabular-nums; }
+/* Steering stays in normal flow below the timeline. There is no floating dock
+   overlap to subtract from its scroll padding or bottom fade. */
+.cr-view { --dock-height: 0px; }
 .cr-page { padding-top: 22px !important; }
 .cr-head { display: flex; align-items: center; gap: 12px; padding: 0 10px 14px; border-bottom: 1px solid var(--stroke-soft); margin-bottom: 6px; }
 .cr-head-text { flex: 1; min-width: 0; }
