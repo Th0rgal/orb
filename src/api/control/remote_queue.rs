@@ -2,6 +2,7 @@
 //! cancellation and delivery; the node/run receipts make replay idempotent.
 use super::super::projects_store::ProjectsStore;
 use super::*;
+use futures::StreamExt;
 use rusqlite::{params, OptionalExtension};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,14 +42,14 @@ pub(super) fn finish(
     id: Uuid,
     state: &str,
 ) -> Result<bool, String> {
-    store.lock()?.execute("UPDATE remote_message_queue SET state=?3 WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND (?3 != 'cancelled' OR json_extract(payload,'$.job_id') IS NULL)",params![user,id.to_string(),state]).map(|n|n>0).map_err(|e|e.to_string())
+    store.lock()?.execute("UPDATE remote_message_queue SET state=?3 WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND (?3 != 'cancelled' OR (json_extract(payload,'$.job_id') IS NULL OR json_extract(payload,'$.delivery_abandonable')=1))",params![user,id.to_string(),state]).map(|n|n>0).map_err(|e|e.to_string())
 }
 pub(super) fn cancel_all(
     store: &ProjectsStore,
     user: &str,
     mission: Option<Uuid>,
 ) -> Result<usize, String> {
-    store.lock()?.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL AND (?2 IS NULL OR mission_id=?2)",params![user,mission.map(|id|id.to_string())]).map_err(|e|e.to_string())
+    store.lock()?.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND state='waiting' AND (json_extract(payload,'$.job_id') IS NULL OR json_extract(payload,'$.delivery_abandonable')=1) AND (?2 IS NULL OR mission_id=?2)",params![user,mission.map(|id|id.to_string())]).map_err(|e|e.to_string())
 }
 
 /// Called under dispatch admission before any parent/child runner is stopped.
@@ -74,9 +75,14 @@ pub(super) async fn cancel_tree(
     let mut conn = store.lock()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for id in seen {
-        tx.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL", params![user,id.to_string()]).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND (json_extract(payload,'$.job_id') IS NULL OR json_extract(payload,'$.delivery_abandonable')=1)", params![user,id.to_string()]).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+pub(super) fn allow_abandon(store: &ProjectsStore, user: &str, id: Uuid) -> Result<(), String> {
+    store.lock()?.execute("UPDATE remote_message_queue SET payload=json_set(payload,'$.delivery_abandonable',1) WHERE user_id=?1 AND message_id=?2 AND state='waiting'", params![user,id.to_string()]).map_err(|e|e.to_string())?;
+    Ok(())
 }
 
 pub(super) async fn enqueue(
@@ -266,22 +272,25 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
                 }
             };
             let mut seen = HashSet::new();
-            for entry in entries {
+            let missions = entries
+                .into_iter()
+                .filter(|entry| seen.insert((entry.user_id.clone(), entry.message.mission_id)))
+                .collect::<Vec<_>>();
+            futures::stream::iter(missions).for_each_concurrent(8, |entry| {
+                let state = state.clone();
+                async move {
                 let mid = entry.message.mission_id.unwrap();
-                if !seen.insert((entry.user_id.clone(), mid)) {
-                    continue;
-                }
                 let user = AuthUser {
                     id: entry.user_id.clone(),
                     username: entry.user_id.clone(),
                 };
                 let control = control_for_user(&state, &user).await;
                 match retire_missing_mission(&state, &control, &entry).await {
-                    Ok(true) => continue,
+                    Ok(true) => return,
                     Ok(false) => {}
                     Err(error) => {
                         tracing::warn!(mission_id=%mid,%error,"Cannot verify queued mission existence");
-                        continue;
+                        return;
                     }
                 }
                 // No local fallback, even if placement is missing or transferred.
@@ -301,7 +310,7 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
                             entry.message.id,
                             Some(&error),
                         );
-                        continue;
+                        return;
                     }
                 };
                 if let Err((_, error)) = remote_grok::deliver_queued(
@@ -319,7 +328,8 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
                     let _ = report_error(&state.projects, &entry.user_id, entry.message.id, detail);
                     tracing::debug!(mission_id=%mid,%error,"Remote message remains queued");
                 }
-            }
+                }
+            }).await;
         }
     });
 }
@@ -394,6 +404,9 @@ mod tests {
             "cannot claim to withdraw a possibly accepted job"
         );
         assert_eq!(cancel_all(&db, "u", Some(mission.id)).unwrap(), 0);
+        allow_abandon(&db, "u", second).unwrap();
+        assert!(finish(&db, "u", second, "cancelled").unwrap());
+        assert!(waiting(&db, Some("u")).unwrap().is_empty());
     }
 
     #[tokio::test]

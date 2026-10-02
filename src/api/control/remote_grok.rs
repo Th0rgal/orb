@@ -1444,8 +1444,11 @@ async fn continue_inner(
                         if status.started_at.is_none()
                             && status.state != "succeeded"
                         {
+                            if matches!(status.state.as_str(), "cancelled" | "failed" | "lost") {
+                                super::remote_queue::allow_abandon(&state.projects, user_id, message_id.unwrap()).map_err(internal)?;
+                            }
                             return Err((StatusCode::CONFLICT,
-                                "The remote job is unconfirmed: delivery paused before confirmed execution. Your message is preserved; delivery is paused to avoid losing or duplicating it.".into()));
+                                "The remote job is unconfirmed: delivery paused before confirmed execution. Your message is preserved. If the job ended, remove this queued message before retrying.".into()));
                         }
                         true
                     },
