@@ -11870,7 +11870,7 @@ pub(super) async fn create_mission_inner(
                 "Cyber selection is available for Codex only.".into(),
             ));
         }
-        mode.program(model_override.as_deref().unwrap_or(""))
+        cyber::program_for_model(mode, model_override.as_deref())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
     if let Err(error) = control
@@ -25138,7 +25138,7 @@ async fn control_actor_loop(
                                 None => before.model_override.as_deref(),
                             };
                             let validation = cyber::read(&config.working_dir, id).and_then(|selection| {
-                                selection.mode.program(next_model.unwrap_or("")).map(|_| ())
+                                cyber::program_for_model(selection.mode, next_model).map(|_| ())
                                     .map_err(|error| format!("invalid_access_program: {error}"))
                             });
                             if let Err(error) = validation { let _ = respond.send(Err(error)); continue; }

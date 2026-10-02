@@ -6,6 +6,12 @@ use std::path::{Path as FsPath, PathBuf};
 
 pub const HEADER: &str = "x-sandboxed-cyber-program";
 pub use crate::cyber_access::Mode;
+
+pub fn program_for_model(mode: Mode, model: Option<&str>) -> Result<Option<&'static str>, String> {
+    let default_model = resolve_codex_default_model();
+    mode.program(model.unwrap_or(&default_model))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Selection {
     pub mode: Mode,
@@ -130,9 +136,7 @@ pub async fn update(
             "Cyber selection is available for Codex only.".into(),
         ));
     }
-    change
-        .mode
-        .program(mission.model_override.as_deref().unwrap_or(""))
+    program_for_model(change.mode, mission.model_override.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(response(
         write(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
