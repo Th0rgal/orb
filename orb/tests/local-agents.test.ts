@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { isSecretPath, quotePath, rewritePrompt, materializeMentions } from "../src/localAgents";
 import type { AttachChip } from "../src/attach";
 
+vi.mock('../src/cyberAccess', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/cyberAccess')>(),
+  getCyber: vi.fn(async () => ({mode:'automatic',status:'requested',revision:'legacy'})),
+}));
+
 describe("local mention rewrite", () => {
   it("leaves unknown @words and rewrites a copied file", () => {
     const text = "see @notes/foo.md and email me @home";
@@ -85,7 +90,7 @@ it("serializes local sends through native recovery and retains the exact receipt
   const host = window as any, previous=host.__TAURI_INTERNALS__;
   let release!: (value: unknown) => void;
   const pending=new Promise(resolve=>release=resolve);
-  const invoke=vi.fn((command:string)=>command==='local_run_launch'?pending:Promise.resolve({done:true,text:'',resumed:false}));
+  const invoke=vi.fn((command:string)=>command==='local_agents_cyber_capabilities'?Promise.resolve(1):command==='local_run_launch'?pending:Promise.resolve({done:true,text:'',resumed:false}));
   host.__TAURI_INTERNALS__={invoke};
   const request={id:'recovery-send',harness:'codex',bin:'/bin/codex',cwd:'/work',prompt:'/plan test'};
   try {
@@ -140,6 +145,7 @@ it('waits for this window’s recovery before launching instead of racing its na
   let release!:()=>void;
   const recovering=new Promise<void>(resolve=>release=resolve);
   const invoke=vi.fn(async(command:string)=>{
+    if(command==='local_agents_cyber_capabilities')return 1;
     if(command==='local_run_reconcile')return recovering;
     if(command==='local_agents_poll')return {done:true,text:''};
     if(command==='local_run_launch')return {run_id:'test-run',generation:1};
@@ -177,6 +183,7 @@ it('Stop drains an already invoked launch before reporting the mission stopped',
  let release!:(value:unknown)=>void;
  const pending=new Promise(resolve=>release=resolve);let running=false;
  const invoke=vi.fn(async(command:string)=>{
+    if(command==='local_agents_cyber_capabilities')return 1;
   if(command==='local_run_launch'){const receipt=await pending;running=true;return receipt;}
   if(command==='local_agents_stop'){running=false;return;}
   if(command==='local_agents_poll')return {done:!running,text:''};
@@ -213,7 +220,7 @@ it('new native launches wait for persisted Stop recovery',async()=>{
  const replay=vi.spyOn(wakeups,'replayLocalWakeupStops').mockReturnValue(recovery);
  const {startLocal}=await import('../src/localAgents');
  const host=window as any,previous=host.__TAURI_INTERNALS__;
- const invoke=vi.fn(async(command:string)=>command==='local_run_launch'?{run_id:'fresh',generation:2}:{done:true,text:''});host.__TAURI_INTERNALS__={invoke};
+ const invoke=vi.fn(async(command:string)=>command==='local_agents_cyber_capabilities'?Promise.resolve(1):command==='local_run_launch'?{run_id:'fresh',generation:2}:{done:true,text:''});host.__TAURI_INTERNALS__={invoke};
  try{
   const launch=startLocal({id:'startup-stop-replay',harness:'codex',bin:'codex',cwd:'/work',prompt:'new turn'});
   await vi.waitFor(()=>expect(replay).toHaveBeenCalled());
@@ -247,4 +254,14 @@ it('typed @context/skills and @context/Context resolve to originals without atta
   expect(result.files).toEqual([]);
   expect(invoke.mock.calls[0][1].request.paths).toEqual(['context/skills/review/SKILL.md','context/Context']);
  } finally {host.__TAURI_INTERNALS__ = previous;}
+});
+
+it('rejects an old native binary before invoking a Codex launch',async()=>{
+ const {startLocal}=await import('../src/localAgents');
+ const host=window as any,previous=host.__TAURI_INTERNALS__;
+ const invoke=vi.fn(async(..._args:any[])=>({done:true,text:''}));host.__TAURI_INTERNALS__={invoke};
+ try{
+  await expect(startLocal({id:'old-cyber-native',harness:'codex',bin:'codex',cwd:'/work',prompt:'test'})).rejects.toThrow('Update Orb desktop');
+  expect(invoke.mock.calls.some((c:any)=>c[0]==='local_run_launch')).toBe(false);
+ }finally{host.__TAURI_INTERNALS__=previous;}
 });
