@@ -1405,13 +1405,7 @@ async fn continue_inner(
         if let Some(job) = entry.job_id {
             // A crash may occur between node acceptance and the prompt event.
             // Ask about the bound job, never create a second job for that ID.
-            let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
-                .await
-                .map_err(internal)?;
-            let handle = handles.iter().find(|h| h.job_id == job);
-            let accepted = if handle.is_some_and(|h| h.accepted_at.is_some()) {
-                true
-            } else {
+            let accepted = {
                 let node = state.config.remote_nodes.node(&entry.node_id).ok_or((
                     StatusCode::CONFLICT,
                     "Queued message node is no longer configured".into(),

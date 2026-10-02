@@ -7082,21 +7082,47 @@ async fn native_grok_auto_track_continuation(
         .unwrap();
     // Ambiguous submission cleanup can leave a matching pre-start cancelled
     // job. Its existence is not proof that the harness received the message.
-    for unconfirmed in ["queued", "cancelled", "failed", "lost"] {
-        fixture.set_state(unconfirmed);
-        let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
+    let bound_job = remote_queue::waiting(&h.state.projects, Some(&h.user.id)).unwrap()[0]
+        .job_id
+        .unwrap();
+    for with_ledger in [false, true] {
+        if with_ledger {
+            crate::remote_node::job_ledger::record(
+                &h.state.config.working_dir,
+                crate::remote_node::job_ledger::JobHandle {
+                    mission_id: id,
+                    node_id: fixture.node.id.clone(),
+                    job_id: bound_job,
+                    started_at: chrono::Utc::now(),
+                    submission_sequence: 0,
+                    accepted_at: Some(chrono::Utc::now()),
+                    heartbeat_at: None,
+                    disk_reservation_bytes: 0,
+                    kind: crate::remote_node::job_ledger::JobHandleKind::Mission,
+                    identity: None,
+                    wait_for_completion: None,
+                    wake_on_terminal: false,
+                },
+            )
             .await
-            .unwrap()
             .unwrap();
-        let delivery =
-            remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first)
-                .await;
-        assert!(delivery
-            .unwrap_err()
-            .1
-            .contains("before confirmed execution"));
-        assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
-        assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+        }
+        for unconfirmed in ["queued", "cancelled", "failed", "lost"] {
+            fixture.set_state(unconfirmed);
+            let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
+                .await
+                .unwrap()
+                .unwrap();
+            let delivery =
+                remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first)
+                    .await;
+            assert!(delivery
+                .unwrap_err()
+                .1
+                .contains("before confirmed execution"));
+            assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
+            assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+        }
     }
     fixture.set_state("succeeded");
     wait_until("recover accepted queue receipt", 10, || async {
@@ -7116,6 +7142,7 @@ async fn native_grok_auto_track_continuation(
         .unwrap();
     assert_eq!(retry["queued"], false);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    crate::remote_node::job_ledger::remove(&h.state.config.working_dir, bound_job).await;
     // Stop must revoke queued follow-ups before a terminal observation can
     // let the background pump start another generation.
     fixture.set_state("running");
