@@ -7,6 +7,24 @@ import queue
 from scripts.remote_codex_app_server import NativeSession, goal_action
 
 
+class CyberSelectionTests(unittest.TestCase):
+    def test_explicit_program_reaches_proxy_config_without_model_substitution(self):
+        with patch.dict(os.environ, {'SANDBOXED_CYBER_PROGRAM':'standard'}, clear=True), \
+             patch('scripts.remote_codex_app_server.subprocess.Popen') as spawn, \
+             patch('scripts.remote_codex_app_server.threading.Thread'):
+            NativeSession({'settings':['model="gpt-6.1-sol"']})
+        command = spawn.call_args.args[0]
+        self.assertIn('model_providers.sandboxed.http_headers={"x-sandboxed-cyber-program"="standard"}', command)
+        self.assertIn('model="gpt-6.1-sol"', command)
+
+    def test_invalid_program_cannot_start_process(self):
+        with patch.dict(os.environ, {'SANDBOXED_CYBER_PROGRAM':'invalid'}, clear=True), \
+             patch('scripts.remote_codex_app_server.subprocess.Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'Invalid cyber program'):
+                NativeSession({'settings':[]})
+            spawn.assert_not_called()
+
+
 class NativeGoalTests(unittest.TestCase):
     def test_full_native_resume_drains_multiple_turns_without_resubmission(self):
         session = NativeSession.__new__(NativeSession)

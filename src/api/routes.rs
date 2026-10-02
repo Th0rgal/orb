@@ -966,6 +966,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::set_mission_title),
         )
         .route(
+            "/api/control/cyber-capabilities",
+            get(control::cyber::capabilities),
+        )
+        .route(
+            "/api/control/missions/:id/cyber",
+            get(control::cyber::get).patch(control::cyber::update),
+        )
+        .route(
             "/api/control/missions/:id/settings",
             patch(control::update_mission_settings),
         )

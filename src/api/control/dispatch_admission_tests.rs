@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::{
-    mission_store::{SqliteMissionStore, StoredEvent},
+    mission_store::{MissionProjectPatch, SqliteMissionStore, StoredEvent},
     projects_store::ProjectsStore,
 };
 use serde_json::{json, Value};
@@ -9789,4 +9789,349 @@ async fn continuation_local_upload_and_stop_keep_original_generation() {
         .wakeup_creation_allowed(mission.id, new.generation)
         .await
         .unwrap());
+}
+
+#[tokio::test]
+async fn cyber_selection_without_override_uses_codex_default_without_resuming() {
+    let h = Harness::new().await;
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("cyber default"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let Json(saved) = cyber::update(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(cyber::Change {
+            mode: cyber::Mode::Daybreak,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["mode"], "daybreak");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, MissionStatus::Paused);
+    assert_eq!(after.model_override, None);
+}
+
+#[tokio::test]
+async fn cyber_client_admission_invalidates_receipt_across_return_transfer() {
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(None, None, None, None, None, Some("codex"), None)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    let selection = cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
+    let key = Uuid::new_v4();
+    cyber::bind_proxy(
+        &h.state.config.working_dir,
+        m.id,
+        selection.revision,
+        key,
+        &resolve_codex_default_model(),
+    )
+    .unwrap();
+    std::fs::write(h.state.config.working_dir.join("mission-cyber").join(format!("{}.receipt.json",m.id)), serde_json::to_vec(&json!({"revision":selection.revision,"requested_model":resolve_codex_default_model(),"model":resolve_codex_default_model(),"program":"standard"})).unwrap()).unwrap();
+    let Json(before) = cyber::get(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(before["status"], "confirmed");
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let req = serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","cyber_access":"standard","cyber_revision":selection.revision})).unwrap();
+    let Json(run) = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(req),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        cyber::read(&h.state.config.working_dir, m.id)
+            .unwrap()
+            .revision,
+        selection.revision
+    );
+    assert!(cyber::proxy_selection(&h.state.config.working_dir, m.id, key).is_none());
+    h.control
+        .mission_store
+        .finish_mission_run(
+            serde_json::from_value(run["run_id"].clone()).unwrap(),
+            run["generation"].as_u64().unwrap(),
+            Some("turn_complete"),
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Json(after) = cyber::get(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after["status"], "requested");
+}
+
+#[tokio::test]
+async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_mutation() {
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            Some("gpt-6.1-sol"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
+    let request = serde_json::from_value(json!({"op":"prepare","destination":{"kind":"client","id":Uuid::new_v4().to_string()},"idempotency_key":"incompatible-cyber-model","model":"gpt-daybreak-blue-latest"})).unwrap();
+    let error = machine_transfer::operate(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(error.1.contains("requires Daybreak"));
+    assert!(h
+        .control
+        .mission_store
+        .machine_transfers(m.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model_override
+            .as_deref(),
+        Some("gpt-6.1-sol")
+    );
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved = cyber::read(&h.state.config.working_dir, m.id).unwrap();
+    let stale = serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","model":"gpt-daybreak-blue-latest","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let error = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(stale),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(m.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        cyber::read(&h.state.config.working_dir, m.id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
+    let bad = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            Some("gpt-daybreak-blue-latest"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(bad.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            bad.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved = cyber::write(&h.state.config.working_dir, bad.id, cyber::Mode::Standard).unwrap();
+    let request=serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let error = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(bad.id),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(bad.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        cyber::read(&h.state.config.working_dir, bad.id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cyber_client_storage_failure_preserves_idle_status_without_a_run() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    } // Root bypasses Unix write permissions.
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(None, None, None, None, None, Some("codex"), None)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved = cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
+    let path = h.state.config.working_dir.join("mission-cyber");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let request=serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let result = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(request),
+    )
+    .await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(m.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::AwaitingUser
+    );
+    assert_eq!(
+        cyber::read(&h.state.config.working_dir, m.id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
 }

@@ -27,6 +27,11 @@ const HARNESSES: &[(&str, &str)] = &[
     ("gemini", "gemini"),
 ];
 
+#[tauri::command]
+pub fn local_agents_cyber_capabilities() -> u32 {
+    2
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScanRequest {
     #[serde(default)]
@@ -71,6 +76,8 @@ pub struct WriteReport {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartRequest {
+    pub cyber_revision: Option<uuid::Uuid>,
+    pub cyber_access: Option<crate::cyber_access::Mode>,
     #[serde(default)]
     pub image_paths: Vec<String>,
     pub id: String,
@@ -1277,6 +1284,7 @@ fn spawn_codex(
     let prompt = request.prompt.clone();
     let mission_id = crate::interactions::session(&request.id);
     let image_paths = request.image_paths.clone();
+    let cyber_access = request.cyber_access.unwrap_or_default();
     let model = request.model.clone();
     let cwd = request.cwd.clone();
     let resume = request.session_id.clone().filter(|s| !s.is_empty());
@@ -1303,6 +1311,7 @@ fn spawn_codex(
             &prompt,
             &image_paths,
             model.as_deref(),
+            cyber_access,
             &cwd,
             resume.as_deref(),
             &text_bg,
@@ -1361,6 +1370,7 @@ fn drive_codex(
     prompt: &str,
     image_paths: &[String],
     model: Option<&str>,
+    cyber_access: crate::cyber_access::Mode,
     cwd: &str,
     resume: Option<&str>,
     text: &Output,
@@ -1390,7 +1400,6 @@ fn drive_codex(
     } else {
         rpc(stdin, reader, "thread/start", params)?
     };
-    let resolved_model = model.or_else(|| started.get("model").and_then(Value::as_str));
     let thread_id = started
         .pointer("/thread/id")
         .and_then(|v| v.as_str())
@@ -1399,12 +1408,46 @@ fn drive_codex(
     if let Ok(mut slot) = session_out.lock() {
         *slot = Some(thread_id.clone());
     }
+    let resolved_model = model.or_else(|| started.get("model").and_then(Value::as_str));
     let goal_objective = prompt
         .trim()
         .strip_prefix("/goal")
         .filter(|rest| rest.starts_with(char::is_whitespace))
         .map(str::trim)
         .filter(|rest| !rest.is_empty());
+    let cyber_program = cyber_access.native(resolved_model.unwrap_or(""))?;
+    if let Some(program) = cyber_program {
+        let account = rpc(stdin, reader, "account/read", json!({"refreshToken":false}))?;
+        if account.pointer("/account/type").and_then(Value::as_str) != Some("chatgpt")
+            || started["modelProvider"].as_str() != Some("openai")
+        {
+            return Err("unsupported_access_program: explicit cyber selection requires a native ChatGPT connection. Choose Automatic explicitly for this connection.".into());
+        }
+        let catalog = rpc(
+            stdin,
+            reader,
+            "model/list",
+            json!({"includeHidden":true,"limit":100}),
+        )?;
+        let accepted = catalog["data"]
+            .as_array()
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|m| m["model"].as_str() == resolved_model)
+            })
+            .and_then(|m| m.pointer("/availableAccessPrograms/cyber"))
+            .and_then(|v| v.as_array());
+        if accepted.is_none() {
+            return Err("unsupported_access_program: this connection does not advertise cyber capabilities for this model. No turn was started.".into());
+        }
+        if !accepted.is_some_and(|values| values.iter().any(|v| v.as_str() == Some(program))) {
+            return Err("access_program_not_enabled: the selected account does not advertise this cyber program for this model. No turn was started.".into());
+        }
+        if goal_objective.is_some() {
+            return Err("unsupported_access_program: native goal continuations do not confirm per-turn cyber selection. Choose Automatic explicitly for this goal.".into());
+        }
+    }
     let mut goal_mode = goal_objective.is_some();
     let plan_prompt = prompt
         .trim()
@@ -1441,6 +1484,9 @@ fn drive_codex(
                 &mut pending,
             )?;
             goal_mode = goal.pointer("/goal/status").and_then(Value::as_str) == Some("active");
+            if cyber_program.is_some() && goal_mode {
+                return Err("unsupported_access_program: choose Automatic explicitly to resume a native goal.".into());
+            }
         }
         let _ = rpc_collect(
             stdin,
@@ -1448,6 +1494,7 @@ fn drive_codex(
             "turn/start",
             json!({
                 "threadId": thread_id,
+                "cyberAccessProgram": cyber_program,
                 "input": input,
                 "collaborationMode": {"mode": if planning {"plan"} else {"default"}, "settings": {"model":resolved_model.ok_or("Codex did not resolve a model for collaboration mode")?, "reasoning_effort":null, "developer_instructions":null}}
             }),
@@ -1549,7 +1596,7 @@ fn drive_codex(
                     stdin,
                     reader,
                     "turn/start",
-                    json!({"threadId":thread_id,"input":[{"type":"text","text":followup}],"collaborationMode":{"mode":if planning {"plan"} else {"default"},"settings":{"model":resolved_model.ok_or("Codex did not resolve a model for collaboration mode")?,"reasoning_effort":null,"developer_instructions":null}}}),
+                    json!({"threadId":thread_id,"cyberAccessProgram":cyber_program,"input":[{"type":"text","text":followup}],"collaborationMode":{"mode":if planning {"plan"} else {"default"},"settings":{"model":resolved_model.ok_or("Codex did not resolve a model for collaboration mode")?,"reasoning_effort":null,"developer_instructions":null}}}),
                     &mut early,
                 );
                 next?;
@@ -2190,6 +2237,8 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let request = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: "gemini-fixture".into(),
             harness: "gemini".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -2347,6 +2396,8 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
         let fresh = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             image_paths: vec![],
             id: "1".into(),
             harness: "opencode".into(),
@@ -2395,11 +2446,15 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
                 .collect::<Vec<_>>()
         );
         let smart = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             model: Some("builtin/smart".into()),
             ..fresh.clone()
         };
         assert!(opencode_args(&smart).contains(&"sandboxed-sh/builtin/smart".to_string()));
         let resumed = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             session_id: Some("ses_abc".into()),
             ..fresh
         };
@@ -2431,6 +2486,74 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     }
 
     #[test]
+    fn cyber_access_goal_guard_uses_the_native_command_boundary() {
+        for prompt in ["/goal", "/goalkeeper", "/goal Work"] {
+            let events = [
+                json!({"id":"orb-initialize","result":{}}),
+                json!({"id":"orb-thread/start","result":{"model":"gpt-6.1-sol","modelProvider":"openai","thread":{"id":"thread"}}}),
+                json!({"id":"orb-account/read","result":{"account":{"type":"chatgpt"}}}),
+                json!({"id":"orb-model/list","result":{"data":[{"model":"gpt-6.1-sol","availableAccessPrograms":{"cyber":["standard"]}}]}}),
+                json!({"id":"orb-turn/start","result":{}}),
+                json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}),
+            ];
+            let input = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            let mut sent = Vec::new();
+            let result = drive_codex(
+                &mut sent, &mut std::io::Cursor::new(input), prompt, &[],
+                Some("gpt-6.1-sol"), crate::cyber_access::Mode::Standard,
+                "/tmp", None, &Output::default(), &Mutex::new(None),
+                &crate::interactions::begin("cyber-goal-boundary"),
+            );
+            let sent = String::from_utf8(sent).unwrap();
+            if prompt == "/goal Work" {
+                assert!(result.unwrap_err().contains("unsupported_access_program"));
+                assert!(!sent.contains("turn/start"));
+            } else {
+                result.unwrap();
+                assert!(sent.contains("turn/start"));
+                assert!(!sent.contains("thread/goal/set"));
+            }
+        }
+    }
+
+    #[test]
+    fn cyber_access_denial_does_not_start_or_substitute_a_turn() {
+        let events = [
+            json!({"id":"orb-initialize","result":{}}),
+            json!({"id":"orb-thread/start","result":{"model":"gpt-6.1-sol","modelProvider":"openai","thread":{"id":"thread"}}}),
+            json!({"id":"orb-account/read","result":{"account":{"type":"chatgpt"}}}),
+            json!({"id":"orb-model/list","result":{"data":[{"model":"gpt-6.1-sol","availableAccessPrograms":{"cyber":["standard"]}}]}}),
+        ];
+        let input = events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let mut sent = Vec::new();
+        let session = Mutex::new(None);
+        let error = drive_codex(
+            &mut sent,
+            &mut std::io::Cursor::new(input),
+            "Reply OK",
+            &[],
+            Some("gpt-6.1-sol"),
+            crate::cyber_access::Mode::Daybreak,
+            "/tmp",
+            None,
+            &Output::default(),
+            &session,
+            &crate::interactions::begin("cyber-denial-test"),
+        )
+        .unwrap_err();
+        assert!(error.contains("access_program_not_enabled"));
+        assert_eq!(session.lock().unwrap().as_deref(), Some("thread"));
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(!sent.contains("turn/start"));
+        assert!(!sent.contains("gpt-daybreak-blue-latest"));
+    }
+
+    #[test]
     fn codex_keeps_early_deltas_and_reconciles_final_items() {
         let events = [
             json!({"id":"orb-initialize","result":{}}),
@@ -2457,6 +2580,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             "prompt",
             &["/tmp/pasted.png".into()],
             None,
+            crate::cyber_access::Mode::Automatic,
             "/tmp",
             None,
             &output,
@@ -2539,6 +2663,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             "/goal Work",
             &[],
             None,
+            crate::cyber_access::Mode::Automatic,
             "/tmp",
             None,
             &Output::default(),
@@ -2575,6 +2700,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             "/goal Finish the work",
             &[],
             None,
+            crate::cyber_access::Mode::Automatic,
             "/tmp",
             None,
             &output,
@@ -2625,6 +2751,8 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
         let request = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: "stdin-test".into(),
             harness: "opencode".into(),
             bin: "/bin/sh".into(),
@@ -2678,6 +2806,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -2821,6 +2951,8 @@ printf '%s\n' '{"type":"result"}'
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
         local_agents_start(StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -2894,6 +3026,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -2966,6 +3100,8 @@ printf '%s\n' '{"type":"result"}'
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
         let request = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             image_paths: vec![],
             id: format!("followup-test-{}", uuid_like()),
             harness: "grok".into(),
@@ -3000,6 +3136,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: id.clone(),
             harness: "grok".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -3031,6 +3169,8 @@ printf '%s\n' '{"type":"result"}'
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
             local_agents_start(StartRequest {
+                cyber_revision: None,
+                cyber_access: None,
                 id: id.clone(),
                 harness: harness.into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -3090,6 +3230,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
             bin: bin.to_string_lossy().into_owned(),
@@ -3133,7 +3275,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("zero-turn-{}", uuid_like());
-            local_agents_start(StartRequest {
+            local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,
                 id: id.clone(),
                 harness: "claudecode".into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -3189,7 +3331,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest{id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
+        local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -3289,6 +3431,8 @@ mod directory_tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
         let request = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
             id: first.clone(),
             harness: "gemini".into(),
             bin: bin.to_string_lossy().into(),
@@ -3301,6 +3445,8 @@ mod directory_tests {
         start_with_env(request.clone(), &[]).unwrap();
         let deferred = tauri::async_runtime::block_on(crate::run_recovery::local_run_launch(
             StartRequest {
+                cyber_revision: None,
+                cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 ..request.clone()
             },
@@ -3313,6 +3459,8 @@ mod directory_tests {
         assert!(deferred.starts_with("Local launch deferred: directory busy"));
         let second = start_with_env(
             StartRequest {
+                cyber_revision: None,
+                cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 cwd: root.path().join(".").to_string_lossy().into(),
                 ..request

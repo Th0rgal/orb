@@ -352,6 +352,7 @@ async fn send_message_streaming_app_server(
     // through the codex backend config would silently get codex's built-in
     // default in app-server mode.
     let resolved_model = resolve_model(session.model.as_deref(), cfg.default_model.as_deref());
+    let mut cyber_program = None;
     let thread_cwd = workspace_exec
         .map(|exec| exec.translate_path_for_container(std::path::Path::new(&session.directory)))
         .unwrap_or_else(|| session.directory.clone());
@@ -385,8 +386,9 @@ async fn send_message_streaming_app_server(
                 return Err(anyhow::anyhow!("codex {} failed; no fresh-thread fallback: {}", if resumed { "thread/resume" } else { "thread/start" }, e));
             }
         };
-        let plan_model = plan_model.unwrap_or_default();
-        if planning && plan_model.is_empty() { return Err(anyhow::anyhow!("Codex did not resolve a model for plan mode")); }
+        // A successful creation must be durable even when access validation
+        // rejects the turn. Retrying with a corrected selection resumes this
+        // known thread instead of quarantining an ambiguous creation.
         if let Some(lease) = native_lease.as_mut() {
             if thread.cwd.as_deref() != Some(thread_cwd.as_str())
                 || (resumed && lease.binding.thread_id.as_deref() != Some(thread.id.as_str()))
@@ -396,6 +398,56 @@ async fn send_message_streaming_app_server(
             }
             lease.bind(&thread.id)?;
         }
+        let plan_model = plan_model.unwrap_or_default();
+        cyber_program = cfg
+            .cyber_access
+            .native(plan_model.as_str())
+            .map_err(anyhow::Error::msg)?
+            .map(str::to_owned);
+        if let Some(ref program) = cyber_program {
+            if cfg.external_chatgpt_auth.is_none() {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: this native connection cannot verify an explicit cyber selection. Choose Automatic explicitly or use a ChatGPT-authenticated connection."));
+            }
+            let catalog: anyhow::Result<serde_json::Value> = session_arc
+                .request(
+                    "model/list",
+                    serde_json::json!({"includeHidden":true,"limit":100}),
+                )
+                .await;
+            let catalog = match catalog {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    let _ = session_arc.shutdown().await;
+                    return Err(error);
+                }
+            };
+            let accepted = catalog["data"]
+                .as_array()
+                .and_then(|models| {
+                    models
+                        .iter()
+                        .find(|m| m["model"].as_str() == Some(plan_model.as_str()))
+                })
+                .and_then(|m| m.pointer("/availableAccessPrograms/cyber"))
+                .and_then(|v| v.as_array());
+            if accepted.is_none() {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: this connection does not advertise cyber capabilities for the selected model. No turn was started."));
+            }
+            if !accepted
+                .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(program.as_str())))
+            {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("access_program_not_enabled: the account does not advertise this cyber program for the selected model. No turn was started."));
+            }
+            if parse_goal_prefix(plan_source).0 {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."));
+            }
+        }
+        if planning && plan_model.is_empty() { return Err(anyhow::anyhow!("Codex did not resolve a model for plan mode")); }
+
 
         // Take the inbound channel before issuing any further RPC — `goal/set`
         // and `turn/start` start emitting notifications before they return.
@@ -442,6 +494,7 @@ async fn send_message_streaming_app_server(
                 if planning && goal.status != "complete" { return Err(anyhow::anyhow!("Finish the active goal or start the plan in a separate session")); }
                 lease.note_goal()?;
                 if goal.status != "complete" || requested_goal {
+                    if cyber_program.is_some() { return Err(anyhow::anyhow!("unsupported_access_program: native goal continuation requires an explicit Automatic selection")); }
                     if goal.status == "complete" {
                         return Err(anyhow::anyhow!("codex_continuity_goal_complete: existing goal is already complete; refusing to reset its usage"));
                     }
@@ -535,6 +588,7 @@ async fn send_message_streaming_app_server(
             }
         } else if !already_primed { if let Err(e) = session_for_rpc
             .turn_start(TurnStartParams {
+                cyber_access_program: cyber_program.clone(),
                 collaboration_mode: planning.then(||collaboration_mode(true, &plan_model)),
                 thread_id: thread_id.clone(),
                 input: vec![UserInputItem::Text {
@@ -822,6 +876,7 @@ async fn send_message_streaming_app_server(
                                     };
                                     let result = session_arc
                                         .turn_start(TurnStartParams {
+                                            cyber_access_program: cyber_program.clone(),
                                             thread_id: thread_id.clone(),
                                             input: vec![UserInputItem::Text { text: text.into() }],
                                             collaboration_mode: Some(collaboration_mode(

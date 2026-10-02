@@ -389,6 +389,7 @@ pub async fn local_origin_launch(
     // Execution stays in the chosen directory; the journal above remains private.
     let snapshot = Snapshot {
         origin: Origin {
+            cyber_access: request.cyber_access,
             id,
             run_id,
             client_id: crate::transfers::local_machine_identity()?

@@ -70,6 +70,14 @@ class NativeSession:
         command = ['codex']
         if os.environ.get('SANDBOXED_MCP_WRAPPER'):
             command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
+        program = os.environ.get('SANDBOXED_CYBER_PROGRAM')
+        if program is not None:
+            if program not in ('standard', 'daybreak_blue', 'daybreak_red'):
+                raise RuntimeError('Invalid cyber program; no request was sent')
+            # API-key proxy auth ignores native cyberAccessProgram. The authenticated
+            # core maps this explicit selection to Responses API access_programs.
+            command += ['-c', 'model_providers.sandboxed.http_headers=' +
+                        '{"x-sandboxed-cyber-program"=' + json.dumps(program) + '}']
         for setting in config['settings']:
             command += ['-c', setting]
         # Match thread policy from process startup, before sandbox probing.

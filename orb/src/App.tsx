@@ -1,3 +1,4 @@
+import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {NextReminder} from "./AutomaticReminder";
 import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
@@ -806,6 +807,9 @@ export function Composer(p: {
               </div>
             </Show>
           </div>
+          <Show when={pick()?.backend === "codex"}>
+            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} onChange={setDraftCyber}/>
+          </Show>
           {/* Effort, after harness and model. Only rendered for a harness the
               core actually accepts an effort for — everything else has
               model_effort forced to null server-side. */}
@@ -1389,6 +1393,7 @@ export default function App() {
     void refreshMissions();
   };
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
+    const selectedCyber = draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     const row = await localAgentForLaunch(pick.backend);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
@@ -1399,10 +1404,11 @@ export default function App() {
     const sent = imagePrompt(bindWorkspace(plan.prompt, root), imagePaths, images);
     const effort = normalizeEffort(pick.effort, pick.backend);
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
-    const signature = JSON.stringify(body);
+    const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
+    setDraftCyber("standard");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     launchedViewKeys.set(m.id,launchViewKey());
@@ -1425,6 +1431,7 @@ export default function App() {
       const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
       const pick = effectivePick();
+      const selectedCyber = draftCyber();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
       try {
         if (!pick || !harnessChoices().some(c => c.backend.id === pick.backend && c.models.some(m => m.value === pick.model))) throw new Error("Choose an available harness and model before starting. Your draft is kept.");
@@ -1451,14 +1458,16 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
+        if(pick.backend === "codex") await requireCyberSupport();
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
-        const body = {title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
         launchAttempt = undefined;
+        setDraftCyber("standard");
         setAttachChips([]);
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
@@ -2253,6 +2262,7 @@ function MissionDock(p: {
             </Show>
           </Show>
         </div>
+        <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
         <Show when={efforts().length > 0}>
           <span class="under-sep" aria-hidden="true">·</span>
           <div class="under-effort-wrap under-model-wrap">

@@ -584,6 +584,18 @@ async fn validate_destination(
     }
     Ok(())
 }
+fn validate_cyber_model(
+    state: &AppState,
+    id: Uuid,
+    backend: &str,
+    model: Option<&str>,
+) -> Result<(), Error> {
+    if backend == "codex" {
+        let selection = cyber::read(&state.config.working_dir, id).map_err(internal_error)?;
+        cyber::program_for_model(selection.mode, model).map_err(conflict)?;
+    }
+    Ok(())
+}
 pub async fn operate(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -640,6 +652,8 @@ pub async fn operate(
             return Ok(Json(json!(old)));
         }
         let backend = backend.unwrap_or(m.backend.clone());
+        let model = model.or(m.model_override.clone());
+        validate_cyber_model(&state, id, &backend, model.as_deref())?;
         validate_destination(&state, &destination, &backend).await?;
         let (source, mut source_root) = source(&state, &control, &m, client_id).await?;
         if matches!(source, Machine::Client { .. }) && source_root.is_none() {
@@ -685,7 +699,7 @@ pub async fn operate(
             source_generation: generation,
             generation: generation + 1,
             backend,
-            model: model.or(m.model_override),
+            model,
             effort: effort.or(m.model_effort),
             source_root,
             destination_root: None,
@@ -886,6 +900,15 @@ pub async fn operate(
             .map_err(internal_error)?;
         validate_attachments(&a, &previous)?;
     }
+    // Recheck against the latest selection under the same lock as settings
+    // and launch admission; copying files must not hold this global lock.
+    let _admission = if a.phase == "activated" {
+        let guard = DISPATCH_ADMISSION.lock().await;
+        validate_cyber_model(&state, id, &a.backend, a.model.as_deref())?;
+        Some(guard)
+    } else {
+        None
+    };
     let a = control
         .mission_store
         .save_machine_transfer(a, Some(rev))
@@ -909,6 +932,9 @@ pub async fn operate(
 
 #[derive(Deserialize)]
 pub struct ClientRunRequest {
+    pub model: Option<String>,
+    pub cyber_access: Option<cyber::Mode>,
+    pub cyber_revision: Option<Uuid>,
     pub message_id: Option<Uuid>,
     pub op: String,
     pub client_id: String,
@@ -924,6 +950,11 @@ pub async fn client_run(
     Path(id): Path<Uuid>,
     Json(req): Json<ClientRunRequest>,
 ) -> Result<Json<Value>, Error> {
+    let _admission = if req.op == "begin" {
+        Some(DISPATCH_ADMISSION.lock().await)
+    } else {
+        None
+    };
     Uuid::parse_str(&req.client_id).map_err(|_| conflict("Invalid computer identity"))?;
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
@@ -1063,6 +1094,20 @@ pub async fn client_run(
     }
     let owner = format!("orb-client:{}", req.client_id);
     if req.op == "begin" {
+        let cyber_mode = if m.backend == "codex" {
+            let saved = cyber::read(&state.config.working_dir, id).map_err(internal_error)?;
+            cyber::validate_client_selection(&saved, req.cyber_access, req.cyber_revision)
+                .map_err(conflict)?;
+            cyber::program_for_model(saved.mode, m.model_override.as_deref()).map_err(conflict)?;
+            // A stale local binding may name another explicit model. Client
+            // defaults are resolved and checked by Codex before turn/start.
+            if let Some(model) = req.model.as_deref() {
+                saved.mode.program(model).map_err(conflict)?;
+            }
+            Some(saved.mode)
+        } else {
+            None
+        };
         let prompt = context(
             &control.mission_store,
             id,
@@ -1072,6 +1117,11 @@ pub async fn client_run(
         .await
         .map_err(internal_error)?;
         crate::api::mission_payload::validate_user_content(&prompt).map_err(conflict)?;
+        if let Some(mode) = cyber_mode {
+            // Fence previous remote proofs before acquiring a run. If storage
+            // fails, no active mission or execution lease needs compensation.
+            cyber::write(&state.config.working_dir, id, mode).map_err(internal_error)?;
+        }
         let run = control
             .mission_store
             .begin_mission_run(
@@ -1222,12 +1272,34 @@ pub async fn local_origin(
     snapshot
         .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let cyber = snapshot.origin.cyber_access;
+    let id = snapshot.origin.id;
+    if let Some(mode) = cyber {
+        if snapshot.origin.backend != "codex" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Cyber selection requires Codex".into(),
+            ));
+        }
+        mode.program(snapshot.origin.model.as_deref().unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    let _guard = DISPATCH_ADMISSION.lock().await;
     let control = control_for_user(&state, &user).await;
     control
         .mission_store
         .sync_local_origin(snapshot)
         .await
         .map_err(conflict)?;
+    if let Some(mode) = cyber {
+        if super::cyber::read(&state.config.working_dir, id)
+            .map_err(internal_error)?
+            .revision
+            .is_nil()
+        {
+            super::cyber::write(&state.config.working_dir, id, mode).map_err(internal_error)?;
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 
