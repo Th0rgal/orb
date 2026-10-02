@@ -25460,7 +25460,7 @@ async fn control_actor_loop(
                         if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
                             let cleared = async {
                                 let _file = dispatch_admission::durable_lock(&config).await?;
-                                remote_queue::cancel_all(&state.projects, &session_user_id, Some(mission_id))
+                                remote_queue::cancel_tree(&state.projects, &mission_store, &session_user_id, mission_id).await
                             }.await;
                             if let Err(error) = cleared {
                                 let _ = respond.send(Err(format!("Failed to cancel remote follow-ups: {error}")));

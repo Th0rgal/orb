@@ -51,6 +51,34 @@ pub(super) fn cancel_all(
     store.lock()?.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL AND (?2 IS NULL OR mission_id=?2)",params![user,mission.map(|id|id.to_string())]).map_err(|e|e.to_string())
 }
 
+/// Called under dispatch admission before any parent/child runner is stopped.
+pub(super) async fn cancel_tree(
+    store: &ProjectsStore,
+    missions: &Arc<dyn MissionStore>,
+    user: &str,
+    root: Uuid,
+) -> Result<(), String> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if seen.insert(id) {
+            pending.extend(
+                missions
+                    .get_child_missions(id)
+                    .await?
+                    .into_iter()
+                    .map(|m| m.id),
+            );
+        }
+    }
+    let mut conn = store.lock()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for id in seen {
+        tx.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL", params![user,id.to_string()]).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 pub(super) async fn enqueue(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -181,6 +209,9 @@ pub(super) fn validate(
     mission: &Mission,
     node: &str,
 ) -> Result<Entry, String> {
+    if mission.status == MissionStatus::Paused {
+        return Err("Mission is paused; resume it to deliver queued messages".into());
+    }
     let entry = waiting(store, Some(user))?
         .into_iter()
         .find(|row| row.message.mission_id == Some(mission.id))
@@ -320,6 +351,13 @@ mod tests {
         assert!(validate(&db, "u", first, &changed, "nippur").is_err());
         assert!(finish(&db, "u", first, "cancelled").unwrap());
         assert!(validate(&db, "u", first, &mission, "nippur").is_err());
+        mission.status = MissionStatus::Paused;
+        assert!(validate(&db, "u", second, &mission, "nippur")
+            .err()
+            .unwrap()
+            .contains("paused"));
+        assert!(is_waiting(&db, "u", second).unwrap());
+        mission.status = MissionStatus::Interrupted;
         assert!(validate(&db, "u", second, &mission, "nippur").is_ok());
         bind_job(&db, "u", second, Some(Uuid::new_v4())).unwrap();
         assert!(
@@ -327,6 +365,77 @@ mod tests {
             "cannot claim to withdraw a possibly accepted job"
         );
         assert_eq!(cancel_all(&db, "u", Some(mission.id)).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_descendant_queues_without_touching_other_missions() {
+        let missions: Arc<dyn MissionStore> =
+            Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
+        let root = missions
+            .create_mission(None, None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let child = missions
+            .create_mission_with_parent(
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("codex"),
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let grandchild = missions
+            .create_mission_with_parent(
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("codex"),
+                None,
+                Some(child.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let other = missions
+            .create_mission(None, None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let db = ProjectsStore::open_in_memory().unwrap();
+        for mission in [&root, &child, &grandchild, &other] {
+            save(
+                &db,
+                &Entry {
+                    user_id: "u".into(),
+                    node_id: "nippur".into(),
+                    session_id: None,
+                    job_id: None,
+                    assignment: assignment(mission),
+                    message: QueuedMessage {
+                        id: Uuid::new_v4(),
+                        content: "follow-up".into(),
+                        mission_id: Some(mission.id),
+                        agent: None,
+                        source: None,
+                        inflight: false,
+                        queue_error: None,
+                    },
+                },
+            )
+            .unwrap();
+        }
+        cancel_tree(&db, &missions, "u", root.id).await.unwrap();
+        let remaining = waiting(&db, Some("u")).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message.mission_id, Some(other.id));
     }
 
     #[test]
