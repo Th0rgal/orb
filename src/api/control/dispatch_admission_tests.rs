@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::{
-    mission_store::{SqliteMissionStore, StoredEvent},
+    mission_store::{MissionProjectPatch, SqliteMissionStore, StoredEvent},
     projects_store::ProjectsStore,
 };
 use serde_json::{json, Value};
