@@ -7082,19 +7082,22 @@ async fn native_grok_auto_track_continuation(
         .unwrap();
     // Ambiguous submission cleanup can leave a matching pre-start cancelled
     // job. Its existence is not proof that the harness received the message.
-    fixture.set_state("cancelled");
-    let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
-        .await
-        .unwrap()
-        .unwrap();
-    let delivery =
-        remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first).await;
-    assert!(delivery
-        .unwrap_err()
-        .1
-        .contains("before confirmed execution"));
-    assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
-    assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    for unconfirmed in ["queued", "cancelled", "failed", "lost"] {
+        fixture.set_state(unconfirmed);
+        let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let delivery =
+            remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first)
+                .await;
+        assert!(delivery
+            .unwrap_err()
+            .1
+            .contains("before confirmed execution"));
+        assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
+        assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    }
     fixture.set_state("succeeded");
     wait_until("recover accepted queue receipt", 10, || async {
         !remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap()
@@ -7155,6 +7158,54 @@ async fn native_grok_auto_track_continuation(
         .iter()
         .all(|automation| automation.driver
             == crate::api::mission_store::AutomationDriver::HarnessLoop));
+}
+
+#[tokio::test]
+async fn remote_queue_retires_deleted_mission_even_with_bound_job() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Failed, None).await;
+    let id = Uuid::new_v4();
+    let entry = remote_queue::Entry {
+        user_id: h.user.id.clone(),
+        node_id: "deleted-node".into(),
+        session_id: None,
+        job_id: Some(Uuid::new_v4()),
+        assignment: json!({}),
+        message: QueuedMessage {
+            id,
+            content: "orphan".into(),
+            mission_id: Some(mission.id),
+            agent: None,
+            source: None,
+            inflight: false,
+            queue_error: None,
+        },
+    };
+    h.state.projects.lock().unwrap().execute(
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![h.user.id,id.to_string(),mission.id.to_string(),serde_json::to_string(&entry).unwrap()],
+    ).unwrap();
+    h.control
+        .mission_store
+        .delete_mission(mission.id)
+        .await
+        .unwrap();
+    wait_until("deleted mission queue retired", 10, || async {
+        !remote_queue::is_waiting(&h.state.projects, &h.user.id, id).unwrap()
+    })
+    .await;
+    let state: String = h
+        .state
+        .projects
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM remote_message_queue WHERE message_id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "deleted");
 }
 
 #[tokio::test]

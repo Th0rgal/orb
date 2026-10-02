@@ -1420,10 +1420,10 @@ async fn continue_inner(
                 match RemoteNodeClient::default().get_job(node, &token, job).await {
                     Ok(status) if status.job_id == job && status.mission_id == mission_id => {
                         if status.started_at.is_none()
-                            && matches!(status.state.as_str(), "cancelled" | "failed" | "lost")
+                            && status.state != "succeeded"
                         {
                             return Err((StatusCode::CONFLICT,
-                                "The remote job ended before confirmed execution. Your message is preserved; delivery is paused to avoid losing or duplicating it.".into()));
+                                "The remote job is unconfirmed: delivery paused before confirmed execution. Your message is preserved; delivery is paused to avoid losing or duplicating it.".into()));
                         }
                         true
                     },

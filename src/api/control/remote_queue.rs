@@ -231,6 +231,27 @@ pub(super) fn validate(
     Ok(entry)
 }
 
+async fn retire_missing_mission(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    entry: &Entry,
+) -> Result<bool, String> {
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    let _file = dispatch_admission::durable_lock(&state.config).await?;
+    if control
+        .mission_store
+        .get_mission(entry.message.mission_id.unwrap())
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    // Deletion is authoritative, including for a bound delivery receipt. Keep
+    // the idempotency tombstone but never retry this orphan again.
+    finish(&state.projects, &entry.user_id, entry.message.id, "deleted")?;
+    Ok(true)
+}
+
 pub(super) fn start(state: std::sync::Weak<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -255,6 +276,14 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
                     username: entry.user_id.clone(),
                 };
                 let control = control_for_user(&state, &user).await;
+                match retire_missing_mission(&state, &control, &entry).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(mission_id=%mid,%error,"Cannot verify queued mission existence");
+                        continue;
+                    }
+                }
                 // No local fallback, even if placement is missing or transferred.
                 let placement = match remote_grok::placement(
                     &state.config.working_dir,
