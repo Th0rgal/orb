@@ -16276,7 +16276,9 @@ pub async fn update_mission_settings(
         .map_err(session_unavailable)?;
 
     let mission = rx.await.map_err(recv_failed)?.map_err(|e| {
-        if e.contains("not found") {
+        if e.starts_with("invalid_access_program:") {
+            (StatusCode::BAD_REQUEST, e)
+        } else if e.contains("not found") {
             (StatusCode::NOT_FOUND, e)
         } else if e.contains("running") {
             (StatusCode::CONFLICT, e)
@@ -25113,10 +25115,26 @@ async fn control_actor_loop(
 
                         // Capture the backend before the update so we can detect
                         // a switch and carry reasoning across (see below).
-                        let old_backend = load_mission_record(&mission_store, id)
-                            .await
-                            .ok()
-                            .map(|m| m.backend);
+                        let before = match load_mission_record(&mission_store, id).await {
+                            Ok(mission) => mission,
+                            Err(error) => { let _ = respond.send(Err(error)); continue; }
+                        };
+                        // The actor holds DISPATCH_ADMISSION, also used by cyber
+                        // updates and client-run admission. Validate the pair
+                        // against the current saved selection before writing.
+                        let next_backend = backend.as_deref().unwrap_or(&before.backend);
+                        if next_backend == "codex" {
+                            let next_model = match &model_override {
+                                Some(value) => value.as_deref(),
+                                None => before.model_override.as_deref(),
+                            };
+                            let validation = cyber::read(&config.working_dir, id).and_then(|selection| {
+                                selection.mode.program(next_model.unwrap_or("")).map(|_| ())
+                                    .map_err(|error| format!("invalid_access_program: {error}"))
+                            });
+                            if let Err(error) = validation { let _ = respond.send(Err(error)); continue; }
+                        }
+                        let old_backend = Some(before.backend);
 
                         let result = mission_store
                             .update_mission_run_settings(

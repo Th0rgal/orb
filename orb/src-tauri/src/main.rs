@@ -187,6 +187,7 @@ fn main() {
             software::software_inventory,
             software::software_update,
             software::software_cancel,
+            local_agents::local_agents_cyber_capabilities,
             local_agents::local_agents_scan,
             local_agents::local_agents_workspace,
             local_agents::local_agents_directory,
