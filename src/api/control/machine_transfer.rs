@@ -1111,6 +1111,11 @@ pub async fn client_run(
         .await
         .map_err(internal_error)?;
         crate::api::mission_payload::validate_user_content(&prompt).map_err(conflict)?;
+        if let Some(mode) = cyber_mode {
+            // Fence previous remote proofs before acquiring a run. If storage
+            // fails, no active mission or execution lease needs compensation.
+            cyber::write(&state.config.working_dir, id, mode).map_err(internal_error)?;
+        }
         let run = control
             .mission_store
             .begin_mission_run(
@@ -1123,21 +1128,6 @@ pub async fn client_run(
             )
             .await
             .map_err(conflict)?;
-        if let Some(mode) = cyber_mode {
-            // Native turns cannot confirm a program. Rotate after admission so
-            // a later transfer back cannot resurrect the previous remote proof.
-            if let Err(error) = cyber::write(&state.config.working_dir, id, mode) {
-                let _ = control
-                    .mission_store
-                    .finish_mission_run(
-                        run.run_id,
-                        run.generation,
-                        Some("cyber_settings_unavailable"),
-                    )
-                    .await;
-                return Err(internal_error(error));
-            }
-        }
         return Ok(Json(
             json!({"run_id":run.run_id,"generation":run.generation,"prompt":prompt}),
         ));

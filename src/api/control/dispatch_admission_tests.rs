@@ -10032,3 +10032,71 @@ async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_m
         saved.revision
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cyber_client_storage_failure_preserves_idle_status_without_a_run() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    } // Root bypasses Unix write permissions.
+    let h = Harness::new().await;
+    let m = h
+        .control
+        .mission_store
+        .create_mission(None, None, None, None, None, Some("codex"), None)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(m.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved = cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
+    let path = h.state.config.working_dir.join("mission-cyber");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let request=serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let result = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(request),
+    )
+    .await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(m.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::AwaitingUser
+    );
+    assert_eq!(
+        cyber::read(&h.state.config.working_dir, m.id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
+}
