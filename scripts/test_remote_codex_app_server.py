@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import unittest
 from unittest.mock import patch, Mock
 import os
@@ -54,6 +55,7 @@ class NativeGoalTests(unittest.TestCase):
         session.send = lambda message: None
         with contextlib.redirect_stdout(io.StringIO()) as output:
             session.run()
+        self.assertIn('"type": "execution.mode", "mode": "goal"', output.getvalue())
         self.assertEqual(session.iteration, 2)
         self.assertEqual([params for method, params in calls if method=='thread/goal/set'], [{'threadId':'same-thread','status':'active'}])
         self.assertFalse(any(method=='turn/start' for method, params in calls))
@@ -83,6 +85,38 @@ class NativeGoalTests(unittest.TestCase):
             session.run()
         self.assertNotIn('goal.status', output.getvalue())
         self.assertEqual(output.getvalue().count('turn.completed'), 1)
+
+    def test_followup_after_completed_goal_reports_ordinary_execution(self):
+        session = NativeSession.__new__(NativeSession)
+        session.config = {'model':'test-model', 'session':'same-thread', 'prompt':'What were the results?'}
+        session.inbound = queue.Queue()
+        session.deferred = []
+        session.goal_status = None
+        session.pending_hint = None
+        calls = []
+        goal = {'status':'complete', 'objective':'original task', 'tokensUsed':123}
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == 'thread/resume':
+                return {'thread':{'id':'same-thread','cwd':os.getcwd(),'turns':[]}}
+            if method == 'thread/goal/get': return {'goal':goal}
+            if method == 'turn/start':
+                session.deferred += [
+                    {'method':'turn/started','params':{'turn':{'id':'followup'}}},
+                    {'method':'turn/completed','params':{'turn':{'id':'followup','status':'completed'}}},
+                ]
+            return {}
+        session.rpc = rpc
+        session.send = lambda message: None
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            session.run()
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn({'type':'execution.mode', 'mode':'turn'}, events)
+        self.assertEqual(events[-1], {'type':'turn.completed'})
+        self.assertFalse(any(event['type'] == 'goal.status' for event in events))
+        self.assertEqual([params for method, params in calls if method == 'turn/start'], [{
+            'threadId':'same-thread', 'input':[{'type':'text','text':'What were the results?'}]}])
+        self.assertFalse(any(method == 'thread/goal/set' for method, _ in calls))
 
     def test_goal_controls_act_on_the_native_goal_without_objective_check(self):
         for word, expected_calls, status in (
