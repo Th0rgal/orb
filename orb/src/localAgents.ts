@@ -371,6 +371,7 @@ export async function writeLocalFiles(root: string, files: LocalFile[]): Promise
 
 export interface StartLocal {
   cyber_access?: CyberMode;
+  cyber_revision?: string;
   imagePaths?: string[];
   id: string;
   harness: string;
@@ -402,7 +403,8 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     if(req.harness === "codex") {
       await requireLocalCyber(invoke);
-      req = {...req,cyber_access:(await getCyber(req.id)).mode};
+      const selection = await getCyber(req.id);
+      req = {...req,cyber_access:selection.mode,cyber_revision:selection.revision};
       if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
     }
     const launch = invoke("local_run_launch", {

@@ -1335,33 +1335,61 @@ async fn native_protocol_proxy(
         None => None,
     };
     let requested_model = req.model;
-    let cyber_receipt = if let Some(token) = headers
+    let execution_key = if let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        state
-            .proxy_api_keys
-            .find_by_token(token)
-            .await
-            .and_then(|key| {
-                let id = key
-                    .name
-                    .strip_prefix("remote-launch:")
-                    .and_then(|id| uuid::Uuid::parse_str(id).ok())?;
-                super::control::cyber::proxy_selection(&state.config.working_dir, id, key.id).map(
-                    |selection| {
-                        (
-                            state.config.working_dir.clone(),
-                            id,
-                            selection,
-                            requested_model.clone(),
-                        )
-                    },
-                )
-            })
+        state.proxy_api_keys.find_by_token(token).await
     } else {
         None
+    };
+    let mission_key_id = execution_key
+        .as_ref()
+        .and_then(|key| key.name.strip_prefix("remote-launch:"))
+        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+    let bound = mission_key_id.and_then(|id| {
+        super::control::cyber::proxy_selection(
+            &state.config.working_dir,
+            id,
+            execution_key.as_ref().unwrap().id,
+        )
+        .map(|pair| (id, pair))
+    });
+    if let Some(id) = mission_key_id {
+        // Pre-feature live keys have no selection. Preserve their existing automatic transport.
+        let legacy = super::control::cyber::read(&state.config.working_dir, id)
+            .is_ok_and(|s| s.revision.is_nil());
+        if bound.is_none() && !legacy {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "This mission execution key is stale".into(),
+                "invalid_access_program",
+            );
+        }
+    }
+    let cyber_receipt = bound
+        .map(|(id, (selection, model))| (state.config.working_dir.clone(), id, selection, model));
+    if let Some((_, _, _, model)) = &cyber_receipt {
+        if matches!(protocol, NativeProtocol::Responses) && model != &requested_model {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "The execution key is bound to another model".into(),
+                "invalid_access_program",
+            );
+        }
+    }
+    let parsed_body: serde_json::Value = serde_json::from_slice(&body).expect("validated request");
+    let cyber_program = match super::control::cyber::enforce_proxy_selection(
+        cyber_receipt.as_ref().map(|(_, _, selection, _)| selection),
+        &requested_model,
+        cyber_program,
+        parsed_body.pointer("/access_programs/cyber"),
+    ) {
+        Ok(program) => program,
+        Err(error) => {
+            return error_response(StatusCode::BAD_REQUEST, error, "invalid_access_program")
+        }
     };
     let is_stream = req.stream.unwrap_or(false);
     super::ai_providers::reconcile_openai_store_from_codex_homes(&state.ai_providers).await;

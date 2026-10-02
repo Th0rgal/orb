@@ -162,7 +162,7 @@ mod tests {
         let key = Uuid::new_v4();
         let selection = write(root.path(), id, Mode::Standard).unwrap();
         assert!(proxy_selection(root.path(), id, key).is_none());
-        bind_proxy(root.path(), id, selection.revision, key).unwrap();
+        bind_proxy(root.path(), id, selection.revision, key, "gpt-6.1-sol").unwrap();
         assert!(proxy_selection(root.path(), id, key).is_some());
         assert!(proxy_selection(root.path(), id, Uuid::new_v4()).is_none());
         write(root.path(), id, Mode::Daybreak).unwrap();
@@ -287,25 +287,118 @@ mod receipt_tests {
 
 /// Key names are user-controlled labels. Only an execution-issued binding can
 /// attribute provider evidence to a mission.
-pub fn bind_proxy(root: &FsPath, id: Uuid, revision: Uuid, key: Uuid) -> Result<(), String> {
+pub fn bind_proxy(
+    root: &FsPath,
+    id: Uuid,
+    revision: Uuid,
+    key: Uuid,
+    model: &str,
+) -> Result<(), String> {
     let dest = path(root, id).with_extension("binding.json");
     let temp = dest.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    std::fs::write(&temp, serde_json::to_vec(&(revision, key)).unwrap())
+    std::fs::write(&temp, serde_json::to_vec(&(revision, key, model)).unwrap())
         .map_err(|e| e.to_string())?;
     let result = std::fs::rename(&temp, dest).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(temp);
     result
 }
-pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<Selection> {
+pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<(Selection, String)> {
     let selection = read(root, id).ok()?;
-    let binding: (Uuid, Uuid) =
+    let binding: (Uuid, Uuid, String) =
         serde_json::from_slice(&std::fs::read(path(root, id).with_extension("binding.json")).ok()?)
             .ok()?;
-    (binding == (selection.revision, key)).then_some(selection)
+    (binding.0 == selection.revision && binding.1 == key).then_some((selection, binding.2))
 }
 
 pub async fn capabilities() -> Json<serde_json::Value> {
     Json(
         serde_json::json!({"version":1,"request_field":"cyber_access","native_goals_explicit":false}),
     )
+}
+
+/// Checked under dispatch admission together with acquiring the client lease.
+pub fn validate_client_selection(
+    saved: &Selection,
+    mode: Option<Mode>,
+    revision: Option<Uuid>,
+) -> Result<(), String> {
+    if mode == Some(saved.mode) && revision == Some(saved.revision) {
+        return Ok(());
+    }
+    if mode.is_none() && revision.is_none() && saved.mode == Mode::Automatic {
+        return Ok(());
+    }
+    Err("Cyber selection changed or this client cannot honor it. Reload before launching; no turn was started.".into())
+}
+
+/// The transport hint cannot override the operator's execution-bound selection.
+pub fn enforce_proxy_selection(
+    selection: Option<&Selection>,
+    model: &str,
+    header: Option<&str>,
+    body_program: Option<&serde_json::Value>,
+) -> Result<Option<&'static str>, String> {
+    let Some(selection) = selection else {
+        return if header.is_some() {
+            Err("Explicit cyber headers require an execution-bound key".into())
+        } else {
+            Ok(None)
+        };
+    };
+    let expected = selection.mode.program(model)?;
+    if header.is_some_and(|value| Some(value) != expected)
+        || body_program.is_some_and(|value| value.as_str() != expected || expected.is_none())
+    {
+        return Err("Cyber request conflicts with the saved mission selection".into());
+    }
+    Ok(expected)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    #[test]
+    fn execution_selection_cannot_be_escalated_or_omitted() {
+        let saved = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        assert_eq!(
+            enforce_proxy_selection(Some(&saved), "gpt-6.1-sol", None, None).unwrap(),
+            Some("standard")
+        );
+        assert!(
+            enforce_proxy_selection(Some(&saved), "gpt-6.1-sol", Some("daybreak_blue"), None)
+                .is_err()
+        );
+        assert!(enforce_proxy_selection(
+            Some(&saved),
+            "gpt-6.1-sol",
+            None,
+            Some(&serde_json::json!("daybreak_blue"))
+        )
+        .is_err());
+        assert!(enforce_proxy_selection(None, "gpt-6.1-sol", Some("standard"), None).is_err());
+        assert!(enforce_proxy_selection(
+            Some(&Selection::default()),
+            "gpt-6.1-sol",
+            Some("daybreak_blue"),
+            None
+        )
+        .is_err());
+    }
+    #[test]
+    fn client_permit_rejects_stale_or_unadvertised_selection() {
+        let saved = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        assert!(validate_client_selection(&saved, Some(saved.mode), Some(saved.revision)).is_ok());
+        assert!(validate_client_selection(&saved, Some(saved.mode), Some(Uuid::new_v4())).is_err());
+        assert!(
+            validate_client_selection(&saved, Some(Mode::Daybreak), Some(saved.revision)).is_err()
+        );
+        assert!(validate_client_selection(&saved, None, None).is_err());
+        assert!(validate_client_selection(&Selection::default(), None, None).is_ok());
+    }
 }

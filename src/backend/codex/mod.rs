@@ -352,53 +352,7 @@ async fn send_message_streaming_app_server(
     // through the codex backend config would silently get codex's built-in
     // default in app-server mode.
     let resolved_model = resolve_model(session.model.as_deref(), cfg.default_model.as_deref());
-    let cyber_program = cfg
-        .cyber_access
-        .native(resolved_model.as_deref().unwrap_or(""))
-        .map_err(anyhow::Error::msg)?
-        .map(str::to_owned);
-    if let Some(ref program) = cyber_program {
-        if cfg.external_chatgpt_auth.is_none() {
-            let _ = session_arc.shutdown().await;
-            return Err(anyhow::anyhow!("unsupported_access_program: this native connection cannot verify an explicit cyber selection. Choose Automatic explicitly or use a ChatGPT-authenticated connection."));
-        }
-        let catalog: anyhow::Result<serde_json::Value> = session_arc
-            .request(
-                "model/list",
-                serde_json::json!({"includeHidden":true,"limit":100}),
-            )
-            .await;
-        let catalog = match catalog {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                let _ = session_arc.shutdown().await;
-                return Err(error);
-            }
-        };
-        let accepted = catalog["data"]
-            .as_array()
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|m| m["model"].as_str() == resolved_model.as_deref())
-            })
-            .and_then(|m| m.pointer("/availableAccessPrograms/cyber"))
-            .and_then(|v| v.as_array());
-        if accepted.is_none() {
-            let _ = session_arc.shutdown().await;
-            return Err(anyhow::anyhow!("unsupported_access_program: this connection does not advertise cyber capabilities for the selected model. No turn was started."));
-        }
-        if !accepted
-            .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(program.as_str())))
-        {
-            let _ = session_arc.shutdown().await;
-            return Err(anyhow::anyhow!("access_program_not_enabled: the account does not advertise this cyber program for the selected model. No turn was started."));
-        }
-        if plan_source.trim().starts_with("/goal") {
-            let _ = session_arc.shutdown().await;
-            return Err(anyhow::anyhow!("unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."));
-        }
-    }
+    let mut cyber_program = None;
     let thread_cwd = workspace_exec
         .map(|exec| exec.translate_path_for_container(std::path::Path::new(&session.directory)))
         .unwrap_or_else(|| session.directory.clone());
@@ -433,6 +387,53 @@ async fn send_message_streaming_app_server(
             }
         };
         let plan_model = plan_model.unwrap_or_default();
+        cyber_program = cfg
+            .cyber_access
+            .native(plan_model.as_str())
+            .map_err(anyhow::Error::msg)?
+            .map(str::to_owned);
+        if let Some(ref program) = cyber_program {
+            if cfg.external_chatgpt_auth.is_none() {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: this native connection cannot verify an explicit cyber selection. Choose Automatic explicitly or use a ChatGPT-authenticated connection."));
+            }
+            let catalog: anyhow::Result<serde_json::Value> = session_arc
+                .request(
+                    "model/list",
+                    serde_json::json!({"includeHidden":true,"limit":100}),
+                )
+                .await;
+            let catalog = match catalog {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    let _ = session_arc.shutdown().await;
+                    return Err(error);
+                }
+            };
+            let accepted = catalog["data"]
+                .as_array()
+                .and_then(|models| {
+                    models
+                        .iter()
+                        .find(|m| m["model"].as_str() == Some(plan_model.as_str()))
+                })
+                .and_then(|m| m.pointer("/availableAccessPrograms/cyber"))
+                .and_then(|v| v.as_array());
+            if accepted.is_none() {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: this connection does not advertise cyber capabilities for the selected model. No turn was started."));
+            }
+            if !accepted
+                .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(program.as_str())))
+            {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("access_program_not_enabled: the account does not advertise this cyber program for the selected model. No turn was started."));
+            }
+            if plan_source.trim().starts_with("/goal") {
+                let _ = session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."));
+            }
+        }
         if planning && plan_model.is_empty() { return Err(anyhow::anyhow!("Codex did not resolve a model for plan mode")); }
         if let Some(lease) = native_lease.as_mut() {
             if thread.cwd.as_deref() != Some(thread_cwd.as_str())

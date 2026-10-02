@@ -10928,21 +10928,6 @@ pub(super) async fn create_mission_inner(
     });
 
     let parent_control = control_for_user(&state, &user).await;
-    if req.cyber_access.is_none() && req.backend.as_deref() == Some("codex") {
-        if let Some(source_id) = req.supersedes_mission_id {
-            parent_control
-                .mission_store
-                .get_mission(source_id)
-                .await
-                .map_err(internal_error)?
-                .ok_or((StatusCode::NOT_FOUND, "Source mission not found".into()))?;
-            req.cyber_access = Some(
-                cyber::read(&state.config.working_dir, source_id)
-                    .map_err(internal_error)?
-                    .mode,
-            );
-        }
-    }
     worker_location::inherit(&state, &parent_control, &mut req)
         .await
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -11852,6 +11837,21 @@ pub(super) async fn create_mission_inner(
                     ),
                 ));
             }
+        }
+    }
+    if req.cyber_access.is_none() && backend.as_deref() == Some("codex") {
+        if let Some(source_id) = req.supersedes_mission_id {
+            parent_control
+                .mission_store
+                .get_mission(source_id)
+                .await
+                .map_err(internal_error)?
+                .ok_or((StatusCode::NOT_FOUND, "Source mission not found".into()))?;
+            req.cyber_access = Some(
+                cyber::read(&state.config.working_dir, source_id)
+                    .map_err(internal_error)?
+                    .mode,
+            );
         }
     }
     if let Some(mode) = req.cyber_access {
@@ -14041,9 +14041,12 @@ async fn submit_leased_remote_job(
     plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
     let mut resolved_plan = plan.clone();
-    let cyber_selection = cyber::read(&state.config.working_dir, mission.id)?;
-    let cyber_selection =
-        cyber::write(&state.config.working_dir, mission.id, cyber_selection.mode)?;
+    let cyber_selection = if matches!(plan, RemoteHarnessPlan::Codex { .. }) {
+        let saved = cyber::read(&state.config.working_dir, mission.id)?;
+        cyber::write(&state.config.working_dir, mission.id, saved.mode)?
+    } else {
+        cyber::Selection::default()
+    };
     let mut project_skill_source = String::new();
     let prompt = match &mut resolved_plan {
         RemoteHarnessPlan::Codex { prompt, .. }
@@ -14230,14 +14233,17 @@ async fn submit_leased_remote_job(
             .create(remote_launch_key_name(mission.id))
             .await
             .map_err(|error| format!("remote launch proxy key could not be minted: {error}"))?;
-        if let Err(error) = cyber::bind_proxy(
-            &state.config.working_dir,
-            mission.id,
-            cyber_selection.revision,
-            key.id,
-        ) {
-            let _ = state.proxy_api_keys.delete(key.id).await;
-            return Err(error);
+        if let RemoteHarnessPlan::Codex { model, .. } = plan {
+            if let Err(error) = cyber::bind_proxy(
+                &state.config.working_dir,
+                mission.id,
+                cyber_selection.revision,
+                key.id,
+                model,
+            ) {
+                let _ = state.proxy_api_keys.delete(key.id).await;
+                return Err(error);
+            }
         }
         (
             remote_execution_for_plan(plan, &api_base_url, &key.key),

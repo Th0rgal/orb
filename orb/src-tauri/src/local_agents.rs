@@ -76,6 +76,7 @@ pub struct WriteReport {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartRequest {
+    pub cyber_revision: Option<uuid::Uuid>,
     pub cyber_access: Option<crate::cyber_access::Mode>,
     #[serde(default)]
     pub image_paths: Vec<String>,
@@ -2193,6 +2194,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let request = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: "gemini-fixture".into(),
             harness: "gemini".into(),
@@ -2351,6 +2353,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
         let fresh = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
             id: "1".into(),
@@ -2400,12 +2403,14 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
                 .collect::<Vec<_>>()
         );
         let smart = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             model: Some("builtin/smart".into()),
             ..fresh.clone()
         };
         assert!(opencode_args(&smart).contains(&"sandboxed-sh/builtin/smart".to_string()));
         let resumed = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             session_id: Some("ses_abc".into()),
             ..fresh
@@ -2670,6 +2675,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
         let request = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: "stdin-test".into(),
             harness: "opencode".into(),
@@ -2724,6 +2730,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
@@ -2868,6 +2875,7 @@ printf '%s\n' '{"type":"result"}'
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
         local_agents_start(StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
@@ -2942,6 +2950,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
@@ -3015,6 +3024,7 @@ printf '%s\n' '{"type":"result"}'
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
         let request = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
             id: format!("followup-test-{}", uuid_like()),
@@ -3050,6 +3060,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
             harness: "grok".into(),
@@ -3082,6 +3093,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
             local_agents_start(StartRequest {
+                cyber_revision: None,
                 cyber_access: None,
                 id: id.clone(),
                 harness: harness.into(),
@@ -3142,6 +3154,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
         local_agents_start(StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
             harness: "claudecode".into(),
@@ -3186,7 +3199,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("zero-turn-{}", uuid_like());
-            local_agents_start(StartRequest { cyber_access: None,
+            local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,
                 id: id.clone(),
                 harness: "claudecode".into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -3242,7 +3255,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest { cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
+        local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -3342,6 +3355,7 @@ mod directory_tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
         let request = StartRequest {
+            cyber_revision: None,
             cyber_access: None,
             id: first.clone(),
             harness: "gemini".into(),
@@ -3355,6 +3369,7 @@ mod directory_tests {
         start_with_env(request.clone(), &[]).unwrap();
         let deferred = tauri::async_runtime::block_on(crate::run_recovery::local_run_launch(
             StartRequest {
+                cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 ..request.clone()
@@ -3368,6 +3383,7 @@ mod directory_tests {
         assert!(deferred.starts_with("Local launch deferred: directory busy"));
         let second = start_with_env(
             StartRequest {
+                cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 cwd: root.path().join(".").to_string_lossy().into(),

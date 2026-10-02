@@ -26,7 +26,11 @@ Native API-key connections likewise require Automatic or a supported connection.
 Remote node Codex runs use the existing authenticated mission proxy. The driver
 sets a program header, and Core maps it into official Responses `access_programs.cyber`.
 Explicit selection requires a direct OpenAI route preserving the requested model;
-unsupported intermediaries are rejected. A provider 403 is returned unchanged,
+unsupported intermediaries are rejected. The execution-issued proxy key pins both model and saved program. A missing header
+cannot drop an explicit selection; conflicting headers or body fields fail closed.
+Local follow-ups validate the fetched selection revision atomically with their
+client-run permit, so another window cannot silently change a pending launch.
+A provider 403 is returned unchanged,
 without rotating accounts. Conflicting program fields are rejected.
 The flag cannot bypass account approval or provider policy.
 
