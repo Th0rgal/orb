@@ -1317,7 +1317,52 @@ async fn native_protocol_proxy(
             );
         }
     };
+    let cyber_program = match headers.get(super::control::cyber::HEADER) {
+        Some(value) => match value.to_str() {
+            Ok(program @ ("standard" | "daybreak_blue" | "daybreak_red"))
+                if matches!(protocol, NativeProtocol::Responses) =>
+            {
+                Some(program)
+            }
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid cyber program or protocol".into(),
+                    "invalid_access_program",
+                )
+            }
+        },
+        None => None,
+    };
     let requested_model = req.model;
+    let cyber_receipt = if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        state
+            .proxy_api_keys
+            .find_by_token(token)
+            .await
+            .and_then(|key| {
+                let id = key
+                    .name
+                    .strip_prefix("remote-launch:")
+                    .and_then(|id| uuid::Uuid::parse_str(id).ok())?;
+                super::control::cyber::proxy_selection(&state.config.working_dir, id, key.id).map(
+                    |selection| {
+                        (
+                            state.config.working_dir.clone(),
+                            id,
+                            selection,
+                            requested_model.clone(),
+                        )
+                    },
+                )
+            })
+    } else {
+        None
+    };
     let is_stream = req.stream.unwrap_or(false);
     super::ai_providers::reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
     let mut standard_accounts =
@@ -1565,6 +1610,17 @@ async fn native_protocol_proxy(
         };
         let credential = credential.as_str();
         supported_entries += 1;
+        if cyber_program.is_some()
+            && (via_cli_proxy
+                || provider_type != ProviderType::OpenAI
+                || entry.model_id
+                    != requested_model
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&requested_model))
+        {
+            return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
+        }
         let rewrite_model_id = if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
         } else {
@@ -1580,6 +1636,22 @@ async fn native_protocol_proxy(
                 );
             }
         };
+        if let Some(program) = cyber_program {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&upstream_body).expect("rewritten JSON");
+            if value
+                .pointer("/access_programs/cyber")
+                .is_some_and(|existing| existing.as_str() != Some(program))
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Conflicting cyber selections; refusing to override the request.".into(),
+                    "invalid_access_program",
+                );
+            }
+            value["access_programs"] = serde_json::json!({"cyber":program});
+            upstream_body = serde_json::to_vec(&value).expect("JSON request").into();
+        }
         if direct_codex {
             let mut value: serde_json::Value =
                 serde_json::from_slice(&upstream_body).expect("rewritten JSON");
@@ -1658,6 +1730,11 @@ async fn native_protocol_proxy(
             }
         };
         let status = upstream.status();
+        if cyber_program.is_some() && status == StatusCode::FORBIDDEN {
+            let body = upstream.bytes().await.unwrap_or_default();
+            // Preserve access denials instead of rotating identities.
+            return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             let _ = upstream.bytes().await;
             state
@@ -1716,6 +1793,8 @@ async fn native_protocol_proxy(
             let upstream_stream = upstream
                 .bytes_stream()
                 .map(|item| item.map_err(|error| std::io::Error::other(error.to_string())));
+            let upstream_stream =
+                super::control::cyber::observe(upstream_stream, cyber_receipt.clone());
             let tracked_stream = track_stream_health(
                 upstream_stream,
                 state.health_tracker.clone(),

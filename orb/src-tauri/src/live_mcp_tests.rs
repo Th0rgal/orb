@@ -56,6 +56,7 @@ fn live_native_mcp_roundtrip() {
     tauri::async_runtime::block_on(async {
         let started = local_origin::local_origin_launch(
             local_agents::StartRequest {
+                cyber_access: None,
                 id: String::new(),
                 harness: harness.clone(),
                 bin: std::env::var("ORB_MCP_LIVE_BINARY").unwrap(),
@@ -211,7 +212,7 @@ fn live_native_mcp_resume() {
         .unwrap()
         .join(format!("{harness}-resume-receipt.json"));
     tauri::async_runtime::block_on(async {
-        crate::run_recovery::local_run_launch(local_agents::StartRequest {
+        crate::run_recovery::local_run_launch(local_agents::StartRequest { cyber_access: None,
             id: id.clone(), harness: harness.clone(), bin: binding["bin"].as_str().unwrap().into(),
             cwd: cwd.into(), session_id: Some(session.clone()), model: binding["model"].as_str().map(str::to_string),
             prompt: "Call sandboxed get_capabilities once again. Report the marker from your previous answer, followed by the role and mission_id from the new tool result. Do not change files or start missions.".into(), image_paths: vec![],
@@ -278,6 +279,7 @@ fn live_native_wakeup_transport() {
         .components()
         .any(|part| part.as_os_str() == "local-runs"));
     let mut request = local_agents::StartRequest {
+        cyber_access: None,
         id: id.clone(),
         harness: harness.clone(),
         bin: String::new(),

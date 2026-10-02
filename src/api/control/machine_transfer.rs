@@ -1222,12 +1222,34 @@ pub async fn local_origin(
     snapshot
         .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let cyber = snapshot.origin.cyber_access;
+    let id = snapshot.origin.id;
+    if let Some(mode) = cyber {
+        if snapshot.origin.backend != "codex" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Cyber selection requires Codex".into(),
+            ));
+        }
+        mode.program(snapshot.origin.model.as_deref().unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     let control = control_for_user(&state, &user).await;
     control
         .mission_store
         .sync_local_origin(snapshot)
         .await
         .map_err(conflict)?;
+    if let Some(mode) = cyber {
+        let _guard = DISPATCH_ADMISSION.lock().await;
+        if super::cyber::read(&state.config.working_dir, id)
+            .map_err(internal_error)?
+            .revision
+            .is_nil()
+        {
+            super::cyber::write(&state.config.working_dir, id, mode).map_err(internal_error)?;
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 

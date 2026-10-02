@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
+#[path = "../../../shared/cyber_access.rs"]
+pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 

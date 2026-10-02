@@ -55,6 +55,7 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             origin: Origin {
+                cyber_access: None,
                 id: Uuid::new_v4(),
                 run_id: Uuid::new_v4(),
                 client_id: Uuid::new_v4(),

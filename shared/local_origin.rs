@@ -10,6 +10,8 @@ pub struct Origin {
     pub project: String,
     pub backend: String,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cyber_access: Option<crate::cyber_access::Mode>,
     pub cwd: String,
     pub prompt: String,
     pub created_at: String,

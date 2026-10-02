@@ -1339,7 +1339,16 @@ async fn run_codex_turn(
         tx
     });
 
+    let cyber_access = match crate::api::control::cyber::read(app_working_dir, mission_id) {
+        Ok(selection) => selection.mode,
+        Err(error) => return continuity_failure(error),
+    };
+    if let Err(error) = crate::api::control::cyber::write(app_working_dir, mission_id, cyber_access)
+    {
+        return continuity_failure(error);
+    }
     let codex_config = crate::backend::codex::client::CodexConfig {
+        cyber_access,
         interactive,
         cli_path,
         model_effort: model_effort.map(|s| s.to_string()),

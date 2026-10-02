@@ -6,6 +6,10 @@ import { providerLimit, resetPhrase } from "./usageLimit";
 
 export type ErrorInfo = { title: string; message: string; tone?: "warning"; link?: { label: string; url: string } };
 export function describeError(raw: string, fallback = "Something went wrong"): ErrorInfo {
+  if (/access_program_not_enabled/.test(raw)) return {title:"Cyber access is not enabled",message:"The account is not approved for this program and model. Check its Daybreak access or explicitly choose Standard. The selected model has not been changed."};
+  if (/unsupported_access_program/.test(raw)) return {title:"Cyber selection is unsupported on this connection",message:"This connection cannot apply the requested program reliably. Use a supported connection, or explicitly choose Automatic. Your conversation is saved."};
+  if (/invalid_access_program/.test(raw)) return {title:"Cyber program and model are incompatible",message:"Choose a compatible cyber program or change the model. No alternative model was selected automatically."};
+  if (/cyberPolicy|cyber_policy/.test(raw)) return {title:"Request rejected by OpenAI’s cyber policy",message:"This request was restricted by the provider. Daybreak access does not allow every request. Your conversation is saved; the program has not been changed automatically."};
   const limit = providerLimit(raw);
   if (limit?.kind === "quota") return {
     tone: "warning",

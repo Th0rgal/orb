@@ -10,6 +10,7 @@
 pub(crate) mod btw_context;
 pub(crate) mod client_placement;
 pub(crate) mod continuations;
+pub mod cyber;
 pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
 #[cfg(test)]
@@ -8533,6 +8534,7 @@ pub async fn missions_integrity(
 /// Request body for creating a mission
 #[derive(Debug, Deserialize)]
 pub struct CreateMissionRequest {
+    pub cyber_access: Option<cyber::Mode>,
     pub title: Option<String>,
     /// Workspace ID to run the mission in (defaults to host workspace)
     pub workspace_id: Option<Uuid>,
@@ -10838,6 +10840,15 @@ fn verify_coalesced_attachments(
     req: &CreateMissionRequest,
     existing: &Mission,
 ) -> Result<(), (StatusCode, String)> {
+    if let Some(mode) = req.cyber_access {
+        if cyber::read(&config.working_dir, existing.id)
+            .map_err(internal_error)?
+            .mode
+            != mode
+        {
+            return Err((StatusCode::CONFLICT,"The existing mission has a different cyber selection. Use its settings or a distinct idempotency key/title.".into()));
+        }
+    }
     if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
         let saved = crate::api::mission_payload::read_sidecar(&config.working_dir, existing.id)
             .map_err(internal_error)?;
@@ -10878,6 +10889,7 @@ pub(super) async fn create_mission_inner(
     let (tx, rx) = oneshot::channel();
 
     let mut req = body.map(|b| b.0).unwrap_or(CreateMissionRequest {
+        cyber_access: None,
         title: None,
         workspace_id: None,
         agent: None,
@@ -10916,6 +10928,21 @@ pub(super) async fn create_mission_inner(
     });
 
     let parent_control = control_for_user(&state, &user).await;
+    if req.cyber_access.is_none() && req.backend.as_deref() == Some("codex") {
+        if let Some(source_id) = req.supersedes_mission_id {
+            parent_control
+                .mission_store
+                .get_mission(source_id)
+                .await
+                .map_err(internal_error)?
+                .ok_or((StatusCode::NOT_FOUND, "Source mission not found".into()))?;
+            req.cyber_access = Some(
+                cyber::read(&state.config.working_dir, source_id)
+                    .map_err(internal_error)?
+                    .mode,
+            );
+        }
+    }
     worker_location::inherit(&state, &parent_control, &mut req)
         .await
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -11827,6 +11854,16 @@ pub(super) async fn create_mission_inner(
             }
         }
     }
+    if let Some(mode) = req.cyber_access {
+        if backend.as_deref() != Some("codex") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Cyber selection is available for Codex only.".into(),
+            ));
+        }
+        mode.program(model_override.as_deref().unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     if let Err(error) = control
         .cmd_tx
         .send(ControlCommand::CreateMission {
@@ -11864,6 +11901,13 @@ pub(super) async fn create_mission_inner(
             return Err(recv_failed(error));
         }
     };
+
+    if let Some(mode) = req.cyber_access {
+        if let Err(error) = cyber::write(&state.config.working_dir, mission.id, mode) {
+            interrupt_new_mission(&control, mission.id, "cyber_settings_unavailable").await;
+            return Err(internal_error(error));
+        }
+    }
 
     // Match actor/sweep lock order before taking the PR-writer lock. The track
     // conflict path may reconcile a terminal predecessor, so admission must
@@ -13997,6 +14041,9 @@ async fn submit_leased_remote_job(
     plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
     let mut resolved_plan = plan.clone();
+    let cyber_selection = cyber::read(&state.config.working_dir, mission.id)?;
+    let cyber_selection =
+        cyber::write(&state.config.working_dir, mission.id, cyber_selection.mode)?;
     let mut project_skill_source = String::new();
     let prompt = match &mut resolved_plan {
         RemoteHarnessPlan::Codex { prompt, .. }
@@ -14106,6 +14153,10 @@ async fn submit_leased_remote_job(
             return Err("native Grok session allocation rejected by run generation fence".into());
         }
     }
+    let cyber_program = match plan {
+        RemoteHarnessPlan::Codex { model, .. } => cyber_selection.mode.program(model)?,
+        _ => None,
+    };
     let shared_token = std::env::var(&node.token_env)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -14179,6 +14230,15 @@ async fn submit_leased_remote_job(
             .create(remote_launch_key_name(mission.id))
             .await
             .map_err(|error| format!("remote launch proxy key could not be minted: {error}"))?;
+        if let Err(error) = cyber::bind_proxy(
+            &state.config.working_dir,
+            mission.id,
+            cyber_selection.revision,
+            key.id,
+        ) {
+            let _ = state.proxy_api_keys.delete(key.id).await;
+            return Err(error);
+        }
         (
             remote_execution_for_plan(plan, &api_base_url, &key.key),
             Some(key.id),
@@ -14186,6 +14246,13 @@ async fn submit_leased_remote_job(
     } else {
         (remote_execution_for_plan(plan, "", ""), None)
     };
+    if let Some(program) = cyber_program {
+        execution
+            .env
+            .get_or_insert_with(HashMap::new)
+            .insert("SANDBOXED_CYBER_PROGRAM".into(), program.into());
+    }
+
     if let Some((session_id, _)) = &claude_session {
         bind_remote_claude_session(&mut execution, session_id);
     }
@@ -18057,6 +18124,15 @@ pub async fn clone_mission(
         })?;
 
     let req = CreateMissionRequest {
+        cyber_access: if overrides.backend.as_deref().unwrap_or(&source.backend) == "codex" {
+            Some(
+                cyber::read(&state.config.working_dir, source.id)
+                    .map_err(internal_error)?
+                    .mode,
+            )
+        } else {
+            None
+        },
         title: overrides.title.or_else(|| source.title.clone()),
         workspace_id: Some(source.workspace_id),
         agent: source.agent.clone(),
