@@ -1357,6 +1357,14 @@ fn drive_codex(
     } else {
         rpc(stdin, reader, "thread/start", params)?
     };
+    let thread_id = started
+        .pointer("/thread/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "codex did not return a thread id".to_string())?
+        .to_string();
+    if let Ok(mut slot) = session_out.lock() {
+        *slot = Some(thread_id.clone());
+    }
     let resolved_model = model.or_else(|| started.get("model").and_then(Value::as_str));
     let goal_objective = prompt
         .trim()
@@ -1396,14 +1404,6 @@ fn drive_codex(
         if goal_objective.is_some() {
             return Err("unsupported_access_program: native goal continuations do not confirm per-turn cyber selection. Choose Automatic explicitly for this goal.".into());
         }
-    }
-    let thread_id = started
-        .pointer("/thread/id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "codex did not return a thread id".to_string())?
-        .to_string();
-    if let Ok(mut slot) = session_out.lock() {
-        *slot = Some(thread_id.clone());
     }
     let mut goal_mode = goal_objective.is_some();
     let plan_prompt = prompt
@@ -2488,6 +2488,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             .join("\n")
             + "\n";
         let mut sent = Vec::new();
+        let session = Mutex::new(None);
         let error = drive_codex(
             &mut sent,
             &mut std::io::Cursor::new(input),
@@ -2498,11 +2499,12 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
             "/tmp",
             None,
             &Output::default(),
-            &Mutex::new(None),
+            &session,
             &crate::interactions::begin("cyber-denial-test"),
         )
         .unwrap_err();
         assert!(error.contains("access_program_not_enabled"));
+        assert_eq!(session.lock().unwrap().as_deref(), Some("thread"));
         let sent = String::from_utf8(sent).unwrap();
         assert!(!sent.contains("turn/start"));
         assert!(!sent.contains("gpt-daybreak-blue-latest"));

@@ -386,6 +386,18 @@ async fn send_message_streaming_app_server(
                 return Err(anyhow::anyhow!("codex {} failed; no fresh-thread fallback: {}", if resumed { "thread/resume" } else { "thread/start" }, e));
             }
         };
+        // A successful creation must be durable even when access validation
+        // rejects the turn. Retrying with a corrected selection resumes this
+        // known thread instead of quarantining an ambiguous creation.
+        if let Some(lease) = native_lease.as_mut() {
+            if thread.cwd.as_deref() != Some(thread_cwd.as_str())
+                || (resumed && lease.binding.thread_id.as_deref() != Some(thread.id.as_str()))
+            {
+                session_arc.shutdown().await;
+                return Err(anyhow::anyhow!("codex_continuity_identity: native thread id/cwd does not match binding"));
+            }
+            lease.bind(&thread.id)?;
+        }
         let plan_model = plan_model.unwrap_or_default();
         cyber_program = cfg
             .cyber_access
@@ -435,15 +447,7 @@ async fn send_message_streaming_app_server(
             }
         }
         if planning && plan_model.is_empty() { return Err(anyhow::anyhow!("Codex did not resolve a model for plan mode")); }
-        if let Some(lease) = native_lease.as_mut() {
-            if thread.cwd.as_deref() != Some(thread_cwd.as_str())
-                || (resumed && lease.binding.thread_id.as_deref() != Some(thread.id.as_str()))
-            {
-                session_arc.shutdown().await;
-                return Err(anyhow::anyhow!("codex_continuity_identity: native thread id/cwd does not match binding"));
-            }
-            lease.bind(&thread.id)?;
-        }
+
 
         // Take the inbound channel before issuing any further RPC — `goal/set`
         // and `turn/start` start emitting notifications before they return.
