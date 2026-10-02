@@ -186,7 +186,8 @@ impl Harness {
             .nest("/remote-build", crate::api::remote_build::routes())
             .nest("/workspaces", crate::api::workspaces::routes())
             .route("/message", axum::routing::post(post_message))
-            .route("/queue", axum::routing::get(get_queue))
+            .route("/queue", axum::routing::get(get_queue).delete(clear_queue))
+            .route("/queue/:id", axum::routing::delete(remove_from_queue))
             .nest("/projects", crate::api::projects_overview::routes())
             .route("/missions", axum::routing::post(create_mission))
             .route("/missions/:id", axum::routing::get(get_mission))
@@ -4960,6 +4961,8 @@ struct FixtureNode {
     /// Latency the node adds before acknowledging a submission — models a
     /// loaded DGX whose accept round-trip spans a scheduler pass.
     submit_delay: Arc<std::sync::Mutex<std::time::Duration>>,
+    status_delay: Arc<std::sync::Mutex<std::time::Duration>>,
+    status_requests: Arc<std::sync::atomic::AtomicUsize>,
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -4982,6 +4985,8 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     let submissions: Arc<std::sync::Mutex<Vec<Value>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let submit_delay = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+    let status_delay = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+    let status_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log = Arc::new(std::sync::Mutex::new(String::new()));
     let app = axum::Router::new()
         .route(
@@ -5016,10 +5021,16 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
             axum::routing::get({
                 let state = state.clone();
                 let submissions = submissions.clone();
+                let status_delay = status_delay.clone();
+                let status_requests = status_requests.clone();
                 move |axum::extract::Path(job_id): axum::extract::Path<Uuid>| {
                     let state = state.clone();
                     let submissions = submissions.clone();
+                    let delay = *status_delay.lock().unwrap();
+                    let status_requests = status_requests.clone();
                     async move {
+                        status_requests.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(delay).await;
                         let state = state.lock().unwrap().clone();
                         let mission_id = submissions
                             .lock()
@@ -5100,6 +5111,8 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
         cancels,
         submissions,
         submit_delay,
+        status_delay,
+        status_requests,
         log,
         _server: server,
     }
@@ -6877,13 +6890,22 @@ async fn native_grok_auto_track_continuation(
             None,
         ))
         .unwrap();
-    let rejected = h.request(false, id, json!({"content":"continue"})).await;
-    assert_eq!(rejected.status(), StatusCode::CONFLICT);
-    assert!(rejected
-        .text()
+    let deferred = h.request(false, id, json!({"content":"continue"})).await;
+    assert_eq!(deferred.status(), StatusCode::OK);
+    let receipt: Value = deferred.json().await.unwrap();
+    assert_eq!(receipt["queued"], true);
+    let removed = h
+        .state
+        .http_client
+        .delete(format!(
+            "{}/queue/{}",
+            h.url,
+            receipt["id"].as_str().unwrap()
+        ))
+        .send()
         .await
-        .unwrap()
-        .contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
     h.state.projects.expire_lease(&conflicting.id).unwrap();
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
     // Simulate the terminal lease sweep; continuation must restore its capability.
@@ -6971,17 +6993,312 @@ async fn native_grok_auto_track_continuation(
             .unwrap()
             .requires_local_disk
     );
-    let active_followup = h
-        .request(false, id, json!({"content":"another turn"}))
-        .await;
-    assert_eq!(active_followup.status(), StatusCode::CONFLICT);
-    assert!(active_followup
-        .text()
+    let first = Uuid::new_v4();
+    let removed = Uuid::new_v4();
+    let last = Uuid::new_v4();
+    for (message, text) in [
+        (first, "first queued"),
+        (removed, "remove me"),
+        (last, "last queued"),
+        (first, "retry must not replace content"),
+    ] {
+        let reply = h
+            .request(
+                false,
+                id,
+                json!({"content":text,"client_message_id":message}),
+            )
+            .await;
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.json::<Value>().await.unwrap()["queued"], true);
+    }
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 3);
+    let read = h
+        .state
+        .http_client
+        .get(format!("{}/queue?mission_id={id}", h.url))
+        .send()
         .await
         .unwrap()
-        .contains(remote_grok::REMOTE_JOB_STILL_RUNNING));
-    assert_eq!(fixture.submissions.lock().unwrap().len(), 3);
-    assert!(store.get_mission_automations(id).await.unwrap().is_empty());
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(read.as_array().unwrap().len(), 3);
+    assert_eq!(read[0]["id"], first.to_string());
+    assert_eq!(read[0]["content"], "first queued");
+    let deleted = h
+        .state
+        .http_client
+        .delete(format!("{}/queue/{removed}", h.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        h.request(
+            false,
+            id,
+            json!({"content":"resurrect","client_message_id":removed})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    // Finishing races a retry and a new send. All accepted IDs remain FIFO;
+    // the same-id replay must never submit another job.
+    fixture.set_state("succeeded");
+    let racing = Uuid::new_v4();
+    let (retry, new) = tokio::join!(
+        h.request(
+            false,
+            id,
+            json!({"content":"retry","client_message_id":first})
+        ),
+        h.request(
+            false,
+            id,
+            json!({"content":"racing completion","client_message_id":racing})
+        )
+    );
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(new.status(), StatusCode::OK);
+    wait_until("remote FIFO drained", 40, || async {
+        remote_queue::waiting(&h.state.projects, Some(&h.user.id))
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    let jobs = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 6);
+    for (job, text) in jobs[3..]
+        .iter()
+        .zip(["first queued", "last queued", "racing completion"])
+    {
+        let command = job["payload"]["command"].as_str().unwrap();
+        assert!(
+            command.contains(&format!("--resume '{session_id}'")),
+            "{command}"
+        );
+        assert!(command.ends_with(&format!("-p '{text}'")), "{command}");
+    }
+    // Simulate process loss after node acceptance, before the queue receipt.
+    // The persisted job binding must recover even after the ledger retired.
+    h.state
+        .projects
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE remote_message_queue SET state='waiting' WHERE user_id=?1 AND message_id=?2",
+            rusqlite::params![h.user.id, first.to_string()],
+        )
+        .unwrap();
+    // Ambiguous submission cleanup can leave a matching pre-start cancelled
+    // job. Its existence is not proof that the harness received the message.
+    let bound_job = remote_queue::waiting(&h.state.projects, Some(&h.user.id)).unwrap()[0]
+        .job_id
+        .unwrap();
+    for with_ledger in [false, true] {
+        if with_ledger {
+            crate::remote_node::job_ledger::record(
+                &h.state.config.working_dir,
+                crate::remote_node::job_ledger::JobHandle {
+                    mission_id: id,
+                    node_id: fixture.node.id.clone(),
+                    job_id: bound_job,
+                    started_at: chrono::Utc::now(),
+                    submission_sequence: 0,
+                    accepted_at: Some(chrono::Utc::now()),
+                    heartbeat_at: None,
+                    disk_reservation_bytes: 0,
+                    kind: crate::remote_node::job_ledger::JobHandleKind::Mission,
+                    identity: None,
+                    wait_for_completion: None,
+                    wake_on_terminal: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for unconfirmed in ["queued", "cancelled", "failed", "lost"] {
+            fixture.set_state(unconfirmed);
+            let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
+                .await
+                .unwrap()
+                .unwrap();
+            let delivery =
+                remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first)
+                    .await;
+            assert!(delivery
+                .unwrap_err()
+                .1
+                .contains("before confirmed execution"));
+            assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
+            assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+        }
+    }
+    fixture.set_state("succeeded");
+    wait_until("recover accepted queue receipt", 10, || async {
+        !remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap()
+    })
+    .await;
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    let retry = h
+        .request(
+            false,
+            id,
+            json!({"content":"after delivery","client_message_id":first}),
+        )
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(retry["queued"], false);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    crate::remote_node::job_ledger::remove(&h.state.config.working_dir, bound_job).await;
+    // Stop must revoke queued follow-ups before a terminal observation can
+    // let the background pump start another generation.
+    fixture.set_state("running");
+    let held = h
+        .request(
+            false,
+            id,
+            json!({"content":"hold before stop", "client_message_id":Uuid::new_v4()}),
+        )
+        .await;
+    assert_eq!(held.status(), StatusCode::OK);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 7);
+    let stopped_message = Uuid::new_v4();
+    let reply = h
+        .request(
+            false,
+            id,
+            json!({"content":"do not launch after stop", "client_message_id":stopped_message}),
+        )
+        .await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, stopped_message).unwrap());
+    let _ = cancel_mission(State(h.state.clone()), Extension(h.user.clone()), Path(id))
+        .await
+        .unwrap();
+    assert!(!remote_queue::is_waiting(&h.state.projects, &h.user.id, stopped_message).unwrap());
+    fixture.set_state("succeeded");
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert_eq!(
+        fixture.submissions.lock().unwrap().len(),
+        7,
+        "Stop must not dispatch queued turns"
+    );
+    // Completed native turns may persist a native-loop accounting receipt.
+    // They must never introduce a Core-driven goal iteration automation.
+    assert!(store
+        .get_mission_automations(id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|automation| automation.driver
+            == crate::api::mission_store::AutomationDriver::HarnessLoop));
+}
+
+#[tokio::test]
+async fn remote_queue_status_wait_does_not_hold_admission() {
+    use std::sync::atomic::Ordering;
+    let fixture =
+        spawn_fixture_node("slow-queue-status", "REMOTE_QUEUE_STATUS_TOKEN", "queued").await;
+    *fixture.status_delay.lock().unwrap() = std::time::Duration::from_secs(2);
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    let mission = h.writer(MissionStatus::Failed, None).await;
+    let id = Uuid::new_v4();
+    let entry = remote_queue::Entry {
+        user_id: h.user.id.clone(),
+        node_id: fixture.node.id.clone(),
+        session_id: None,
+        job_id: Some(Uuid::new_v4()),
+        assignment: json!({}),
+        message: QueuedMessage {
+            id,
+            content: "waiting".into(),
+            mission_id: Some(mission.id),
+            agent: None,
+            source: None,
+            inflight: false,
+            queue_error: None,
+        },
+    };
+    h.state.projects.lock().unwrap().execute(
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![h.user.id,id.to_string(),mission.id.to_string(),serde_json::to_string(&entry).unwrap()],
+    ).unwrap();
+    let placement = remote_grok::RemotePlacement {
+        node_id: fixture.node.id.clone(),
+        job_id: entry.job_id.unwrap(),
+        live: false,
+    };
+    let (delivery, ()) = tokio::join!(
+        remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, mission.id, placement, id),
+        async {
+            wait_until("status query starts", 2, || async {
+                fixture.status_requests.load(Ordering::SeqCst) > 0
+            })
+            .await;
+            let _guard = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                DISPATCH_ADMISSION.lock(),
+            )
+            .await
+            .expect("node status must not hold global admission");
+            remote_queue::finish(&h.state.projects, &h.user.id, id, "deleted").unwrap();
+        }
+    );
+    assert!(delivery.is_err());
+    assert!(!remote_queue::is_waiting(&h.state.projects, &h.user.id, id).unwrap());
+}
+
+#[tokio::test]
+async fn remote_queue_retires_deleted_mission_even_with_bound_job() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Failed, None).await;
+    let id = Uuid::new_v4();
+    let entry = remote_queue::Entry {
+        user_id: h.user.id.clone(),
+        node_id: "deleted-node".into(),
+        session_id: None,
+        job_id: Some(Uuid::new_v4()),
+        assignment: json!({}),
+        message: QueuedMessage {
+            id,
+            content: "orphan".into(),
+            mission_id: Some(mission.id),
+            agent: None,
+            source: None,
+            inflight: false,
+            queue_error: None,
+        },
+    };
+    h.state.projects.lock().unwrap().execute(
+        "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![h.user.id,id.to_string(),mission.id.to_string(),serde_json::to_string(&entry).unwrap()],
+    ).unwrap();
+    h.control
+        .mission_store
+        .delete_mission(mission.id)
+        .await
+        .unwrap();
+    wait_until("deleted mission queue retired", 10, || async {
+        !remote_queue::is_waiting(&h.state.projects, &h.user.id, id).unwrap()
+    })
+    .await;
+    let state: String = h
+        .state
+        .projects
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM remote_message_queue WHERE message_id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "deleted");
 }
 
 #[tokio::test]
@@ -7716,6 +8033,7 @@ fn http_restored_scheduler_batch_retry_preserves_pending_and_consumed_state() {
                 mission_id: Some(m.id),
                 source: Some("scheduler".into()),
                 inflight,
+                queue_error: None,
             };
             let mut snapshot = Vec::new();
             if !inflight {
@@ -7728,6 +8046,7 @@ fn http_restored_scheduler_batch_retry_preserves_pending_and_consumed_state() {
                     mission_id: Some(m.id),
                     source: Some("api:test".into()),
                     inflight: false,
+                    queue_error: None,
                 });
             }
             snapshot.push(batch);

@@ -370,6 +370,26 @@ raw command:
   header `x-coalesced-with: <mission id>` and the same shape.
 - `scripts/remote-launch-canary.sh` exercises this shape against a real node.
 
+### Remote follow-up queue
+
+`POST /api/control/message` accepts content-only follow-ups for resumable native
+remote missions while their current turn runs. The response uses `queued: true`
+and preserves `client_message_id`. Core stores the inbox and delivery receipts
+in SQLite, resumes draining it on startup, and delivers one message at a time
+in insertion order on the original node and native session. It never falls back
+to a local harness or creates a replacement mission for a queued message.
+Existing restrictions on PR/explicit-track continuation and identity changes
+still apply.
+
+`GET /api/control/queue?mission_id=…` includes these rows with
+`source: "remote-queue"`; Orb displays them with a Cancel action. DELETE on
+`/api/control/queue/:message_id` withdraws a message before dispatch begins.
+Cancelled and delivered IDs remain receipts, so retrying a request cannot
+resurrect or duplicate it. A durable message-to-job binding covers a restart
+between node acceptance and transcript persistence. If acceptance cannot be
+confirmed, delivery remains paused with `queue_error` instead of submitting
+another job. Placement/session changes also pause delivery for review.
+
 ### Raw remote mission lifecycle (durable ownership)
 
 A raw remote mission never starts a local harness, so its liveness cannot be

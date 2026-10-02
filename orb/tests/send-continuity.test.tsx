@@ -53,3 +53,19 @@ it('keeps a follow-up visible through a failed request and retries with the same
  expect(view.container.querySelector('.user')).toBe(node);
  expect(screen.getAllByText('Keep my follow-up')).toHaveLength(1);
 });
+
+it('shows a remote queued follow-up once and removes it without reopening the conversation',async()=>{
+ const {getMission}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'remote-queued',status:'active',history:[],created_at:'',updated_at:''});
+ let queued=true;
+ vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+  if(options?.method==='DELETE'){queued=false;return Response.json({ok:true});}
+  if(String(url).includes('/queue?'))return Response.json(queued?[{id:'remote-message',mission_id:'remote-queued',content:'Durable remote follow-up',source:'remote-queue'}]:[]);
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ render(()=><NativeMissionView id="remote-queued" initial={{id:'remote-queued',status:'active',history:[],created_at:'',updated_at:''}}/>);
+ await waitFor(()=>expect(screen.getAllByText('Durable remote follow-up')).toHaveLength(1));
+ const {fireEvent}=await import('@solidjs/testing-library');
+ await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+ await waitFor(()=>expect(screen.queryByText('Durable remote follow-up')).toBeNull());
+});
