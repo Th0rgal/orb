@@ -219,17 +219,29 @@ class IdentityTests(unittest.TestCase):
             (root / "current").unlink(); (root / "current").symlink_to(root / "current")
             self.assertFalse(identity.active_profile_exists(root))
 
-    def test_missing_skill_requires_repair(self):
+    def test_missing_profile_artifacts_require_repair(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); generation = root / "g-000000000000"; generation.mkdir()
             (root / "current").symlink_to(generation)
             (generation / "receipt.json").write_text(json.dumps({"signing_fingerprint": identity.FINGERPRINT}))
-            for name in ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml", "skill/SKILL.md"]:
-                path = generation / name; path.parent.mkdir(exist_ok=True); path.write_text("fixture")
-            (generation / "gnupg").mkdir()
+            for name in [*identity.REQUIRED_PROFILE_FILES, "gnupg/private-keys-v1.d/test.key", "gnupg/pubring.kbx"]:
+                path = generation / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text("fixture")
             self.assertTrue(identity.active_profile_exists(root))
-            (generation / "skill/SKILL.md").unlink()
-            self.assertFalse(identity.active_profile_exists(root))
+            for name in [*identity.REQUIRED_PROFILE_FILES, "gnupg/private-keys-v1.d/test.key", "gnupg/pubring.kbx"]:
+                with self.subTest(name=name):
+                    path = generation / name; path.unlink()
+                    self.assertFalse(identity.active_profile_exists(root))
+                    path.write_text("fixture")
+
+    def test_matching_digest_repairs_failed_profile_verification(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); old = root / "old"; old.mkdir()
+            new = root / "new"; new.mkdir()
+            (root / "current").symlink_to(old)
+            bundle = self.bundle(); (root / ".bundle-digest").write_text(identity.bundle_digest(bundle))
+            with patch.object(identity, "active_profile_exists", return_value=True), patch.object(identity, "prepare_generation", return_value=new), patch.object(identity, "verify", side_effect=[RuntimeError("damaged"), {"signed_commit":"verified"}]):
+                self.assertTrue(identity.install(root, bundle)["changed"])
+            self.assertEqual((root / "current").resolve(), new.resolve())
 
     def test_container_setup_uses_rooted_endpoint_and_old_core_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:

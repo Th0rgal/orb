@@ -25,6 +25,9 @@ import urllib.error
 import uuid
 
 GENERATION_SCHEMA = 2
+REQUIRED_PROFILE_FILES = ("github-token", "gitconfig", "gitignore", "git-credential", "gpg-sign",
+                          "ssh/config", "ssh/known_hosts", "ssh/github", "ssh/github.pub",
+                          "ssh/paloma", "ssh/paloma.pub", "gh/hosts.yml", "skill/SKILL.md", "gnupg/gpg.conf")
 
 FIELDS = ("GITHUB_TOKEN", "GITHUB_SSH_PRIVATE_KEY", "GITHUB_SSH_PUBLIC_KEY",
           "GIT_SIGNING_PRIVATE_KEY", "PALOMA_SSH_PRIVATE_KEY", "PALOMA_SSH_PUBLIC_KEY")
@@ -367,9 +370,10 @@ def active_profile_exists(root):
         generation = (root / "current").resolve(strict=True)
         receipt = json.loads((generation / "receipt.json").read_text())
         return (generation.parent == root.resolve() and receipt.get("signing_fingerprint") == FINGERPRINT
-                and all((generation / name).is_file() for name in
-                        ["github-token", "gitconfig", "gpg-sign", "ssh/config", "gh/hosts.yml", "skill/SKILL.md"])
-                and (generation / "gnupg").is_dir())
+                and all((generation / name).is_file() for name in REQUIRED_PROFILE_FILES)
+                and any(path.is_file() for path in (generation / "gnupg/private-keys-v1.d").glob("*.key"))
+                and any((generation / "gnupg" / name).is_file() for name in
+                        ("pubring.kbx", "pubring.gpg", "public-keys.d/pubring.db")))
     except (OSError, ValueError, RuntimeError, AttributeError):
         return False
 
@@ -390,10 +394,17 @@ def install(root, bundle, network=True):
         digest = bundle_digest(bundle)
         marker = root / ".bundle-digest"
         if marker.exists() and marker.read_text() == digest and active_profile_exists(root):
-            report = verify(root, network)
-            publish_launchers(root)
-            atomic_json(root / "status.json", {"last_success": int(time.time()), "library_revision": bundle["library_revision"]})
-            return {"changed": False, **report}
+            try:
+                report = verify(root, network)
+            except Exception:
+                # A matching bundle digest does not prove generated files are
+                # intact. Rebuild and verify a candidate; failed verification
+                # (including an outage) still leaves the current pointer intact.
+                pass
+            else:
+                publish_launchers(root)
+                atomic_json(root / "status.json", {"last_success": int(time.time()), "library_revision": bundle["library_revision"]})
+                return {"changed": False, **report}
         stage = prepare_generation(root, bundle)
         # Verify through a separate pointer before changing the active generation.
         candidate = root / ("candidate-" + uuid.uuid4().hex)
