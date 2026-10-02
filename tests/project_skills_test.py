@@ -23,7 +23,7 @@ class ProjectSkillsTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.source = self.base / 'project'
         self.source.mkdir()
         self.cwd = self.base / 'work'
