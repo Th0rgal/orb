@@ -148,6 +148,33 @@ async fn wait_file(path: &Path) {
 }
 
 #[tokio::test]
+async fn codex_continuity_cyber_rejection_can_retry_the_known_thread() {
+    let f = Fixture::new();
+    let mut config = f.backend_config("normal", CancellationToken::new());
+    config.cyber_access = crate::cyber_access::Mode::Standard;
+    let error = match f.start(config, "first input").await {
+        Err(error) => error,
+        Ok(_) => panic!("fixture has no verified ChatGPT account"),
+    };
+    assert!(error.to_string().contains("unsupported_access_program"));
+    assert!(f.requests("turn/start").is_empty());
+    assert_eq!(
+        continuity::read(&f.config.path)
+            .unwrap()
+            .unwrap()
+            .thread_id
+            .as_deref(),
+        Some("native-thread-1")
+    );
+    f.assert_processes_stopped();
+    f.run("normal", "retry with Automatic").await;
+    assert_eq!(f.requests("thread/start").len(), 1);
+    assert_eq!(f.requests("thread/resume").len(), 1);
+    assert_eq!(f.requests("turn/start").len(), 1);
+    f.assert_processes_stopped();
+}
+
+#[tokio::test]
 async fn codex_continuity_restarts_same_native_thread_without_transcript_replay() {
     let f = Fixture::new();
     let first = f.run("normal", "framed initial instructions").await;

@@ -909,6 +909,8 @@ pub async fn operate(
 
 #[derive(Deserialize)]
 pub struct ClientRunRequest {
+    pub cyber_access: Option<cyber::Mode>,
+    pub cyber_revision: Option<Uuid>,
     pub message_id: Option<Uuid>,
     pub op: String,
     pub client_id: String,
@@ -924,6 +926,11 @@ pub async fn client_run(
     Path(id): Path<Uuid>,
     Json(req): Json<ClientRunRequest>,
 ) -> Result<Json<Value>, Error> {
+    let _admission = if req.op == "begin" {
+        Some(DISPATCH_ADMISSION.lock().await)
+    } else {
+        None
+    };
     Uuid::parse_str(&req.client_id).map_err(|_| conflict("Invalid computer identity"))?;
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
@@ -1063,6 +1070,11 @@ pub async fn client_run(
     }
     let owner = format!("orb-client:{}", req.client_id);
     if req.op == "begin" {
+        if m.backend == "codex" {
+            let saved = cyber::read(&state.config.working_dir, id).map_err(internal_error)?;
+            cyber::validate_client_selection(&saved, req.cyber_access, req.cyber_revision)
+                .map_err(conflict)?;
+        }
         let prompt = context(
             &control.mission_store,
             id,
@@ -1222,12 +1234,34 @@ pub async fn local_origin(
     snapshot
         .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let cyber = snapshot.origin.cyber_access;
+    let id = snapshot.origin.id;
+    if let Some(mode) = cyber {
+        if snapshot.origin.backend != "codex" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Cyber selection requires Codex".into(),
+            ));
+        }
+        mode.program(snapshot.origin.model.as_deref().unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    let _guard = DISPATCH_ADMISSION.lock().await;
     let control = control_for_user(&state, &user).await;
     control
         .mission_store
         .sync_local_origin(snapshot)
         .await
         .map_err(conflict)?;
+    if let Some(mode) = cyber {
+        if super::cyber::read(&state.config.working_dir, id)
+            .map_err(internal_error)?
+            .revision
+            .is_nil()
+        {
+            super::cyber::write(&state.config.working_dir, id, mode).map_err(internal_error)?;
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 

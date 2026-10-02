@@ -130,6 +130,7 @@ pub async fn fork_mission(
         "placement": if client {Some("client")}else{None},
         "workspace_id": source.workspace_id,
         "working_directory": working_directory,
+        "cyber_access": if req.backend=="codex" {Some(super::cyber::read(&state.config.working_dir,id).map_err(internal_error)?.mode)} else {None},
         "backend": req.backend,
         "agent": if changed { None } else { source.agent },
         "config_profile": if changed { None } else { source.config_profile },

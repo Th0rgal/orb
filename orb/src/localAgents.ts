@@ -1,3 +1,4 @@
+import { getCyber, requireCyberSupport, type CyberMode } from "./cyberAccess";
 import {followNative} from "./nativeInteractionStream";
 import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 /**
@@ -369,6 +370,8 @@ export async function writeLocalFiles(root: string, files: LocalFile[]): Promise
 }
 
 export interface StartLocal {
+  cyber_access?: CyberMode;
+  cyber_revision?: string;
   imagePaths?: string[];
   id: string;
   harness: string;
@@ -398,6 +401,12 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     await nativeRecoveries.get(req.id);
     await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
     if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
+    if(req.harness === "codex") {
+      await requireLocalCyber(invoke);
+      const selection = await getCyber(req.id);
+      req = {...req,cyber_access:selection.mode,cyber_revision:selection.revision};
+      if(runVersions.get(req.id)!==version)throw new Error("Local launch rejected: stopped before launch");
+    }
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
       request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
@@ -526,6 +535,7 @@ export async function localSessionGit(cwd: string): Promise<{ repository: string
 /** Initial runs have a native-generated identity and a durable synchronization journal. */
 export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {key:string;title:string;project:string;prompt:string;tags:string[]}): Promise<import("./api").Mission> {
  const invoke=tauriInvoke();if(!invoke)throw new Error("Open Orb desktop to start on this computer.");
+ if(request.harness==='codex'){await requireCyberSupport();await requireLocalCyber(invoke);}
  await import("./localWakeups").then(m=>m.replayLocalWakeupStops());
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
@@ -560,4 +570,9 @@ export async function prepareProjectSkills(project: string, cwd: string, harness
   await invoke("project_skills_prepare", {
     request: { endpoint: getApiUrl(), token: getJwt() ?? "", project, paths: [] }, cwd, harness, bin: bin ?? null,
   });
+}
+
+async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof tauriInvoke>>){
+ try {if(await invoke("local_agents_cyber_capabilities")===2)return;}catch{}
+ throw Error("Update Orb desktop before requesting a cyber program on this computer. Your selection was not silently omitted.");
 }

@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
+#[path = "../../../shared/cyber_access.rs"]
+pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 
@@ -185,6 +187,7 @@ fn main() {
             software::software_inventory,
             software::software_update,
             software::software_cancel,
+            local_agents::local_agents_cyber_capabilities,
             local_agents::local_agents_scan,
             local_agents::local_agents_workspace,
             local_agents::local_agents_directory,

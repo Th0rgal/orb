@@ -9790,3 +9790,47 @@ async fn continuation_local_upload_and_stop_keep_original_generation() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn cyber_selection_without_override_uses_codex_default_without_resuming() {
+    let h = Harness::new().await;
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("cyber default"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let Json(saved) = cyber::update(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(cyber::Change {
+            mode: cyber::Mode::Daybreak,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["mode"], "daybreak");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, MissionStatus::Paused);
+    assert_eq!(after.model_override, None);
+}

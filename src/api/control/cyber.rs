@@ -1,0 +1,488 @@
+//! Per-mission cyber selection. Provider authorization remains authoritative.
+//! Legacy missions retain automatic selection until an operator chooses a mode.
+use super::*;
+use serde::{Deserialize, Serialize};
+use std::path::{Path as FsPath, PathBuf};
+
+pub const HEADER: &str = "x-sandboxed-cyber-program";
+pub use crate::cyber_access::Mode;
+
+pub fn program_for_model(mode: Mode, model: Option<&str>) -> Result<Option<&'static str>, String> {
+    let default_model = resolve_codex_default_model();
+    mode.program(model.unwrap_or(&default_model))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Selection {
+    pub mode: Mode,
+    /// This is the requested mode, never a claim of provider confirmation.
+    pub revision: Uuid,
+}
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Automatic,
+            revision: Uuid::nil(),
+        }
+    }
+}
+fn path(root: &FsPath, id: Uuid) -> PathBuf {
+    root.join("mission-cyber").join(format!("{id}.json"))
+}
+pub fn read(root: &FsPath, id: Uuid) -> Result<Selection, String> {
+    match std::fs::read(path(root, id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+            "The mission cyber setting is unreadable; refusing to guess a program.".into()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Selection::default()),
+        Err(_) => Err("The mission cyber setting could not be read.".into()),
+    }
+}
+pub fn write(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let selection = Selection {
+        mode,
+        revision: Uuid::new_v4(),
+    };
+    let dest = path(root, id);
+    std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temp = dest.with_extension(format!("{}.tmp", selection.revision));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(&selection).unwrap())
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, &dest).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result.map(|_| selection)
+}
+fn response(selection: Selection) -> serde_json::Value {
+    serde_json::json!({"mode":selection.mode,"revision":selection.revision,"status":"requested","confirmed_program":null,
+      "note":"Selection saved for the next launch. Account authorization is checked by the provider; activation is not confirmed by a successful save."})
+}
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let mission = control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::NOT_FOUND, "Mission not found".into()))?;
+    let selection = read(&state.config.working_dir, id).map_err(internal_error)?;
+    let mut result = response(selection.clone());
+    if let Some(receipt) = std::fs::read(receipt_path(&state.config.working_dir, id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok())
+    {
+        if receipt_is_current(&mission, &selection, &receipt) {
+            result["status"] = serde_json::json!("confirmed");
+            result["confirmed_program"] = serde_json::json!(receipt.program);
+            result["confirmed_model"] = serde_json::json!(receipt.model);
+        }
+    }
+    Ok(Json(result))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Change {
+    pub mode: Mode,
+}
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(change): Json<Change>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    let control = control_for_user(&state, &user).await;
+    let mission = control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::NOT_FOUND, "Mission not found".into()))?;
+    if !matches!(
+        mission.status,
+        MissionStatus::AwaitingUser
+            | MissionStatus::Acknowledged
+            | MissionStatus::Interrupted
+            | MissionStatus::Failed
+            | MissionStatus::Paused
+            | MissionStatus::Blocked
+    ) {
+        return Err((StatusCode::CONFLICT,"Stop the current turn before changing its cyber program. Your selection has not changed.".into()));
+    }
+    if mission.backend != "codex" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cyber selection is available for Codex only.".into(),
+        ));
+    }
+    program_for_model(change.mode, mission.model_override.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(response(
+        write(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
+    )))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn access_is_separate_from_the_model() {
+        assert_eq!(
+            Mode::Daybreak.native("gpt-6.1-sol").unwrap(),
+            Some("daybreakBlue")
+        );
+        assert_eq!(
+            Mode::Daybreak.program("gpt-6-astra").unwrap(),
+            Some("daybreak_blue")
+        );
+        assert!(Mode::Standard.program("gpt-daybreak-blue-latest").is_err());
+        assert!(Mode::Daybreak.program("unrecognized-model").is_err());
+        assert_eq!(Mode::Automatic.program("any-model").unwrap(), None);
+    }
+    #[test]
+    fn provider_evidence_requires_current_execution_key() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let key = Uuid::new_v4();
+        let selection = write(root.path(), id, Mode::Standard).unwrap();
+        assert!(proxy_selection(root.path(), id, key).is_none());
+        bind_proxy(root.path(), id, selection.revision, key, "gpt-6.1-sol").unwrap();
+        assert!(proxy_selection(root.path(), id, key).is_some());
+        assert!(proxy_selection(root.path(), id, Uuid::new_v4()).is_none());
+        write(root.path(), id, Mode::Daybreak).unwrap();
+        assert!(proxy_selection(root.path(), id, key).is_none());
+    }
+    #[test]
+    fn legacy_and_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        assert_eq!(read(dir.path(), id).unwrap().mode, Mode::Automatic);
+        let saved = write(dir.path(), id, Mode::Standard).unwrap();
+        assert_eq!(read(dir.path(), id).unwrap().revision, saved.revision);
+        std::fs::write(path(dir.path(), id), b"broken").unwrap();
+        assert!(read(dir.path(), id).is_err());
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Receipt {
+    revision: Uuid,
+    requested_model: String,
+    program: String,
+    model: String,
+}
+fn receipt_is_current(mission: &Mission, selection: &Selection, receipt: &Receipt) -> bool {
+    let default_model = resolve_codex_default_model();
+    mission.backend == "codex"
+        && !client_placement::is_tagged(&mission.project.tags)
+        && receipt.revision == selection.revision
+        && mission.model_override.as_deref().unwrap_or(&default_model) == receipt.requested_model
+}
+fn receipt_path(root: &FsPath, id: Uuid) -> PathBuf {
+    path(root, id).with_extension("receipt.json")
+}
+/// Only structured provider metadata can confirm activation. Assistant text is
+/// never evidence, and an old model/selection receipt cannot confirm a new one.
+fn confirmation(value: &serde_json::Value) -> Option<(&str, &str)> {
+    if !matches!(
+        value["type"].as_str(),
+        Some("response.created" | "response.completed")
+    ) {
+        return None;
+    }
+    let program = value.pointer("/response/access_programs/cyber")?.as_str()?;
+    if !matches!(program, "standard" | "daybreak_blue" | "daybreak_red") {
+        return None;
+    }
+    Some((program, value.pointer("/response/model")?.as_str()?))
+}
+pub fn observe(
+    inner: impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+    receipt: Option<(PathBuf, Uuid, Selection, String)>,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    use futures::StreamExt;
+    async_stream::stream! {
+        let mut inner=std::pin::pin!(inner);
+        let mut line=Vec::new(); let mut oversized=false; let mut recorded=false;
+        while let Some(chunk)=inner.next().await {
+            if let (Some((root,id,selection,requested_model)),Ok(bytes))=(&receipt,&chunk) {
+                if !recorded {
+                    for b in bytes {
+                        if *b==b'\n' {
+                            if !oversized {
+                                if let Some(data)=line.strip_prefix(b"data: ") {
+                                    if let Ok(value)=serde_json::from_slice::<serde_json::Value>(data) {
+                                        if let Some((program,model))=confirmation(&value) {
+                                            if selection.mode.program(requested_model).ok().flatten().is_none_or(|requested|requested==program) {
+                                                let record=Receipt{revision:selection.revision,requested_model:requested_model.clone(),program:program.into(),model:model.into()};
+                                                let dest=receipt_path(root,*id);let tmp=dest.with_extension(format!("{}.tmp",Uuid::new_v4()));
+                                                if std::fs::write(&tmp,serde_json::to_vec(&record).unwrap()).is_ok(){let _=std::fs::rename(&tmp,dest);}let _=std::fs::remove_file(&tmp);
+                                                recorded=true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            line.clear();oversized=false;
+                        } else if !oversized { if line.len()<65536 {line.push(*b);} else {line.clear();oversized=true;} }
+                    }
+                }
+            }
+            yield chunk;
+        }
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use futures::StreamExt;
+    #[tokio::test]
+    async fn only_provider_metadata_confirms_and_chunks_are_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let selection = write(root.path(), id, Mode::Standard).unwrap();
+        let payload=b"data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6.1-sol\",\"access_programs\":{\"cyber\":\"standard\"}}}\n\n";
+        let chunks: Vec<_> = payload
+            .chunks(7)
+            .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+            .collect();
+        let stream = observe(
+            futures::stream::iter(chunks),
+            Some((
+                root.path().into(),
+                id,
+                selection.clone(),
+                "gpt-6.1-sol".into(),
+            )),
+        );
+        let output: Vec<_> = stream.collect().await;
+        assert_eq!(
+            output
+                .into_iter()
+                .flat_map(|c| c.unwrap().to_vec())
+                .collect::<Vec<_>>(),
+            payload
+        );
+        let receipt: Receipt =
+            serde_json::from_slice(&std::fs::read(receipt_path(root.path(), id)).unwrap()).unwrap();
+        assert_eq!(receipt.revision, selection.revision);
+        assert_eq!(receipt.program, "standard");
+        let assistant =
+            serde_json::json!({"type":"response.output_text.delta","delta":"Daybreak is active"});
+        assert!(confirmation(&assistant).is_none());
+        let changed = write(root.path(), id, Mode::Daybreak).unwrap();
+        assert_ne!(receipt.revision, changed.revision);
+    }
+}
+
+/// Key names are user-controlled labels. Only an execution-issued binding can
+/// attribute provider evidence to a mission.
+pub fn bind_proxy(
+    root: &FsPath,
+    id: Uuid,
+    revision: Uuid,
+    key: Uuid,
+    model: &str,
+) -> Result<(), String> {
+    let dest = path(root, id).with_extension("binding.json");
+    let temp = dest.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    std::fs::write(&temp, serde_json::to_vec(&(revision, key, model)).unwrap())
+        .map_err(|e| e.to_string())?;
+    let result = std::fs::rename(&temp, dest).map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(temp);
+    result
+}
+pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<(Selection, String)> {
+    let selection = read(root, id).ok()?;
+    let binding: (Uuid, Uuid, String) =
+        serde_json::from_slice(&std::fs::read(path(root, id).with_extension("binding.json")).ok()?)
+            .ok()?;
+    (binding.0 == selection.revision && binding.1 == key).then_some((selection, binding.2))
+}
+
+pub async fn capabilities() -> Json<serde_json::Value> {
+    Json(
+        serde_json::json!({"version":2,"request_field":"cyber_access","native_goals_explicit":false}),
+    )
+}
+
+/// Checked under dispatch admission together with acquiring the client lease.
+pub fn validate_client_selection(
+    saved: &Selection,
+    mode: Option<Mode>,
+    revision: Option<Uuid>,
+) -> Result<(), String> {
+    if mode == Some(saved.mode) && revision == Some(saved.revision) {
+        return Ok(());
+    }
+    if mode.is_none() && revision.is_none() && saved.mode == Mode::Automatic {
+        return Ok(());
+    }
+    Err("Cyber selection changed or this client cannot honor it. Reload before launching; no turn was started.".into())
+}
+
+/// The transport hint cannot override the operator's execution-bound selection.
+pub fn enforce_proxy_selection(
+    selection: Option<&Selection>,
+    model: &str,
+    header: Option<&str>,
+    body_program: Option<&serde_json::Value>,
+) -> Result<Option<&'static str>, String> {
+    let Some(selection) = selection else {
+        return if header.is_some() || body_program.is_some() {
+            Err("Explicit cyber programs require an execution-bound key".into())
+        } else {
+            Ok(None)
+        };
+    };
+    let expected = selection.mode.program(model)?;
+    if header.is_some_and(|value| Some(value) != expected)
+        || body_program.is_some_and(|value| value.as_str() != expected || expected.is_none())
+    {
+        return Err("Cyber request conflicts with the saved mission selection".into());
+    }
+    Ok(expected)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    #[test]
+    fn execution_selection_cannot_be_escalated_or_omitted() {
+        let saved = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        assert_eq!(
+            enforce_proxy_selection(Some(&saved), "gpt-6.1-sol", None, None).unwrap(),
+            Some("standard")
+        );
+        assert!(
+            enforce_proxy_selection(Some(&saved), "gpt-6.1-sol", Some("daybreak_blue"), None)
+                .is_err()
+        );
+        assert!(enforce_proxy_selection(
+            Some(&saved),
+            "gpt-6.1-sol",
+            None,
+            Some(&serde_json::json!("daybreak_blue"))
+        )
+        .is_err());
+        assert!(enforce_proxy_selection(None, "gpt-6.1-sol", Some("standard"), None).is_err());
+        assert!(enforce_proxy_selection(
+            None,
+            "gpt-6.1-sol",
+            None,
+            Some(&serde_json::json!("daybreak_blue"))
+        )
+        .is_err());
+        assert!(enforce_proxy_selection(None, "gpt-6.1-sol", None, None).is_ok());
+        assert!(enforce_proxy_selection(
+            Some(&Selection::default()),
+            "gpt-6.1-sol",
+            Some("daybreak_blue"),
+            None
+        )
+        .is_err());
+    }
+    #[tokio::test]
+    async fn default_model_receipt_confirms_only_current_codex_remote_execution() {
+        let store = mission_store::InMemoryMissionStore::new();
+        let mut mission = store
+            .create_mission(None, None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let selection = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        let receipt = Receipt {
+            revision: selection.revision,
+            requested_model: resolve_codex_default_model(),
+            program: "standard".into(),
+            model: resolve_codex_default_model(),
+        };
+        assert!(receipt_is_current(&mission, &selection, &receipt));
+        mission.project.tags.push(client_placement::TAG.into());
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.project.tags.clear();
+        mission.backend = "claudecode".into();
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.backend = "codex".into();
+        mission.model_override = Some("another-model".into());
+        assert!(!receipt_is_current(&mission, &selection, &receipt));
+        mission.model_override = None;
+        assert!(!receipt_is_current(
+            &mission,
+            &Selection::default(),
+            &receipt
+        ));
+    }
+
+    #[tokio::test]
+    async fn coalescing_preserves_legacy_defaults_and_successor_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::new(dir.path().to_path_buf());
+        let store = mission_store::InMemoryMissionStore::new();
+        let mut existing = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        existing.backend = "codex".into();
+        let mut req: CreateMissionRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        write(dir.path(), existing.id, Mode::Standard).unwrap();
+        assert_eq!(
+            verify_coalesced_attachments(&config, &req, &existing)
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        existing.backend = "claudecode".into();
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        existing.backend = "codex".into();
+        req.cyber_access = Some(Mode::Standard);
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        req.cyber_access = None;
+        let source = Uuid::new_v4();
+        write(dir.path(), source, Mode::Standard).unwrap();
+        req.supersedes_mission_id = Some(source);
+        assert!(verify_coalesced_attachments(&config, &req, &existing).is_ok());
+        req.cyber_access = Some(Mode::Automatic);
+        assert_eq!(
+            verify_coalesced_attachments(&config, &req, &existing)
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn client_permit_rejects_stale_or_unadvertised_selection() {
+        let saved = Selection {
+            mode: Mode::Standard,
+            revision: Uuid::new_v4(),
+        };
+        assert!(validate_client_selection(&saved, Some(saved.mode), Some(saved.revision)).is_ok());
+        assert!(validate_client_selection(&saved, Some(saved.mode), Some(Uuid::new_v4())).is_err());
+        assert!(
+            validate_client_selection(&saved, Some(Mode::Daybreak), Some(saved.revision)).is_err()
+        );
+        assert!(validate_client_selection(&saved, None, None).is_err());
+        assert!(validate_client_selection(&Selection::default(), None, None).is_ok());
+    }
+}

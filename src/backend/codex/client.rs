@@ -19,6 +19,7 @@ pub struct CodexConfig {
     pub model_effort: Option<String>,
     /// Enable Codex's higher-throughput ChatGPT credit tier for supported models.
     pub fast_mode: bool,
+    pub cyber_access: crate::api::control::cyber::Mode,
     /// ChatGPT OAuth account supplied by the host app. When set, the app-server
     /// uses external `chatgptAuthTokens` mode and asks the host to refresh.
     pub external_chatgpt_auth: Option<CodexExternalChatgptAuth>,
@@ -49,6 +50,7 @@ impl Default for CodexConfig {
             default_model: None,
             model_effort: None,
             fast_mode: false,
+            cyber_access: Default::default(),
             external_chatgpt_auth: None,
             cancel_token: None,
             extra_env: std::collections::HashMap::new(),

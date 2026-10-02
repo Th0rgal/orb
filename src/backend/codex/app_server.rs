@@ -182,6 +182,8 @@ pub struct ThreadGoalGetResponse {
 
 #[derive(Debug, Serialize)]
 pub struct TurnStartParams {
+    #[serde(rename = "cyberAccessProgram", skip_serializing_if = "Option::is_none")]
+    pub cyber_access_program: Option<String>,
     #[serde(rename = "collaborationMode", skip_serializing_if = "Option::is_none")]
     pub collaboration_mode: Option<Value>,
     #[serde(rename = "threadId")]
@@ -499,7 +501,7 @@ impl AppServerSession {
     }
 
     /// Send a request and await the response.
-    async fn request<P: Serialize, R: for<'de> Deserialize<'de>>(
+    pub(crate) async fn request<P: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: P,
@@ -790,6 +792,7 @@ mod tests {
     #[test]
     fn turn_start_params_serialize_threadid_camelcase() {
         let p = TurnStartParams {
+            cyber_access_program: None,
             collaboration_mode: None,
             thread_id: "abc".to_string(),
             input: vec![UserInputItem::Text {

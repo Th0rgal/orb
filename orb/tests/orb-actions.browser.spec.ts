@@ -48,6 +48,7 @@ async function setup(page: Page, options: Options = {}) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if(path === "/api/control/cyber-capabilities") return route.fulfill({json:{version:2}});
     if(path === "/api/model-routing/chains") return route.fulfill({json:[{id:"builtin/smart",name:"Smart (Default)"}]});
     if (path === "/api/control/missions" && request.method() === "POST") {
       posts.push(request.postDataJSON());
@@ -252,7 +253,7 @@ test("new file: traversal is refused and an existing name is never overwritten",
 
 test("composer effort: shown after harness and model for Codex, and sent on create", async ({ page }) => {
   const { posts } = await setup(page);
-  const picks = page.locator(".picks .model");
+  const picks = page.locator(".picks .model:not(.cyber-pill)");
   await expect(picks).toHaveText(["Codex", "GPT-6 Astra", "Default"]);
 
   await picks.nth(2).click();
@@ -267,11 +268,12 @@ test("composer effort: shown after harness and model for Codex, and sent on crea
   expect(posts[0].backend).toBe("codex");
   expect(posts[0].model_override).toBe("gpt-6-astra");
   expect(posts[0].model_effort).toBe("high");
+  expect(posts[0].cyber_access).toBe("standard");
 });
 
 test("composer effort: absent for a harness the core ignores effort for, and reset on switch", async ({ page }) => {
   const { posts } = await setup(page);
-  const picks = page.locator(".picks .model");
+  const picks = page.locator(".picks .model:not(.cyber-pill)");
 
   await picks.nth(2).click();
   await page.locator(".picks .menu").getByRole("button", { name: /Max/ }).first().click();
@@ -281,15 +283,15 @@ test("composer effort: absent for a harness the core ignores effort for, and res
   // control disappears rather than offering a level that would be dropped.
   await picks.nth(0).click();
   await page.locator(".picks .menu").getByRole("button", { name: "OpenCode" }).click();
-  await expect(page.locator(".picks .model")).toHaveText(["OpenCode", "Smart (Default)"]);
+  await expect(page.locator(".picks .model:not(.cyber-pill)")).toHaveText(["OpenCode", "Smart (Default)"]);
 
   // Returning to Codex does not resurrect the dropped level.
-  await page.locator(".picks .model").nth(0).click();
+  await page.locator(".picks .model:not(.cyber-pill)").nth(0).click();
   await page.locator(".picks .menu").getByRole("button", { name: "Codex" }).click();
-  await expect(page.locator(".picks .model").nth(2)).toHaveText(/Default/);
+  await expect(page.locator(".picks .model:not(.cyber-pill)").nth(2)).toHaveText(/Default/);
 
   // ...and a launch on the effort-less harness omits the field entirely.
-  await page.locator(".picks .model").nth(0).click();
+  await page.locator(".picks .model:not(.cyber-pill)").nth(0).click();
   await page.locator(".picks .menu").getByRole("button", { name: "OpenCode" }).click();
   await page.getByPlaceholder("Describe a task, / for commands, @ for context").fill("ship it");
   await page.keyboard.press("Enter");

@@ -1317,7 +1317,80 @@ async fn native_protocol_proxy(
             );
         }
     };
+    let cyber_program = match headers.get(super::control::cyber::HEADER) {
+        Some(value) => match value.to_str() {
+            Ok(program @ ("standard" | "daybreak_blue" | "daybreak_red"))
+                if matches!(protocol, NativeProtocol::Responses) =>
+            {
+                Some(program)
+            }
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid cyber program or protocol".into(),
+                    "invalid_access_program",
+                )
+            }
+        },
+        None => None,
+    };
     let requested_model = req.model;
+    let execution_key = if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        state.proxy_api_keys.find_by_token(token).await
+    } else {
+        None
+    };
+    let mission_key_id = execution_key
+        .as_ref()
+        .and_then(|key| key.name.strip_prefix("remote-launch:"))
+        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+    let bound = mission_key_id.and_then(|id| {
+        super::control::cyber::proxy_selection(
+            &state.config.working_dir,
+            id,
+            execution_key.as_ref().unwrap().id,
+        )
+        .map(|pair| (id, pair))
+    });
+    if let Some(id) = mission_key_id {
+        // Pre-feature live keys have no selection. Preserve their existing automatic transport.
+        let legacy = super::control::cyber::read(&state.config.working_dir, id)
+            .is_ok_and(|s| s.revision.is_nil());
+        if bound.is_none() && !legacy {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "This mission execution key is stale".into(),
+                "invalid_access_program",
+            );
+        }
+    }
+    let cyber_receipt = bound
+        .map(|(id, (selection, model))| (state.config.working_dir.clone(), id, selection, model));
+    if let Some((_, _, _, model)) = &cyber_receipt {
+        if matches!(protocol, NativeProtocol::Responses) && model != &requested_model {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "The execution key is bound to another model".into(),
+                "invalid_access_program",
+            );
+        }
+    }
+    let parsed_body: serde_json::Value = serde_json::from_slice(&body).expect("validated request");
+    let cyber_program = match super::control::cyber::enforce_proxy_selection(
+        cyber_receipt.as_ref().map(|(_, _, selection, _)| selection),
+        &requested_model,
+        cyber_program,
+        parsed_body.pointer("/access_programs/cyber"),
+    ) {
+        Ok(program) => program,
+        Err(error) => {
+            return error_response(StatusCode::BAD_REQUEST, error, "invalid_access_program")
+        }
+    };
     let is_stream = req.stream.unwrap_or(false);
     super::ai_providers::reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
     let mut standard_accounts =
@@ -1565,6 +1638,17 @@ async fn native_protocol_proxy(
         };
         let credential = credential.as_str();
         supported_entries += 1;
+        if cyber_program.is_some()
+            && (via_cli_proxy
+                || provider_type != ProviderType::OpenAI
+                || entry.model_id
+                    != requested_model
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&requested_model))
+        {
+            return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
+        }
         let rewrite_model_id = if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
         } else {
@@ -1580,6 +1664,22 @@ async fn native_protocol_proxy(
                 );
             }
         };
+        if let Some(program) = cyber_program {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&upstream_body).expect("rewritten JSON");
+            if value
+                .pointer("/access_programs/cyber")
+                .is_some_and(|existing| existing.as_str() != Some(program))
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Conflicting cyber selections; refusing to override the request.".into(),
+                    "invalid_access_program",
+                );
+            }
+            value["access_programs"] = serde_json::json!({"cyber":program});
+            upstream_body = serde_json::to_vec(&value).expect("JSON request").into();
+        }
         if direct_codex {
             let mut value: serde_json::Value =
                 serde_json::from_slice(&upstream_body).expect("rewritten JSON");
@@ -1658,6 +1758,11 @@ async fn native_protocol_proxy(
             }
         };
         let status = upstream.status();
+        if cyber_program.is_some() && status == StatusCode::FORBIDDEN {
+            let body = upstream.bytes().await.unwrap_or_default();
+            // Preserve access denials instead of rotating identities.
+            return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             let _ = upstream.bytes().await;
             state
@@ -1716,6 +1821,8 @@ async fn native_protocol_proxy(
             let upstream_stream = upstream
                 .bytes_stream()
                 .map(|item| item.map_err(|error| std::io::Error::other(error.to_string())));
+            let upstream_stream =
+                super::control::cyber::observe(upstream_stream, cyber_receipt.clone());
             let tracked_stream = track_stream_health(
                 upstream_stream,
                 state.health_tracker.clone(),
