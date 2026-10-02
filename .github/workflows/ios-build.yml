@@ -23,15 +23,11 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Pinned so CI and local regeneration produce byte-identical pbxproj output.
-  # The committed project.pbxproj must be regenerated with exactly this version.
-  XCODEGEN_VERSION: 2.46.0
 
 jobs:
   ios-build:
     name: iOS Build
-    # macos-15 ships Xcode 16 (project.yml xcodeVersion 16, iOS deployment
-    # target 18) — older images lack the iOS 18 SDK.
+    # Use the runner’s current Xcode, including the iOS 26 SDK.
     runs-on: macos-15
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -41,22 +37,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install xcodegen (pinned)
-        run: |
-          set -euo pipefail
-          curl -fsSL -o "${RUNNER_TEMP}/xcodegen.zip" \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
-          unzip -oq "${RUNNER_TEMP}/xcodegen.zip" -d "${RUNNER_TEMP}"
-          "${RUNNER_TEMP}/xcodegen/bin/xcodegen" --version
-
-      - name: Regenerate Xcode project and check for drift
-        run: |
-          set -euo pipefail
-          "${RUNNER_TEMP}/xcodegen/bin/xcodegen" generate
-          if ! git diff --exit-code SandboxedDashboard.xcodeproj/project.pbxproj; then
-            echo "::error title=pbxproj drift::project.pbxproj is out of date. Regenerate with xcodegen ${XCODEGEN_VERSION} ('xcodegen generate' in ios_dashboard/) and commit the result."
-            exit 1
-          fi
+      - name: Regenerate Xcode project using the Xcode Cloud hook
+        env:
+          CI_PRIMARY_REPOSITORY_PATH: ${{ github.workspace }}
+        run: bash ci_scripts/ci_post_clone.sh
 
       - name: Build (compile-only, no signing)
         run: |
