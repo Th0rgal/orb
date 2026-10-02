@@ -7097,6 +7097,39 @@ async fn native_grok_auto_track_continuation(
         .unwrap();
     assert_eq!(retry["queued"], false);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    // Stop must revoke queued follow-ups before a terminal observation can
+    // let the background pump start another generation.
+    fixture.set_state("running");
+    let held = h
+        .request(
+            false,
+            id,
+            json!({"content":"hold before stop", "client_message_id":Uuid::new_v4()}),
+        )
+        .await;
+    assert_eq!(held.status(), StatusCode::OK);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 7);
+    let stopped_message = Uuid::new_v4();
+    let reply = h
+        .request(
+            false,
+            id,
+            json!({"content":"do not launch after stop", "client_message_id":stopped_message}),
+        )
+        .await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, stopped_message).unwrap());
+    let _ = cancel_mission(State(h.state.clone()), Extension(h.user.clone()), Path(id))
+        .await
+        .unwrap();
+    assert!(!remote_queue::is_waiting(&h.state.projects, &h.user.id, stopped_message).unwrap());
+    fixture.set_state("succeeded");
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert_eq!(
+        fixture.submissions.lock().unwrap().len(),
+        7,
+        "Stop must not dispatch queued turns"
+    );
     // Completed native turns may persist a native-loop accounting receipt.
     // They must never introduce a Core-driven goal iteration automation.
     assert!(store

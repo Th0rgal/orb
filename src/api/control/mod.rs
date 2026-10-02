@@ -25454,6 +25454,19 @@ async fn control_actor_loop(
                                 }
                             }
                         }
+                        // The actor already holds DISPATCH_ADMISSION. Fence
+                        // durable follow-ups before stopping the current run,
+                        // so a timer snapshot cannot restart an explicit Stop.
+                        if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                            let cleared = async {
+                                let _file = dispatch_admission::durable_lock(&config).await?;
+                                remote_queue::cancel_all(&state.projects, &session_user_id, Some(mission_id))
+                            }.await;
+                            if let Err(error) = cleared {
+                                let _ = respond.send(Err(format!("Failed to cancel remote follow-ups: {error}")));
+                                continue;
+                            }
+                        }
                         if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
                             let _ = respond.send(Err(format!("Failed to fence mission wake-ups: {error}")));
                             continue;
