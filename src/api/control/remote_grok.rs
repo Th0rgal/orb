@@ -1418,7 +1418,15 @@ async fn continue_inner(
                 ))?;
                 let token = std::env::var(&node.token_env).map_err(internal)?;
                 match RemoteNodeClient::default().get_job(node, &token, job).await {
-                    Ok(status) if status.job_id == job && status.mission_id == mission_id => true,
+                    Ok(status) if status.job_id == job && status.mission_id == mission_id => {
+                        if status.started_at.is_none()
+                            && matches!(status.state.as_str(), "cancelled" | "failed" | "lost")
+                        {
+                            return Err((StatusCode::CONFLICT,
+                                "The remote job ended before confirmed execution. Your message is preserved; delivery is paused to avoid losing or duplicating it.".into()));
+                        }
+                        true
+                    },
                     Ok(_) => {
                         return Err((StatusCode::CONFLICT, "Remote job identity mismatch".into()))
                     }

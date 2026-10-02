@@ -7080,6 +7080,22 @@ async fn native_grok_auto_track_continuation(
             rusqlite::params![h.user.id, first.to_string()],
         )
         .unwrap();
+    // Ambiguous submission cleanup can leave a matching pre-start cancelled
+    // job. Its existence is not proof that the harness received the message.
+    fixture.set_state("cancelled");
+    let placement = remote_grok::placement(&h.state.config.working_dir, &store, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let delivery =
+        remote_grok::deliver_queued(&h.state, &h.control, &h.user.id, id, placement, first).await;
+    assert!(delivery
+        .unwrap_err()
+        .1
+        .contains("before confirmed execution"));
+    assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap());
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
+    fixture.set_state("succeeded");
     wait_until("recover accepted queue receipt", 10, || async {
         !remote_queue::is_waiting(&h.state.projects, &h.user.id, first).unwrap()
     })
