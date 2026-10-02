@@ -3642,11 +3642,22 @@ fn belongs_to_a_mission(cgroup: &str, own_cgroup: &str) -> bool {
             .map(str::trim)
             .map(str::to_owned)
     };
-    match path(cgroup) {
-        Some(process) => {
-            process.starts_with("/missions.slice/") || path(own_cgroup).as_deref() == Some(&process)
+    match (path(cgroup), path(own_cgroup)) {
+        (Some(process), Some(own)) => {
+            // A compute node may share this host and the installed MCP binary.
+            // Its accepted jobs survive Core's restart; recycling their MCP
+            // launcher instead terminates Codex as an unrecoverable transport
+            // failure. Leave those companions on their existing inode.
+            process.starts_with("/missions.slice/")
+                || process == own
+                || process.split('/').any(|unit| {
+                    unit == "sandboxed-node.service"
+                        || (unit.starts_with("sandboxed-node@") && unit.ends_with(".service"))
+                        || (unit.starts_with("sandboxed-node-job-") && unit.ends_with(".scope"))
+                })
         }
-        None => false,
+        // Missing/unrecognized cgroup data is not proof of safe ownership.
+        _ => true,
     }
 }
 
@@ -3670,7 +3681,28 @@ mod companion_recycling_tests {
             "0::/system.slice/hermes-assistant.service\n",
             own
         ));
-        assert!(!belongs_to_a_mission("", own));
+        assert!(belongs_to_a_mission("", own));
+        assert!(belongs_to_a_mission(
+            "0::/system.slice/hermes-assistant.service\n",
+            ""
+        ));
+    }
+
+    #[test]
+    fn colocated_node_companions_survive_core_deployment() {
+        let own = "0::/system.slice/sandboxed-sh-prod.service\n";
+        for group in [
+            "/system.slice/sandboxed-node.service",
+            "/system.slice/sandboxed-node.service/job-123",
+            "/system.slice/sandboxed-node@sepolia.service/job-123",
+            "/user.slice/user-996.slice/user@996.service/app.slice/sandboxed-node-job-cd158650d29d4830a4a0207bb45dd681.scope",
+        ] {
+            assert!(belongs_to_a_mission(&format!("0::{group}\n"), own));
+        }
+        assert!(!belongs_to_a_mission(
+            "0::/system.slice/not-sandboxed-node.service\n",
+            own
+        ));
     }
 }
 
