@@ -1246,6 +1246,7 @@ pub async fn local_origin(
         mode.program(snapshot.origin.model.as_deref().unwrap_or(""))
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
+    let _guard = DISPATCH_ADMISSION.lock().await;
     let control = control_for_user(&state, &user).await;
     control
         .mission_store
@@ -1253,7 +1254,6 @@ pub async fn local_origin(
         .await
         .map_err(conflict)?;
     if let Some(mode) = cyber {
-        let _guard = DISPATCH_ADMISSION.lock().await;
         if super::cyber::read(&state.config.working_dir, id)
             .map_err(internal_error)?
             .revision
