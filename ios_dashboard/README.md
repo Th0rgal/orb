@@ -79,10 +79,16 @@ In multi-user mode, the login screen also asks for a username.
 The project uses XcodeGen to generate the Xcode project from `project.yml`. For Xcode Cloud builds:
 
 1. The `ci_scripts/ci_post_clone.sh` script automatically runs after cloning
-2. It installs XcodeGen from GitHub releases (with Homebrew as a fallback) and generates `SandboxedDashboard.xcodeproj`
+2. It downloads the pinned XcodeGen 2.46.0 release (matching GitHub iOS CI), generates `SandboxedDashboard.xcodeproj`, and fails if the generated project differs from the committed project.
 3. Configure your Xcode Cloud workflow to use:
    - **Scheme**: `SandboxedDashboard`
    - **Project**: `ios_dashboard/SandboxedDashboard.xcodeproj`
+   - **Branch**: `master`
+   - **Archive action**: distribute to the existing TestFlight group
+
+GitHub’s `iOS Build` workflow only compiles the app without signing. A successful
+GitHub run does not indicate a TestFlight upload. Verify the Xcode Cloud build’s
+commit SHA and the processed build in App Store Connect after each release.
 
 ## Project Structure
 
