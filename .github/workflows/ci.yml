@@ -179,6 +179,7 @@ jobs:
           scripts/test_retag_project_missions.py
           scripts/test_storage_inventory.py
           scripts/test_remote_codex_app_server.py
+          scripts/test_development_identity.py
 
       - name: Test project skill preparation and ownership
         run: |

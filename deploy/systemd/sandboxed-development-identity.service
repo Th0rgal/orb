@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconcile Paloma development credentials from Bitwarden
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/sandboxed-sh/development_identity.py sync --config /etc/sandboxed-sh/development-identity/config.json --apply
+# Individual SSH, subprocess and API operations have bounded deadlines.
+# Let every target run even when earlier containers consume their deadlines.
+TimeoutStartSec=0
+Nice=10
