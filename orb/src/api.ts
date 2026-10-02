@@ -799,6 +799,8 @@ export async function createMission(body: CreateMissionBody): Promise<Mission> {
 }
 
 export interface QueuedMessage {
+  queue_error?: string | null;
+  source?: string | null;
   id: string;
   content: string;
   /** Durable run-start proof, independent of mission busy/terminal status. */

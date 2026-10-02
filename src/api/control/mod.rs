@@ -19,6 +19,7 @@ pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
 pub(crate) mod remote_grok;
+mod remote_queue;
 pub(crate) mod usage_limit_wait;
 pub(crate) mod worker_location;
 #[cfg(test)]
@@ -4126,6 +4127,8 @@ pub struct QueuedMessage {
     /// interrupted and an explicit resume is required.
     #[serde(default)]
     pub inflight: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_error: Option<String>,
 }
 
 /// A scheduler batch keeps one transport entry, but every original receipt ID
@@ -4176,6 +4179,7 @@ fn serialize_queue_snapshot(
             mission_id: *target_mid,
             source: source.clone(),
             inflight: false,
+            queue_error: None,
         })
         .collect();
     let mut runners: Vec<_> = parallel_runners.iter().collect();
@@ -4194,6 +4198,7 @@ fn serialize_queue_snapshot(
                 mission_id: Some(*mission_id),
                 source: message.source.clone(),
                 inflight: durably_started,
+                queue_error: None,
             });
         }
         items.extend(runner.queue.iter().map(|message| QueuedMessage {
@@ -4203,6 +4208,7 @@ fn serialize_queue_snapshot(
             mission_id: Some(*mission_id),
             source: message.source.clone(),
             inflight: false,
+            queue_error: None,
         }));
     }
     let mut consumed: Vec<_> = recovered_consumed.values().cloned().collect();
@@ -4760,7 +4766,9 @@ impl ControlHub {
     }
 
     pub(crate) fn bind_admission_state(&self, state: &Arc<AppState>) {
-        let _ = self.admission_state.set(Arc::downgrade(state));
+        if self.admission_state.set(Arc::downgrade(state)).is_ok() {
+            remote_queue::start(Arc::downgrade(state));
+        }
         self.admission_ready.notify_waiters();
     }
 
@@ -5484,21 +5492,28 @@ pub async fn post_message(
                 } else {
                     content
                 };
-            // Public follow-ups can continue the native session on its node.
-            // Internal actor routes retain their fence against local execution.
-            remote_grok::continue_on_node(
+            remote_queue::enqueue(
                 &state,
                 &control,
                 &user.id,
                 mid,
-                placement,
-                Some(content),
-                Some(id),
+                placement.clone(),
+                content,
+                id,
             )
             .await?;
+            // Idle continuations retain their immediate-delivery behavior.
+            // A racing dispatch or temporary failure leaves the durable entry
+            // queued for the same-node retry loop.
+            if !placement.live {
+                let _ = remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
+                    .await;
+            }
+            let queued =
+                remote_queue::is_waiting(&state.projects, &user.id, id).map_err(internal_error)?;
             return Ok(Json(ControlMessageResponse {
                 id,
-                queued: false,
+                queued,
                 message_accepted: true,
                 mission_id: Some(mid),
                 previous_execution: None,
@@ -6080,6 +6095,12 @@ pub async fn get_queue(
             "failed to get queue".to_string(),
         )
     })?;
+    queue.extend(
+        remote_queue::waiting(&state.projects, Some(&user.id))
+            .map_err(internal_error)?
+            .into_iter()
+            .map(|row| row.message),
+    );
     if let Some(mid) = query.mission_id {
         let mission = control
             .mission_store
@@ -6121,6 +6142,7 @@ pub async fn get_queue(
                             mission_id: entry.mission_id,
                             source: entry.source.clone(),
                             inflight: entry.inflight,
+                            queue_error: None,
                         });
                     }
                 }
@@ -6146,6 +6168,7 @@ pub async fn get_queue(
                         mission_id: Some(mid),
                         source: Some("scheduler".into()),
                         inflight: false,
+                        queue_error: None,
                     })
                     .collect();
                 let delivered: HashSet<Uuid> = queue
@@ -6170,6 +6193,22 @@ pub async fn remove_from_queue(
     Path(message_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    {
+        let _guard = DISPATCH_ADMISSION.lock().await;
+        let _file = dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(internal_error)?;
+        if remote_queue::finish(&state.projects, &user.id, message_id, "cancelled")
+            .map_err(internal_error)?
+        {
+            return Ok(ok_json());
+        }
+        if remote_queue::is_waiting(&state.projects, &user.id, message_id)
+            .map_err(internal_error)?
+        {
+            return Err((StatusCode::CONFLICT,"Delivery has already started; this message can no longer be removed from the queue".into()));
+        }
+    }
     let (tx, rx) = oneshot::channel();
     control
         .cmd_tx
@@ -6209,6 +6248,14 @@ pub async fn clear_queue(
     Query(query): Query<ClearQueueQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    let remote_cleared = {
+        let _guard = DISPATCH_ADMISSION.lock().await;
+        let _file = dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(internal_error)?;
+        remote_queue::cancel_all(&state.projects, &user.id, query.mission_id)
+            .map_err(internal_error)?
+    };
     let (tx, rx) = oneshot::channel();
     control
         .cmd_tx
@@ -6224,7 +6271,9 @@ pub async fn clear_queue(
             "failed to clear queue".to_string(),
         )
     })?;
-    Ok(Json(serde_json::json!({ "ok": true, "cleared": cleared })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "cleared": cleared + remote_cleared }),
+    ))
 }
 
 // ==================== Mission Endpoints ====================
@@ -12409,6 +12458,7 @@ pub(super) async fn create_mission_inner(
                     remote_node_id,
                     remote_plan,
                     None,
+                    None,
                 )
                 .await
             }
@@ -13966,6 +14016,7 @@ async fn dispatch_remote_job(
     remote_node_id: &str,
     plan: &RemoteHarnessPlan,
     scheduled_origin: Option<(Option<Uuid>, Uuid)>,
+    queue_delivery: Option<(&str, Uuid)>,
 ) -> Result<Mission, String> {
     let node = crate::remote_node::placement_for_selected_node(
         &state.config.remote_nodes,
@@ -14000,6 +14051,9 @@ async fn dispatch_remote_job(
         }
     }
     let dispatched = async {
+        if let Some((user, id)) = queue_delivery {
+            remote_queue::bind_job(&state.projects, user, id, Some(job_id))?;
+        }
         if let Some((message, previous_job)) = scheduled_origin {
             control
                 .mission_store
@@ -14009,6 +14063,18 @@ async fn dispatch_remote_job(
         submit_leased_remote_job(state, control, mission, node, job_id, plan).await
     }
     .await;
+    if dispatched.is_err() {
+        // No recovery handle means preflight/definitive rejection, before a
+        // possible node acceptance. Ambiguous submits retain their binding.
+        if let Some((user, id)) = queue_delivery {
+            if matches!(crate::remote_node::job_ledger::load(&state.config.working_dir).await,Ok(handles) if handles.iter().all(|handle|handle.job_id!=job_id))
+            {
+                if let Err(error) = remote_queue::bind_job(&state.projects, user, id, None) {
+                    tracing::warn!(%error,"Could not clear rejected queue job binding");
+                }
+            }
+        }
+    }
     if dispatched.is_err() {
         if let Err(error) = finish_remote_job_lease(
             control.mission_store.as_ref(),
@@ -26402,6 +26468,7 @@ async fn control_actor_loop(
                                 mission_id: *target_mid,
                                 source: source.clone(),
                                 inflight: false,
+                                queue_error: None,
                             })
                             .collect();
                         // Also collect queued messages from parallel runners
@@ -26414,6 +26481,7 @@ async fn control_actor_loop(
                                     mission_id: Some(*mid),
                                     source: qm.source.clone(),
                                     inflight: false,
+                                    queue_error: None,
                                 });
                             }
                         }
@@ -38151,6 +38219,7 @@ Investigate <service/> failures.
                 mission_id: Some(Uuid::new_v4()),
                 source: None,
                 inflight: false,
+                queue_error: None,
             },
             QueuedMessage {
                 id: inflight_id,
@@ -38159,6 +38228,7 @@ Investigate <service/> failures.
                 mission_id: Some(Uuid::new_v4()),
                 source: Some("task-board".into()),
                 inflight: true,
+                queue_error: None,
             },
         ]);
 
@@ -38194,6 +38264,7 @@ Investigate <service/> failures.
                 mission_id: Some(Uuid::new_v4()),
                 source: Some("scheduler".into()),
                 inflight,
+                queue_error: None,
             };
             let (pending, consumed) = partition_restored_control_messages(vec![entry]);
             let restored = pending.first().or_else(|| consumed.first()).unwrap();

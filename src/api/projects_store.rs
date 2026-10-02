@@ -81,6 +81,17 @@ pub const TRACK_VERIFIER_CLASSES: [&str; 5] =
     ["external_state", "command", "review", "operator", "manual"];
 
 pub(crate) const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_message_queue (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ user_id TEXT NOT NULL,
+ message_id TEXT NOT NULL,
+ mission_id TEXT NOT NULL,
+ payload TEXT NOT NULL,
+ state TEXT NOT NULL DEFAULT 'waiting',
+ UNIQUE(user_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);
+
 CREATE TABLE IF NOT EXISTS project_bindings (
     slug               TEXT PRIMARY KEY NOT NULL,
     control_session_id TEXT NOT NULL,

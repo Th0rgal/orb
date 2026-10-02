@@ -1173,7 +1173,7 @@ async fn persist_turn_prompt(
     prompt: &str,
     source: &str,
     message_id: Option<Uuid>,
-) {
+) -> Result<(), String> {
     let event = AgentEvent::UserMessage {
         id: message_id.unwrap_or_else(Uuid::new_v4),
         content: prompt.to_string(),
@@ -1181,10 +1181,9 @@ async fn persist_turn_prompt(
         mission_id: Some(mission_id),
         source: Some(source.to_string()),
     };
-    if let Err(error) = owner.mission_store.log_event(mission_id, &event).await {
-        tracing::warn!(%mission_id, %error, "remote grok turn prompt could not be persisted");
-    }
+    owner.mission_store.log_event(mission_id, &event).await?;
     owner.send(event);
+    Ok(())
 }
 
 // ─── Placement + remote continuation of existing missions ────────────────────
@@ -1332,6 +1331,44 @@ pub(crate) async fn continue_on_node(
     content: Option<String>,
     message_id: Option<Uuid>,
 ) -> Result<Mission, (StatusCode, String)> {
+    continue_inner(
+        state, control, user_id, mission_id, placement, content, message_id, false,
+    )
+    .await
+}
+
+pub(super) async fn deliver_queued(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    user_id: &str,
+    mission_id: Uuid,
+    placement: RemotePlacement,
+    id: Uuid,
+) -> Result<Mission, (StatusCode, String)> {
+    continue_inner(
+        state,
+        control,
+        user_id,
+        mission_id,
+        placement,
+        None,
+        Some(id),
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn continue_inner(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    user_id: &str,
+    mission_id: Uuid,
+    _placement: RemotePlacement,
+    mut content: Option<String>,
+    message_id: Option<Uuid>,
+    queued: bool,
+) -> Result<Mission, (StatusCode, String)> {
     let _admission = super::DISPATCH_ADMISSION.lock().await;
     let _file_guard = super::dispatch_admission::durable_lock(&state.config)
         .await
@@ -1350,6 +1387,76 @@ pub(crate) async fn continue_on_node(
                 format!("Mission {mission_id} not found"),
             )
         })?;
+    // Refresh under the admission lock: an HTTP/timer placement snapshot may
+    // precede another dispatch or the completion of the previous generation.
+    let placement = placement(&state.config.working_dir, &store, mission_id)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::CONFLICT, "Remote placement disappeared".into()))?;
+    if queued {
+        let entry = super::remote_queue::validate(
+            &state.projects,
+            user_id,
+            message_id.unwrap(),
+            &mission,
+            &placement.node_id,
+        )
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+        if let Some(job) = entry.job_id {
+            // A crash may occur between node acceptance and the prompt event.
+            // Ask about the bound job, never create a second job for that ID.
+            let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
+                .await
+                .map_err(internal)?;
+            let handle = handles.iter().find(|h| h.job_id == job);
+            let accepted = if handle.is_some_and(|h| h.accepted_at.is_some()) {
+                true
+            } else {
+                let node = state.config.remote_nodes.node(&entry.node_id).ok_or((
+                    StatusCode::CONFLICT,
+                    "Queued message node is no longer configured".into(),
+                ))?;
+                let token = std::env::var(&node.token_env).map_err(internal)?;
+                match RemoteNodeClient::default().get_job(node, &token, job).await {
+                    Ok(status) if status.job_id == job && status.mission_id == mission_id => true,
+                    Ok(_) => {
+                        return Err((StatusCode::CONFLICT, "Remote job identity mismatch".into()))
+                    }
+                    Err(error) if error.is_not_found() => return Err((StatusCode::CONFLICT,"Cannot confirm whether the previous job accepted this message. Delivery is paused to avoid sending it twice.".into())),
+                    Err(error) => return Err(internal(error)),
+                }
+            };
+            if accepted {
+                persist_turn_prompt(
+                    &RemoteMissionOwner::live(control),
+                    mission_id,
+                    entry.message.content.trim(),
+                    &format!("api:{user_id}"),
+                    message_id,
+                )
+                .await
+                .map_err(internal)?;
+                super::remote_queue::finish(
+                    &state.projects,
+                    user_id,
+                    message_id.unwrap(),
+                    "accepted",
+                )
+                .map_err(internal)?;
+                return Ok(mission);
+            }
+        }
+        content = Some(entry.message.content);
+    } else if super::remote_queue::waiting(&state.projects, Some(user_id))
+        .map_err(internal)?
+        .iter()
+        .any(|row| row.message.mission_id == Some(mission_id))
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Remote follow-ups are already queued".into(),
+        ));
+    }
     if let Some(id) = message_id {
         // The process may have died after accepted dispatch but before writing
         // the prompt event or replying to the scheduler. The persisted binding
@@ -1371,6 +1478,21 @@ pub(crate) async fn continue_on_node(
                             && handle.accepted_at.is_some()
                     });
             if accepted {
+                if queued {
+                    persist_turn_prompt(
+                        &RemoteMissionOwner::live(control),
+                        mission_id,
+                        content.as_deref().unwrap_or_default().trim(),
+                        &format!("api:{user_id}"),
+                        message_id,
+                    )
+                    .await
+                    .map_err(internal)?;
+                }
+                if queued {
+                    super::remote_queue::finish(&state.projects, user_id, id, "accepted")
+                        .map_err(internal)?;
+                }
                 return Ok(mission);
             }
         }
@@ -1382,6 +1504,10 @@ pub(crate) async fn continue_on_node(
             .iter()
             .any(|event| event.event_id.as_deref() == Some(expected.as_str()))
         {
+            if queued {
+                super::remote_queue::finish(&state.projects, user_id, id, "accepted")
+                    .map_err(internal)?;
+            }
             return Ok(mission);
         }
     }
@@ -1656,6 +1782,7 @@ pub(crate) async fn continue_on_node(
         &placement.node_id,
         &plan,
         Some((message_id, placement.job_id)),
+        queued.then(|| (user_id, message_id.unwrap())),
     )
     .await
     {
@@ -1668,7 +1795,13 @@ pub(crate) async fn continue_on_node(
             return Err((StatusCode::CONFLICT, message));
         }
     };
-    persist_turn_prompt(&owner, mission.id, &history_prompt, &source, message_id).await;
+    persist_turn_prompt(&owner, mission.id, &history_prompt, &source, message_id)
+        .await
+        .map_err(internal)?;
+    if queued {
+        super::remote_queue::finish(&state.projects, user_id, message_id.unwrap(), "accepted")
+            .map_err(internal)?;
+    }
     Ok(resumed)
 }
 
