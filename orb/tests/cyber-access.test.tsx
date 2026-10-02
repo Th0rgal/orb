@@ -23,6 +23,7 @@ describe('cyber selection',()=>{
  });
  it('preserves access denial and cyber policy as distinct errors',()=>{
   expect(describeError('403 access_program_not_enabled').title).toBe('Cyber access is not enabled');
+  expect(describeError("unexpected status 403 Forbidden: Daybreak isn't available for this model. Turn off Daybreak or choose another model.").title).toBe('Daybreak is unavailable for this account or model');
   expect(describeError('cyberPolicy').title).toContain('policy');
   expect(describeError('unsupported_access_program').title).toContain('unsupported');
  });
