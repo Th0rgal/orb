@@ -245,6 +245,9 @@ pub(crate) struct GrokStream {
     pub(crate) stop_reason: Option<String>,
     pub(crate) ended: bool,
     pub(crate) native_goal_status: Option<String>,
+    /// Explicit decision from the native driver after reading the persisted goal.
+    /// Missing receipts retain the legacy fail-closed goal classification.
+    codex_ordinary_turn: bool,
     pub(crate) auth_required: bool,
     pub(crate) error: Option<String>,
     pub(crate) json_events: u64,
@@ -332,6 +335,10 @@ impl GrokStream {
         // Codex exec emits native thread/turn/item events. Keep the thread id
         // for continuation on the same node and preserve tool/text ordering.
         let kind = value["type"].as_str().unwrap_or_default();
+        if kind == "execution.mode" {
+            self.codex_ordinary_turn = value["mode"].as_str() == Some("turn");
+            return;
+        }
         if kind == "goal.status" {
             if let Some(status) = value["status"].as_str() {
                 self.native_goal_status = Some(status.to_string());
@@ -1039,7 +1046,8 @@ impl NativeGrokObserver {
                 Some("end_turn" | "EndTurn")
             );
         let codex_goal = self.mission.backend == "codex"
-            && (self.mission.goal_mode || self.stream.native_goal_status.is_some());
+            && (self.stream.native_goal_status.is_some()
+                || (self.mission.goal_mode && !self.stream.codex_ordinary_turn));
         // Raw remote commands predate stream-json. Require a Claude result only
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
@@ -2333,6 +2341,86 @@ mod tests {
         assert_eq!(updates.last(), Some(&StreamUpdate::End));
         stream.feed("{\"type\":\"turn.failed\",\"error\":{\"message\":\"rate limited\"}}\n");
         assert_eq!(stream.error.as_deref(), Some("rate limited"));
+    }
+
+    #[tokio::test]
+    async fn codex_followup_verdict_uses_native_execution_mode() {
+        use crate::api::mission_store::SqliteMissionStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "codex-followup")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("results?"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        // Missing receipts and actual native stop states must remain fail-closed.
+        for (mode, goal_status, exit_code, ended, expected_success) in [
+            (Some("turn"), None, 0, true, true),
+            (Some("turn"), None, 1, true, false),
+            (Some("turn"), None, 0, false, false),
+            (None, None, 0, true, false),
+            (Some("unknown"), None, 0, true, false),
+            (Some("goal"), None, 0, true, false),
+            (Some("goal"), Some("complete"), 0, true, true),
+            (Some("goal"), Some("blocked"), 0, true, false),
+            (Some("goal"), Some("paused"), 0, true, false),
+            (Some("goal"), Some("budgetLimited"), 0, true, false),
+            (Some("goal"), Some("usageLimited"), 0, true, false),
+            (Some("turn"), Some("blocked"), 0, true, false),
+        ] {
+            let job_id = Uuid::new_v4();
+            let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job_id)
+                .await
+                .unwrap();
+            observer.mission.goal_mode = true;
+            observer.streaming = LogStreaming::Supported;
+            if let Some(mode) = mode {
+                observer.stream.feed(&format!(
+                    "{}\n",
+                    serde_json::json!({"type":"execution.mode", "mode":mode})
+                ));
+            }
+            if let Some(status) = goal_status {
+                observer.stream.feed(&format!(
+                    "{}\n",
+                    serde_json::json!({"type":"goal.status", "status":status})
+                ));
+            }
+            observer.stream.feed("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"answer\",\"text\":\"Both tasks passed.\"}}\n");
+            if ended {
+                observer.stream.feed("{\"type\":\"turn.completed\"}\n");
+            }
+            let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+                "job_id":job_id, "mission_id":mission.id, "state":"succeeded",
+                "exit_code":exit_code, "created_at":"2026-10-02T21:29:10Z"
+            }))
+            .unwrap();
+            let verdict = observer.verdict(&status, "old-agent").await;
+            assert_eq!(
+                verdict.success, expected_success,
+                "mode={mode:?}, goal={goal_status:?}, exit={exit_code}, ended={ended}"
+            );
+            if expected_success {
+                assert_eq!(verdict.content, "Both tasks passed.");
+                assert_eq!(verdict.status_reason, "remote_node_job");
+            }
+        }
     }
 
     #[test]

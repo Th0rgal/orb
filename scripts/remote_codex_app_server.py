@@ -214,6 +214,9 @@ class NativeSession:
             return
         action = goal_action(goal, self.config['prompt'])
         self.goal = action is not None
+        # Mission goal_mode is historical. Tell Core what this invocation actually
+        # runs after reconciling the native goal, including follow-ups after completion.
+        emit('execution.mode', mode='goal' if self.goal else 'turn')
         # Restored stop snapshots precede this explicit activation.
         self.deferred = [m for m in self.deferred if m.get('method') not in ('thread/goal/updated', 'thread/goal/cleared')]
         if self.goal:
