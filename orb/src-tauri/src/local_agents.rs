@@ -573,10 +573,15 @@ fn spawn_harness(
 
 // A durable create-new marker also fences retries after an Orb restart or lost stdout.
 // Only a confirmed OS spawn failure may release it; a known native ID can resume.
-fn claim_antigravity_attempt(root: &std::path::Path, id: &str, session: Option<&str>) -> Result<Option<PathBuf>, String> {
+fn claim_antigravity_attempt(root: &std::path::Path, id: &str, cwd: &std::path::Path, session: Option<&str>) -> Result<Option<PathBuf>, String> {
     if session.is_some_and(|id| !id.trim().is_empty()) { return Ok(None); }
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    let name: String = id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    use sha2::{Digest, Sha256};
+    let mut key = Sha256::new();
+    key.update(id.as_bytes());
+    key.update([0]);
+    key.update(cwd.canonicalize().map_err(|e| e.to_string())?.as_os_str().as_encoded_bytes());
+    let name = format!("{:x}", key.finalize());
     let path = root.join(name);
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
         .map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists {
@@ -593,7 +598,7 @@ fn spawn_antigravity(
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    let claim = claim_antigravity_attempt(&PathBuf::from(home).join(".orb/antigravity-attempts"), &request.id, request.session_id.as_deref())?;
+    let claim = claim_antigravity_attempt(&PathBuf::from(home).join(".orb/antigravity-attempts"), &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
     let mut command = mission_command(request, env);
     let mut child = command.current_dir(&request.cwd)
         .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))
@@ -2307,12 +2312,14 @@ mod tests {
     #[test]
     fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
         let root = tempfile::tempdir().unwrap();
-        let marker = claim_antigravity_attempt(root.path(), "mission", None).unwrap().unwrap();
+        let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None).unwrap().unwrap();
         assert!(marker.is_file());
-        assert!(claim_antigravity_attempt(root.path(), "mission", None).is_err());
-        assert!(claim_antigravity_attempt(root.path(), "mission", Some("")).is_err());
-        assert!(claim_antigravity_attempt(root.path(), "mission", Some("native-id")).unwrap().is_none());
-        assert!(claim_antigravity_attempt(root.path(), "other", None).is_ok());
+        let destination = tempfile::tempdir().unwrap();
+        assert!(claim_antigravity_attempt(root.path(), "mission", destination.path(), None).is_ok());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), None).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("")).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("native-id")).unwrap().is_none());
+        assert!(claim_antigravity_attempt(root.path(), "other", root.path(), None).is_ok());
     }
 
     #[test]
