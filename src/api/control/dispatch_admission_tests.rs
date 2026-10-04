@@ -6183,6 +6183,30 @@ async fn poll_loop_surfaces_terminal_outcome_after_operator_interruption() {
         .unwrap()
         .iter()
         .all(|handle| handle.job_id != job_id));
+    // A concurrent recovery observer can still hold this already-settled receipt.
+    poll_remote_job(
+        &working_dir,
+        RemoteMissionOwner::live(&h.control),
+        h.state.fleet.clone(),
+        crate::remote_node::RemoteNodeClient::default(),
+        fixture.node.clone(),
+        "fixture-token".into(),
+        mission.id,
+        job_id,
+        chrono::Utc::now(),
+    )
+    .await;
+    let notes = store
+        .get_events(mission.id, Some(&["assistant_message"]), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|event| event.content.contains("after the mission left Active"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

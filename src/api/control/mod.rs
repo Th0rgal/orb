@@ -15655,20 +15655,44 @@ async fn poll_remote_job(
                             continue;
                         }
                     } else {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            job_id = %job_id,
-                            node = %node.id,
-                            state = %status.state,
-                            "remote job reached a terminal state after operator interruption; preserving mission status"
-                        );
-                        // The status is preserved, but the outcome must still
-                        // be visible in the mission's durable history; the
-                        // incident mission had no record at all of what
-                        // happened to its node job. Log once, then settle
-                        // the observer's lease with the node's verdict.
-                        if !preserved_terminal_noted {
-                            let note = AgentEvent::AssistantMessage {
+                        // The live observer may have already settled this receipt while
+                        // recovery was polling it. Fence notes as well as status updates.
+                        let _admission = DISPATCH_ADMISSION.lock().await;
+                        let _file = match dispatch_admission::durable_lock_root(ledger_dir).await {
+                            Ok(lock) => lock,
+                            Err(error) => {
+                                tracing::warn!(%mission_id, %job_id, %error, "Cannot fence remote terminal note");
+                                continue;
+                            }
+                        };
+                        let active = match owner
+                            .mission_store
+                            .get_active_mission_run(mission_id)
+                            .await
+                        {
+                            Ok(active) => active,
+                            Err(error) => {
+                                tracing::warn!(%mission_id, %job_id, %error, "Cannot inspect remote terminal note ownership");
+                                continue;
+                            }
+                        };
+                        if active
+                            .is_some_and(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+                        {
+                            tracing::info!(
+                                mission_id = %mission_id,
+                                job_id = %job_id,
+                                node = %node.id,
+                                state = %status.state,
+                                "remote job reached a terminal state after operator interruption; preserving mission status"
+                            );
+                            // The status is preserved, but the outcome must still
+                            // be visible in the mission's durable history; the
+                            // incident mission had no record at all of what
+                            // happened to its node job. Log once, then settle
+                            // the observer's lease with the node's verdict.
+                            if !preserved_terminal_noted {
+                                let note = AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: format!(
                                     "Remote node '{}' job {} reached state '{}' (exit {:?}) after the mission left Active ({}); the mission status is preserved.{}\n\nlog tail:\n{}",
@@ -15697,26 +15721,27 @@ async fn poll_remote_job(
                                 resumable: false,
                                 completion_evidence: None,
                             };
-                            if let Err(error) =
-                                owner.mission_store.log_event(mission_id, &note).await
+                                if let Err(error) =
+                                    owner.mission_store.log_event(mission_id, &note).await
+                                {
+                                    tracing::warn!(%mission_id, %job_id, %error,
+                                    "remote terminal note persistence failed; retaining ownership and retrying");
+                                    continue;
+                                }
+                                owner.send(note);
+                                preserved_terminal_noted = true;
+                            }
+                            if let Err(error) = finish_remote_job_lease(
+                                owner.mission_store.as_ref(),
+                                mission_id,
+                                job_id,
+                                &format!("remote_job_{}", status.state),
+                            )
+                            .await
                             {
                                 tracing::warn!(%mission_id, %job_id, %error,
-                                    "remote terminal note persistence failed; retaining ownership and retrying");
-                                continue;
-                            }
-                            owner.send(note);
-                            preserved_terminal_noted = true;
-                        }
-                        if let Err(error) = finish_remote_job_lease(
-                            owner.mission_store.as_ref(),
-                            mission_id,
-                            job_id,
-                            &format!("remote_job_{}", status.state),
-                        )
-                        .await
-                        {
-                            tracing::warn!(%mission_id, %job_id, %error,
                                 "remote job run lease could not be finished after preserved interruption");
+                            }
                         }
                     }
                     if let Err(error) = crate::remote_node::job_ledger::finalize_with_artifacts(
