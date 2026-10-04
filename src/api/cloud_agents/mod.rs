@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub mod chatgpt;
 pub mod cursor;
 pub mod grok;
+pub mod hermes;
 pub mod http;
 pub mod usage;
 pub mod worker;
@@ -15,6 +16,7 @@ pub enum Provider {
     Chatgpt,
     GrokBot,
     CursorCloud,
+    Hermes,
 }
 impl Provider {
     pub fn backend(self) -> &'static str {
@@ -22,6 +24,7 @@ impl Provider {
             Self::Chatgpt => "cloud_chatgpt",
             Self::GrokBot => "cloud_grok_bot",
             Self::CursorCloud => "cloud_cursor",
+            Self::Hermes => "cloud_hermes",
         }
     }
 }
@@ -87,6 +90,8 @@ pub struct ModelParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub model_params: Vec<ModelParam>,
     #[serde(default)]
     pub model: Option<String>,
@@ -104,6 +109,7 @@ pub struct Turn {
 impl Turn {
     pub fn new(key: String, prompt: String) -> Self {
         Self {
+            session_id: None,
             model: None,
             model_params: vec![],
             key,

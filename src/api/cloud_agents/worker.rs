@@ -2,7 +2,12 @@ use super::*;
 use crate::api::mission_store::MissionStore;
 use std::{sync::Arc, time::Duration};
 /// Spawned once with the owning Core session. Orb is only an observer.
-pub fn start(store: Arc<dyn MissionStore>, app_dir: std::path::PathBuf) {
+pub fn start(
+    store: Arc<dyn MissionStore>,
+    app_dir: std::path::PathBuf,
+    config: crate::config::Config,
+    user_id: String,
+) {
     tokio::spawn(async move {
         let mut active = std::collections::HashMap::<Uuid, tokio::task::JoinHandle<()>>::new();
         loop {
@@ -16,6 +21,8 @@ pub fn start(store: Arc<dyn MissionStore>, app_dir: std::path::PathBuf) {
                     }
                     let store = store.clone();
                     let dir = app_dir.clone();
+                    let config = config.clone();
+                    let user_id = user_id.clone();
                     active.insert(
                         row.mission_id,
                         tokio::spawn(async move {
@@ -23,6 +30,8 @@ pub fn start(store: Arc<dyn MissionStore>, app_dir: std::path::PathBuf) {
                                 super::chatgpt::tick(&store, row, &dir).await
                             } else if row.selection.provider == Provider::GrokBot {
                                 super::grok::tick(&store, row).await
+                            } else if row.selection.provider == Provider::Hermes {
+                                super::hermes::tick(&store, row, &config, &user_id).await
                             } else {
                                 tick(&store, row).await
                             };

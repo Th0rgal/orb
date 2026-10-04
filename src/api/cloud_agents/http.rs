@@ -107,6 +107,7 @@ pub async fn accounts(
             }
         }
     }
+    accounts.push(hermes::account(&state, &user.id).await);
     Json(accounts)
 }
 pub async fn options(Extension(user): Extension<AuthUser>) -> Result<Json<Value>, Error> {
@@ -365,7 +366,8 @@ pub async fn follow_up(
     if let Some(value) = &model {
         match execution.selection.provider {
             Provider::Chatgpt => validate_chatgpt_model(value).map_err(bad)?,
-            Provider::CursorCloud => {
+            Provider::Hermes if value.len() <= 200 => {}
+            Provider::CursorCloud | Provider::Hermes => {
                 if value.is_empty() || value.len() > 200 {
                     return Err(bad("Invalid model identifier"));
                 }
@@ -459,7 +461,7 @@ pub async fn cancel(
     let mut e = find(&store, id).await?;
     if !matches!(
         e.selection.provider,
-        Provider::CursorCloud | Provider::GrokBot
+        Provider::CursorCloud | Provider::GrokBot | Provider::Hermes
     ) {
         return Err(bad("Cancellation is not supported by this connector"));
     }

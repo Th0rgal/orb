@@ -8,8 +8,8 @@ import {mergeById,pollWhileVisible} from './poll';
 import './providerUsage.css';
 
 type AccountUsage={windows:{label:string;used_percent:number}[];details:{label:string;used_percent:number}[];reset_at?:string;reset_at_ms?:string;source:string};
-const services:CloudProvider[]=['chatgpt','cursor_cloud','grok_bot'];
-const dashboards:Record<CloudProvider,string>={chatgpt:'https://chatgpt.com/',cursor_cloud:'https://cursor.com/dashboard/usage',grok_bot:'https://grok.com/'};
+const services:CloudProvider[]=['chatgpt','cursor_cloud','grok_bot','hermes'];
+const dashboards:Partial<Record<CloudProvider,string>>={chatgpt:'https://chatgpt.com/',cursor_cloud:'https://cursor.com/dashboard/usage',grok_bot:'https://grok.com/'};
 export function cloudAccountStatus(account:CloudAccount):string {
  if(account.available)return 'Available';
  if(/RequiresLogin|reconnect|login|sign.?in/i.test(account.reason??''))return 'Reconnect';
@@ -42,7 +42,7 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
  const [open,setOpen]=createSignal(false),[error,setError]=createSignal('');
  const available=()=>p.accounts.filter(a=>a.available).length;
  const label=()=>p.accounts.length>1?`${available()} of ${p.accounts.length} profiles available`:cloudAccountStatus(p.accounts[0]);
- const visit=async()=>{try{await openExternalUrl(dashboards[p.provider]);setError('');}catch(e){setError(String(e));}};
+ const visit=async()=>{try{await openExternalUrl(dashboards[p.provider]!);setError('');}catch(e){setError(String(e));}};
  return <div class="p-acc-wrap"><button class="s-row p-acc p-acc-btn" aria-expanded={open()} onClick={()=>setOpen(!open())}>
   <ProviderLogo type={p.provider}/><div class="s-row-text"><div class="s-row-title cloud-provider-title">{cloudNames[p.provider]}<Show when={p.accounts.some(a=>a.experimental)}><span class="cloud-experimental-icon" title="Experimental connector" aria-label="Experimental connector"><FlaskIcon size={14}/></span></Show></div><div class="s-row-desc"><span class={`p-st ${available()?'connected':'needs_reauth'}`}>{label()}</span></div></div><span class={`chev p-acc-chev ${open()?'open':''}`}>›</span>
  </button><Show when={open()}><div class="p-acc-body">
@@ -53,7 +53,7 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
    <Show when={p.usage?.details?.length}><details class="cloud-usage-breakdown"><summary>Usage breakdown</summary><For each={p.usage?.details}>{w=><ProviderUsageMeter label={w.label} usedPct={w.used_percent}/>}</For></details></Show>
    <Show when={p.usage?.reset_at||p.usage?.reset_at_ms}>{reset=><p class="cloud-provider-note">Resets {new Date(p.usage?.reset_at??Number(reset())).toLocaleDateString()}</p>}</Show>
   </Show>
-  <div class="p-acc-actions"><button class="s-btn" onClick={()=>void visit()}>{p.provider==='cursor_cloud'?'View usage in Cursor':`Open ${cloudNames[p.provider]}`} ↗</button></div>
+  <Show when={dashboards[p.provider]}><div class="p-acc-actions"><button class="s-btn" onClick={()=>void visit()}>{p.provider==='cursor_cloud'?'View usage in Cursor':`Open ${cloudNames[p.provider]}`} ↗</button></div></Show>
   <Show when={error()}><p class="s-row-desc c-red" role="alert">{error()}</p></Show>
  </div></Show></div>;
 }

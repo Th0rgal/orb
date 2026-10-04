@@ -45,6 +45,7 @@ import { projects as seed, LOREM_REPLY, type Agent, type Block, type Turn } from
 import * as Ic from "./icons";
 import { ForkMission } from "./ForkMission";
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
+import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
@@ -1261,7 +1262,7 @@ export default function App() {
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
     const mission = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
-    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(mission.title) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
+    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(mission.title) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;
@@ -1731,7 +1732,7 @@ export default function App() {
             <Match when={currentMissionId()}>
               {(id) => (
                 <>
-                  <SessionPreview data={sessionPreview()} plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined} goal={!!missionGoal(openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()))} />
+                  <Show when={sessionPreview().destination === "Paloma"}><ProviderLogo type="hermes" /></Show><SessionPreview data={sessionPreview()} plan={previewPlan()?.id === id() ? previewPlan()?.data : undefined} goal={!!missionGoal(openMission()?.id === id() ? openMission() : missions().find((m) => m.id === id()))} />
                 </>
               )}
             </Match>
@@ -2331,7 +2332,7 @@ function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
   const [error, setError] = createSignal("");
   onMount(() => { if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e))); });
-  return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} /></Show>}</Show>;
+  return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show>}</Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {

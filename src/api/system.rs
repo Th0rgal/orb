@@ -1549,7 +1549,13 @@ fn hermes_api_server_port(config: &crate::config::Config) -> u16 {
 pub(crate) async fn hermes_api_server_key(
     state: &crate::api::routes::AppState,
 ) -> Result<String, String> {
-    let runtime_name = assistant_runtime_name(&state.config);
+    hermes_api_server_key_for_config(&state.config).await
+}
+
+pub(crate) async fn hermes_api_server_key_for_config(
+    config: &crate::config::Config,
+) -> Result<String, String> {
+    let runtime_name = assistant_runtime_name(config);
     for path in hermes_env_paths(runtime_name) {
         if let Ok(contents) = tokio::fs::read_to_string(path).await {
             if let Some(key) =

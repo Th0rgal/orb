@@ -5,6 +5,7 @@ import { For, Show, createSignal, createEffect, onMount, onCleanup } from 'solid
 import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider } from './cloudAgentApi';
 import './cloudAgents.css';
+import { ProviderLogo } from './ProviderLogo';
 import { Composer, floatingDock } from './App';
 import { Transcript } from './Transcript';
 import type { StreamItem } from './transcriptModel';
@@ -47,13 +48,13 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         <Show when={open() === 'project'}><ProjectPicker projects={p.projects ?? []} selected={p.project} canCreate={!!p.onCreateProject}
           onSelect={id => {p.onProject?.(id); close();}} onClose={close} onCreate={() => {close(); p.onCreateProject?.();}}/></Show>
       </div>
-      <Show when={account()}><AgentChoice label="Account" description={account()?.label} meta value={account()!.id} items={accounts().filter(a => a.provider === provider()).map(a => ({value:a.id, label:cloudAccountLabel(a),description:a.label}))}
-        icon={<Ic.CloudIcon size={14}/>} suffix={<Show when={account()?.experimental}><span class="cloud-experimental" title="Experimental connector" aria-label="Experimental connector"><Ic.FlaskIcon size={13}/></span></Show>}
+      <Show when={account()}><AgentChoice label={provider()==='hermes'?'Profile':'Account'} description={account()?.label} meta value={account()!.id} items={accounts().filter(a => a.provider === provider()).map(a => ({value:a.id, label:cloudAccountLabel(a),description:a.label}))}
+        icon={<ProviderLogo type={provider()}/>} suffix={<Show when={account()?.experimental}><span class="cloud-experimental" title="Experimental connector" aria-label="Experimental connector"><Ic.FlaskIcon size={13}/></span></Show>}
         disabled={busy()} open={open() === 'account'} onOpen={() => setOpen('account')} onClose={close} onSelect={setAccountId}/></Show>
     </div>
     <div class="composer tall">
       <div class="composer-field"><textarea aria-label="Prompt" autofocus rows={2} placeholder="Describe a task for your cloud agent" value={prompt()} disabled={busy()} onInput={e => setPrompt(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); } }} /></div>
-      <div class="plus-wrap"><Ic.CloudIcon size={16} /></div>
+      <div class="plus-wrap"><ProviderLogo type={provider()}/></div>
       <div class="picks">
         <AgentChoice label="Service" value={provider()} items={Object.entries(cloudNames).map(([value,label]) => ({value,label}))} disabled={busy()}
           open={open() === 'service'} onOpen={() => setOpen('service')} onClose={close} onSelect={value => void choose(value as CloudProvider)}/>
@@ -82,7 +83,8 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
     </div>
   </div></section>;
 }
-export function CloudConversation(p: { id: string; onMission?: (m: Mission | null) => void }) {
+export function CloudConversation(p: { id: string; onMission?: (m: Mission | null) => void; onOpenMission?: (m:Mission)=>void }) {
+  const [children,setChildren]=createSignal<{id:string;title:string;status:string}[]>([]);
   const [execution, setExecution] = createSignal<CloudExecution>(); const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
   const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false);
   const [model,setModel]=createSignal(''),[modelParams,setModelParams]=createSignal<ModelParam[]>([]);
@@ -94,6 +96,10 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     refreshing = (async () => {
       try { const [e, m] = await Promise.all([cloudExecution(p.id), getMission(p.id)]);
         if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); p.onMission?.(m); setError(''); }
+        if(e.selection.provider==='hermes') {
+          const result=await api<{missions:{id:string;title:string;status:string}[]}>(`/api/control/missions/${p.id}/cloud/children`);
+          if(!disposed)setChildren(result.missions);
+        }
       } catch(e) { if (!disposed) setError(`Connection lost. Last observed state is preserved. ${String(e)}`); }
       finally { refreshing = undefined; }
     })();
@@ -106,11 +112,16 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     if (busy() || !text.trim() || !execution() || !cloudCanSend(execution()!)) return false;
     if (attempt?.text !== text || attempt?.model!==model() || JSON.stringify(attempt?.params)!==JSON.stringify(modelParams())) attempt = {text, key: crypto.randomUUID(),model:model(),params:modelParams()};
     setBusy(true);
-    try { await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})}); attempt = undefined; await refresh(); return true; } catch(e) { setError(String(e)); return false; } finally { setBusy(false); }
+    try { await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model || execution()?.selection.provider==='hermes' ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})}); attempt = undefined; await refresh(); return true; } catch(e) { setError(String(e)); return false; } finally { setBusy(false); }
   };
   const cancel = async () => { setBusy(true); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
+  const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
+    setBusy(true);
+    try {await api(`/api/control/missions/${p.id}/cloud/approval`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id,request_id,choice})});await refresh();}
+    catch(e){setError(String(e));}finally{setBusy(false);}
+  };
   const download = async (path: string) => { try { const result = await api<{url?:string; content_base64?:string; name?:string}>(`/api/control/missions/${p.id}/cloud/artifact?path=${encodeURIComponent(path)}`); if (result.content_base64) { const bytes = Uint8Array.from(atob(result.content_base64), c => c.charCodeAt(0)); const blob = URL.createObjectURL(new Blob([bytes], {type:'application/octet-stream'})); const link = document.createElement('a'); link.href = blob; link.download = result.name ?? 'artifact'; link.click(); setTimeout(() => URL.revokeObjectURL(blob), 10000); return; } const url = safeCloudUrl(result.url); if (!url) throw new Error('Invalid artifact URL'); await openExternalUrl(url); } catch(e) {setError(String(e));} };
-  const working = (t: {phase: string}) => ['queued', 'submitting', 'running', 'cancel_requested'].includes(t.phase);
+  const working = (t: {phase: string}) => ['queued', 'submitting', 'running', 'waiting_user', 'cancel_requested'].includes(t.phase);
   const active = () => execution()?.turns.some(working) ?? false;
   const items = (): StreamItem[] => (execution()?.turns ?? []).flatMap(t => [
     {kind: 'user' as const, key: `${t.key}:prompt`, text: t.prompt},
@@ -124,7 +135,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     if (!seen.has(t.key)) seen.set(t.key, Date.now());
     const seconds = Math.max(0, Math.floor((now() - seen.get(t.key)!) / 1000));
     const label = t.phase === 'cancel_requested' ? 'Stopping…' : t.phase === 'queued' ? 'Queued…'
-      : t.phase === 'submitting' ? (t.detail ?? `Opening ${cloudNames[execution()!.selection.provider]}…`)
+      : t.phase === 'waiting_user' ? 'Waiting for approval' : t.phase === 'submitting' ? (t.detail ?? `Opening ${cloudNames[execution()!.selection.provider]}…`)
       : t.result ? 'Writing…' : (t.detail ?? 'Thinking…');
     return `${label} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   };
@@ -138,17 +149,19 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
             onSubmit={send}/>
         </Show>}/>
       <Show when={progress()}>{text => <p class="cloud-working" role="status"><span class="cloud-working-dot" aria-hidden="true"/>{text()}</p>}</Show>
+      <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)))}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>
       <For each={e().turns}>{turn => <>
         <Show when={turn.detail && !working(turn)}><p class="cloud-note">{turn.detail}</p></Show>
         <For each={turn.branches}>{branch => <p>{branch.branch} <Show when={safeCloudUrl(branch.prUrl)}>{url => <a href={url()} target="_blank" rel="noopener noreferrer">View pull request</a>}</Show></p>}</For>
-        <For each={turn.artifacts}>{artifact => <p><button class="na-drop-btn" onClick={() => void download(artifact.path)}>Download {artifact.path}</button></p>}</For>
+        <For each={turn.artifacts.filter(a=>a.kind==='hermes_approval' && turn.phase==='waiting_user')}>{approval => <div role="group" aria-label="Hermes approval"><p>{approval.request?.command ?? 'Hermes is waiting for your approval.'}</p><For each={approval.request?.choices ?? ['once','deny']}>{choice=><button class="na-drop-btn" disabled={busy()} onClick={()=>void approve(approval.run_id!,approval.request?.request_id,choice)}>{choice==='once'?'Approve once':choice==='deny'?'Deny':choice}</button>}</For></div>}</For>
+        <For each={turn.artifacts.filter(a=>!a.kind)}>{artifact => <p><button class="na-drop-btn" onClick={() => void download(artifact.path)}>Download {artifact.path}</button></p>}</For>
       </>}</For>
     </>}</Show>
   </div></div><div class="dock" ref={floatingDock}><div class="col">
     <Show when={execution()}>{e => <>
       <Show when={account()?.capabilities.follow_up}><Composer textOnly picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send} controls={<Show when={account()?.capabilities.models}><div class="picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div></Show>}
-        onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
-      <div class="cloud-conversation-meta"><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
+        onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
+      <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
         <span role="status">{cloudPhase(e().turns.at(-1)?.phase ?? '')}</span>
         <Show when={safeCloudUrl(e().external_url)}>{url => <a href={url()} onClick={event => {event.preventDefault(); void openExternalUrl(url());}}>Open in {cloudNames[e().selection.provider]}</a>}</Show>
       </div>

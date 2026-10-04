@@ -26,3 +26,18 @@ it('says Writing once a partial answer streams, and stops when the answer is com
   await screen.findByText('Question 1 ?');
   expect(screen.queryByText(/Writing…|Thinking…/)).toBeNull();
 });
+
+it('requires an explicit choice for the exact Hermes approval and displays child attempts', async () => {
+  const {api}=await import('../src/api');
+  vi.mocked(api).mockResolvedValue({missions:[{id:'child',title:'Delegated check',status:'completed'}]});
+  fakes.execution.mockResolvedValue({mission_id:'m',revision:1,selection:{provider:'hermes',account:'paloma'},turns:[turn('waiting_user',{
+    external_id:'run_one',artifacts:[{kind:'hermes_approval',run_id:'run_one',request:{request_id:'approval_one',command:'Perform requested action',choices:['once','deny']}}]
+  })]});
+  render(()=><CloudConversation id="m"/>);
+  await screen.findByText('Delegated check');
+  const approve=await screen.findByRole('button',{name:'Approve once'});
+  expect(screen.queryByRole('button',{name:'always'})).toBeNull();
+  expect(vi.mocked(api).mock.calls.filter(([,opts])=>opts?.method==='POST')).toHaveLength(0);
+  approve.click();
+  await vi.waitFor(()=>expect(vi.mocked(api).mock.calls.some(([url,opts])=>url.endsWith('/cloud/approval')&&opts?.body===JSON.stringify({run_id:'run_one',request_id:'approval_one',choice:'once'}))).toBe(true));
+});

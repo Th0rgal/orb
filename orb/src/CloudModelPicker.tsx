@@ -25,10 +25,10 @@ export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:M
   if(selectedProvider==='grok_bot')return;
   let current=true; // provider changes discard late discovery replies
   setModels([]);setLoading(true);p.onRepositories?.([]);p.onRepositoriesLoading?.(true);
-  void api<{models:{items:CloudModel[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
+  void api<{models:{items:CloudModel[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='hermes'?'hermes':selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
    if(!current)return;setModels(data.models.items ?? []);p.onRepositories?.(data.repositories?.items ?? []);
    if(!p.model){
-    const selected=data.models.items?.find(m=>m.id===(selectedProvider==='chatgpt'?'gpt-6-pro':'default')) ?? data.models.items?.[0];
+    const selected=data.models.items?.find(m=>m.id===(selectedProvider==='hermes'?'':selectedProvider==='chatgpt'?'gpt-6-pro':'default')) ?? data.models.items?.[0];
     if(selected)p.onChange(selected.id,selected.variants?.find(v=>v.isDefault)?.params ?? selected.variants?.[0]?.params ?? []);
    }
   }).catch(error=>{if(current)p.onError(String(error));}).finally(()=>{if(current){setLoading(false);p.onRepositoriesLoading?.(false);}});

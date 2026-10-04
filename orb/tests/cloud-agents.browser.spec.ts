@@ -136,3 +136,41 @@ test('section shortcuts and real model variants use the shared menus',async({pag
  await page.keyboard.press('Meta+4');await expect(page.getByRole('button',{name:'Providers',exact:true})).toHaveClass(/active/);
  await page.keyboard.press('Meta+5');await expect(page.getByRole('button',{name:'Demo',exact:true})).toBeFocused();
 });
+
+test('Hermes uses Paloma and profile default, preserves a failed draft and request identity',async({page})=>{
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ const launches:any[]=[];
+ await page.route('**/api/**',async route=>{
+  const path=new URL(route.request().url()).pathname;
+  if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
+  let json:unknown={};
+  if(path==='/api/projects')json={projects:[{slug:'demo',title:'Demo'}]};
+  else if(path==='/api/cloud/accounts')json=[{id:'paloma',provider:'hermes',label:'Paloma',available:true,capabilities:{models:true,follow_up:true,cancel:true}}];
+  else if(path==='/api/cloud/hermes/options')json={models:{items:[{id:'',name:'Profile default'},{id:'configured-alias',name:'Configured model'}]}};
+  else if(path==='/api/control/missions'&&route.request().method()==='POST'){launches.push(route.request().postDataJSON());return route.fulfill({status:503,body:'Hermes temporarily unavailable'});}
+  else if(path==='/api/control/missions'||path==='/api/control/queue'||path==='/api/backends')json=[];
+  else if(path.endsWith('/files'))json={entries:[]};
+  else if(path.endsWith('/crons'))json={jobs:[]};
+  else if(path.includes('/controller'))json={job:null,runs:[]};
+  else if(path==='/api/providers/backend-models')json={backends:{}};
+  return route.fulfill({json});
+ });
+ await page.goto('/');
+ await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
+ const form=page.getByRole('region',{name:'Cloud agent'});
+ await form.getByLabel('Service',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await expect(form.getByLabel('Profile',{exact:true})).toContainText('Paloma');
+ await expect(form.getByLabel('Model',{exact:true})).toContainText('Profile default');
+ await expect(form.locator('img[src="/hermes.png"]').first()).toBeVisible();
+ expect(launches).toHaveLength(0);
+ await form.getByLabel('Prompt',{exact:true}).fill('Remember ORB_HERMES_LOCAL_TEST');
+ await form.getByRole('button',{name:'Create cloud agent'}).click();
+ await expect(form.getByRole('alert')).toContainText('Hermes temporarily unavailable');
+ await expect(form.getByLabel('Prompt',{exact:true})).toHaveValue('Remember ORB_HERMES_LOCAL_TEST');
+ await form.getByRole('button',{name:'Create cloud agent'}).click();
+ await expect.poll(()=>launches.length).toBe(2);
+ expect(launches[0]).toEqual(launches[1]);
+ expect(launches[0].cloud).toEqual({provider:'hermes',account:'paloma'});
+ await page.screenshot({path:'screenshots/hermes-cloud-local.png',fullPage:true});
+});
