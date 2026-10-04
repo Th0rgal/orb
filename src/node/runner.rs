@@ -365,6 +365,9 @@ impl JobRunner {
                     .map_err(|error| anyhow::anyhow!(error))?;
                 let mission_dir = self.work_root.join(job.mission_id.to_string());
                 tokio::fs::create_dir_all(&mission_dir).await?;
+                self.managed_auth
+                    .prepare_workspace(managed_auth, &mission_dir)
+                    .map_err(anyhow::Error::msg)?;
 
                 let mut cmd = crate::remote_node::raw_command(command, &mission_dir, env.as_ref());
                 // Applied last: the payload env cannot redirect a managed

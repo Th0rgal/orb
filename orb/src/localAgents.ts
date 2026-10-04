@@ -21,7 +21,7 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "gemini"] as const;
+export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"] as const;
 export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
 
 const FILE_CAP = 512 * 1024;
@@ -30,6 +30,8 @@ const PATH_KEY = "orb.localAgentPaths";
 const BIND_KEY = "orb.localBindings";
 
 export interface ScanRow {
+  models?: [string,string][];
+  auth_error?: string | null;
   id: string;
   bin: string;
   path?: string | null;

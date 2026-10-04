@@ -12,7 +12,7 @@ pub fn require_runtime_owner(
 ) -> Result<(), String> {
     if matches!(
         harness,
-        "codex" | "claudecode" | "opencode" | "gemini" | "grok"
+        "codex" | "claudecode" | "opencode" | "gemini" | "grok" | "antigravity"
     ) && user.is_none_or(|user| user.id.trim().is_empty())
     {
         return Err("Cannot launch native mission without its authenticated MCP owner".into());
@@ -93,6 +93,9 @@ pub fn overlays(
             // soft-settings allowlist. ACP session/new and session/load own
             // per-session servers; never edit the shared GROK_HOME instead.
             file = Some(json!({"name":"sandboxed","command":binary,"args":args,"env":[]}));
+        }
+        "antigravity" => {
+            file = Some(json!({"mcpServers":{"sandboxed":server}}));
         }
         "gemini" => {
             let default_path = if cfg!(target_os = "macos") {
@@ -277,6 +280,14 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         write_private(&profile, definition.as_bytes())?;
         flags.extend(["--agent".into(), profile.to_string_lossy().into_owned()]);
     }
+    let overlay = if harness == "antigravity" {
+        Some(super::antigravity::Overlay::install(
+            &std::env::current_dir().map_err(|_| "Cannot resolve workspace")?,
+            file.as_ref().ok_or("Missing Antigravity MCP config")?,
+        )?)
+    } else {
+        None
+    };
     let mut process = tokio::process::Command::new(program);
     process
         .args(harness_arguments(program, &command[1..], &flags)?)
@@ -367,6 +378,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         // is reaped and private files removed; do not hang runtime shutdown.
         std::process::exit(status.code().unwrap_or(1));
     }
+    drop(overlay);
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -486,7 +498,14 @@ mod tests {
 
     #[test]
     fn native_runtime_requires_owner_without_inventing_a_default_identity() {
-        for harness in ["codex", "claudecode", "opencode", "gemini", "grok"] {
+        for harness in [
+            "codex",
+            "claudecode",
+            "opencode",
+            "gemini",
+            "grok",
+            "antigravity",
+        ] {
             assert!(require_runtime_owner(harness, None).is_err());
             for id in ["", "  "] {
                 let user = crate::api::auth::AuthUser {
@@ -585,7 +604,14 @@ mod tests {
                 json!({"mcp_servers":{"other":{"command":"existing"}}}).to_string(),
             ),
         ]);
-        for harness in ["codex", "claudecode", "opencode", "grok", "gemini"] {
+        for harness in [
+            "codex",
+            "claudecode",
+            "opencode",
+            "grok",
+            "gemini",
+            "antigravity",
+        ] {
             let (args, env, file) = overlays(
                 harness,
                 "/bin/sandboxed-mcp",

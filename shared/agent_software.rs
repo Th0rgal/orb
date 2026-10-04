@@ -21,6 +21,7 @@ const TOOLS: &[(&str, &str, &str, Option<&str>)] = &[
     ("codex", "Codex", "codex", Some("@openai/codex")),
     ("opencode", "OpenCode", "opencode", Some("opencode-ai")),
     ("grok", "Grok", "grok", None),
+    ("antigravity", "Antigravity", "agy", None),
     ("gemini", "Gemini", "gemini", Some("@google/gemini-cli")),
 ];
 pub fn now() -> u64 {

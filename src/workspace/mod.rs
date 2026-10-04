@@ -3946,7 +3946,10 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         }
 
         // Collect skills (for backends that use skill contents directly)
-        if matches!(backend_id, "claudecode" | "codex" | "gemini" | "grok") {
+        if matches!(
+            backend_id,
+            "claudecode" | "codex" | "gemini" | "grok" | "antigravity"
+        ) {
             let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
                 Ok(names) => {
                     tracing::debug!(
@@ -4057,7 +4060,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
 
     let unified_mcp = if matches!(
         backend_id,
-        "codex" | "claudecode" | "opencode" | "gemini" | "grok"
+        "codex" | "claudecode" | "opencode" | "gemini" | "grok" | "antigravity"
     ) {
         if let Some(user) = boss_user_id {
             let (url, token) = crate::control_mcp::launch::bootstrap(mission_id, user)

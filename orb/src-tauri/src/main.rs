@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[path = "../../../shared/antigravity.rs"]
+mod antigravity;
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
 #[path = "../../../shared/cyber_access.rs"]

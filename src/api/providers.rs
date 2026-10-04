@@ -2084,6 +2084,25 @@ pub async fn list_backend_model_options(
         }
     }
 
+    let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+        .unwrap_or_else(|| "agy".into());
+    if let Ok(Ok(models)) =
+        tokio::task::spawn_blocking(move || crate::antigravity::models(std::path::Path::new(&cli)))
+            .await
+    {
+        backends.insert(
+            "antigravity".into(),
+            models
+                .into_iter()
+                .map(|(value, label)| BackendModelOption {
+                    value,
+                    label,
+                    description: Some("Antigravity account model".into()),
+                    provider_id: None,
+                })
+                .collect(),
+        );
+    }
     Json(BackendModelOptionsResponse { backends })
 }
 
@@ -2264,6 +2283,18 @@ pub async fn validate_model_override(
                         model_override
                     ))
                 }
+            }
+        }
+        "antigravity" => {
+            // Account-entitled CLI IDs are independent of the Gemini API catalog.
+            if model_override
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !model_override.is_empty()
+            {
+                Ok(())
+            } else {
+                Err("Use an exact model ID from agy models".into())
             }
         }
         "gemini" => {

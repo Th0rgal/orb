@@ -92,6 +92,7 @@ function LocalAgentsCard() {
     codex: "Codex",
     grok: "Grok",
     gemini: "Gemini",
+    antigravity: "Antigravity",
     opencode: "OpenCode",
   };
   const save = (id: string) => {
@@ -105,11 +106,11 @@ function LocalAgentsCard() {
           {busy() ? "Scanning…" : "Scan"}
         </button>
       </Row>
-      <For each={["claudecode", "codex", "grok", "opencode", "gemini"]}>
+      <For each={["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"]}>
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}` : "Not found"}>
+            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : "Not found"}>
               <input
                 class="s-input"
                 aria-label={`${label[id]} path`}

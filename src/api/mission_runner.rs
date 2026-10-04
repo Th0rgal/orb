@@ -3928,6 +3928,8 @@ async fn run_mission_turn(
         // Pin Codex instead of inheriting the global DEFAULT_MODEL, which is
         // usually a Claude/OpenCode slug and invalid for the Codex CLI.
         config.default_model = Some(resolve_codex_default_model());
+    } else if backend_id == "antigravity" && model_override.is_none() {
+        config.default_model = None;
     } else if backend_id == "gemini" && model_override.is_none() {
         // Pin Gemini to a stable backend default instead of inheriting the
         // global model or relying on the CLI's own default.
@@ -9237,6 +9239,10 @@ pub async fn check_backend_prerequisites(
         "gemini" => {
             let cli = cli_path.unwrap_or("gemini");
             check_gemini_prerequisites(&workspace_exec, cwd, cli).await
+        }
+        "antigravity" => {
+            let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;
+            BackendPreflightResult { backend_id: "antigravity".into(), available, cli_available: available, auto_install_possible: false, missing_dependencies: if available { vec![] } else { vec!["agy CLI".into()] }, message: Some("Install Antigravity CLI and sign in as the execution user with agy; verify access with agy models".into()) }
         }
         "grok" => {
             let cli = cli_path.unwrap_or("grok");

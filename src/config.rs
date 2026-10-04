@@ -617,13 +617,14 @@ impl Config {
                     "opencode",
                     "grok",
                     "gemini",
+                    "antigravity",
                     "codex",
                     "chatgpt_ui",
                 ]
                 .contains(&backend.as_str())
             {
                 tracing::warn!(
-                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, gemini, codex, chatgpt_ui",
+                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, gemini, antigravity, codex, chatgpt_ui",
                     v
                 );
                 None

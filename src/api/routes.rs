@@ -319,6 +319,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Box::new(crate::backend::codex::CodexBackend::new()),
         Box::new(crate::backend::gemini::GeminiBackend::new()),
         Box::new(crate::backend::grok::GrokBackend::new()),
+        Box::new(crate::backend::antigravity::AntigravityBackend::new()),
         Box::new(crate::backend::chatgpt_ui::ChatGptUiBackend::new()),
     ];
     struct BackendProbe {
@@ -445,9 +446,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     backend_registry.register(crate::backend::codex::registry_entry());
     backend_registry.register(crate::backend::gemini::registry_entry());
     backend_registry.register(crate::backend::grok::registry_entry());
+    backend_registry.register(crate::backend::antigravity::registry_entry());
     backend_registry.register(crate::backend::chatgpt_ui::registry_entry());
     let backend_registry = Arc::new(RwLock::new(backend_registry));
-    tracing::info!("Backend registry initialized with {} backends", 6);
+    tracing::info!("Backend registry initialized with {} backends", 7);
 
     // Note: No central OpenCode server cleanup needed - missions use per-workspace CLI execution
 

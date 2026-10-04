@@ -336,7 +336,7 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
 }
 
 /** Harness order for the composer: the native agents first, then routers. */
-const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "gemini"];
+const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"];
 
 export async function listHarnessChoices(): Promise<HarnessChoice[]> {
   const [backends, models] = await Promise.all([listBackends(), listBackendModels()]);

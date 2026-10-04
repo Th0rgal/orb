@@ -1503,6 +1503,14 @@ pub async fn write_backend_config(
             )
             .await
         }
+        "antigravity" => {
+            // Native OAuth and the scoped MCP overlay belong to agy/the launcher.
+            // Avoid writing unrelated provider credentials or OpenCode config.
+            if let Some(skills) = skill_contents {
+                write_codex_skills_to_workspace(&workspace_dir.join(".agents"), skills).await?;
+            }
+            Ok(())
+        }
         "gemini" | "grok" => {
             // These CLIs don't need a Sandboxed.sh-specific config format; use
             // OpenCode config for workspace setup (skills, commands, etc.).

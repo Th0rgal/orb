@@ -1,5 +1,6 @@
 //! One control-plane tool catalogue, shared by Core and every MCP client.
 mod actions;
+mod antigravity;
 mod assistant;
 pub mod client;
 mod cloud_read;

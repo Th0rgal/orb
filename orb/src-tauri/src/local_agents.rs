@@ -25,6 +25,7 @@ const HARNESSES: &[(&str, &str)] = &[
     ("grok", "grok"),
     ("opencode", "opencode"),
     ("gemini", "gemini"),
+    ("antigravity", "agy"),
 ];
 
 #[tauri::command]
@@ -40,6 +41,8 @@ pub struct ScanRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ScanRow {
+    pub models: Vec<(String, String)>,
+    pub auth_error: Option<String>,
     pub id: String,
     pub bin: String,
     pub path: Option<String>,
@@ -157,7 +160,10 @@ fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .filter(|p| p.is_file())
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));
+            let discovery = if *id == "antigravity" { path.as_deref().map(crate::antigravity::models) } else { None };
+            let (models, auth_error) = match discovery { Some(Ok(models)) => (models, None), Some(Err(error)) => (vec![], Some(error)), None => (vec![], None) };
             ScanRow {
+                models, auth_error,
                 id: (*id).to_string(),
                 bin: (*bin).to_string(),
                 // A slow version probe must not hide an installed CLI.
@@ -527,6 +533,7 @@ fn spawn_harness(
     env: &[(String, String)],
 ) -> Result<Child, String> {
     match request.harness.as_str() {
+        "antigravity" => spawn_antigravity(request, text, session_id, error, env),
         "claudecode" => spawn_claude(request, text, session_id, error, env),
         "codex" => spawn_codex(request, text, session_id, error, done, env),
         "grok" => spawn_piped(
@@ -558,6 +565,50 @@ fn spawn_harness(
         ),
         other => Err(format!("unknown local harness {other}")),
     }
+}
+
+fn spawn_antigravity(
+    request: &StartRequest, text: &Arc<Output>, session_id: &Arc<Mutex<Option<String>>>,
+    error: &Arc<Mutex<Option<String>>>, env: &[(String, String)],
+) -> Result<Child, String> {
+    let mut command = mission_command(request, env);
+    let mut child = command.current_dir(&request.cwd)
+        .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|e| format!("Cannot start Antigravity: {e}"))?;
+    let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
+    let output = Arc::clone(text);
+    let slot = Arc::clone(session_id);
+    let error = Arc::clone(error);
+    let expected = request.session_id.clone();
+    let pid = child.id();
+    let guard = text.reader();
+    thread::spawn(move || {
+        let _guard = guard;
+        let mut stream = crate::antigravity::Stream::default();
+        stream.session = expected.clone();
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break; };
+            let Ok(value) = serde_json::from_str(&line) else { continue; };
+            for tool in stream.feed(&value) { output.native_activity(&tool); }
+            output.publish_activities();
+            if let Some(id) = &stream.session {
+                if expected.as_deref().is_some_and(|old| old != id) {
+                    stream.error = Some("Antigravity resumed a different conversation".into());
+                } else if let Ok(mut slot) = slot.lock() { *slot = Some(id.clone()); }
+            }
+            output.replace(stream.text.clone());
+            if stream.error.is_some() {
+                #[cfg(unix)]
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                break;
+            }
+        }
+        if let Err(message) = stream.finish() {
+            if let Ok(mut error) = error.lock() { *error = Some(message); }
+        }
+    });
+    Ok(child)
 }
 
 fn gemini_args(request: &StartRequest) -> Vec<String> {

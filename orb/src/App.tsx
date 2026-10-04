@@ -137,7 +137,22 @@ const loadPick = (): HarnessPick | null => {
     return null;
   }
 };
-const [harnessChoices, setHarnessChoices] = createSignal<HarnessChoice[]>([]);
+const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
+const harnessChoices = createMemo(() => {
+  const choices = remoteHarnessChoices().map(choice => ({ ...choice, models: [...choice.models] }));
+  const models = localInstalled().find(row => row.id === "antigravity")?.models ?? [];
+  if (models.length) {
+    let choice = choices.find(choice => choice.backend.id === "antigravity");
+    if (!choice) {
+      choice = { backend: { id: "antigravity", name: "Antigravity" }, models: [] };
+      choices.push(choice);
+    }
+    for (const [value, label] of models) {
+      if (!choice.models.some(model => model.value === value)) choice.models.push({ value, label });
+    }
+  }
+  return choices;
+});
 const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
 const setHarnessPick = (p: HarnessPick) => {
   setHarnessPickRaw(p);
@@ -169,7 +184,7 @@ const pickLabel = (pick: HarnessPick | null): string => {
 };
 async function refreshHarnessChoices() {
   try {
-    setHarnessChoices(await listHarnessChoices());
+    setRemoteHarnessChoices(await listHarnessChoices());
   } catch {
     /* keep last */
   }
@@ -1212,6 +1227,7 @@ export default function App() {
     }
     return MACHINES.find((m) => m.id === newMachine())?.name ?? nodeLabel(newMachine());
   };
+
   // Keyed on the connection only: the body reads selected()/newMachine()/
   // fleetNodes(), and tracking those made every fleet poll re-run the
   // effect, which re-polled the fleet — an endless fetch loop.

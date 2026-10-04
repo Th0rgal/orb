@@ -8847,7 +8847,7 @@ fn native_backend_prefix(raw_model: &str) -> Option<&str> {
         return None;
     }
     match prefix {
-        "codex" | "claudecode" | "gemini" | "grok" => Some(prefix),
+        "codex" | "claudecode" | "gemini" | "grok" | "antigravity" => Some(prefix),
         _ => None,
     }
 }
@@ -8857,6 +8857,7 @@ fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "claudecode" => Some("claudecode"),
         "gemini" => Some("gemini"),
+        "antigravity" => Some("antigravity"),
         "grok" => Some("grok"),
         _ => None,
     }
@@ -11529,7 +11530,7 @@ pub(super) async fn create_mission_inner(
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "gemini" | "grok" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui")
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -11634,9 +11635,15 @@ pub(super) async fn create_mission_inner(
     }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
-        if matches!(backend_id, "codex" | "claudecode" | "gemini" | "grok") {
+        if matches!(
+            backend_id,
+            "codex" | "claudecode" | "gemini" | "grok" | "antigravity"
+        ) {
             if let Some(workspace) = state.workspaces.get(ws_id).await {
-                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "gemini") {
+                let cli_path = if matches!(
+                    backend_id,
+                    "claudecode" | "codex" | "gemini" | "antigravity"
+                ) {
                     state
                         .backend_configs
                         .get(backend_id)
@@ -12619,8 +12626,14 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
-    &["claudecode", "opencode", "grok", "codex", "gemini"];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &[
+    "claudecode",
+    "opencode",
+    "grok",
+    "codex",
+    "gemini",
+    "antigravity",
+];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -12656,6 +12669,11 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 /// from the client's selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
+    Antigravity {
+        model: Option<String>,
+        prompt: String,
+        resume_session_id: Option<String>,
+    },
     Gemini {
         model: Option<String>,
         prompt: String,
@@ -12702,6 +12720,10 @@ impl RemoteHarnessPlan {
 
     pub(crate) fn label(&self) -> String {
         match self {
+            RemoteHarnessPlan::Antigravity { model, .. } => format!(
+                "antigravity/{}",
+                model.as_deref().unwrap_or("account default")
+            ),
             RemoteHarnessPlan::Gemini { model, .. } => format!(
                 "gemini/{}",
                 model.as_deref().unwrap_or("node default model")
@@ -12760,6 +12782,7 @@ pub(crate) fn plan_remote_harness(
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
         "gemini" => Ok(RemoteHarnessPlan::Gemini { model, prompt }),
+        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { model, prompt, resume_session_id: None }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
             // Claude Code expects bare model ids.
@@ -12992,6 +13015,26 @@ pub(crate) fn remote_execution_for_plan(
             new_session_id.as_deref(),
             label,
         ),
+        RemoteHarnessPlan::Antigravity {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
+            let args =
+                crate::antigravity::args(model.as_deref(), resume_session_id.as_deref(), prompt);
+            RemoteExecution {
+                managed_auth: vec!["antigravity".into()],
+                command: format!(
+                    "exec agy {}",
+                    args.iter()
+                        .map(|arg| shell_single_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
+                label,
+            }
+        }
         RemoteHarnessPlan::Gemini { model, prompt } => {
             let mut command = String::from("command -v gemini >/dev/null 2>&1 || { echo 'gemini is not installed on this node' >&2; exit 127; }; gemini --yolo");
             if let Some(model) = model {
@@ -14127,6 +14170,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Antigravity { prompt, .. }
         | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
@@ -14175,6 +14219,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Antigravity { prompt, .. }
         | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
         _ => "",
@@ -14344,6 +14389,7 @@ async fn submit_leased_remote_job(
             RemoteHarnessPlan::OpenCode { .. } => "opencode",
             RemoteHarnessPlan::Grok { .. } => "grok",
             RemoteHarnessPlan::Gemini { .. } => "gemini",
+            RemoteHarnessPlan::Antigravity { .. } => "antigravity",
             RemoteHarnessPlan::Raw { .. } => unreachable!(),
         };
         let env = execution.env.get_or_insert_with(HashMap::new);
@@ -14370,6 +14416,11 @@ async fn submit_leased_remote_job(
             "gemini" => execution.command.replacen(
                 "gemini --yolo",
                 "/usr/local/bin/sandboxed-mcp launch --harness gemini -- gemini --yolo",
+                1,
+            ),
+            "antigravity" => execution.command.replacen(
+                "exec agy ",
+                "exec /usr/local/bin/sandboxed-mcp launch --harness antigravity -- agy ",
                 1,
             ),
             "grok" => execution.command.replacen(
@@ -16244,7 +16295,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "gemini" | "grok" | "chatgpt_ui"
+            "claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui"
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -29093,6 +29144,8 @@ async fn run_single_control_turn(
         || (backend_id.as_deref() == Some("grok") && requested_model.is_none())
     {
         config.default_model = None;
+    } else if backend_id.as_deref() == Some("antigravity") && requested_model.is_none() {
+        config.default_model = None;
     } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
         config.default_model = Some(resolve_gemini_default_model());
     } else if backend_id.as_deref() == Some("chatgpt_ui") && requested_model.is_none() {
@@ -29410,6 +29463,34 @@ async fn run_single_control_turn(
                     extras: crate::api::runners::TurnExtras::None,
                 }),
             )
+            .await
+        }
+        Some("antigravity") => {
+            let mid = match require_mission_id(mission_id, "Antigravity", &events_tx) {
+                Ok(id) => id,
+                Err(r) => return r,
+            };
+            use crate::api::runners::HarnessRunner as _;
+            Box::pin(crate::api::runners::AntigravityRunner.run_turn(
+                crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
+                    workspace: exec_workspace,
+                    work_dir: &ctx.working_dir,
+                    message: &user_message,
+                    model: config.default_model.as_deref(),
+                    model_effort: None,
+                    fast_mode: false,
+                    agent: config.opencode_agent.as_deref(),
+                    mission_id: mid,
+                    events_tx: events_tx.clone(),
+                    cancel,
+                    app_working_dir: &config.working_dir,
+                    session_id: session_id.as_deref(),
+                    is_continuation: force_session_resume
+                        || history.iter().any(|(role, _)| role == "assistant"),
+                    extras: crate::api::runners::TurnExtras::None,
+                },
+            ))
             .await
         }
         Some("chatgpt_ui") => {

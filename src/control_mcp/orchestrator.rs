@@ -458,7 +458,7 @@ impl OrchestratorMcp {
                     "properties": {
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
                             "description": "Optional single backend to inspect. If omitted, returns all common backends."
                         }
                     }
@@ -627,7 +627,7 @@ impl OrchestratorMcp {
                         },
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
                             "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, gemini for Gemini models, grok for Grok models, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
                         },
                         "model_override": {
@@ -683,7 +683,7 @@ impl OrchestratorMcp {
                                 "required": ["title", "prompt"],
                                 "properties": {
                                     "title": { "type": "string" },
-                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"] },
+                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"] },
                                     "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort; gpt-5.5-sol is unsupported." },
                                     "model_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
                                     "agent": { "type": "string" },

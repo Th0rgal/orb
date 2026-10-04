@@ -1,0 +1,78 @@
+# Google Antigravity
+
+Sandboxed.sh and Orb run Google's native `agy` CLI with backend ID
+`antigravity`. This is separate from the `gemini` backend and does not route
+through an API-key proxy. Install the official CLI from
+https://antigravity.google/docs/cli/install/ and sign in by running `agy`
+as the account that executes missions.
+
+Run `agy models` to see the signed-in account's available model IDs. Orb's
+local agent scan and Core's model endpoint use that command rather than a
+hardcoded catalog. Select the exact account-supported model. An unavailable
+model fails in the native CLI; it is never silently replaced. During validation
+with CLI 1.2.16, Gemini 4 Argon was reported as `agy-demo`.
+
+## Remote nodes
+
+Install `agy` on the node's service PATH, then run it interactively as the
+`sandboxed-node` service user and complete Google's native sign-in. Keep OAuth
+codes and tokens out of mission messages, repositories, and deployment logs.
+
+Configure the node service with:
+
+```ini
+SANDBOXED_NODE_ANTIGRAVITY_HOME=/var/lib/sandboxed-node/.gemini/antigravity-cli
+```
+
+This value names the native CLI profile directory, not the user's whole home.
+On Linux, CLI 1.2.16 stores `antigravity-oauth-token` there with mode 0600.
+The node advertises the managed profile only while that file is private and
+readable. This is a local credential-presence check; expired/revoked credentials
+still require native sign-in. Verify `agy models` as the service user after
+provisioning.
+
+Jobs retain their isolated HOME. The node binds only
+`$HOME/.gemini/antigravity-cli` to the operator-configured profile. Existing
+workspace symlinks or conflicting destinations are rejected. The profile holds
+both native authentication and conversations; it must stay on the same node
+for continuation. No credential value travels in a Core job payload.
+
+Upgrade both `sandboxed-node` and its `sandboxed-mcp` companion before enabling
+this backend. Existing production deployment and draining rules apply.
+
+## Lifecycle and project context
+
+Every turn uses `--output-format stream-json`. Success requires both an explicit
+native `SUCCESS` result and a successful process exit. Missing terminal output,
+a changed conversation identity, or a failed native result cannot become a
+successful mission. Follow-ups use the stored `--conversation` ID, never the
+CLI's most-recent conversation. Per-step token usage avoids counting the native
+result's lifetime usage again on continuation.
+
+Project skills use `.agents/skills`. The MCP supervisor temporarily merges its
+scoped server into `.agents/mcp_config.json`, holds an exclusive checkout lock,
+and restores the original configuration on normal exit or handled cancellation.
+User-defined servers are preserved. Concurrent runs need separate worktrees.
+After a supervisor crash or SIGKILL, a stale `sandboxed` MCP entry fails closed;
+remove that stale entry after confirming the old run has stopped. External
+configuration edits during a run are preserved rather than overwritten.
+
+Rebuild Orb and its bundled MCP companion after updating the source; refreshing
+only the frontend cannot install native harness support. Orb Settings shows the
+CLI path, account model count, or a sign-in/discovery error.
+
+## Validation evidence
+
+The shared stream parser is tested against a sanitized real Argon trajectory
+in `tests/fixtures/antigravity_turn.jsonl`, including file writes, terminal
+commands, tool results, usage, and the explicit terminal result. Focused tests
+also cover duplicate completed steps, missing results, identity changes,
+argument boundaries, managed-profile binding, and MCP restoration/locking.
+
+On 2026-10-04, native CLI 1.2.16 passed a disposable multi-file feature task on
+macOS: module and UI edits, two Node tests, a browser click changing a counter
+from 0 to 1, and a screenshot inspected separately. Exact-session continuation
+also passed. Native file-write/assertion and exact-session resume tests passed
+as `sandboxed-node` on Core, old-agent, Ashur, Babylon, Nippur, and DGX Spark.
+These CLI checks verify the account and protocol; deployed Core/Orb validation
+must also be completed before calling the integration shipped.

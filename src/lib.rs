@@ -36,6 +36,8 @@
 pub mod account_limits;
 pub mod agents;
 pub mod ai_providers;
+#[path = "../shared/antigravity.rs"]
+pub mod antigravity;
 pub mod api;
 pub mod backend;
 pub mod backend_config;

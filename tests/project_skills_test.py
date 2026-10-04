@@ -57,7 +57,7 @@ class ProjectSkillsTest(unittest.TestCase):
         old.rename(old.with_name('renamed'))
         (old.with_name('renamed') / 'SKILL.md').write_text('A renamed plain Markdown skill.')
         self.prepare()
-        for native in skills.NATIVE.values():
+        for native in set(skills.NATIVE.values()):
             self.assertFalse((self.cwd / native / 'orb-marker').is_symlink())
         shutil.rmtree(self.source / 'skills')
         self.prepare('chatgpt_ui')
@@ -183,7 +183,7 @@ class ProjectSkillsTest(unittest.TestCase):
                 (original.with_name('renamed') / 'SKILL.md').write_text('# renamed')
                 skills.prepare(str(self.source), nested, 'opencode', verify=False)
                 for directory in [self.cwd, nested]:
-                    for native in skills.NATIVE.values():
+                    for native in set(skills.NATIVE.values()):
                         self.assertFalse((directory / native / 'orb-marker').exists())
                     self.assertIn('# renamed', (directory / '.opencode/skills/renamed/SKILL.md').read_text())
                 shutil.rmtree(original.with_name('renamed'))
@@ -192,7 +192,7 @@ class ProjectSkillsTest(unittest.TestCase):
                     self.assertEqual(json.loads((directory / skills.MANIFEST).read_text())['entries'], {})
 
     def test_managed_manifest_traversal_is_refused_before_any_cleanup(self):
-        for native in skills.NATIVE.values():
+        for native in set(skills.NATIVE.values()):
             root = self.cwd / native
             (root / 'personal').mkdir(parents=True)
             (root / 'personal/SKILL.md').write_text('PERSONAL-SKILL')
@@ -208,7 +208,7 @@ class ProjectSkillsTest(unittest.TestCase):
 
     def test_preserves_user_configuration_and_skills(self):
         self.skill()
-        for native in skills.NATIVE.values():
+        for native in set(skills.NATIVE.values()):
             parent = self.cwd / native
             (parent / 'personal').mkdir(parents=True)
             (parent / 'personal/SKILL.md').write_text('personal')
@@ -216,7 +216,7 @@ class ProjectSkillsTest(unittest.TestCase):
         self.prepare()
         shutil.rmtree(self.source / 'skills')
         self.prepare()
-        for native in skills.NATIVE.values():
+        for native in set(skills.NATIVE.values()):
             self.assertEqual((self.cwd / native / 'personal/SKILL.md').read_text(), 'personal')
             self.assertEqual((self.cwd / native).parent.joinpath('config').read_text(), 'user configuration')
 
@@ -418,7 +418,7 @@ class ProjectSkillsTest(unittest.TestCase):
             process.join(10)
             self.assertEqual(process.exitcode, 0)
         state = json.loads((self.cwd / skills.MANIFEST).read_text())
-        self.assertEqual(len(state['entries']), len(skills.NATIVE))
+        self.assertEqual(len(state['entries']), len(set(skills.NATIVE.values())))
         for relative in state['entries']:
             self.assertTrue((self.cwd / relative).is_symlink())
 

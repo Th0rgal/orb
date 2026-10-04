@@ -16,6 +16,7 @@ import subprocess
 import shlex
 
 NATIVE = {
+    "antigravity": ".agents/skills",
     "codex": ".agents/skills",
     "claudecode": ".claude/skills",
     "opencode": ".opencode/skills",
@@ -23,6 +24,7 @@ NATIVE = {
     "grok": ".grok/skills",
 }
 ALIASES = {
+    "antigravity": (".agents/skills",),
     "codex": (".agents/skills", ".codex/skills"),
     "claudecode": (".claude/skills",),
     "opencode": (".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"),
