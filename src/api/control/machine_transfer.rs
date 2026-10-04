@@ -10,8 +10,12 @@ fn context_path(id: Uuid) -> String {
     format!(".paloma/transfers/{id}/conversation.txt")
 }
 
+fn archive_context(t: &Transfer) -> bool {
+    t.backend == "antigravity" || t.context.len() > INLINE_CONTEXT_BYTES
+}
+
 fn portable_prompt(t: &Transfer) -> String {
-    if t.backend != "antigravity" && t.context.len() <= INLINE_CONTEXT_BYTES {
+    if !archive_context(t) {
         return t.context.clone();
     }
     format!(
@@ -21,7 +25,7 @@ fn portable_prompt(t: &Transfer) -> String {
 }
 
 fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Error> {
-    if a.backend != "antigravity" && a.context.len() <= INLINE_CONTEXT_BYTES {
+    if !archive_context(a) {
         return Ok(());
     }
     use sha2::{Digest, Sha256};
@@ -66,7 +70,7 @@ fn context_block(a: &Transfer, operation: &Operation) -> Result<Option<Value>, E
     let Operation::Read { path, offset } = operation else {
         return Ok(None);
     };
-    if a.context.len() <= INLINE_CONTEXT_BYTES || *path != context_path(a.id) {
+    if !archive_context(a) || *path != context_path(a.id) {
         return Ok(None);
     }
     use base64::Engine;
@@ -1345,6 +1349,37 @@ mod portable_context_tests {
         assert_eq!(manifest.bytes, transfer.context.len() as u64);
         assert!(portable_prompt(&transfer).contains(&context_path(transfer.id)));
         assert!(crate::antigravity::validate_prompt(&portable_prompt(&transfer)).is_ok());
+        let area = tempfile::tempdir().unwrap();
+        crate::machine_transfer::operate(area.path(), None, Operation::Stage { manifest }).unwrap();
+        let block = context_block(
+            &transfer,
+            &Operation::Read {
+                path: context_path(transfer.id),
+                offset: 0,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        crate::machine_transfer::operate(
+            area.path(),
+            None,
+            Operation::Write {
+                path: context_path(transfer.id),
+                offset: 0,
+                data: block["data"].as_str().unwrap().into(),
+            },
+        )
+        .unwrap();
+        crate::machine_transfer::operate(area.path(), None, Operation::Verify).unwrap();
+        assert_eq!(
+            std::fs::read(
+                area.path()
+                    .join("workspace")
+                    .join(context_path(transfer.id))
+            )
+            .unwrap(),
+            transfer.context.as_bytes()
+        );
     }
 
     #[test]
