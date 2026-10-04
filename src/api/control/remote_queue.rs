@@ -98,6 +98,27 @@ pub(super) async fn enqueue(
     let _file = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
+    // Accepted receipts precede current-assignment admission on retries.
+    let previous: Option<(String, String)> = state
+        .projects
+        .lock()
+        .map_err(internal_error)?
+        .query_row(
+            "SELECT mission_id,state FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
+            params![user, id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal_error)?;
+    if let Some((owner, status)) = previous {
+        if owner != mid.to_string() || status == "cancelled" {
+            return Err((
+                StatusCode::CONFLICT,
+                "This message ID was already used or cancelled".into(),
+            ));
+        }
+        return Ok(());
+    }
     machine_transfer::guard(&control.mission_store, mid)
         .await
         .map_err(internal_error)?;
@@ -158,26 +179,6 @@ pub(super) async fn enqueue(
                 "{prefix}: this mission's writer identity does not support native continuation"
             ),
         ));
-    }
-    let previous: Option<(String, String)> = state
-        .projects
-        .lock()
-        .map_err(internal_error)?
-        .query_row(
-            "SELECT mission_id,state FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
-            params![user, id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal_error)?;
-    if let Some((owner, status)) = previous {
-        if owner != mid.to_string() || status == "cancelled" {
-            return Err((
-                StatusCode::CONFLICT,
-                "This message ID was already used or cancelled".into(),
-            ));
-        }
-        return Ok(());
     }
     // Validate only new messages: an accepted ID retains its receipt even if
     // the assignment changed after a response was lost. Admission protects

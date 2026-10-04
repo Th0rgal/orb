@@ -7044,6 +7044,9 @@ async fn native_grok_auto_track_continuation(
             id,
             crate::api::mission_store::MissionProjectPatch {
                 project: Some(Some("reassigned-project".into())),
+                track: Some(Some("explicit-reassigned-track".into())),
+                github_pr: Some(Some("owner/repo#123".into())),
+                tags: Some(vec!["pr-writer".into()]),
                 ..Default::default()
             },
         )
@@ -7069,6 +7072,9 @@ async fn native_grok_auto_track_continuation(
             id,
             crate::api::mission_store::MissionProjectPatch {
                 project: Some(current.project.project.clone()),
+                track: Some(current.project.track.clone()),
+                github_pr: Some(current.project.github_pr.clone()),
+                tags: Some(current.project.tags.clone()),
                 ..Default::default()
             },
         )
