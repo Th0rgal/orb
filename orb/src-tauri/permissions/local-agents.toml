@@ -23,6 +23,7 @@ commands.allow = [
   "local_run_launch",
   "local_run_reconcile",
   "local_binding_set",
+  "local_bindings_refresh",
   "local_bindings_subscribe",
   "local_bindings_unsubscribe",
   "local_interaction",

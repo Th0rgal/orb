@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#[path = "../../../shared/antigravity.rs"]
-mod antigravity;
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
+#[path = "../../../shared/antigravity.rs"]
+mod antigravity;
 #[path = "../../../shared/cyber_access.rs"]
 pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
@@ -149,6 +149,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_append,
             bindings::local_binding_set,
+            bindings::local_bindings_refresh,
             bindings::local_bindings_subscribe,
             bindings::local_bindings_unsubscribe,
             local_origin::local_origin_launch,

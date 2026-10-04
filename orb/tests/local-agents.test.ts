@@ -288,3 +288,30 @@ it('returns local inventory before Antigravity account discovery finishes', asyn
   await vi.waitFor(()=>expect(localInstalled()[1].models).toEqual([['agy-demo','Gemini 4 Argon']]));
  } finally {host.__TAURI_INTERNALS__=previous;host.__TAURI__=previousPublic;}
 });
+
+it('refreshes a missing cached binding before deciding it belongs to another computer', async () => {
+  vi.resetModules();
+  const host = window as any;
+  const previousNative = host.__TAURI_INTERNALS__, previousTauri = host.__TAURI__;
+  localStorage.removeItem('orb.localBindings');
+  const binding = {harness:'codex',bin:'/bin/codex',cwd:'/work',sessionId:'original-session'};
+  let channel: any;
+  host.__TAURI__ = {core:{Channel:class {onmessage=(_value:any)=>{}; constructor(){channel=this;}}}};
+  host.__TAURI_INTERNALS__ = {invoke: vi.fn(async (cmd:string,args:any) => {
+    if(cmd==='local_bindings_subscribe'){args.onEvent.onmessage({revision:0,bindings:{}});return 1;}
+    if(cmd==='local_bindings_refresh')return {revision:1,bindings:{mission:binding}};
+  })};
+  try {
+    const {restoreLocalBindings,refreshLocalBindings,localBinding}=await import('../src/localAgents');
+    await restoreLocalBindings();
+    expect(localBinding('mission')).toBeUndefined();
+    await refreshLocalBindings();
+    expect(localBinding('mission')).toEqual(binding);
+    channel.onmessage({revision:0,bindings:{}});
+    expect(localBinding('mission')).toEqual(binding);
+    expect(localBinding('another-computer')).toBeUndefined();
+  } finally {
+    window.dispatchEvent(new Event('pagehide'));
+    host.__TAURI_INTERNALS__=previousNative;host.__TAURI__=previousTauri;
+  }
+});
