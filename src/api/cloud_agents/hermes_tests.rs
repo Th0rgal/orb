@@ -119,3 +119,26 @@ fn remote_run_identity_cannot_change_request_path() {
         "/v1/runs/run_123/stop"
     );
 }
+
+#[tokio::test]
+async fn stalled_hermes_probe_does_not_hold_other_accounts_for_the_request_timeout() {
+    let app = Router::new().route(
+        "/v1/capabilities",
+        get(|| async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Json(json!({}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let h = Hermes {
+        client: reqwest::Client::new(),
+        url,
+        key: "fixture".into(),
+    };
+    let started = std::time::Instant::now();
+    assert!(probe(&h).await.unwrap_err().contains("not responding"));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    server.abort();
+}

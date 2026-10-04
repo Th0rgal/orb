@@ -59,6 +59,9 @@ impl Hermes {
             .map_err(|_| "Hermes connection lost; execution will be reconciled")?;
         if !response.status().is_success() {
             return Err(match response.status().as_u16() {
+                400 | 422 => {
+                    "Hermes rejected this turn; check the selected model and profile configuration"
+                }
                 401 | 403 => "Hermes authorization failed; reconnect the profile",
                 404 => "Hermes execution or capability is unavailable; no replacement was launched",
                 409 => "Hermes request conflicts with an existing operation",
@@ -88,10 +91,17 @@ impl Hermes {
         Ok(())
     }
 }
+async fn probe(h: &Hermes) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_millis(750), h.capabilities())
+        .await
+        .unwrap_or_else(|_| {
+            Err("Hermes is not responding; other cloud services remain available".into())
+        })
+}
 pub async fn account(state: &AppState, user: &str) -> Account {
     let result = async {
         let h = Hermes::connect(&state.config, user).await?;
-        h.capabilities().await
+        probe(&h).await
     }
     .await;
     Account {
@@ -210,10 +220,13 @@ pub async fn tick(
     }
     let outcome = observe(store, &mut e, i, config, user).await;
     if let Err(error) = &outcome {
-        if error.contains("authorization failed") || error.contains("not connected") {
-            if e.turns[i].phase == Phase::Queued || e.turns[i].phase == Phase::Running {
-                e.turns[i].phase = Phase::ReconnectRequired;
-            }
+        if (error.contains("authorization failed") || error.contains("not connected"))
+            && matches!(e.turns[i].phase, Phase::Queued | Phase::Running)
+        {
+            e.turns[i].phase = Phase::ReconnectRequired;
+        }
+        if error.starts_with("Hermes rejected this turn") {
+            e.turns[i].phase = Phase::Failed;
         }
         e.turns[i].detail = Some(error.clone());
     }
@@ -257,7 +270,9 @@ async fn observe_with_client(
             .as_deref()
             .and_then(|v| v.strip_prefix("submission:"))
             .and_then(|v| v.parse::<i64>().ok());
-        if !submitted.is_some_and(|s| chrono::Utc::now().timestamp() - s < 20 * 60 * 60) {
+        if !submitted
+            .is_some_and(|s| (0..20 * 60 * 60).contains(&(chrono::Utc::now().timestamp() - s)))
+        {
             e.turns[i].phase = Phase::SubmissionUncertain;
             return Err(
                 "Submission recovery window expired; inspect Hermes before retrying".into(),

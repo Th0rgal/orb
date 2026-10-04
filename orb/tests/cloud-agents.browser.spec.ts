@@ -174,3 +174,59 @@ test('Hermes uses Paloma and profile default, preserves a failed draft and reque
  expect(launches[0].cloud).toEqual({provider:'hermes',account:'paloma'});
  await page.screenshot({path:'screenshots/hermes-cloud-local.png',fullPage:true});
 });
+
+test('Hermes approvals, turn-only stop and reload retain the same conversation',async({page})=>{
+ const id='bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb';
+ const mission={id,title:'Paloma local acceptance',backend:'cloud_hermes',project:'demo',status:'awaiting_user',history:[],created_at:'',updated_at:''};
+ let phase='waiting_user'; const actions:{path:string;body:any}[]=[];
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ await page.route('**/api/**',async route=>{
+  const request=route.request(),path=new URL(request.url()).pathname;
+  if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
+  if(request.method()==='POST'){
+   actions.push({path,body:request.postData()?request.postDataJSON():null});
+   if(path.endsWith('/approval'))phase='running';
+   if(path.endsWith('/cancel'))phase='cancelled';
+   return route.fulfill({json:{message_accepted:true,queued:true,mission_id:id}});
+  }
+  let json:unknown={};
+  if(path==='/api/projects')json={projects:[{slug:'demo',title:'Demo'}]};
+  else if(path==='/api/control/missions')json=[mission];
+  else if(path===`/api/control/missions/${id}`)json=mission;
+  else if(path.endsWith('/cloud'))json={mission_id:id,selection:{provider:'hermes',account:'paloma',model:'configured-alias'},turns:[{key:'first',prompt:'Bounded test',phase,external_id:'run_one',result:'Marker retained.',artifacts:phase==='waiting_user'?[{kind:'hermes_approval',run_id:'run_one',request:{request_id:'request_one',command:'Bounded test action',choices:['once','deny']}}]:[],branches:[]}]};
+  else if(path.endsWith('/cloud/children'))json={missions:[{id:'child',title:'Harmless delegated check',status:'active'}]};
+  else if(path==='/api/cloud/accounts')json=[{id:'paloma',provider:'hermes',label:'Paloma',available:true,capabilities:{models:true,follow_up:true,cancel:true}}];
+  else if(path==='/api/cloud/hermes/options')json={models:{items:[{id:'',name:'Profile default'},{id:'configured-alias',name:'Configured model'}]}};
+  else if(path.endsWith('/files'))json={entries:[]};
+  else if(path.endsWith('/crons'))json={jobs:[]};
+  else if(path.includes('/controller'))json={job:null,runs:[]};
+  else if(path==='/api/control/queue'||path==='/api/backends')json=[];
+  else if(path==='/api/providers/backend-models')json={backends:{}};
+  return route.fulfill({json});
+ });
+ await page.goto('/');
+ await page.getByRole('button',{name:'Demo',exact:true}).click();
+ await page.locator('button.row.agent').filter({hasText:mission.title}).click();
+ await expect(page.getByRole('button',{name:'Harmless delegated check'})).toBeVisible();
+ await expect(page.locator('.mission-lead img[src="/hermes.png"]')).toBeVisible();
+ expect(actions).toHaveLength(0);
+ await page.getByRole('button',{name:'Approve once'}).click();
+ await expect.poll(()=>actions.length).toBe(1);
+ expect(actions[0].body).toEqual({run_id:'run_one',request_id:'request_one',choice:'once'});
+ await page.getByRole('button',{name:'Stop',exact:true}).click();
+ await expect.poll(()=>phase).toBe('cancelled');
+ expect(actions[1].path).toBe(`/api/control/missions/${id}/cloud/cancel`);
+ await page.reload();
+ await page.getByRole('button',{name:'Demo',exact:true}).waitFor();
+ if(await page.getByRole('button',{name:'Demo',exact:true}).getAttribute('aria-expanded')!=='true')await page.getByRole('button',{name:'Demo',exact:true}).click();
+ await page.locator('button.row.agent').filter({hasText:mission.title}).click();
+ await expect(page.getByText('Marker retained.',{exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Harmless delegated check'})).toBeVisible();
+ await page.getByLabel('Model',{exact:true}).click();
+ await page.getByRole('menuitemradio',{name:'Profile default'}).click();
+ await page.getByPlaceholder('Continue this conversation…').fill('Recall the marker');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await expect.poll(()=>actions.length).toBe(3);
+ expect(actions[2].body.mission_id).toBe(id);
+ expect(actions[2].body.cloud_model).toBe('');
+});
