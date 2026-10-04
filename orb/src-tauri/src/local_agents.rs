@@ -575,6 +575,7 @@ fn spawn_antigravity(
     request: &StartRequest, text: &Arc<Output>, session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>, env: &[(String, String)],
 ) -> Result<Child, String> {
+    crate::antigravity::validate_prompt(&request.prompt)?;
     let mut command = mission_command(request, env);
     let mut child = command.current_dir(&request.cwd)
         .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))

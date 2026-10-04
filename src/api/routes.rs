@@ -1334,6 +1334,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(super::providers::export_model_snapshots),
         )
         .route(
+            "/api/providers/antigravity-models",
+            get(super::providers::node_antigravity_models),
+        )
+        .route(
             "/api/providers/backend-models",
             get(super::providers::list_backend_model_options),
         )

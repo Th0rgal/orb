@@ -14,7 +14,11 @@ impl Drop for DispatchFileLock {
 /// Lock order: process admission mutex, durable admission file, PR writer
 /// lock, stores. This also serializes cooperating backend processes.
 pub(crate) async fn durable_lock(config: &Config) -> Result<DispatchFileLock, String> {
-    let dir = config.working_dir.join(".sandboxed-sh/missions");
+    durable_lock_root(&config.working_dir).await
+}
+
+pub(crate) async fn durable_lock_root(root: &std::path::Path) -> Result<DispatchFileLock, String> {
+    let dir = root.join(".sandboxed-sh/missions");
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| e.to_string())?;

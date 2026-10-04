@@ -1,3 +1,4 @@
+import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
@@ -118,6 +119,7 @@ import {
   type RemoteLaunchCapability,
   type RemoteNodesResponse,
   openExternalUrl,
+  listNodeAntigravityModels,
 } from "./api";
 
 const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "routing", "machines", "providers", "execution"]);
@@ -138,13 +140,22 @@ const loadPick = (): HarnessPick | null => {
   }
 };
 const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
+const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
+const nodeModelRequests = new Set<string>();
+async function refreshNodeAntigravityModels(machine: string) {
+  if (machine === "local" || machine === "core") return;
+  const version = connectionVersion(), key = `${version}:${machine}`;
+  if (nodeModelRequests.has(key)) return;
+  nodeModelRequests.add(key);
+  try {
+    const models = await listNodeAntigravityModels(machine);
+    if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
+  } catch { if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:[]})); }
+  finally { nodeModelRequests.delete(key); }
+}
 const harnessChoices = (machine = "core"): HarnessChoice[] => {
-  const choices = remoteHarnessChoices().map(choice => ({ ...choice, models: [...choice.models] }));
-  if (machine !== "local") return choices;
-  const local = choices.filter(choice => choice.backend.id !== "antigravity");
-  const models = localInstalled().find(row => row.id === "antigravity")?.models ?? [];
-  if (models.length) local.push({ backend: { id: "antigravity", name: "Antigravity" }, models: models.map(([value, label]) => ({ value, label })) });
-  return local;
+  const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models);
 };
 const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
 const setHarnessPick = (p: HarnessPick) => {
@@ -158,8 +169,8 @@ const setHarnessPick = (p: HarnessPick) => {
 /** Preserve an explicit selection; launch validation reports unavailable models.
  * A stored effort is normalized against the stored harness on every read, so a
  * level that harness never accepted can't survive into a create payload. */
-const effectivePick = (): HarnessPick | null => {
-  const choices = harnessChoices();
+const effectivePick = (machine = "core"): HarnessPick | null => {
+  const choices = harnessChoices(machine);
   if (!choices.length) return null;
   const stored = harnessPick();
   if (stored) {
@@ -469,12 +480,13 @@ export function Composer(p: {
   const [atItems, setAtItems] = createSignal<AttachItem[]>([]);
   const [caret, setCaret] = createSignal(0);
   let ta!: HTMLTextAreaElement;
-  const pick = () => effectivePick();
+  const pick = () => effectivePick(p.uploadTarget);
   const backend = () => p.backend ?? pick()?.backend ?? null;
   // Restored local conversations can open before New Agent or Settings has
   // scanned installed harnesses. Load capabilities for their composer too.
   createEffect(() => {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
+    else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
   });
   const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
@@ -752,6 +764,7 @@ export function Composer(p: {
               setWhich(opening ? "harness" : null);
               // Discover newly installed CLIs without recreating the composer.
               if (opening && p.harnessIds) void refreshLocalAgents(false);
+              if (opening && p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
             }}>
               {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
             </button>
@@ -1440,7 +1453,7 @@ export default function App() {
       const machine = newMachine();
       const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
-      const pick = effectivePick();
+      const pick = effectivePick(machine);
       const selectedCyber = draftCyber();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
       try {

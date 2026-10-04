@@ -6,6 +6,9 @@ use crate::api::control::AgentEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
+    if let Err(error) = crate::antigravity::validate_prompt(ctx.message) {
+        return AgentResult::failure(error, 0);
+    }
     if ctx.is_continuation && ctx.session_id.is_none() {
         return AgentResult::failure(
             "Antigravity continuation requires its original conversation ID",

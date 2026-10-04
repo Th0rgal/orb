@@ -2038,6 +2038,7 @@ mod tests {
             verdict.status_reason,
             true,
             observer.usage(),
+            None,
         )
         .await
         .unwrap();

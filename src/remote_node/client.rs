@@ -46,6 +46,27 @@ impl Default for RemoteNodeClient {
 }
 
 impl RemoteNodeClient {
+    pub async fn antigravity_models(
+        &self,
+        node: &RemoteNodeConfig,
+        token: &str,
+    ) -> Result<Vec<(String, String)>, RemoteNodeError> {
+        let response = self
+            .http
+            .get(format!("{}/antigravity/models", node.base_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if !response.status().is_success() {
+            return Err(RemoteNodeError::Request(format!(
+                "Node model discovery returned {}",
+                response.status()
+            )));
+        }
+        response.json().await.map_err(transport_error)
+    }
+
     pub async fn heartbeat(
         &self,
         node: &RemoteNodeConfig,

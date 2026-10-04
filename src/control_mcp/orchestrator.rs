@@ -1575,6 +1575,7 @@ impl OrchestratorMcp {
                     "gemini".to_string(),
                     "opencode".to_string(),
                     "grok".to_string(),
+                    "antigravity".to_string(),
                 ]
             });
 
@@ -1639,6 +1640,10 @@ impl OrchestratorMcp {
                     "backend": "opencode",
                     "ready": true,
                     "reason": "OpenCode routes through configured providers; inspect provider selection separately.",
+                }),
+                "antigravity" => json!({
+                    "backend": "antigravity", "ready": null, "auth_status": "unknown", "provider": "Google",
+                    "reason": "Antigravity uses the execution machine's native Google login. Run agy models or an authenticated turn on that machine to verify entitlement.",
                 }),
                 "grok" => json!({
                     "backend": "grok",

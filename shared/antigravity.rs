@@ -2,6 +2,18 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+/// Bound the native argv and the remote shell's worst-case quote expansion.
+pub fn validate_prompt(prompt: &str) -> Result<(), String> {
+    if prompt.len() > 16 * 1024 {
+        Err(
+            "Antigravity prompts must be at most 16 KiB; put large context in workspace files"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 pub fn args(model: Option<&str>, session: Option<&str>, prompt: &str) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -127,8 +139,19 @@ impl Stream {
 
 /// Authenticated native discovery, bounded and without retaining stderr (OAuth URLs).
 pub fn models(binary: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    models_in_home(binary, None)
+}
+
+pub fn models_in_home(
+    binary: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<Vec<(String, String)>, String> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    if let Some(home) = home {
+        command.env("HOME", home);
+    }
+    let mut child = command
         .arg("models")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -233,6 +256,12 @@ mod tests {
             &json!({"event":"result","result":{"conversation_id":"expected","status":"SUCCESS"}}),
         );
         assert!(s.finish().is_ok());
+    }
+    #[test]
+    fn rejects_oversized_prompt_before_native_launch() {
+        assert!(validate_prompt(&"a".repeat(16 * 1024)).is_ok());
+        assert!(validate_prompt(&"'".repeat(16 * 1024 + 1)).is_err());
+        assert!(validate_prompt(&"é".repeat(16 * 1024)).is_err());
     }
     #[test]
     fn resumes_exact_session_and_keeps_prompt_one_argument() {

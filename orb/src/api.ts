@@ -1137,3 +1137,8 @@ export function completeProviderOAuth(id: string, code: string) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method_index: 0, code }),
   });
 }
+
+/** Account-entitled models from the selected node, never Core's login. */
+export async function listNodeAntigravityModels(nodeId: string): Promise<[string,string][]> {
+ return api(`/api/providers/antigravity-models?node_id=${encodeURIComponent(nodeId)}`, {signal: AbortSignal.timeout(20000)});
+}

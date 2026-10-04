@@ -13966,7 +13966,30 @@ async fn finalize_remote_mission(
     status_reason: &str,
     native_stream: bool,
     usage: Option<crate::cost::TokenUsage>,
+    ledger_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
+    // Recovery and the live observer can both see the same terminal receipt.
+    // Serialize with dispatch, then require that this job still owns the run.
+    // A duplicate old receipt must never complete a newer continuation.
+    let _admission = DISPATCH_ADMISSION.lock().await;
+    let _file = match ledger_dir {
+        Some(root) => Some(dispatch_admission::durable_lock_root(root).await?),
+        None => None,
+    };
+    if let Some(job_id) = job_id {
+        let active = owner
+            .mission_store
+            .get_active_mission_run(mission_id)
+            .await?;
+        if active.is_none_or(|run| run.owner_actor_id != remote_job_lease_owner(job_id)) {
+            return Ok(());
+        }
+        let current = owner.mission_store.get_mission(mission_id).await?;
+        if !should_finalize_remote_job(current.map(|mission| mission.status)) {
+            return Ok(());
+        }
+    }
+
     let model = if usage.is_some() {
         owner
             .mission_store
@@ -14354,6 +14377,9 @@ async fn submit_leased_remote_job(
                 .to_string(),
         ))
     };
+    if let RemoteHarnessPlan::Antigravity { prompt, .. } = plan {
+        crate::antigravity::validate_prompt(prompt)?;
+    }
     let (mut execution, proxy_key_id) = if plan.uses_core_proxy() {
         let api_base_url = super::mission_runner::public_api_base_url_from_env()
             .ok_or_else(|| {
@@ -15496,6 +15522,7 @@ async fn poll_remote_job(
                         grok.is_some(),
                         grok.as_ref()
                             .and_then(remote_grok::NativeGrokObserver::usage),
+                        Some(ledger_dir),
                     )
                     .await;
                     fleet.record_outcome(outcome(
@@ -15619,6 +15646,7 @@ async fn poll_remote_job(
                             grok.is_some(),
                             grok.as_ref()
                                 .and_then(remote_grok::NativeGrokObserver::usage),
+                            Some(ledger_dir),
                         )
                         .await
                         {
@@ -39199,11 +39227,16 @@ Investigate <service/> failures.
             .await
             .unwrap();
         let owner = RemoteMissionOwner::offline(Arc::clone(&store));
+        let old_job = Uuid::new_v4();
+        store
+            .begin_mission_run(mission.id, &remote_job_lease_owner(old_job), None)
+            .await
+            .unwrap();
 
         finalize_remote_mission(
             &owner,
             mission.id,
-            None,
+            Some(old_job),
             "node-a",
             true,
             "remote result".to_string(),
@@ -39215,6 +39248,7 @@ Investigate <service/> failures.
                 cache_read_input_tokens: Some(7),
                 ..Default::default()
             }),
+            Some(dir.path()),
         )
         .await
         .unwrap();
@@ -39233,6 +39267,50 @@ Investigate <service/> failures.
         assert_eq!(events[0].content, "remote result");
         assert_eq!(events[0].metadata["usage"]["input_tokens"], 11);
         assert_eq!(events[0].metadata["usage"]["cache_read_input_tokens"], 7);
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        let next_job = Uuid::new_v4();
+        let next = store
+            .begin_mission_run(mission.id, &remote_job_lease_owner(next_job), None)
+            .await
+            .unwrap();
+        finalize_remote_mission(
+            &owner,
+            mission.id,
+            Some(old_job),
+            "node-a",
+            true,
+            "duplicate old receipt".into(),
+            "remote_node_job",
+            true,
+            None,
+            Some(dir.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get_mission(mission.id).await.unwrap().unwrap().status,
+            MissionStatus::Active
+        );
+        assert_eq!(
+            store
+                .get_active_mission_run(mission.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id,
+            next.run_id
+        );
+        assert_eq!(
+            store
+                .get_events(mission.id, Some(&["assistant_message"]), None, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

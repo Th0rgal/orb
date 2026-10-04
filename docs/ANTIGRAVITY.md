@@ -87,3 +87,8 @@ An isolated Linux Core instance also passed initial and follow-up Argon turns,
 with file assertions, scoped MCP calls, and an unchanged persisted native
 conversation ID. Production services and the installed Orb app still require
 a coordinated upgrade.
+
+Orb discovers remote models from the selected node's managed login through
+an authenticated node endpoint; Core and local accounts are not substituted.
+Prompts are limited to 16 KiB before native launch to stay within command-line
+limits, including remote shell escaping. Put larger context in workspace files.

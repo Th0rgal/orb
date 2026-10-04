@@ -1927,6 +1927,37 @@ pub async fn list_full_model_catalog(
     })
 }
 
+#[derive(Deserialize)]
+pub struct NodeAntigravityQuery {
+    node_id: String,
+}
+
+pub async fn node_antigravity_models(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<NodeAntigravityQuery>,
+) -> Result<Json<Vec<(String, String)>>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    if !state.config.remote_nodes.enabled {
+        return Err((StatusCode::CONFLICT, "Remote nodes are disabled".into()));
+    }
+    let node = state
+        .config
+        .remote_nodes
+        .node(&query.node_id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown node".into()))?;
+    let token = std::env::var(&node.token_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Node credential unavailable".into(),
+        )
+    })?;
+    crate::remote_node::RemoteNodeClient::default()
+        .antigravity_models(node, &token)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))
+}
+
 /// List model options grouped by backend.
 ///
 /// This is used by the frontend to power per-harness model override pickers.

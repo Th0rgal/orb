@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/project-context/prepare", post(prepare_project_context))
         .route("/heartbeat", get(heartbeat))
+        .route("/antigravity/models", get(antigravity_models))
         .route("/software", get(software_inventory))
         .route("/software/updates", post(software_update))
         .route("/software/updates/cancel", post(software_cancel))
@@ -188,6 +189,28 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn antigravity_models(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<(String, String)>>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let auth = state.managed_auth.clone();
+    let models = tokio::task::spawn_blocking(move || {
+        let home = tempfile::tempdir().map_err(|_| "Cannot prepare model discovery".to_string())?;
+        auth.prepare_workspace(&["antigravity".into()], home.path())?;
+        sandboxed_sh::antigravity::models_in_home(Path::new("agy"), Some(home.path()))
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Model discovery failed".into(),
+        )
+    })?
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+    Ok(Json(models))
 }
 
 fn check_auth(headers: &HeaderMap, state: &NodeState) -> Result<(), (StatusCode, String)> {
