@@ -1,7 +1,7 @@
 import {eventPage} from "./eventPageFixture";
 import { test, expect } from "@playwright/test";
 
-for (const target of [{ backend: "opencode", name: "OpenCode", model: "builtin/smart", label: "Smart (Default)" }, { backend: "antigravity", name: "Antigravity", model: "node-argon", label: "Node Argon" }]) {
+for (const target of [{ backend: "opencode", name: "OpenCode", model: "builtin/smart", label: "Smart (Default)" }, { backend: "antigravity", name: "Antigravity CLI", model: "node-argon", label: "Node Argon" }]) {
 test(`fork dialog uses ${target.name} on the source destination without mutating it`, async ({ page }) => {
   const source = { id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", remote_node_id: "dgx-spark", history: [], created_at: "", updated_at: "" };
   const fork = { ...source, id: "forked", title: "Original work · fork", backend: target.backend, model_override: target.model };

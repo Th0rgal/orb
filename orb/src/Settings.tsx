@@ -92,7 +92,7 @@ function LocalAgentsCard() {
     codex: "Codex",
     grok: "Grok",
     gemini: "Gemini",
-    antigravity: "Antigravity",
+    antigravity: "Antigravity CLI",
     opencode: "OpenCode",
   };
   const save = (id: string) => {

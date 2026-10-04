@@ -37,11 +37,11 @@ it("exposes API key editing and keeps real error details", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/cloud/accounts") ? [] : url.endsWith("/zai/usage") ? {provider_type:"zai",error:"Account unavailable"} : url.endsWith("/minimax/usage") ? {provider_type:"minimax",model_usage:[]} : url.endsWith("/providers")
     ? ["muse", "custom", "minimax", "zai"].map(id => ({ id, name: id, provider_type: id, uses_oauth: false, status: { type: "connected" } }))
     : url.endsWith("/zai/usage") ? {provider_type:"zai",error:"Account unavailable"} : url.endsWith("/minimax/usage") ? {provider_type:"minimax",model_usage:[]} : { entries: { muse: { provider_type: "muse" }, custom: { provider_type: "custom" }, minimax: { provider_type: "minimax", model_usage: [] }, zai: { provider_type: "zai", error: "Account unavailable" } } }))));
-  const { container } = render(() => <Providers />);
+  render(() => <Providers />);
   await screen.findAllByText("muse");
   await waitFor(() => expect(screen.getByRole("button", { name: /^zai/ })).toBeTruthy());
   for (const name of ["muse", "custom", "minimax"]) expect(screen.getByRole("button", { name: `Actions for ${name}`, exact: true })).toBeTruthy();
-  expect(container.querySelectorAll(".p-acc-chev")).toHaveLength(4);
+  expect(screen.getByRole("heading", { name: "API keys" }).closest("section")!.querySelectorAll(".p-acc-chev")).toHaveLength(4);
   fireEvent.click(screen.getByRole("button", { name: /^zai/ }));
   expect(await screen.findByText("Account unavailable")).toBeTruthy();
 });
