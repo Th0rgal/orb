@@ -6944,6 +6944,29 @@ async fn native_grok_auto_track_continuation(
         .release_leases_for_attempt(&id.to_string())
         .unwrap();
 
+    let current = store.get_mission(id).await.unwrap().unwrap();
+    let identity = Harness::assertion(&current);
+    for field in ["project", "track", "github_pr"] {
+        let mut stale = identity.clone();
+        stale[field] = json!("changed-identity");
+        let rejected = h
+            .request(
+                false,
+                id,
+                json!({
+                    "content": "keep optimizing", "continue_identity": stale
+                }),
+            )
+            .await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(rejected
+            .text()
+            .await
+            .unwrap()
+            .contains("writer_identity_stale"));
+        assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    }
+
     // Orb/MCP use the ordinary composer endpoint after a goal finishes.
     fixture.set_state("running");
     fixture.log.lock().unwrap().clear();
@@ -6954,7 +6977,7 @@ async fn native_grok_auto_track_continuation(
             id,
             json!({
                 "content":"  keep optimizing  ", "client_message_id":message_id,
-                "unexpected_field":true
+                "unexpected_field":true, "continue_identity":identity
             }),
         )
         .await;
