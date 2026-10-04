@@ -5465,7 +5465,6 @@ pub async fn post_message(
                 || req.github_pr.is_some()
                 || req.track.is_some()
                 || req.title.is_some()
-                || req.continue_identity.is_some()
             {
                 return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
             }
@@ -5499,7 +5498,7 @@ pub async fn post_message(
                 &control,
                 &user.id,
                 mid,
-                placement.clone(),
+                req.continue_identity.as_ref(),
                 content,
                 id,
             )

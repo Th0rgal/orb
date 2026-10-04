@@ -369,8 +369,8 @@ struct OrbConversation: View {
                 if let id {
                     body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
-                    if !mission["track"].text.isEmpty && mission["remote_node_id"].text.isEmpty {
-                        body["continue_identity"] = .object(["project": mission["project"], "track": mission["track"], "github_pr": mission["github_pr"]])
+                    if let identity = OrbContinuation.identity(for: mission) {
+                        body["continue_identity"] = identity
                     }
                     if isCloud { body["cloud_model"] = .string(selection.model); body["cloud_model_params"] = selection.params }
                     if !isCloud && !selection.model.isEmpty && selection.model != mission["model_override"].text {

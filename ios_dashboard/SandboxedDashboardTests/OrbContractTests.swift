@@ -30,6 +30,19 @@ final class OrbContractTests: XCTestCase {
         XCTAssertTrue(cloud.mobile)
         XCTAssertTrue(cloud.cloud)
     }
+    func testRemoteFollowupOmitsLocalIdentityAcrossPlacementFormats() {
+        let local: [String: OrbJSON] = ["project": .string("default"), "track": .string("mission-123"), "github_pr": .null]
+        XCTAssertEqual(OrbContinuation.identity(for: .object(local)), .object(local))
+        for placement: [String: OrbJSON] in [
+            ["remote_node_id": .string("babylon")],
+            ["remote_job": .object(["node_id": .string("babylon")])],
+            ["execution": .object(["scope_unit": .string("remote-node:babylon")])]
+        ] {
+            XCTAssertNil(OrbContinuation.identity(for: .object(local.merging(placement) { _, new in new })))
+        }
+        XCTAssertNil(OrbContinuation.identity(for: .object([:])))
+    }
+
     func testFolderTagKeepsNestedPath() {
         let row = OrbRow(.object(["id": .string("a"), "tags": .array([.string("orb-folder:Design/Images")])]))
         XCTAssertEqual(row.folder, "Design/Images")

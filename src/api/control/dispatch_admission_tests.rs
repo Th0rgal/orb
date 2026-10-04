@@ -6944,6 +6944,70 @@ async fn native_grok_auto_track_continuation(
         .release_leases_for_attempt(&id.to_string())
         .unwrap();
 
+    let current = store.get_mission(id).await.unwrap().unwrap();
+    let identity = Harness::assertion(&current);
+    // A reassignment while enqueue waits for admission must invalidate the
+    // client's assertion before any durable message is accepted.
+    let admission = DISPATCH_ADMISSION.lock().await;
+    let expected = serde_json::from_value(identity.clone()).unwrap();
+    let racing_id = Uuid::new_v4();
+    let enqueue = remote_queue::enqueue(
+        &h.state,
+        &h.control,
+        "test",
+        id,
+        Some(&expected),
+        "keep optimizing".into(),
+        racing_id,
+    );
+    tokio::pin!(enqueue);
+    assert!(futures::poll!(&mut enqueue).is_pending());
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("reassigned-project".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    drop(admission);
+    let refusal = enqueue.await.unwrap_err();
+    assert_eq!(refusal.0, StatusCode::CONFLICT);
+    assert!(refusal.1.contains("writer_identity_stale"));
+    assert!(!remote_queue::is_waiting(&h.state.projects, "test", racing_id).unwrap());
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(current.project.project.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for field in ["project", "track", "github_pr"] {
+        let mut stale = identity.clone();
+        stale[field] = json!("changed-identity");
+        let rejected = h
+            .request(
+                false,
+                id,
+                json!({
+                    "content": "keep optimizing", "continue_identity": stale
+                }),
+            )
+            .await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(rejected
+            .text()
+            .await
+            .unwrap()
+            .contains("writer_identity_stale"));
+        assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    }
+
     // Orb/MCP use the ordinary composer endpoint after a goal finishes.
     fixture.set_state("running");
     fixture.log.lock().unwrap().clear();
@@ -6954,7 +7018,7 @@ async fn native_grok_auto_track_continuation(
             id,
             json!({
                 "content":"  keep optimizing  ", "client_message_id":message_id,
-                "unexpected_field":true
+                "unexpected_field":true, "continue_identity":identity
             }),
         )
         .await;
@@ -6973,6 +7037,49 @@ async fn native_grok_auto_track_continuation(
         ack["warnings"],
         json!(["unrecognized fields ignored: unexpected_field"])
     );
+    // Losing the response must not strand an already accepted iOS request
+    // after the project changes. It returns its receipt, without a second job.
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("reassigned-project".into())),
+                track: Some(Some("explicit-reassigned-track".into())),
+                github_pr: Some(Some("owner/repo#123".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let retried = h
+        .request(
+            false,
+            id,
+            json!({
+                "content":"  keep optimizing  ", "client_message_id":message_id,
+                "continue_identity":identity
+            }),
+        )
+        .await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried: Value = retried.json().await.unwrap();
+    assert_eq!(retried["id"], message_id.to_string());
+    assert_eq!(retried["message_accepted"], true);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 3);
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(current.project.project.clone()),
+                track: Some(current.project.track.clone()),
+                github_pr: Some(current.project.github_pr.clone()),
+                tags: Some(current.project.tags.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let mut saw_followup = false;
     while let Ok(event) = events.try_recv() {
         if let AgentEvent::UserMessage {

@@ -31,6 +31,17 @@ indirect enum OrbJSON: Codable, Sendable, Equatable {
     var flag: Bool { if case .bool(let v) = self { return v }; return false }
 }
 
+/// Remote placement can be reported by either the mission or its current job.
+enum OrbContinuation {
+    static func identity(for mission: OrbJSON) -> OrbJSON? {
+        guard !mission["track"].text.isEmpty,
+              mission["remote_node_id"].text.isEmpty,
+              mission["remote_job"] == .null,
+              !mission["execution"]["scope_unit"].text.hasPrefix("remote-node:") else { return nil }
+        return .object(["project": mission["project"], "track": mission["track"], "github_pr": mission["github_pr"]])
+    }
+}
+
 struct OrbRow: Identifiable, Hashable {
     let id: String
     let name: String
