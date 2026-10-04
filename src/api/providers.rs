@@ -2134,8 +2134,83 @@ pub async fn list_backend_model_options(
     Json(BackendModelOptionsResponse { backends })
 }
 
+#[derive(Clone, Copy)]
+struct AntigravityReadiness {
+    checked: std::time::Instant,
+    ready: bool,
+    checking: bool,
+}
+fn antigravity_readiness(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, AntigravityReadiness>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, AntigravityReadiness>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+fn antigravity_workspace_key(
+    workspace: &crate::workspace::Workspace,
+    work_dir: &std::path::Path,
+    cli: &str,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(workspace)
+        .unwrap_or_default()
+        .hash(&mut key);
+    work_dir.hash(&mut key);
+    cli.hash(&mut key);
+    key.finish()
+}
+/// Listings never wait for native account I/O. Explicit discovery and activation
+/// still probe live; their result refreshes this workspace-scoped cache.
+pub(crate) fn cached_workspace_antigravity_ready(
+    workspace: crate::workspace::Workspace,
+    work_dir: std::path::PathBuf,
+    cli: String,
+) -> bool {
+    let key = antigravity_workspace_key(&workspace, &work_dir, &cli);
+    let mut cache = antigravity_readiness()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let entry = cache.entry(key).or_insert(AntigravityReadiness {
+        checked: std::time::Instant::now() - std::time::Duration::from_secs(61),
+        ready: false,
+        checking: false,
+    });
+    let ready = entry.ready;
+    if entry.checking || entry.checked.elapsed() < std::time::Duration::from_secs(60) {
+        return ready;
+    }
+    entry.checking = true;
+    drop(cache);
+    tokio::spawn(async move {
+        let _ = workspace_antigravity_models(workspace, &work_dir, &cli).await;
+    });
+    ready
+}
+
 /// Use the same workspace environment and user as a native mission turn.
 pub(crate) async fn workspace_antigravity_models(
+    workspace: crate::workspace::Workspace,
+    work_dir: &std::path::Path,
+    cli: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let key = antigravity_workspace_key(&workspace, work_dir, cli);
+    let result = discover_workspace_antigravity_models(workspace, work_dir, cli).await;
+    antigravity_readiness()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            key,
+            AntigravityReadiness {
+                checked: std::time::Instant::now(),
+                ready: result.is_ok(),
+                checking: false,
+            },
+        );
+    result
+}
+async fn discover_workspace_antigravity_models(
     workspace: crate::workspace::Workspace,
     work_dir: &std::path::Path,
     cli: &str,
@@ -2495,6 +2570,43 @@ fn is_grok_backend_model_id(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_cached_readiness_returns_before_discovery_and_coalesces() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let cli = root.path().join("agy-fixture");
+        let gate = root.path().join("gate");
+        let counter = root.path().join("counter");
+        std::fs::write(&cli, "#!/bin/sh\nprintf x >> \"$TEST_AGY_COUNTER\"\nwhile [ ! -f \"$TEST_AGY_GATE\" ]; do sleep 0.02; done\nprintf 'model\\tAccount\\n'\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut workspace = crate::workspace::Workspace::default_host(root.path().to_path_buf());
+        workspace
+            .env_vars
+            .insert("TEST_AGY_COUNTER".into(), counter.display().to_string());
+        workspace
+            .env_vars
+            .insert("TEST_AGY_GATE".into(), gate.display().to_string());
+        let ready = || {
+            cached_workspace_antigravity_ready(
+                workspace.clone(),
+                root.path().into(),
+                cli.display().to_string(),
+            )
+        };
+        assert!(!ready());
+        assert!(!ready());
+        std::fs::write(&gate, "ready").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !ready() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(counter).unwrap(), "x");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

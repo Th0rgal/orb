@@ -453,7 +453,19 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         .into_iter()
         .map(|b| b.id)
         .collect();
-    if !core_antigravity_ready(state, None).await {
+    let ready = if let Some(workspace) = state.workspaces.get(Uuid::nil()).await {
+        let cli =
+            super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+                .unwrap_or_else(|| "agy".into());
+        crate::api::providers::cached_workspace_antigravity_ready(
+            workspace,
+            state.config.working_dir.clone(),
+            cli,
+        )
+    } else {
+        false
+    };
+    if !ready {
         harnesses.retain(|id| id != "antigravity");
     }
     let mut rows = vec![

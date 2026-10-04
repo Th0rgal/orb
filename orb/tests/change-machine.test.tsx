@@ -100,3 +100,15 @@ it('uses destination account models and rejects the source-only model', async()=
  fireEvent.change(ui.getByLabelText('Transfer model'),{target:{value:'node-only'}});
  expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
 });
+
+it('selects the first destination model when changing harness', async()=>{
+ const destination:transfers.Destination={machine:{kind:'node',id:'node'},label:'Node',available:true,harnesses:['codex']};
+ vi.spyOn(transfers,'inspectTransfer').mockResolvedValue({version:1,actions:[],destinations:[destination]});
+ const node:HarnessChoice[]=[...choices,{backend:{id:'antigravity',name:'Antigravity'},models:[{value:'node-only',label:'Node only'}]}];
+ const ui=render(()=><ChangeMachine mission={mission} choices={choices} choicesFor={()=>node} onClose={()=>{}} onMoved={()=>{}}/>);
+ await waitFor(()=>expect(ui.getByRole('menuitem',{name:/Node/})).toBeTruthy());
+ fireEvent.click(ui.getByRole('menuitem',{name:/Node/}));
+ fireEvent.change(ui.getByLabelText('Transfer harness'),{target:{value:'antigravity'}});
+ expect((ui.getByLabelText('Transfer model') as HTMLSelectElement).value).toBe('node-only');
+ expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});
