@@ -10,6 +10,33 @@
 //! - Health monitoring
 //! - Working directory (isolated per mission)
 
+/// Preserve the current request and instructions; trim only synthesized history.
+fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &str) -> String {
+    let full = crate::util::frame_turn_prompt(history, message) + suffix;
+    if crate::antigravity::validate_prompt(&full).is_ok() {
+        return full;
+    }
+    let marker = "[Earlier history omitted to fit the native prompt budget]\n";
+    let base = crate::util::frame_turn_prompt(marker, message).len() + suffix.len();
+    let budget = (16usize * 1024).saturating_sub(base);
+    let mut start = history.len().saturating_sub(budget);
+    while !history.is_char_boundary(start) {
+        start += 1;
+    }
+    crate::util::frame_turn_prompt(&(marker.to_string() + &history[start..]), message) + suffix
+}
+
+#[cfg(test)]
+#[test]
+fn antigravity_handoff_preserves_request_and_recent_unicode_history() {
+    let history = "é🕊".repeat(10_000) + "RECENT_HISTORY";
+    let prompt = antigravity_handoff_prompt(&history, "CURRENT_REQUEST", "REQUIRED_INSTRUCTIONS");
+    assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
+    assert!(prompt.contains("CURRENT_REQUEST"));
+    assert!(prompt.contains("RECENT_HISTORY"));
+    assert!(prompt.ends_with("REQUIRED_INSTRUCTIONS"));
+}
+
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -4498,7 +4525,8 @@ async fn run_mission_turn(
         ),
         "antigravity" => (
             if session_id.is_none() {
-                convo.clone()
+                let framed = crate::util::frame_turn_prompt(&history_context, &user_message);
+                antigravity_handoff_prompt(&history_context, &user_message, &convo[framed.len()..])
             } else {
                 user_message.clone()
             },

@@ -146,6 +146,12 @@ pub async fn local_agents_scan(request: ScanRequest) -> Result<Vec<ScanRow>, Str
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn local_antigravity_models(path: String) -> Result<Vec<(String, String)>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::antigravity::models(Path::new(&path)))
+        .await.map_err(|error| error.to_string())?
+}
+
 fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
     HARNESSES
         .iter()
@@ -160,10 +166,8 @@ fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .filter(|p| p.is_file())
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));
-            let discovery = if *id == "antigravity" { path.as_deref().map(crate::antigravity::models) } else { None };
-            let (models, auth_error) = match discovery { Some(Ok(models)) => (models, None), Some(Err(error)) => (vec![], Some(error)), None => (vec![], None) };
             ScanRow {
-                models, auth_error,
+                models: vec![], auth_error: None,
                 id: (*id).to_string(),
                 bin: (*bin).to_string(),
                 // A slow version probe must not hide an installed CLI.

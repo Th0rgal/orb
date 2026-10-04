@@ -30,6 +30,7 @@ commands.allow = [
   "local_interaction_answer",
   "local_session_git",
   "local_agents_scan",
+  "local_antigravity_models",
   "local_agents_workspace",
   "local_agents_write",
   "local_machine_identity",

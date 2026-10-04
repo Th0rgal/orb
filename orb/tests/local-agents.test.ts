@@ -265,3 +265,26 @@ it('rejects an old native binary before invoking a Codex launch',async()=>{
   expect(invoke.mock.calls.some((c:any)=>c[0]==='local_run_launch')).toBe(false);
  }finally{host.__TAURI_INTERNALS__=previous;}
 });
+
+it('returns local inventory before Antigravity account discovery finishes', async () => {
+ vi.resetModules();
+ const host = window as any;
+ const previous = host.__TAURI_INTERNALS__;
+ const previousPublic = host.__TAURI__;
+ let finish!: (models: [string,string][]) => void;
+ const pending = new Promise<[string,string][]>(resolve => {finish=resolve;});
+ host.__TAURI__=undefined;
+ host.__TAURI_INTERNALS__={invoke:async (cmd:string) => {
+  if(cmd==='local_agents_scan') return [{id:'codex',path:'/codex',bin:'codex',installed:true},{id:'antigravity',path:'/agy',bin:'agy',installed:true}];
+  if(cmd==='local_antigravity_models') return pending;
+  throw Error(cmd);
+ }};
+ try {
+  const {refreshLocalAgents,localInstalled}=await import('../src/localAgents');
+  const rows=await refreshLocalAgents(true);
+  expect(rows.map(row=>row.id)).toEqual(['codex','antigravity']);
+  expect(localInstalled()[1].models).toBeUndefined();
+  finish([['agy-demo','Gemini 4 Argon']]);
+  await vi.waitFor(()=>expect(localInstalled()[1].models).toEqual([['agy-demo','Gemini 4 Argon']]));
+ } finally {host.__TAURI_INTERNALS__=previous;host.__TAURI__=previousPublic;}
+});
