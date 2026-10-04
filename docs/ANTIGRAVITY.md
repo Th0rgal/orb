@@ -92,3 +92,10 @@ Orb discovers remote models from the selected node's managed login through
 an authenticated node endpoint; Core and local accounts are not substituted.
 Prompts are limited to 16 KiB before native launch to stay within command-line
 limits, including remote shell escaping. Put larger context in workspace files.
+
+Core records native launch intent before starting the CLI. An ambiguous attempt
+without a persisted conversation ID requires reconciliation; a proven failure
+before launch can be retried. Backend handoffs carry bounded conversation
+history. A committed machine transfer clears Antigravity's source-machine
+identity and launch guard, then starts a fresh conversation with portable
+history on the destination.

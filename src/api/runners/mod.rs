@@ -115,6 +115,9 @@ pub(crate) struct TurnContext<'a> {
 pub(crate) enum TurnExtras<'a> {
     #[default]
     None,
+    Antigravity {
+        current_message: &'a str,
+    },
     Codex {
         current_message: &'a str,
         tool_hub: Option<Arc<FrontendToolHub>>,

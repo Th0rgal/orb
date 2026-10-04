@@ -76,6 +76,11 @@ pub(super) async fn save(
                 if matches!(action.destination,Machine::Client{..}){tags.push("placement:client".into());}
                 let now=now_string();
                 tx.execute("UPDATE missions SET working_directory=?2,requires_local_disk=?3,tags=?4,backend=?5,model_override=?6,model_effort=?7,session_id=NULL,deferred_goal=NULL,workspace_id='00000000-0000-0000-0000-000000000000',status='awaiting_user',terminal_reason='machine_transfer',updated_at=?8,agent=NULL,config_profile=NULL WHERE id=?1",params![mid,root,matches!(action.destination,Machine::Core),serde_json::to_string(&tags).map_err(error)?,action.backend,action.model,action.effort,now]).map_err(error)?;
+                // Antigravity identity and unbound-attempt guards belong to the
+                // source machine. The committed transfer authorizes a new one.
+                for table in ["mission_harness_sessions", "mission_native_prompt_attempts", "mission_native_prompt_claims"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE mission_id=?1 AND backend='antigravity'"), [&mid]).map_err(error)?;
+                }
                 // Reserve a terminal generation in the existing execution ledger.
                 tx.execute("INSERT INTO mission_runs(run_id,mission_id,generation,execution_state,owner_actor_id,started_at,heartbeat_at,ended_at,terminal_reason) VALUES(?1,?2,?3,'terminal',?4,?5,?5,?5,'machine_transfer')",params![action.id.to_string(),mid,action.generation,format!("machine-transfer:{}",action.id),now]).map_err(error)?;
 
@@ -138,6 +143,78 @@ mod tests {
             context: "complete history".into(),
             created_at: now_string(),
         }
+    }
+    #[tokio::test]
+    async fn antigravity_transfer_authorizes_one_new_unbound_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "argon-transfer")
+            .await
+            .unwrap();
+        let m = store
+            .create_mission(None, None, None, None, None, Some("antigravity"), None)
+            .await
+            .unwrap();
+        assert!(store
+            .claim_native_prompt(m.id, "antigravity", None, None, Uuid::new_v4())
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_native_prompt(m.id, "antigravity", None, None, Uuid::new_v4())
+            .await
+            .unwrap());
+        assert!(store
+            .update_mission_session_id(m.id, "source-native", "antigravity", None)
+            .await
+            .unwrap());
+        store
+            .update_mission_status(m.id, MissionStatus::AwaitingUser)
+            .await
+            .unwrap();
+        let m = store.get_mission(m.id).await.unwrap().unwrap();
+        let mut request = action(&m);
+        request.source = Machine::Node {
+            id: "source-node".into(),
+        };
+        request.destination = Machine::Core;
+        let mut a = store.save_machine_transfer(request, None).await.unwrap();
+        a.phase = "verified".into();
+        a.destination_root = Some("/destination".into());
+        a.receipt = Some(serde_json::json!({"digest":"abc"}));
+        a = store.save_machine_transfer(a, Some(0)).await.unwrap();
+        let revision = a.revision;
+        a.phase = "activated".into();
+        store
+            .save_machine_transfer(a, Some(revision))
+            .await
+            .unwrap();
+        assert!(!store
+            .native_prompt_attempted(m.id, "antigravity")
+            .await
+            .unwrap());
+        assert!(store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .is_none());
+        store
+            .update_mission_status(m.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        let run = store
+            .begin_mission_run(m.id, "control:test", None)
+            .await
+            .unwrap();
+        let stamp = crate::api::mission_store::SessionUpdateRun::from(&run);
+        assert!(store
+            .claim_native_prompt(m.id, "antigravity", None, Some(&stamp), Uuid::new_v4())
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_native_prompt(m.id, "antigravity", None, Some(&stamp), Uuid::new_v4())
+            .await
+            .unwrap());
     }
     #[tokio::test]
     async fn machine_transfer_preserves_identity_and_fences_execution_across_restart() {

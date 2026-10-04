@@ -93,7 +93,7 @@ impl Stream {
         if self.completed_steps.contains(&step) {
             return vec![];
         }
-        if body["state"] == "DONE" {
+        if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
             self.completed_steps.insert(step);
             self.input_tokens += body["usage"]["input_tokens"].as_u64().unwrap_or(0);
             self.output_tokens += body["usage"]["output_tokens"].as_u64().unwrap_or(0);
@@ -117,8 +117,8 @@ impl Stream {
         if self.tools.insert(id.clone()) {
             events.push(json!({"type":"tool_call","toolCallId":id,"name":name,"toolName":name,"rawInput":info["parameters"]}));
         }
-        if body["state"] == "DONE" {
-            events.push(json!({"type":"tool_call_update","toolCallId":id,"name":name,"toolName":name,"status":if info["error"].is_null() {"completed"} else {"failed"},"output":info["output"],"rawOutput":info["output"]}));
+        if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
+            events.push(json!({"type":"tool_call_update","toolCallId":id,"name":name,"toolName":name,"status":if body["state"] == "ERROR" || !info["error"].is_null() {"failed"} else {"completed"},"output":info["output"],"rawOutput":info["output"]}));
         }
         events
     }
@@ -208,11 +208,18 @@ mod tests {
     fn real_argon_turn_has_tools_usage_and_an_explicit_result() {
         let mut stream = Stream::default();
         let mut tools = 0;
+        let mut failed_tools = 0;
         for line in include_str!("../tests/fixtures/antigravity_turn.jsonl").lines() {
-            tools += stream.feed(&serde_json::from_str(line).unwrap()).len();
+            let events = stream.feed(&serde_json::from_str(line).unwrap());
+            failed_tools += events
+                .iter()
+                .filter(|event| event["status"] == "failed")
+                .count();
+            tools += events.len();
         }
         assert!(stream.finish().is_ok());
         assert!(tools >= 4);
+        assert_eq!(failed_tools, 1);
         assert!(stream.input_tokens > 0);
         assert_eq!(stream.cache_read_tokens, 40593);
         assert!(stream.text.contains("node --test"));

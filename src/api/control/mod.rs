@@ -29518,7 +29518,11 @@ async fn run_single_control_turn(
                     mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
-                    message: &user_message,
+                    message: if session_id.is_none() {
+                        &convo
+                    } else {
+                        &user_message
+                    },
                     model: config.default_model.as_deref(),
                     model_effort: None,
                     fast_mode: false,
@@ -29530,7 +29534,9 @@ async fn run_single_control_turn(
                     session_id: session_id.as_deref(),
                     is_continuation: force_session_resume
                         || history.iter().any(|(role, _)| role == "assistant"),
-                    extras: crate::api::runners::TurnExtras::None,
+                    extras: crate::api::runners::TurnExtras::Antigravity {
+                        current_message: &user_message,
+                    },
                 },
             ))
             .await

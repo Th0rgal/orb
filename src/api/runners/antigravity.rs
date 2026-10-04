@@ -5,28 +5,109 @@ use crate::antigravity::Stream;
 use crate::api::control::AgentEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
-    if let Err(error) = crate::antigravity::validate_prompt(ctx.message) {
-        return AgentResult::failure(error, 0);
+async fn fresh_transfer_prompt(ctx: &TurnContext<'_>) -> Result<Option<String>, String> {
+    let Some(store) = ctx.mission_store.as_ref() else {
+        return Ok(None);
+    };
+    let Some(transfer) =
+        crate::api::control::machine_transfer::committed(store, ctx.mission_id).await?
+    else {
+        return Ok(None);
+    };
+    if transfer.destination != crate::api::mission_store::transfer::Machine::Core {
+        return Ok(None);
     }
-    if ctx.is_continuation && ctx.session_id.is_none() {
-        return AgentResult::failure(
-            "Antigravity continuation requires its original conversation ID",
-            0,
-        )
-        .with_terminal_reason(TerminalReason::NativeContinuityRequired);
+    let current_message = match &ctx.extras {
+        super::TurnExtras::Antigravity { current_message } => *current_message,
+        _ => ctx.message,
+    };
+    crate::api::control::machine_transfer::context(
+        store,
+        ctx.mission_id,
+        current_message.to_string(),
+        None,
+    )
+    .await
+    .map(Some)
+}
+
+pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
+    let Some(store) = ctx.mission_store.as_ref() else {
+        return AgentResult::failure("Antigravity requires durable native identity storage", 0);
+    };
+    if ctx.session_id.is_none() {
+        match store
+            .native_prompt_attempted(ctx.mission_id, "antigravity")
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return AgentResult::failure(
+                "Prior Antigravity attempt has no durable identity; reconcile it before retrying",
+                0,
+            )
+            .with_terminal_reason(TerminalReason::NativeContinuityRequired),
+            Err(error) => return AgentResult::failure(error, 0),
+        }
+    }
+    let transferred_prompt = if ctx.session_id.is_none() {
+        match fresh_transfer_prompt(&ctx).await {
+            Ok(prompt) => prompt,
+            Err(error) => return AgentResult::failure(error, 0),
+        }
+    } else {
+        None
+    };
+    let prompt = transferred_prompt.as_deref().unwrap_or(ctx.message);
+    if let Err(error) = crate::antigravity::validate_prompt(prompt) {
+        return AgentResult::failure(error, 0);
     }
     let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
-    let args = crate::antigravity::args(ctx.model, ctx.session_id, ctx.message);
+    let args = crate::antigravity::args(ctx.model, ctx.session_id, prompt);
     let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
     let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
+    let claim = uuid::Uuid::new_v4();
+    let run = super::session_update_run();
+    match store
+        .claim_native_prompt(
+            ctx.mission_id,
+            "antigravity",
+            ctx.session_id,
+            run.as_ref(),
+            claim,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return AgentResult::failure(
+                "Antigravity native launch was superseded or has an unresolved prior attempt",
+                0,
+            )
+            .with_terminal_reason(TerminalReason::NativeContinuityRequired)
+        }
+        Err(error) => return AgentResult::failure(error, 0),
+    }
     let mut child = match exec
         .spawn_streaming(&cwd, &cli, &args, Default::default())
         .await
     {
         Ok(child) => child,
-        Err(e) => return AgentResult::failure(format!("Cannot start Antigravity: {e}"), 0),
+        Err(e) => {
+            if e.downcast_ref::<crate::workspace_exec::ConfirmedNoLaunch>()
+                .is_some()
+            {
+                let _ = store
+                    .release_native_prompt_no_launch(
+                        ctx.mission_id,
+                        "antigravity",
+                        run.as_ref(),
+                        claim,
+                    )
+                    .await;
+            }
+            return AgentResult::failure(format!("Cannot start Antigravity: {e}"), 0);
+        }
     };
     drop(child.stdin.take());
     let stderr = child.stderr.take().unwrap();

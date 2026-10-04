@@ -4356,7 +4356,11 @@ async fn run_mission_turn(
         .count();
     let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
 
-    let user_message = if let Some(store) = mission_store.as_ref() {
+    let user_message = if backend_id == "antigravity" {
+        // Its runner authorizes the first destination generation and injects
+        // portable context exactly once.
+        user_message
+    } else if let Some(store) = mission_store.as_ref() {
         match super::control::machine_transfer::context(
             store,
             mission_id,
@@ -4492,6 +4496,14 @@ async fn run_mission_turn(
             },
             is_continuation,
         ),
+        "antigravity" => (
+            if session_id.is_none() {
+                convo.clone()
+            } else {
+                user_message.clone()
+            },
+            is_continuation,
+        ),
         "gemini" => (convo.clone(), is_continuation),
         _ => (user_message.clone(), is_continuation),
     };
@@ -4510,6 +4522,10 @@ async fn run_mission_turn(
                     status: Some(Arc::clone(&status)),
                     history: &history,
                     max_history_total_chars: config.context.max_history_total_chars,
+                }
+            } else if backend_id == "antigravity" {
+                super::runners::TurnExtras::Antigravity {
+                    current_message: &user_message,
                 }
             } else if backend_id == "codex" {
                 super::runners::TurnExtras::Codex {
