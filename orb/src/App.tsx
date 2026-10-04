@@ -2578,7 +2578,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const id=localMissionId();
     if(!id)return;
     const reconcile = async () => {
-      await import("./localAgents").then(m => m.restoreLocalBindings());
+      await import("./localAgents").then(m => m.refreshLocalBindings());
       if (localBinding(id)) await reconcileLocalRun(id);
     };
     const refreshLocal = () => reconcile().catch(console.error);
@@ -2663,7 +2663,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (clientPlaced()) {
       const sendVersion=connectionVersion(),sendMission=p.id;
       try {
-        await import("./localAgents").then(m => m.restoreLocalBindings());
+        await import("./localAgents").then(m => m.refreshLocalBindings());
       } catch (error) {
         if (!localBinding(p.id)) {
           setSendError(`Couldn’t restore this computer’s session: ${error instanceof Error ? error.message : String(error)}. Your draft is kept.`);

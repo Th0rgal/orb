@@ -46,6 +46,26 @@ pub fn local_bindings(id: Option<String>, binding: Option<Value>) -> Result<Valu
     Ok(Value::Object(store.load()?.bindings.clone()))
 }
 impl Store {
+    fn refresh(&mut self, dir: &std::path::Path) -> Result<Snapshot, String> {
+        let bindings = match std::fs::read(dir.join("local-bindings.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|s| s.bindings != bindings)
+        {
+            let revision = self.snapshot.as_ref().map_or(0, |s| s.revision + 1);
+            let next = Snapshot { revision, bindings };
+            self.snapshot = Some(next.clone());
+            self.subscribers
+                .retain(|_, channel| channel.send(next.clone()).is_ok());
+        }
+        Ok(self.snapshot.as_ref().unwrap().clone())
+    }
+
     fn update(&mut self, dir: &std::path::Path, id: String, binding: Value) -> Result<(), String> {
         if !["harness", "bin", "cwd"].iter().all(|key| {
             binding[*key]
@@ -70,6 +90,15 @@ impl Store {
             .retain(|_, channel| channel.send(next.clone()).is_ok());
         Ok(())
     }
+}
+
+/// Reconcile the on-disk owner record before deciding a session belongs elsewhere.
+#[tauri::command]
+pub fn local_bindings_refresh() -> Result<Snapshot, String> {
+    store()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .refresh(&directory()?)
 }
 
 #[tauri::command]
@@ -116,6 +145,30 @@ pub fn clear_subscriptions() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refresh_recovers_external_binding_and_removal_without_resetting_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::default();
+        assert!(store.refresh(dir.path()).unwrap().bindings.is_empty());
+        let binding = serde_json::json!({"harness":"codex","bin":"/bin/codex","cwd":"/work","sessionId":"original"});
+        std::fs::write(
+            dir.path().join("local-bindings.json"),
+            serde_json::to_vec(&serde_json::json!({"mission":binding})).unwrap(),
+        )
+        .unwrap();
+        let snapshot = store.refresh(dir.path()).unwrap();
+        assert_eq!(snapshot.bindings["mission"]["sessionId"], "original");
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(store.refresh(dir.path()).unwrap().revision, 1);
+        std::fs::write(dir.path().join("local-bindings.json"), b"invalid").unwrap();
+        assert!(store.refresh(dir.path()).is_err());
+        assert_eq!(store.snapshot.as_ref().unwrap().revision, 1);
+        std::fs::remove_file(dir.path().join("local-bindings.json")).unwrap();
+        let removed = store.refresh(dir.path()).unwrap();
+        assert!(removed.bindings.is_empty());
+        assert_eq!(removed.revision, 2);
+    }
+
     #[test]
     fn identical_binding_does_not_write_or_publish() {
         let dir = tempfile::tempdir().unwrap();

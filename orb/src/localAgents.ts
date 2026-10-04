@@ -115,6 +115,17 @@ function tauriInvoke(): Invoke | null {
   return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
 }
 
+export async function refreshLocalBindings(): Promise<void> {
+ await restoreLocalBindings();
+ const invoke=tauriInvoke();
+ if(!invoke)throw new Error('Native storage unavailable.');
+ try { applyBindings(await invoke('local_bindings_refresh') as BindingSnapshot); }
+ catch(error) {
+  // An older native shell can coexist with the updated dev frontend until restart.
+  if(!/local_bindings_refresh.*(?:not found|not allowed)|(?:unknown command|command not found).*local_bindings_refresh/i.test(String(error)))throw error;
+ }
+}
+
 export function restoreLocalBindings(): Promise<void> {
  if(bindingsReady)return bindingsReady;
  if(!tauriInvoke())return Promise.resolve();
