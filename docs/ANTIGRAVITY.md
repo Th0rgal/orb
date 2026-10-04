@@ -99,3 +99,14 @@ before launch can be retried. Backend handoffs carry bounded conversation
 history. A committed machine transfer clears Antigravity's source-machine
 identity and launch guard, then starts a fresh conversation with portable
 history on the destination.
+
+Orb also records an unbound native launch durably before starting the process.
+If no conversation ID is recovered, retrying that mission is blocked even after
+an app restart. Reconcile the native conversation and restore its exact ID before
+continuing; do not remove the launch marker to blindly replay repository work.
+Node transfer readiness requires both the installed CLI and managed profile.
+
+An isolated Core-to-node mission passed three immediate turns with scoped MCP
+calls, independent file assertions, a stable native conversation ID, and durable
+per-turn input/output/cache usage. Its node model endpoint rejected unauthenticated
+requests and returned the selected account's Argon model when authenticated.

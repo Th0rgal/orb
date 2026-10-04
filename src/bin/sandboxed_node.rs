@@ -1162,21 +1162,33 @@ async fn transfer_capabilities(
     let harnesses = transfer_harnesses(
         &paths,
         state.managed_auth.advertised().iter().any(|p| p == "grok"),
+        state
+            .managed_auth
+            .advertised()
+            .iter()
+            .any(|p| p == "antigravity"),
     );
     Ok(Json(
         serde_json::json!({"version":2,"harnesses":harnesses,"features":["links","selection"]}),
     ))
 }
-fn transfer_harnesses(paths: &std::ffi::OsStr, grok_auth: bool) -> Vec<&'static str> {
+fn transfer_harnesses(
+    paths: &std::ffi::OsStr,
+    grok_auth: bool,
+    antigravity_auth: bool,
+) -> Vec<&'static str> {
     [
         ("grok", "grok"),
         ("codex", "codex"),
         ("opencode", "opencode"),
         ("claude", "claudecode"),
+        ("agy", "antigravity"),
     ]
     .into_iter()
     .filter(|(bin, _)| {
-        std::env::split_paths(paths).any(|p| p.join(bin).is_file()) && (*bin != "grok" || grok_auth)
+        std::env::split_paths(paths).any(|p| p.join(bin).is_file())
+            && (*bin != "grok" || grok_auth)
+            && (*bin != "agy" || antigravity_auth)
     })
     .map(|(_, backend)| backend)
     .collect()
@@ -1189,15 +1201,29 @@ mod transfer_harness_tests {
         std::fs::write(dir.path().join("claude"), "fixture").unwrap();
         std::fs::write(dir.path().join("grok"), "fixture").unwrap();
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false),
+            super::transfer_harnesses(dir.path().as_os_str(), false, false),
             vec!["claudecode"]
         );
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), true),
+            super::transfer_harnesses(dir.path().as_os_str(), true, false),
             vec!["grok", "claudecode"]
         );
+        std::fs::write(dir.path().join("agy"), "fixture").unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            vec!["claudecode", "antigravity"]
+        );
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, false),
+            vec!["claudecode"]
+        );
+        std::fs::remove_file(dir.path().join("agy")).unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            vec!["claudecode"]
+        );
         std::fs::remove_file(dir.path().join("claude")).unwrap();
-        assert!(super::transfer_harnesses(dir.path().as_os_str(), false).is_empty());
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false).is_empty());
     }
 }
 

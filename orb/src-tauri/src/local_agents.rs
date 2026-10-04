@@ -571,16 +571,37 @@ fn spawn_harness(
     }
 }
 
+// A durable create-new marker also fences retries after an Orb restart or lost stdout.
+// Only a confirmed OS spawn failure may release it; a known native ID can resume.
+fn claim_antigravity_attempt(root: &std::path::Path, id: &str, session: Option<&str>) -> Result<Option<PathBuf>, String> {
+    if session.is_some_and(|id| !id.trim().is_empty()) { return Ok(None); }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let name: String = id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let path = root.join(name);
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        .map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "Antigravity has an earlier launch without a recorded conversation ID. Reconcile that native conversation before retrying; automatic replay is blocked.".to_string()
+        } else { e.to_string() })?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    std::fs::File::open(root).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
+    Ok(Some(path))
+}
+
 fn spawn_antigravity(
     request: &StartRequest, text: &Arc<Output>, session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>, env: &[(String, String)],
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
+    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let claim = claim_antigravity_attempt(&PathBuf::from(home).join(".orb/antigravity-attempts"), &request.id, request.session_id.as_deref())?;
     let mut command = mission_command(request, env);
     let mut child = command.current_dir(&request.cwd)
         .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().map_err(|e| format!("Cannot start Antigravity: {e}"))?;
+        .spawn().map_err(|e| {
+            if let Some(path) = &claim { let _ = std::fs::remove_file(path); }
+            format!("Cannot start Antigravity: {e}")
+        })?;
     let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
     let output = Arc::clone(text);
     let slot = Arc::clone(session_id);
@@ -2283,6 +2304,17 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
+    #[test]
+    fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = claim_antigravity_attempt(root.path(), "mission", None).unwrap().unwrap();
+        assert!(marker.is_file());
+        assert!(claim_antigravity_attempt(root.path(), "mission", None).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", Some("")).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", Some("native-id")).unwrap().is_none());
+        assert!(claim_antigravity_attempt(root.path(), "other", None).is_ok());
+    }
+
     #[test]
     fn antigravity_process_requires_terminal_result_and_preserves_resume() {
         use std::os::unix::fs::PermissionsExt;
