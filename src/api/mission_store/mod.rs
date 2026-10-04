@@ -4881,6 +4881,58 @@ mod harness_session_tests {
                 &mut sessions
             )
             .is_none());
+            let switched = store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("antigravity"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "placeholder",
+                )
+                .await
+                .unwrap();
+            assert!(
+                switched.session_id.is_none(),
+                "{kind}: actual store handoff must not invent identity"
+            );
+            assert!(store
+                .update_mission_session_id(other.id, "native-conversation", "antigravity", None)
+                .await
+                .unwrap());
+            store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("claudecode"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "other-placeholder",
+                )
+                .await
+                .unwrap();
+            let resumed = store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("antigravity"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "placeholder",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resumed.session_id.as_deref(),
+                Some("native-conversation"),
+                "{kind}: restore the real native identity"
+            );
             sessions.insert("antigravity".into(), "native-conversation".into());
             assert_eq!(
                 select_harness_session(&other, Some("antigravity"), "placeholder", &mut sessions)
