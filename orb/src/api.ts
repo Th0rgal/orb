@@ -324,9 +324,9 @@ export async function listBackends(): Promise<BackendInfo[]> {
   return Array.isArray(data) ? data : (data.backends ?? []);
 }
 
-export async function listBackendModels(workspaceId?: string): Promise<Record<string, BackendModelOption[]>> {
+export async function listBackendModels(): Promise<Record<string, BackendModelOption[]>> {
   const [data, chains] = await Promise.all([
-    cachedCatalog<{ backends?: Record<string, BackendModelOption[]> }>("/api/providers/backend-models" + (workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "")),
+    cachedCatalog<{ backends?: Record<string, BackendModelOption[]> }>("/api/providers/backend-models"),
     cachedCatalog<{id:string;name:string;is_default?:boolean}[]>("/api/model-routing/chains"),
   ]);
   // Route identity comes from the chain store, never provider display labels.
@@ -1138,7 +1138,7 @@ export function completeProviderOAuth(id: string, code: string) {
   });
 }
 
-/** Account-entitled models from the selected node, never Core's login. */
+/** Account-entitled models from the selected execution destination, fetched independently. */
 export async function listNodeAntigravityModels(nodeId: string): Promise<[string,string][]> {
- return api(`/api/providers/antigravity-models?node_id=${encodeURIComponent(nodeId)}`, {signal: AbortSignal.timeout(20000)});
+ return api(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
 }

@@ -143,7 +143,7 @@ const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoi
 const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
 async function refreshNodeAntigravityModels(machine: string) {
-  if (machine === "local" || machine === "core") return;
+  if (machine === "local") return;
   const version = connectionVersion(), key = `${version}:${machine}`;
   if (nodeModelRequests.has(key)) return;
   nodeModelRequests.add(key);

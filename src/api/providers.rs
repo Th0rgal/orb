@@ -364,8 +364,6 @@ pub struct FullCatalogResponse {
 /// Query parameters for backend models endpoint.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BackendModelsQuery {
-    /// Discover native account models in this execution workspace (default: host workspace).
-    pub workspace_id: Option<uuid::Uuid>,
     /// Include providers even if they are not configured/authenticated.
     #[serde(default)]
     pub include_all: bool,
@@ -1931,7 +1929,8 @@ pub async fn list_full_model_catalog(
 
 #[derive(Deserialize)]
 pub struct NodeAntigravityQuery {
-    node_id: String,
+    node_id: Option<String>,
+    workspace_id: Option<uuid::Uuid>,
 }
 
 pub async fn node_antigravity_models(
@@ -1939,13 +1938,26 @@ pub async fn node_antigravity_models(
     Query(query): Query<NodeAntigravityQuery>,
 ) -> Result<Json<Vec<(String, String)>>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
+    let Some(node_id) = query.node_id else {
+        let workspace = state
+            .workspaces
+            .get(query.workspace_id.unwrap_or(uuid::Uuid::nil()))
+            .await
+            .ok_or((StatusCode::NOT_FOUND, "Unknown workspace".into()))?;
+        let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+            .unwrap_or_else(|| "agy".into());
+        return workspace_antigravity_models(workspace, &state.config.working_dir, &cli)
+            .await
+            .map(Json)
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error));
+    };
     if !state.config.remote_nodes.enabled {
         return Err((StatusCode::CONFLICT, "Remote nodes are disabled".into()));
     }
     let node = state
         .config
         .remote_nodes
-        .node(&query.node_id)
+        .node(&node_id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown node".into()))?;
     let token = std::env::var(&node.token_env).map_err(|_| {
         (
@@ -2117,30 +2129,8 @@ pub async fn list_backend_model_options(
         }
     }
 
-    let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
-        .unwrap_or_else(|| "agy".into());
-    if let Some(workspace) = state
-        .workspaces
-        .get(query.workspace_id.unwrap_or(uuid::Uuid::nil()))
-        .await
-    {
-        if let Ok(models) =
-            workspace_antigravity_models(workspace, &state.config.working_dir, &cli).await
-        {
-            backends.insert(
-                "antigravity".into(),
-                models
-                    .into_iter()
-                    .map(|(value, label)| BackendModelOption {
-                        value,
-                        label,
-                        description: Some("Antigravity account model".into()),
-                        provider_id: None,
-                    })
-                    .collect(),
-            );
-        }
-    }
+    // Native account discovery has its own endpoint; a slow/stale login must
+    // never delay this shared catalog and hide unrelated harness choices.
     Json(BackendModelOptionsResponse { backends })
 }
 

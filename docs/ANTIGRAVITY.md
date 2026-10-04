@@ -112,7 +112,8 @@ per-turn input/output/cache usage. Its node model endpoint rejected unauthentica
 requests and returned the selected account's Argon model when authenticated.
 
 Core's native model catalog runs discovery through the selected workspace's
-execution environment (`workspace_id` on `/api/providers/backend-models`,
-defaulting to the host workspace). Container account models are never inferred
+execution environment (`workspace_id` on `/api/providers/antigravity-models`,
+defaulting to the host workspace). Discovery uses a separate request so a slow
+or stale login cannot block other harnesses in the shared catalog. Container account models are never inferred
 from the API process login. Antigravity transfer history is always archived in
 the checkpoint and referenced by a short prompt, including medium conversations.
