@@ -90,7 +90,7 @@ pub(super) async fn enqueue(
     control: &ControlState,
     user: &str,
     mid: Uuid,
-    _placement: remote_grok::RemotePlacement,
+    expected: Option<&crate::api::writer_recycle::WriterContinuation>,
     content: String,
     id: Uuid,
 ) -> Result<(), (StatusCode, String)> {
@@ -111,6 +111,17 @@ pub(super) async fn enqueue(
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
+    // Older iOS clients send an identity assertion for remote jobs. Validate
+    // under admission so reassignment cannot race the persisted queue snapshot.
+    if let Some(expected) = expected {
+        writer_reuse_or_conflict(
+            &mission,
+            &crate::api::writer_recycle::WriterIdentityPatch {
+                continue_identity: Some(expected.clone()),
+                ..Default::default()
+            },
+        )?;
+    }
     if !matches!(
         mission.backend.as_str(),
         "grok" | "codex" | "claudecode" | "opencode" | "antigravity"

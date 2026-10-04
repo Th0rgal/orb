@@ -5468,23 +5468,6 @@ pub async fn post_message(
             {
                 return Err((StatusCode::CONFLICT, format!("{}: remote continuation supports content only; use a linked replacement for agent or writer identity changes", remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)));
             }
-            // Older iOS clients include this precondition even for remote jobs.
-            // Accept an exact assertion, never an identity edit or stale tuple.
-            if let Some(expected) = req.continue_identity.as_ref() {
-                let mission = control
-                    .mission_store
-                    .get_mission(mid)
-                    .await
-                    .map_err(internal_error)?
-                    .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
-                writer_reuse_or_conflict(
-                    &mission,
-                    &crate::api::writer_recycle::WriterIdentityPatch {
-                        continue_identity: Some(expected.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
             let content =
                 if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {
                     let mission = control
@@ -5515,7 +5498,7 @@ pub async fn post_message(
                 &control,
                 &user.id,
                 mid,
-                placement.clone(),
+                req.continue_identity.as_ref(),
                 content,
                 id,
             )

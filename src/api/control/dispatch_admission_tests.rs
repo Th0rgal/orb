@@ -6946,6 +6946,47 @@ async fn native_grok_auto_track_continuation(
 
     let current = store.get_mission(id).await.unwrap().unwrap();
     let identity = Harness::assertion(&current);
+    // A reassignment while enqueue waits for admission must invalidate the
+    // client's assertion before any durable message is accepted.
+    let admission = DISPATCH_ADMISSION.lock().await;
+    let expected = serde_json::from_value(identity.clone()).unwrap();
+    let racing_id = Uuid::new_v4();
+    let enqueue = remote_queue::enqueue(
+        &h.state,
+        &h.control,
+        "test",
+        id,
+        Some(&expected),
+        "keep optimizing".into(),
+        racing_id,
+    );
+    tokio::pin!(enqueue);
+    assert!(futures::poll!(&mut enqueue).is_pending());
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("reassigned-project".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    drop(admission);
+    let refusal = enqueue.await.unwrap_err();
+    assert_eq!(refusal.0, StatusCode::CONFLICT);
+    assert!(refusal.1.contains("writer_identity_stale"));
+    assert!(!remote_queue::is_waiting(&h.state.projects, "test", racing_id).unwrap());
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(current.project.project.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     for field in ["project", "track", "github_pr"] {
         let mut stale = identity.clone();
         stale[field] = json!("changed-identity");
