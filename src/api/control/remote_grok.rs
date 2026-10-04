@@ -689,6 +689,18 @@ fn take_allocated_claude_session(job_id: Uuid) -> bool {
 }
 
 impl NativeGrokObserver {
+    pub(crate) fn usage(&self) -> Option<crate::cost::TokenUsage> {
+        self.stream
+            .antigravity
+            .as_ref()
+            .map(|stream| crate::cost::TokenUsage {
+                input_tokens: stream.input_tokens,
+                output_tokens: stream.output_tokens,
+                cache_read_input_tokens: Some(stream.cache_read_tokens),
+                cache_creation_input_tokens: None,
+            })
+    }
+
     /// Attach to a native Grok job without a host goal driver.
     pub(crate) async fn attach(
         owner: &RemoteMissionOwner,
@@ -2025,6 +2037,7 @@ mod tests {
             verdict.content,
             verdict.status_reason,
             true,
+            observer.usage(),
         )
         .await
         .unwrap();

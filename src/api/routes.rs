@@ -408,8 +408,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // a fixed preference order. The preference list lives here (operational
     // policy) but the "is it available" answer comes from the probe map so
     // we don't restate CLI names.
-    const DEFAULT_BACKEND_PRIORITY: &[&str] =
-        &["claudecode", "opencode", "grok", "gemini", "codex"];
+    const DEFAULT_BACKEND_PRIORITY: &[&str] = &[
+        "claudecode",
+        "opencode",
+        "grok",
+        "gemini",
+        "codex",
+        "antigravity",
+    ];
     let default_backend = config.default_backend.clone().unwrap_or_else(|| {
         let detected = |id: &str| {
             probes

@@ -13965,16 +13965,27 @@ async fn finalize_remote_mission(
     content: String,
     status_reason: &str,
     native_stream: bool,
+    usage: Option<crate::cost::TokenUsage>,
 ) -> Result<(), String> {
+    let model = if usage.is_some() {
+        owner
+            .mission_store
+            .get_mission(mission_id)
+            .await?
+            .and_then(|mission| mission.model_override)
+    } else {
+        None
+    };
+    let model_normalized = model.as_deref().map(crate::cost::normalized_model);
     let event = AgentEvent::AssistantMessage {
         id: Uuid::new_v4(),
         content,
         success,
         cost_cents: 0,
         cost_source: crate::agents::CostSource::Unknown,
-        usage: None,
-        model: None,
-        model_normalized: None,
+        usage,
+        model,
+        model_normalized,
         mission_id: Some(mission_id),
         shared_files: None,
         resumable: !success,
@@ -15483,6 +15494,8 @@ async fn poll_remote_job(
                         content,
                         "remote_node_lost",
                         grok.is_some(),
+                        grok.as_ref()
+                            .and_then(remote_grok::NativeGrokObserver::usage),
                     )
                     .await;
                     fleet.record_outcome(outcome(
@@ -15604,6 +15617,8 @@ async fn poll_remote_job(
                             content,
                             status_reason,
                             grok.is_some(),
+                            grok.as_ref()
+                                .and_then(remote_grok::NativeGrokObserver::usage),
                         )
                         .await
                         {
@@ -39194,6 +39209,12 @@ Investigate <service/> failures.
             "remote result".to_string(),
             "remote_node_job",
             true,
+            Some(crate::cost::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                cache_read_input_tokens: Some(7),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -39210,6 +39231,8 @@ Investigate <service/> failures.
             "offline native finalization remains durable"
         );
         assert_eq!(events[0].content, "remote result");
+        assert_eq!(events[0].metadata["usage"]["input_tokens"], 11);
+        assert_eq!(events[0].metadata["usage"]["cache_read_input_tokens"], 7);
     }
 
     #[test]
