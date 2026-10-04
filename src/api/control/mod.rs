@@ -14543,6 +14543,34 @@ async fn submit_leased_remote_job(
         }
         remote_grok::note_allocated_claude_session(job_id);
     }
+    let antigravity_claim = if matches!(
+        plan,
+        RemoteHarnessPlan::Antigravity {
+            resume_session_id: None,
+            ..
+        }
+    ) {
+        let claim = async {
+            let run = control.mission_store.get_active_mission_run(mission.id).await?
+                .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+                .ok_or("Antigravity launch lost its run lease")?;
+            let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+            if !control.mission_store.claim_native_prompt(mission.id, "antigravity", None, Some(&fence), job_id).await? {
+                return Err("Prior Antigravity launch has no recorded conversation identity; reconcile it before retrying".to_string());
+            }
+            Ok::<_, String>(fence)
+        }.await;
+        match claim {
+            Ok(fence) => Some(fence),
+            Err(error) => {
+                crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+                retire_proxy_key().await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
         Err(crate::remote_node::RemoteNodeError::Request(message)) => {
@@ -14567,6 +14595,15 @@ async fn submit_leased_remote_job(
         Err(error) => {
             // A node HTTP rejection is definitive: the handler did not queue
             // the job, so this pre-submit handle can be discarded.
+            if let Some(fence) = &antigravity_claim {
+                if let Err(error) = control
+                    .mission_store
+                    .release_native_prompt_no_launch(mission.id, "antigravity", Some(fence), job_id)
+                    .await
+                {
+                    tracing::error!(mission_id = %mission.id, %error, "Could not release rejected Antigravity launch claim");
+                }
+            }
             if let Some((session_id, fence)) = &claude_session {
                 if let Err(rollback) = control
                     .mission_store

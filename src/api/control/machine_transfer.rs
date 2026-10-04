@@ -433,8 +433,19 @@ async fn listed_node_capabilities(state: &AppState) -> Vec<Result<Value, Error>>
         .unwrap_or_default()
 }
 
+async fn core_antigravity_ready(state: &AppState) -> bool {
+    let Some(workspace) = state.workspaces.get(Uuid::nil()).await else {
+        return false;
+    };
+    let cli = super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+        .unwrap_or_else(|| "agy".into());
+    crate::api::providers::workspace_antigravity_models(workspace, &state.config.working_dir, &cli)
+        .await
+        .is_ok()
+}
+
 async fn capabilities(state: &AppState) -> Vec<Value> {
-    let harnesses: Vec<_> = state
+    let mut harnesses: Vec<_> = state
         .backend_registry
         .read()
         .await
@@ -442,6 +453,9 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         .into_iter()
         .map(|b| b.id)
         .collect();
+    if !core_antigravity_ready(state).await {
+        harnesses.retain(|id| id != "antigravity");
+    }
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
@@ -580,6 +594,9 @@ async fn validate_destination(
         Machine::Core => {
             if state.backend_registry.read().await.get(backend).is_none() {
                 return Err(conflict("Selected harness is unavailable on Core"));
+            }
+            if backend == "antigravity" && !core_antigravity_ready(state).await {
+                return Err(conflict("Antigravity is not ready in the Core workspace; install agy and sign in before transferring"));
             }
         }
         Machine::Client { id } => {

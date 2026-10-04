@@ -2135,7 +2135,7 @@ pub async fn list_backend_model_options(
 }
 
 /// Use the same workspace environment and user as a native mission turn.
-async fn workspace_antigravity_models(
+pub(crate) async fn workspace_antigravity_models(
     workspace: crate::workspace::Workspace,
     work_dir: &std::path::Path,
     cli: &str,
