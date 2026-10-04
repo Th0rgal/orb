@@ -29141,10 +29141,9 @@ async fn run_single_control_turn(
     } else if (backend_id.as_deref() == Some("opencode")
         && effective_config_profile.is_some()
         && requested_model.is_none())
-        || (backend_id.as_deref() == Some("grok") && requested_model.is_none())
+        || (matches!(backend_id.as_deref(), Some("grok" | "antigravity"))
+            && requested_model.is_none())
     {
-        config.default_model = None;
-    } else if backend_id.as_deref() == Some("antigravity") && requested_model.is_none() {
         config.default_model = None;
     } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
         config.default_model = Some(resolve_gemini_default_model());

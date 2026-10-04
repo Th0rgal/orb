@@ -2279,6 +2279,37 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn antigravity_process_requires_terminal_result_and_preserves_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        for success in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("agy-fixture");
+            let mut script = String::from("#!/bin/sh\nprintf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"native-session\"}'\n");
+            if success {
+                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"SUCCESS\",\"response\":\"Ready\"}}'\n");
+            }
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let request = StartRequest {
+                cyber_revision: None, cyber_access: None, image_paths: vec![],
+                id: "antigravity-fixture".into(), harness: "antigravity".into(),
+                bin: bin.to_string_lossy().into_owned(), cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "hello".into(), model: Some("agy-demo".into()), session_id: Some("native-session".into()),
+            };
+            let output = Arc::new(Output::default());
+            let session = Arc::new(Mutex::new(None));
+            let error = Arc::new(Mutex::new(None));
+            let mut child = spawn_harness(&request, &output, &session, &error, &Arc::new(AtomicBool::new(false)), &[]).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert!(output.wait_drained(Some(Duration::from_secs(2))));
+            assert_eq!(session.lock().unwrap().as_deref(), Some("native-session"));
+            assert_eq!(error.lock().unwrap().is_none(), success);
+            if success { assert_eq!(output.snapshot(), "Ready"); }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn gemini_stream_preserves_session_and_only_emits_assistant_deltas() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

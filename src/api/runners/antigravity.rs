@@ -56,6 +56,10 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             continue;
         };
         let tools = stream.feed(&value);
+        if stream.error.is_some() {
+            stop(&mut child).await;
+            break;
+        }
         if !bound {
             if let Some(id) = &stream.session {
                 if ctx.session_id.is_some_and(|expected| expected != id) {

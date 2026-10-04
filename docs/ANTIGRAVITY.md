@@ -76,3 +76,9 @@ also passed. Native file-write/assertion and exact-session resume tests passed
 as `sandboxed-node` on Core, old-agent, Ashur, Babylon, Nippur, and DGX Spark.
 These CLI checks verify the account and protocol; deployed Core/Orb validation
 must also be completed before calling the integration shipped.
+
+A real Argon MCP probe also passed through the built `sandboxed-mcp` launcher
+against an isolated loopback test gateway: the advertised tool was called,
+its marker was returned, and the temporary project MCP configuration was
+removed afterward. Core and Orb native test binaries both compile and pass
+their focused Antigravity checks.
