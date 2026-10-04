@@ -10,8 +10,12 @@ fn context_path(id: Uuid) -> String {
     format!(".paloma/transfers/{id}/conversation.txt")
 }
 
+fn archive_context(t: &Transfer) -> bool {
+    t.backend == "antigravity" || t.context.len() > INLINE_CONTEXT_BYTES
+}
+
 fn portable_prompt(t: &Transfer) -> String {
-    if t.context.len() <= INLINE_CONTEXT_BYTES {
+    if !archive_context(t) {
         return t.context.clone();
     }
     format!(
@@ -21,7 +25,7 @@ fn portable_prompt(t: &Transfer) -> String {
 }
 
 fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Error> {
-    if a.context.len() <= INLINE_CONTEXT_BYTES {
+    if !archive_context(a) {
         return Ok(());
     }
     use sha2::{Digest, Sha256};
@@ -66,7 +70,7 @@ fn context_block(a: &Transfer, operation: &Operation) -> Result<Option<Value>, E
     let Operation::Read { path, offset } = operation else {
         return Ok(None);
     };
-    if a.context.len() <= INLINE_CONTEXT_BYTES || *path != context_path(a.id) {
+    if !archive_context(a) || *path != context_path(a.id) {
         return Ok(None);
     }
     use base64::Engine;
@@ -429,8 +433,19 @@ async fn listed_node_capabilities(state: &AppState) -> Vec<Result<Value, Error>>
         .unwrap_or_default()
 }
 
+async fn core_antigravity_ready(state: &AppState, model: Option<&str>) -> bool {
+    let Some(workspace) = state.workspaces.get(Uuid::nil()).await else {
+        return false;
+    };
+    let cli = super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+        .unwrap_or_else(|| "agy".into());
+    crate::api::providers::workspace_antigravity_models(workspace, &state.config.working_dir, &cli)
+        .await
+        .is_ok_and(|models| model.is_none_or(|wanted| models.iter().any(|(id, _)| id == wanted)))
+}
+
 async fn capabilities(state: &AppState) -> Vec<Value> {
-    let harnesses: Vec<_> = state
+    let mut harnesses: Vec<_> = state
         .backend_registry
         .read()
         .await
@@ -438,6 +453,21 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         .into_iter()
         .map(|b| b.id)
         .collect();
+    let ready = if let Some(workspace) = state.workspaces.get(Uuid::nil()).await {
+        let cli =
+            super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
+                .unwrap_or_else(|| "agy".into());
+        crate::api::providers::cached_workspace_antigravity_ready(
+            workspace,
+            state.config.working_dir.clone(),
+            cli,
+        )
+    } else {
+        false
+    };
+    if !ready {
+        harnesses.retain(|id| id != "antigravity");
+    }
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
@@ -556,6 +586,7 @@ async fn validate_destination(
     state: &AppState,
     dest: &Machine,
     backend: &str,
+    model: Option<&str>,
 ) -> Result<(), Error> {
     match dest {
         Machine::Node { id } => {
@@ -572,10 +603,26 @@ async fn validate_destination(
             {
                 return Err(conflict("Selected harness is not ready on this machine"));
             }
+            if backend == "antigravity" {
+                if let Some(model) = model {
+                    let models = node_request(state, id, "/antigravity/models", None).await?;
+                    if !models
+                        .as_array()
+                        .is_some_and(|rows| rows.iter().any(|row| row[0].as_str() == Some(model)))
+                    {
+                        return Err(conflict(
+                            "Selected Antigravity model is unavailable on the destination node",
+                        ));
+                    }
+                }
+            }
         }
         Machine::Core => {
             if state.backend_registry.read().await.get(backend).is_none() {
                 return Err(conflict("Selected harness is unavailable on Core"));
+            }
+            if backend == "antigravity" && !core_antigravity_ready(state, model).await {
+                return Err(conflict("Antigravity or the selected model is not ready in the Core workspace; check agy sign-in and models before transferring"));
             }
         }
         Machine::Client { id } => {
@@ -654,7 +701,7 @@ pub async fn operate(
         let backend = backend.unwrap_or(m.backend.clone());
         let model = model.or(m.model_override.clone());
         validate_cyber_model(&state, id, &backend, model.as_deref())?;
-        validate_destination(&state, &destination, &backend).await?;
+        validate_destination(&state, &destination, &backend, model.as_deref()).await?;
         let (source, mut source_root) = source(&state, &control, &m, client_id).await?;
         if matches!(source, Machine::Client { .. }) && source_root.is_none() {
             source_root = client_root;
@@ -746,7 +793,7 @@ pub async fn operate(
             if a.phase != "verified" {
                 return Err(conflict("Destination verification is incomplete"));
             }
-            validate_destination(&state, &a.destination, &a.backend).await?;
+            validate_destination(&state, &a.destination, &a.backend, a.model.as_deref()).await?;
             if let Machine::Client { id } = &a.source {
                 if client_source_verified.as_ref() != Some(id) {
                     return Err(conflict(
@@ -862,7 +909,7 @@ pub async fn operate(
             let inventory = matches!(operation, Operation::Inventory);
             let mut value = adapter(&state, &a, &side, operation).await?;
             // The archived conversation joins the snapshot and counts in its limits.
-            if inventory && a.context.len() > INLINE_CONTEXT_BYTES {
+            if inventory && archive_context(&a) {
                 let reserved = &mut value["reserved"];
                 *reserved = json!({
                     "bytes": reserved["bytes"].as_u64().unwrap_or(0) + a.context.len() as u64,
@@ -1334,6 +1381,48 @@ mod portable_context_tests {
             context: content,
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn antigravity_transfer_always_archives_context_for_argv_budget() {
+        let mut transfer = action("history".repeat(4_000));
+        transfer.backend = "antigravity".into();
+        let mut manifest = Manifest::default();
+        include_context_file(&transfer, &mut manifest).unwrap();
+        assert_eq!(manifest.bytes, transfer.context.len() as u64);
+        assert!(portable_prompt(&transfer).contains(&context_path(transfer.id)));
+        assert!(crate::antigravity::validate_prompt(&portable_prompt(&transfer)).is_ok());
+        let area = tempfile::tempdir().unwrap();
+        crate::machine_transfer::operate(area.path(), None, Operation::Stage { manifest }).unwrap();
+        let block = context_block(
+            &transfer,
+            &Operation::Read {
+                path: context_path(transfer.id),
+                offset: 0,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        crate::machine_transfer::operate(
+            area.path(),
+            None,
+            Operation::Write {
+                path: context_path(transfer.id),
+                offset: 0,
+                data: block["data"].as_str().unwrap().into(),
+            },
+        )
+        .unwrap();
+        crate::machine_transfer::operate(area.path(), None, Operation::Verify).unwrap();
+        assert_eq!(
+            std::fs::read(
+                area.path()
+                    .join("workspace")
+                    .join(context_path(transfer.id))
+            )
+            .unwrap(),
+            transfer.context.as_bytes()
+        );
     }
 
     #[test]

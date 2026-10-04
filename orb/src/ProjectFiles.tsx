@@ -226,6 +226,8 @@ export function LiveProjectsSection(p: {
   /** Details from the open conversation, including restored/local sessions. */
   currentMission?: Mission;
   harnessChoices: HarnessChoice[];
+  forkChoices?: (mission: Mission) => HarnessChoice[];
+  onForkOpen?: (mission: Mission) => void;
   onFork: (mission: Mission) => void;
   selected: () => string | null;
   open: (id: string | null) => void;
@@ -1322,7 +1324,7 @@ export function LiveProjectsSection(p: {
       <Show when={missionMenu()}>
         {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().x, menu().y)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>
           <Show when={forkTarget()}>{target =>
-            <ForkMission mission={target().mission} choices={p.harnessChoices} destination={missionDestination(target().mission)}
+            <ForkMission mission={target().mission} choices={p.forkChoices?.(target().mission) ?? p.harnessChoices} onOpen={() => p.onForkOpen?.(target().mission)} destination={missionDestination(target().mission)}
               position={{ x: target().x, y: target().y }} onClose={() => setForkTarget(null)}
               onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} />
           }</Show>

@@ -1,3 +1,4 @@
+import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
@@ -119,6 +120,7 @@ import {
   type RemoteLaunchCapability,
   type RemoteNodesResponse,
   openExternalUrl,
+  listNodeAntigravityModels,
 } from "./api";
 
 const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "routing", "machines", "providers", "execution"]);
@@ -138,7 +140,24 @@ const loadPick = (): HarnessPick | null => {
     return null;
   }
 };
-const [harnessChoices, setHarnessChoices] = createSignal<HarnessChoice[]>([]);
+const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
+const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
+const nodeModelRequests = new Set<string>();
+async function refreshNodeAntigravityModels(machine: string) {
+  if (machine === "local") return;
+  const version = connectionVersion(), key = `${version}:${machine}`;
+  if (nodeModelRequests.has(key)) return;
+  nodeModelRequests.add(key);
+  try {
+    const models = await listNodeAntigravityModels(machine);
+    if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
+  } catch { if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:[]})); }
+  finally { nodeModelRequests.delete(key); }
+}
+const harnessChoices = (machine = "core"): HarnessChoice[] => {
+  const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models);
+};
 const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
 const setHarnessPick = (p: HarnessPick) => {
   setHarnessPickRaw(p);
@@ -151,8 +170,8 @@ const setHarnessPick = (p: HarnessPick) => {
 /** Preserve an explicit selection; launch validation reports unavailable models.
  * A stored effort is normalized against the stored harness on every read, so a
  * level that harness never accepted can't survive into a create payload. */
-const effectivePick = (): HarnessPick | null => {
-  const choices = harnessChoices();
+const effectivePick = (machine = "core"): HarnessPick | null => {
+  const choices = harnessChoices(machine);
   if (!choices.length) return null;
   const stored = harnessPick();
   if (stored) {
@@ -170,7 +189,7 @@ const pickLabel = (pick: HarnessPick | null): string => {
 };
 async function refreshHarnessChoices() {
   try {
-    setHarnessChoices(await listHarnessChoices());
+    setRemoteHarnessChoices(await listHarnessChoices());
   } catch {
     /* keep last */
   }
@@ -452,7 +471,7 @@ export function Composer(p: {
 
   const [slashHi, setSlashHi] = createSignal(0);
   const [model, setModel] = createSignal(MODELS[0]);
-  const live = () => isConnected() && harnessChoices().length > 0;
+  const live = () => isConnected() && harnessChoices(p.uploadTarget).length > 0;
   const [menu, setMenu] = createSignal(false);
   const [ctx, setCtx] = createSignal(false);
   const [which, setWhich] = createSignal<"harness" | "model" | "effort" | null>(null);
@@ -462,14 +481,15 @@ export function Composer(p: {
   const [atItems, setAtItems] = createSignal<AttachItem[]>([]);
   const [caret, setCaret] = createSignal(0);
   let ta!: HTMLTextAreaElement;
-  const pick = () => effectivePick();
+  const pick = () => effectivePick(p.uploadTarget);
   const backend = () => p.backend ?? pick()?.backend ?? null;
   // Restored local conversations can open before New Agent or Settings has
   // scanned installed harnesses. Load capabilities for their composer too.
   createEffect(() => {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
+    else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
   });
-  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices().find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
@@ -641,13 +661,13 @@ export function Composer(p: {
     setCtx(false);
     setWhich(null);
     if (slash()) setSlashOff(true);
-    if (at()) setAtOff(true);
+    if (atQuery(text(), caret()).open) setAtOff(true);
   };
   const onEsc = (e: KeyboardEvent) => {
     if (e.defaultPrevented || hasFocusScope()) return;
-    // `close()` already dismisses the `@` picker; it was missing from this
-    // guard, so Escape did nothing while only that picker was open.
-    if (e.key === "Escape" && (menu() || ctx() || which() || slash() || at())) {
+    // Dismiss a pending mention query too: its file catalog can arrive
+    // after Escape and must not reopen the picker over the next Enter.
+    if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
       e.stopPropagation();
       close();
     }
@@ -704,7 +724,7 @@ export function Composer(p: {
   );
   // Two pickers, Cursor-style: harness first (Claude Code, Codex, …), then
   // the model that harness can run. Changing the harness resets the model.
-  const choice = () => harnessChoices().find((c) => c.backend.id === pick()?.backend);
+  const choice = () => harnessChoices(p.uploadTarget).find((c) => c.backend.id === pick()?.backend);
   const modelLabel = () => {
     const m = choice()?.models.find((x) => x.value === pick()?.model);
     return m ? shortModelLabel(m.label) : (pick()?.model ?? "Model");
@@ -745,12 +765,13 @@ export function Composer(p: {
               setWhich(opening ? "harness" : null);
               // Discover newly installed CLIs without recreating the composer.
               if (opening && p.harnessIds) void refreshLocalAgents(false);
+              if (opening && p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
             }}>
               {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "harness"}>
               <div class="menu">
-                <For each={harnessChoices().filter((c) => !p.harnessIds || p.harnessIds.includes(c.backend.id))}>
+                <For each={harnessChoices(p.uploadTarget).filter((c) => !p.harnessIds || p.harnessIds.includes(c.backend.id))}>
                   {(c) => (
                     <button
                       class={`menu-item ${c.backend.id === pick()?.backend ? "on" : ""}`}
@@ -1213,6 +1234,7 @@ export default function App() {
     }
     return MACHINES.find((m) => m.id === newMachine())?.name ?? nodeLabel(newMachine());
   };
+
   // Keyed on the connection only: the body reads selected()/newMachine()/
   // fleetNodes(), and tracking those made every fleet poll re-run the
   // effect, which re-polled the fleet — an endless fetch loop.
@@ -1266,7 +1288,7 @@ export default function App() {
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;
-    const choice = harnessChoices().find(c => c.backend.id === backend);
+    const choice = harnessChoices(local ? "local" : "core").find(c => c.backend.id === backend);
     const model = mission?.model_override || binding?.model;
     const modelLabel = choice?.models.find(m => m.value === model)?.label;
     const effort = normalizeEffort(mission?.model_effort, backend);
@@ -1432,11 +1454,11 @@ export default function App() {
       const machine = newMachine();
       const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
-      const pick = effectivePick();
+      const pick = effectivePick(machine);
       const selectedCyber = draftCyber();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
       try {
-        if (!pick || !harnessChoices().some(c => c.backend.id === pick.backend && c.models.some(m => m.value === pick.model))) throw new Error("Choose an available harness and model before starting. Your draft is kept.");
+        if (!pick || !harnessChoices(machine).some(c => c.backend.id === pick.backend && c.models.some(m => m.value === pick.model))) throw new Error("Choose an available harness and model before starting. Your draft is kept.");
         if (projectSlug === DEFAULT_PROJECT.slug && !liveProjects().some(project => project.slug === projectSlug)) {
           const version = connectionVersion();
           const project = await ensureDefaultProject();
@@ -1643,6 +1665,8 @@ export default function App() {
                     activityMissions={missions()}
                     currentMission={openMission()?.id === currentMissionId() ? openMission() ?? undefined : undefined}
                     harnessChoices={harnessChoices()}
+                    forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
+                    onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
                     onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
                     selected={selected}
                     onDeleted={ids => {
@@ -2159,7 +2183,7 @@ function MissionDock(p: {
   const [modelOpen, setModelOpen] = createSignal(false);
   const [effortOpen, setEffortOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
-  const choice = () => harnessChoices().find((c) => c.backend.id === p.mission?.backend);
+  const choice = () => harnessChoices(p.mission?.remote_node_id ?? "core").find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
   const modelId = () => p.mission?.model_override || "";
   const modelLabel = () => {
@@ -2224,12 +2248,12 @@ function MissionDock(p: {
           <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
           {p.destination} <Ic.ChevronDown size={10} />
         </button>
-        <Show when={machineOpen() && p.mission}>{m => <ChangeMachine mission={m()} choices={harnessChoices()} onClose={() => setMachineOpen(false)} onMoved={mission => p.onMission?.(mission)} />}</Show>
+        <Show when={machineOpen() && p.mission}>{m => <ChangeMachine mission={m()} choices={harnessChoices()} choicesFor={machine => harnessChoices(machine.kind === "client" ? "local" : machine.kind === "node" ? machine.id : "core")} onDestination={machine => { if (machine.kind === "client") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(machine.kind === "node" ? machine.id : "core"); }} onClose={() => setMachineOpen(false)} onMoved={mission => p.onMission?.(mission)} />}</Show>
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
-        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices()} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
+        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(m().remote_node_id ?? "core")} onOpen={() => void refreshNodeAntigravityModels(m().remote_node_id ?? "core")} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
           <Show

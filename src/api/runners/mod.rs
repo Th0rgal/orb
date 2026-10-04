@@ -5,6 +5,7 @@
 //! backend turn runners themselves) move here so `mission_runner.rs` can
 //! shrink down to orchestration (dispatch, retry/fallback, TerminalReason).
 
+pub(crate) mod antigravity;
 pub(crate) mod chatgpt_ui;
 pub(crate) mod chatgpt_ui_jobs;
 pub(crate) mod claudecode;
@@ -114,6 +115,9 @@ pub(crate) struct TurnContext<'a> {
 pub(crate) enum TurnExtras<'a> {
     #[default]
     None,
+    Antigravity {
+        current_message: &'a str,
+    },
     Codex {
         current_message: &'a str,
         tool_hub: Option<Arc<FrontendToolHub>>,
@@ -157,6 +161,18 @@ pub(crate) struct OpenCodeRunner;
 pub(crate) struct CodexRunner;
 pub(crate) struct GrokRunner;
 pub(crate) struct GeminiRunner;
+pub(crate) struct AntigravityRunner;
+impl HarnessRunner for AntigravityRunner {
+    fn name(&self) -> &'static str {
+        "antigravity"
+    }
+    fn run_turn<'a>(
+        &'a self,
+        ctx: TurnContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = AgentResult> + Send + 'a>> {
+        Box::pin(antigravity::run(ctx))
+    }
+}
 pub(crate) struct ChatGptUiRunner;
 
 impl HarnessRunner for ClaudeCodeRunner {
@@ -361,6 +377,7 @@ pub(crate) fn runner_for(backend_id: &str) -> Option<&'static dyn HarnessRunner>
         "codex" => Some(&CodexRunner),
         "grok" => Some(&GrokRunner),
         "gemini" => Some(&GeminiRunner),
+        "antigravity" => Some(&AntigravityRunner),
         "chatgpt_ui" => Some(&ChatGptUiRunner),
         _ => None,
     }

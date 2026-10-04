@@ -458,7 +458,7 @@ impl OrchestratorMcp {
                     "properties": {
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
                             "description": "Optional single backend to inspect. If omitted, returns all common backends."
                         }
                     }
@@ -627,7 +627,7 @@ impl OrchestratorMcp {
                         },
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
                             "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, gemini for Gemini models, grok for Grok models, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
                         },
                         "model_override": {
@@ -683,7 +683,7 @@ impl OrchestratorMcp {
                                 "required": ["title", "prompt"],
                                 "properties": {
                                     "title": { "type": "string" },
-                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "chatgpt_ui"] },
+                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"] },
                                     "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort; gpt-5.5-sol is unsupported." },
                                     "model_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
                                     "agent": { "type": "string" },
@@ -1575,6 +1575,7 @@ impl OrchestratorMcp {
                     "gemini".to_string(),
                     "opencode".to_string(),
                     "grok".to_string(),
+                    "antigravity".to_string(),
                 ]
             });
 
@@ -1639,6 +1640,10 @@ impl OrchestratorMcp {
                     "backend": "opencode",
                     "ready": true,
                     "reason": "OpenCode routes through configured providers; inspect provider selection separately.",
+                }),
+                "antigravity" => json!({
+                    "backend": "antigravity", "ready": null, "auth_status": "unknown", "provider": "Google",
+                    "reason": "Antigravity uses the execution machine's native Google login. Run agy models or an authenticated turn on that machine to verify entitlement.",
                 }),
                 "grok" => json!({
                     "backend": "grok",

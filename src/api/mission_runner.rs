@@ -10,6 +10,33 @@
 //! - Health monitoring
 //! - Working directory (isolated per mission)
 
+/// Preserve the current request and instructions; trim only synthesized history.
+pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &str) -> String {
+    let full = crate::util::frame_turn_prompt(history, message) + suffix;
+    if crate::antigravity::validate_prompt(&full).is_ok() {
+        return full;
+    }
+    let marker = "[Earlier history omitted to fit the native prompt budget]\n";
+    let base = crate::util::frame_turn_prompt(marker, message).len() + suffix.len();
+    let budget = (16usize * 1024).saturating_sub(base);
+    let mut start = history.len().saturating_sub(budget);
+    while !history.is_char_boundary(start) {
+        start += 1;
+    }
+    crate::util::frame_turn_prompt(&(marker.to_string() + &history[start..]), message) + suffix
+}
+
+#[cfg(test)]
+#[test]
+fn antigravity_handoff_preserves_request_and_recent_unicode_history() {
+    let history = "é🕊".repeat(10_000) + "RECENT_HISTORY";
+    let prompt = antigravity_handoff_prompt(&history, "CURRENT_REQUEST", "REQUIRED_INSTRUCTIONS");
+    assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
+    assert!(prompt.contains("CURRENT_REQUEST"));
+    assert!(prompt.contains("RECENT_HISTORY"));
+    assert!(prompt.ends_with("REQUIRED_INSTRUCTIONS"));
+}
+
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -3928,6 +3955,8 @@ async fn run_mission_turn(
         // Pin Codex instead of inheriting the global DEFAULT_MODEL, which is
         // usually a Claude/OpenCode slug and invalid for the Codex CLI.
         config.default_model = Some(resolve_codex_default_model());
+    } else if backend_id == "antigravity" && model_override.is_none() {
+        config.default_model = None;
     } else if backend_id == "gemini" && model_override.is_none() {
         // Pin Gemini to a stable backend default instead of inheriting the
         // global model or relying on the CLI's own default.
@@ -4354,7 +4383,11 @@ async fn run_mission_turn(
         .count();
     let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
 
-    let user_message = if let Some(store) = mission_store.as_ref() {
+    let user_message = if backend_id == "antigravity" {
+        // Its runner authorizes the first destination generation and injects
+        // portable context exactly once.
+        user_message
+    } else if let Some(store) = mission_store.as_ref() {
         match super::control::machine_transfer::context(
             store,
             mission_id,
@@ -4490,6 +4523,15 @@ async fn run_mission_turn(
             },
             is_continuation,
         ),
+        "antigravity" => (
+            if session_id.is_none() {
+                let framed = crate::util::frame_turn_prompt(&history_context, &user_message);
+                antigravity_handoff_prompt(&history_context, &user_message, &convo[framed.len()..])
+            } else {
+                user_message.clone()
+            },
+            is_continuation,
+        ),
         "gemini" => (convo.clone(), is_continuation),
         _ => (user_message.clone(), is_continuation),
     };
@@ -4508,6 +4550,10 @@ async fn run_mission_turn(
                     status: Some(Arc::clone(&status)),
                     history: &history,
                     max_history_total_chars: config.context.max_history_total_chars,
+                }
+            } else if backend_id == "antigravity" {
+                super::runners::TurnExtras::Antigravity {
+                    current_message: &user_message,
                 }
             } else if backend_id == "codex" {
                 super::runners::TurnExtras::Codex {
@@ -9237,6 +9283,10 @@ pub async fn check_backend_prerequisites(
         "gemini" => {
             let cli = cli_path.unwrap_or("gemini");
             check_gemini_prerequisites(&workspace_exec, cwd, cli).await
+        }
+        "antigravity" => {
+            let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;
+            BackendPreflightResult { backend_id: "antigravity".into(), available, cli_available: available, auto_install_possible: false, missing_dependencies: if available { vec![] } else { vec!["agy CLI".into()] }, message: Some("Install Antigravity CLI and sign in as the execution user with agy; verify access with agy models".into()) }
         }
         "grok" => {
             let cli = cli_path.unwrap_or("grok");

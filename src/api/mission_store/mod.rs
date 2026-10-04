@@ -4836,13 +4836,111 @@ fn select_harness_session(
     sessions
         .get(target)
         .cloned()
-        .or_else(|| (target != "grok").then(|| allocated_id.to_string()))
+        .or_else(|| (!matches!(target, "grok" | "antigravity")).then(|| allocated_id.to_string()))
 }
 
 #[cfg(test)]
 mod harness_session_tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn antigravity_allocates_native_identity_only_after_launch() {
+        for kind in ["memory", "file", "sqlite"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().into(), "antigravity")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().into(), "antigravity")
+                        .await
+                        .unwrap(),
+                ),
+                _ => Arc::new(InMemoryMissionStore::new()),
+            };
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("antigravity"), None)
+                .await
+                .unwrap();
+            assert!(
+                mission.session_id.is_none(),
+                "{kind}: no synthetic conversation ID"
+            );
+            let mut sessions = HashMap::new();
+            let other = store
+                .create_mission(None, None, None, None, None, Some("claudecode"), None)
+                .await
+                .unwrap();
+            assert!(select_harness_session(
+                &other,
+                Some("antigravity"),
+                "placeholder",
+                &mut sessions
+            )
+            .is_none());
+            let switched = store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("antigravity"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "placeholder",
+                )
+                .await
+                .unwrap();
+            assert!(
+                switched.session_id.is_none(),
+                "{kind}: actual store handoff must not invent identity"
+            );
+            assert!(store
+                .update_mission_session_id(other.id, "native-conversation", "antigravity", None)
+                .await
+                .unwrap());
+            store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("claudecode"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "other-placeholder",
+                )
+                .await
+                .unwrap();
+            let resumed = store
+                .update_mission_run_settings(
+                    other.id,
+                    Some("antigravity"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "placeholder",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resumed.session_id.as_deref(),
+                Some("native-conversation"),
+                "{kind}: restore the real native identity"
+            );
+            sessions.insert("antigravity".into(), "native-conversation".into());
+            assert_eq!(
+                select_harness_session(&other, Some("antigravity"), "placeholder", &mut sessions)
+                    .as_deref(),
+                Some("native-conversation")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn unsubmitted_session_rollback_is_fenced_by_generation_and_identity() {

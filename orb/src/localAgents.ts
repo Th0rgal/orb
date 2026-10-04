@@ -21,7 +21,7 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "gemini"] as const;
+export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"] as const;
 export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
 
 const FILE_CAP = 512 * 1024;
@@ -30,6 +30,8 @@ const PATH_KEY = "orb.localAgentPaths";
 const BIND_KEY = "orb.localBindings";
 
 export interface ScanRow {
+  models?: [string,string][];
+  auth_error?: string | null;
   id: string;
   bin: string;
   path?: string | null;
@@ -44,6 +46,7 @@ export interface LocalBinding {
   cwd: string;
   model?: string;
   sessionId?: string;
+  transferId?: string;
 }
 
 export interface LocalFile {
@@ -147,6 +150,19 @@ export async function localAgentForLaunch(id:string):Promise<ScanRow|undefined>{
  return (await refreshLocalAgents(false)).find(row=>row.id===id&&row.installed&&row.path);
 }
 
+const localModelRequests = new Set<string>();
+function refreshLocalAntigravityModels() {
+  const path = installed().find(row => row.id === "antigravity")?.path;
+  const invoke = tauriInvoke();
+  if (!path || !invoke || localModelRequests.has(path)) return;
+  localModelRequests.add(path);
+  void invoke("local_antigravity_models", {path}).then(models => {
+    setInstalled(rows => rows.map(row => row.id === "antigravity" && row.path === path ? {...row,models:models as [string,string][],auth_error:null} : row));
+  }).catch(error => {
+    setInstalled(rows => rows.map(row => row.id === "antigravity" && row.path === path ? {...row,models:[],auth_error:String(error)} : row));
+  }).finally(() => localModelRequests.delete(path));
+}
+
 export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
   if (scanPromise) return scanPromise;
   const paths = pathOverrides();
@@ -162,6 +178,7 @@ export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
       // A resolved path is enough to launch; missing version only limits capabilities.
       setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path})) : []);
       scannedAt = Date.now(); scannedPaths = key;
+      refreshLocalAntigravityModels();
       return installed();
     } catch { return installed(); }
   })().finally(() => { setScanning(false); scanPromise = undefined; });

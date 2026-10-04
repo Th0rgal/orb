@@ -83,3 +83,32 @@ it("shares an in-flight preload and reads transfer state fresh on every open", a
   await waitFor(() => expect(inspect).toHaveBeenCalledTimes(2));
   reopened.unmount();
 });
+
+it('uses destination account models and rejects the source-only model', async()=>{
+ const destination:transfers.Destination={machine:{kind:'node',id:'node'},label:'Node',available:true,harnesses:['antigravity']};
+ vi.spyOn(transfers,'inspectTransfer').mockResolvedValue({version:1,actions:[],destinations:[destination]});
+ const core:HarnessChoice[]=[{backend:{id:'antigravity',name:'Antigravity'},models:[{value:'core-only',label:'Core only'}]}];
+ const node:HarnessChoice[]=[{backend:{id:'antigravity',name:'Antigravity'},models:[{value:'node-only',label:'Node only'}]}];
+ const selected=vi.fn();
+ const ui=render(()=><ChangeMachine mission={{...mission,backend:'antigravity',model_override:'core-only'}} choices={core} choicesFor={()=>node} onDestination={selected} onClose={()=>{}} onMoved={()=>{}}/>);
+ await waitFor(()=>expect(ui.getByRole('menuitem',{name:/Node/})).toBeTruthy());
+ fireEvent.click(ui.getByRole('menuitem',{name:/Node/}));
+ expect(selected).toHaveBeenCalledWith(destination.machine);
+ expect(ui.queryByRole('option',{name:'Core only'})).toBeNull();
+ expect(ui.getByRole('option',{name:'Node only'})).toBeTruthy();
+ expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.change(ui.getByLabelText('Transfer model'),{target:{value:'node-only'}});
+ expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('selects the first destination model when changing harness', async()=>{
+ const destination:transfers.Destination={machine:{kind:'node',id:'node'},label:'Node',available:true,harnesses:['codex']};
+ vi.spyOn(transfers,'inspectTransfer').mockResolvedValue({version:1,actions:[],destinations:[destination]});
+ const node:HarnessChoice[]=[...choices,{backend:{id:'antigravity',name:'Antigravity'},models:[{value:'node-only',label:'Node only'}]}];
+ const ui=render(()=><ChangeMachine mission={mission} choices={choices} choicesFor={()=>node} onClose={()=>{}} onMoved={()=>{}}/>);
+ await waitFor(()=>expect(ui.getByRole('menuitem',{name:/Node/})).toBeTruthy());
+ fireEvent.click(ui.getByRole('menuitem',{name:/Node/}));
+ fireEvent.change(ui.getByLabelText('Transfer harness'),{target:{value:'antigravity'}});
+ expect((ui.getByLabelText('Transfer model') as HTMLSelectElement).value).toBe('node-only');
+ expect((ui.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});

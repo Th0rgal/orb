@@ -41,6 +41,7 @@ pub const GROK_AUTH_FILE: &str = "auth.json";
 pub struct ManagedAuth {
     grok_home: Option<PathBuf>,
     gemini_home: Option<PathBuf>,
+    antigravity_home: Option<PathBuf>,
 }
 
 impl ManagedAuth {
@@ -54,6 +55,10 @@ impl ManagedAuth {
             .ok()
             .map(PathBuf::from)
             .filter(|path| path.is_absolute());
+        auth.antigravity_home = std::env::var("SANDBOXED_NODE_ANTIGRAVITY_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
         auth
     }
 
@@ -76,6 +81,7 @@ impl ManagedAuth {
         Self {
             grok_home,
             gemini_home: None,
+            antigravity_home: None,
         }
     }
 
@@ -84,6 +90,7 @@ impl ManagedAuth {
         Self {
             grok_home: Some(path.into()),
             gemini_home: None,
+            antigravity_home: None,
         }
     }
 
@@ -105,6 +112,13 @@ impl ManagedAuth {
             .is_some_and(|home| private_file_readable(&home.join(".gemini/oauth_creds.json")))
         {
             ready.push("gemini".into());
+        }
+        if self
+            .antigravity_home
+            .as_ref()
+            .is_some_and(|p| private_file_readable(&p.join("antigravity-oauth-token")))
+        {
+            ready.push("antigravity".into());
         }
         ready
     }
@@ -129,6 +143,15 @@ impl ManagedAuth {
                         ));
                     }
                 }
+                "antigravity" => {
+                    if !self
+                        .antigravity_home
+                        .as_ref()
+                        .is_some_and(|p| private_file_readable(&p.join("antigravity-oauth-token")))
+                    {
+                        return Err("Antigravity requires SANDBOXED_NODE_ANTIGRAVITY_HOME pointing to the execution user's native CLI profile with a private OAuth login; sign in with agy".into());
+                    }
+                }
                 "gemini" => {
                     if !self.gemini_home.as_ref().is_some_and(|home| {
                         private_file_readable(&home.join(".gemini/oauth_creds.json"))
@@ -138,12 +161,48 @@ impl ManagedAuth {
                 }
                 other => {
                     return Err(format!(
-                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, gemini)"
+                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, gemini, antigravity)"
                     ));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Bind only the native agy profile; retain the job's isolated HOME.
+    pub fn prepare_workspace(&self, profiles: &[String], directory: &Path) -> Result<(), String> {
+        self.validate_request(profiles)?;
+        if !profiles.iter().any(|p| p == "antigravity") {
+            return Ok(());
+        }
+        let profile = self
+            .antigravity_home
+            .as_ref()
+            .ok_or("Missing Antigravity profile")?;
+        let gemini = directory.join(".gemini");
+        if gemini.is_symlink() {
+            return Err("Job .gemini must not be a symlink".into());
+        }
+        std::fs::create_dir_all(&gemini).map_err(|_| "Cannot prepare native Antigravity home")?;
+        let link = gemini.join("antigravity-cli");
+        if let Ok(metadata) = std::fs::symlink_metadata(&link) {
+            if !metadata.file_type().is_symlink()
+                || std::fs::read_link(&link).ok().as_ref() != Some(profile)
+            {
+                return Err("Job Antigravity home conflicts with the node-managed profile".into());
+            }
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(profile, &link)
+                .map_err(|_| "Cannot bind native Antigravity profile")?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            Err("Antigravity node-managed profiles require Unix".into())
+        }
     }
 
     /// Environment to export for the requested profiles. Applied *after* the
@@ -210,6 +269,7 @@ mod tests {
         let auth = ManagedAuth {
             grok_home: None,
             gemini_home: Some(root.path().into()),
+            antigravity_home: None,
         };
         assert!(auth.advertised().is_empty());
         assert!(auth.env_for(&["gemini".into()]).is_err());
@@ -231,6 +291,33 @@ mod tests {
         std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(auth.advertised().is_empty());
         assert!(auth.validate_request(&["gemini".into()]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn antigravity_mount_is_narrow_and_rejects_workspace_redirection() {
+        use std::os::unix::fs::PermissionsExt;
+        let profile = tempfile::tempdir().unwrap();
+        let token = profile.path().join("antigravity-oauth-token");
+        std::fs::write(&token, "fixture-only").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let auth = ManagedAuth {
+            antigravity_home: Some(profile.path().into()),
+            ..Default::default()
+        };
+        let job = tempfile::tempdir().unwrap();
+        let requested = vec!["antigravity".into()];
+        assert_eq!(auth.advertised(), requested);
+        assert!(auth.env_for(&requested).unwrap().is_empty());
+        auth.prepare_workspace(&requested, job.path()).unwrap();
+        auth.prepare_workspace(&requested, job.path()).unwrap();
+        let link = job.path().join(".gemini/antigravity-cli");
+        assert_eq!(std::fs::read_link(&link).unwrap(), profile.path());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(auth.prepare_workspace(&requested, job.path()).is_err());
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(auth.advertised().is_empty());
     }
 
     fn grok_home_with_auth() -> tempfile::TempDir {

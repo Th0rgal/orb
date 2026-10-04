@@ -85,7 +85,7 @@ When a user asks which “servers/backends” sandboxed.sh uses, answer by layer
 
 1. **Control-plane host** — runs sandboxed.sh production and orchestrates mission state.
 2. **Workspace** — container/host execution environment selected by `workspace_id`; examples include project workspaces and the dedicated `dgx-spark` workspace.
-3. **LLM backend** — the `backend` field (`codex`, `claudecode`, `opencode`, `gemini`, `grok`); this selects the agent/model transport, not a physical machine.
+3. **LLM backend** — the `backend` field (`codex`, `claudecode`, `opencode`, `gemini`, `grok`, `antigravity`); this selects the agent/model transport, not a physical machine.
 4. **Remote node/build worker** — extra compute reached through sandboxed-node or `/api/remote-build`; current documented general runners are `babylon`, `nippur`, and `ashur`, while the Lean build fleet also includes `dgx-spark`.
 5. **Adjacent runner** — e.g. a GitHub Actions self-hosted runner. This is not automatically a sandboxed.sh remote node even if it runs on the same machine.
 
@@ -104,7 +104,19 @@ The `agent` field is **one of the agent names registered on the platform**. The 
 
 > **Pitfall — agent availability and naming vary by deployment.** `agent` is a registered platform profile and `backend` selects the execution backend; they are logically separate, but current deployments may register backend-aligned agent IDs such as `codex` in addition to profiles such as `build` and `plan`. Do not hard-code a universal agent list. Use the live tool schema/catalog or a previously verified route. For Codex, always set `backend="codex"` and the exact OpenAI model ID in `model_override`; use the deployment's accepted agent profile (`codex`, `build`, or `plan`) and verify the created mission records the requested `agent`, `backend`, `model_override`, and `model_effort`. A mission merely reaching `pending` is not enough—re-read it after startup and require execution evidence before calling the route healthy.
 
-The `backend` parameter (`opencode`, `claudecode`, `codex`, `gemini`, `grok`) selects the LLM backend, not the agent — this is the underlying model the agent uses.
+The `backend` parameter (`opencode`, `claudecode`, `codex`, `gemini`, `grok`, `antigravity`) selects the LLM backend, not the agent — this is the underlying model the agent uses.
+
+### Native Antigravity
+
+Use `backend="antigravity"` for Google's native `agy` CLI, independently of the
+Gemini API backend. Use an exact model ID discovered on the execution machine;
+Core, local Orb, and each node can have different Google account entitlements.
+`get_backend_auth_status` reports native login as indeterminate (`ready: null`),
+not as a missing API key. Verify target-account model discovery and an actual
+turn. Nodes require their configured managed Antigravity profile. Keep prompts
+within 16 KiB and put larger context in workspace files. Resume the recorded
+native conversation; only an explicit machine transfer authorizes replacing
+its source-machine identity. See [setup and recovery](../../docs/ANTIGRAVITY.md).
 
 ### User-mandated model runs: bound, verify, then independently gate
 
@@ -135,7 +147,7 @@ This limit is separate from model context size. A model can handle the informati
 
 ### Backend tiering for cost optimisation (multi-provider routing)
 
-The `opencode` backend is the **universal router** — it can target ANY provider model via `model_override`, including non-OpenAI/Anthropic providers that the other backends can't reach (Z.AI GLM, Minimax, Kimi/Moonshot, Cerebras, Spark, Virtuals). The other backends (`claudecode`, `codex`, `gemini`, `grok`) are locked to their respective providers.
+The `opencode` backend is the **universal router** — it can target ANY provider model via `model_override`, including non-OpenAI/Anthropic providers that the other backends can't reach (Z.AI GLM, Minimax, Kimi/Moonshot, Cerebras, Spark, Virtuals). The other backends (`claudecode`, `codex`, `gemini`, `grok`, `antigravity`) are locked to their respective providers.
 
 This enables a **cost-tiering strategy** when the user has "unlimited" quota on alternative providers:
 

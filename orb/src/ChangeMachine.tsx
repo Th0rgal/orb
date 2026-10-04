@@ -2,7 +2,7 @@ import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministra
 import {connectionVersion} from "./api";
 import {nodeLabel} from "./missionLaunch";
 import { Select } from "./Select";
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
 import { cancelMission, getMission, type HarnessChoice, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
@@ -46,7 +46,7 @@ export function forgetMachineDestinationLoads() { loads.clear(); }
 /** Warm the machine list in the background; failures surface when the menu opens. */
 export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId).catch(() => {}); }
 
-export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; onClose: () => void; onMoved: (mission: Mission) => void }) {
+export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; choicesFor?: (machine: Machine) => HarnessChoice[]; onDestination?: (machine: Machine) => void; onClose: () => void; onMoved: (mission: Mission) => void }) {
   const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());
   const [selected, setSelected] = createSignal<Destination>();
   const [action, setAction] = createSignal<TransferAction>();
@@ -67,9 +67,12 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
   const requestKey = crypto.randomUUID();
   const current = (): Machine => p.mission.machine_transfer?.destination ?? (p.mission.tags?.includes("placement:client") ? { kind: "client", id: client ?? "unknown" } : p.mission.remote_node_id || p.mission.remote_job?.node_id ? { kind: "node", id: (p.mission.remote_node_id ?? p.mission.remote_job?.node_id)! } : { kind: "core" });
   const running = () => localRunActive(p.mission.id) || ["active", "pending", "running", "starting"].includes(p.mission.status);
-  const models = () => p.choices.find(c => c.backend.id === backend())?.models ?? [];
-  const availableHarnesses = () => p.choices.filter(c => !selected()?.harnesses || selected()!.harnesses!.includes(c.backend.id));
-  const compatible = () => !selected()?.harnesses || selected()!.harnesses!.includes(backend());
+  createEffect(() => { const destination = selected()?.machine; if (destination) p.onDestination?.(destination); });
+  const destinationChoices = () => selected() && p.choicesFor ? p.choicesFor(selected()!.machine) : p.choices;
+  const models = () => destinationChoices().find(c => c.backend.id === backend())?.models ?? [];
+  const availableHarnesses = () => destinationChoices().filter(c => c.backend.id === "antigravity" ? c.models.length > 0 : !selected()?.harnesses || selected()!.harnesses!.includes(c.backend.id));
+  const harnessCompatible = () => backend() === "antigravity" ? models().length > 0 : !selected()?.harnesses || selected()!.harnesses!.includes(backend());
+  const compatible = () => harnessCompatible() && (backend() !== "antigravity" || models().some(option => option.value === model()));
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
   const loadKey = (d: Destination) => d.machine.kind === "node" ? d.machine.id : d.machine.kind;
   // This computer and Core keep their place; usable nodes go least busy first.
@@ -130,7 +133,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
     }
   };
   const prepare = async () => {
-    const target = selected(); if (!target || busy() || !ready() || !target.available) return;
+    const target = selected(); if (!target || busy() || !ready() || !target.available || !compatible()) return;
     cancelled = false; setBusy(true); setError(""); setStage("Preparing workspace…");
     try {
       if (current().kind === "client" && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer before moving it.");
@@ -208,13 +211,13 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; o
         <Show when={!action()?.manifest && !inventory()}><p>The conversation and its workspace files move together. The agent waits for your next message.</p></Show>
         <Show when={!action()}>
           <div class="transfer-options">
-            <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(p.choices.find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
-              <Show when={!compatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
+            <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(destinationChoices().find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
+              <Show when={!harnessCompatible()}><option value={backend()} disabled>{backend()} — unavailable</option></Show>
               <For each={availableHarnesses()}>{c => <option value={c.backend.id} selected={c.backend.id === backend()}>{c.backend.name}</option>}</For>
             </Select></label>
             <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value} selected={m.value === model()}>{m.label}</option>}</For></Select></label>
           </div>
-          <Show when={!compatible()}><p>Choose a harness available on this machine.</p></Show>
+          <Show when={!compatible()}><p>Choose a harness and model available on this machine.</p></Show>
         </Show>
         <Show when={!action()?.manifest && inventory()}>{found => <TransferSelection inventory={found()} choice={choice()} disabled={busy()} onChoice={setChoice} />}</Show>
         <Show when={action()?.manifest}>{m => <TransferInventory manifest={m()} />}</Show>

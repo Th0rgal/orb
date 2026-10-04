@@ -50,3 +50,21 @@ it('surfaces permanent refusals and bounds repeated network failures', async()=>
   await vi.runAllTimersAsync();await result;
   expect(request).toHaveBeenCalledTimes(3);
 });
+
+it('resets an Antigravity binding once per activated transfer even at the same path', async()=>{
+ const agents=await import('../src/localAgents');
+ const {adoptTransferredWorkspace}=await import('../src/machineTransfer');
+ vi.spyOn(clients,'machineIdentity').mockResolvedValue('computer');
+ let binding:any={harness:'antigravity',bin:'/agy',cwd:'/same',sessionId:'old-native',transferId:'old-transfer'};
+ vi.spyOn(agents,'localBinding').mockImplementation(()=>binding);
+ vi.spyOn(agents,'refreshLocalAgents').mockResolvedValue([{id:'antigravity',bin:'agy',path:'/agy',installed:true}]);
+ const remember=vi.spyOn(agents,'rememberBinding').mockImplementation(async(_id,next)=>{binding=next;});
+ const action:TransferAction={id:'new-transfer',mission_id:'mission',phase:'activated',source:{kind:'node',id:'node'},destination:{kind:'client',id:'computer'},backend:'antigravity',destination_root:'/same',created_at:''};
+ await adoptTransferredWorkspace(action);
+ expect(binding.sessionId).toBeUndefined();
+ expect(binding.transferId).toBe('new-transfer');
+ binding.sessionId='new-native';
+ await adoptTransferredWorkspace(action);
+ expect(remember).toHaveBeenCalledTimes(1);
+ expect(binding.sessionId).toBe('new-native');
+});

@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/project-context/prepare", post(prepare_project_context))
         .route("/heartbeat", get(heartbeat))
+        .route("/antigravity/models", get(antigravity_models))
         .route("/software", get(software_inventory))
         .route("/software/updates", post(software_update))
         .route("/software/updates/cancel", post(software_cancel))
@@ -188,6 +189,28 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn antigravity_models(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<(String, String)>>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let auth = state.managed_auth.clone();
+    let models = tokio::task::spawn_blocking(move || {
+        let home = tempfile::tempdir().map_err(|_| "Cannot prepare model discovery".to_string())?;
+        auth.prepare_workspace(&["antigravity".into()], home.path())?;
+        sandboxed_sh::antigravity::models_in_home(Path::new("agy"), Some(home.path()))
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Model discovery failed".into(),
+        )
+    })?
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+    Ok(Json(models))
 }
 
 fn check_auth(headers: &HeaderMap, state: &NodeState) -> Result<(), (StatusCode, String)> {
@@ -1139,21 +1162,33 @@ async fn transfer_capabilities(
     let harnesses = transfer_harnesses(
         &paths,
         state.managed_auth.advertised().iter().any(|p| p == "grok"),
+        state
+            .managed_auth
+            .advertised()
+            .iter()
+            .any(|p| p == "antigravity"),
     );
     Ok(Json(
         serde_json::json!({"version":2,"harnesses":harnesses,"features":["links","selection"]}),
     ))
 }
-fn transfer_harnesses(paths: &std::ffi::OsStr, grok_auth: bool) -> Vec<&'static str> {
+fn transfer_harnesses(
+    paths: &std::ffi::OsStr,
+    grok_auth: bool,
+    antigravity_auth: bool,
+) -> Vec<&'static str> {
     [
         ("grok", "grok"),
         ("codex", "codex"),
         ("opencode", "opencode"),
         ("claude", "claudecode"),
+        ("agy", "antigravity"),
     ]
     .into_iter()
     .filter(|(bin, _)| {
-        std::env::split_paths(paths).any(|p| p.join(bin).is_file()) && (*bin != "grok" || grok_auth)
+        std::env::split_paths(paths).any(|p| p.join(bin).is_file())
+            && (*bin != "grok" || grok_auth)
+            && (*bin != "agy" || antigravity_auth)
     })
     .map(|(_, backend)| backend)
     .collect()
@@ -1166,15 +1201,29 @@ mod transfer_harness_tests {
         std::fs::write(dir.path().join("claude"), "fixture").unwrap();
         std::fs::write(dir.path().join("grok"), "fixture").unwrap();
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false),
+            super::transfer_harnesses(dir.path().as_os_str(), false, false),
             vec!["claudecode"]
         );
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), true),
+            super::transfer_harnesses(dir.path().as_os_str(), true, false),
             vec!["grok", "claudecode"]
         );
+        std::fs::write(dir.path().join("agy"), "fixture").unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            vec!["claudecode", "antigravity"]
+        );
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, false),
+            vec!["claudecode"]
+        );
+        std::fs::remove_file(dir.path().join("agy")).unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            vec!["claudecode"]
+        );
         std::fs::remove_file(dir.path().join("claude")).unwrap();
-        assert!(super::transfer_harnesses(dir.path().as_os_str(), false).is_empty());
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false).is_empty());
     }
 }
 

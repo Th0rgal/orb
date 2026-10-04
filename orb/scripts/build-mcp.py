@@ -24,5 +24,8 @@ native_metadata = json.loads(subprocess.check_output([
     "--manifest-path", str(root / "orb/src-tauri/Cargo.toml")], cwd=root))
 native_target = Path(native_metadata["target_directory"]) / "debug"
 native_target.mkdir(parents=True, exist_ok=True)
-shutil.copy2(source, native_target / f"sandboxed-mcp{suffix}")
+native_companion = native_target / f"sandboxed-mcp{suffix}"
+# CARGO_TARGET_DIR may intentionally share the Core and Orb build cache.
+if source.resolve() != native_companion.resolve():
+    shutil.copy2(source, native_companion)
 print(f"Staged sandboxed-mcp for {host}")

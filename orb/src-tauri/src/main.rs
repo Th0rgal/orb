@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[path = "../../../shared/antigravity.rs"]
+mod antigravity;
 #[path = "../../../shared/agent_software.rs"]
 mod agent_software;
 #[path = "../../../shared/cyber_access.rs"]
@@ -189,6 +191,7 @@ fn main() {
             software::software_cancel,
             local_agents::local_agents_cyber_capabilities,
             local_agents::local_agents_scan,
+            local_agents::local_antigravity_models,
             local_agents::local_agents_workspace,
             local_agents::local_agents_directory,
             local_agents::local_agents_write,

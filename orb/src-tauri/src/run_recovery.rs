@@ -49,6 +49,20 @@ fn stopped(id: &str) -> Result<bool, String> {
 }
 // Older Orb versions did not hold the file lock. Also catches an orphan CLI
 // which survived the desktop process. Unknown cwd is conservatively busy.
+fn process_blocks_workspace(name: &str, cwd: Option<&std::path::Path>, root: &std::path::Path) -> bool {
+    let harness = ["codex", "claude", "opencode", "grok", "agy"].iter().any(|n| name.contains(n));
+    cwd.is_some_and(|path| path.starts_with(root)) || (harness && cwd.is_none())
+}
+
+#[test]
+fn antigravity_orphan_blocks_unknown_workspace_recovery() {
+    use std::path::Path;
+    assert!(process_blocks_workspace("agy", None, Path::new("/work")));
+    assert!(process_blocks_workspace("agy.exe", None, Path::new("/work")));
+    assert!(!process_blocks_workspace("agy", Some(Path::new("/other")), Path::new("/work")));
+    assert!(process_blocks_workspace("tool", Some(Path::new("/work/sub")), Path::new("/work")));
+}
+
 fn workspace_quiet(cwd: &str) -> Result<(), String> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let root = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
@@ -62,12 +76,7 @@ fn workspace_quiet(cwd: &str) -> Result<(), String> {
     );
     for process in system.processes().values() {
         let name = process.name().to_string_lossy().to_lowercase();
-        let harness = ["codex", "claude", "opencode", "grok"]
-            .iter()
-            .any(|n| name.contains(n));
-        if process.cwd().is_some_and(|p| p.starts_with(&root))
-            || (harness && process.cwd().is_none())
-        {
+        if process_blocks_workspace(&name, process.cwd(), &root) {
             return Err(
                 "An agent process may still be using this workspace. Stop it before retrying."
                     .into(),

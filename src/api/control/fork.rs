@@ -65,11 +65,14 @@ pub async fn fork_mission(
             })
         })
         .collect();
-    let prompt = if let Some(question) = &req.side_question {
-        side_agent_prompt(&history, question, incremental)?
-    } else {
-        fork_prompt(id, source.title.as_deref(), &history)?
-    };
+    let prompt = initial_prompt(
+        id,
+        source.title.as_deref(),
+        &history,
+        &req.backend,
+        req.side_question.as_deref(),
+        incremental,
+    )?;
     crate::api::mission_payload::validate_user_content(&prompt)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let client =
@@ -236,6 +239,51 @@ mod side_context_tests {
     }
 }
 
+// Bound only synthesized history; never shorten the operator's current request.
+fn initial_prompt(
+    id: Uuid,
+    title: Option<&str>,
+    history: &[serde_json::Value],
+    backend: &str,
+    question: Option<&str>,
+    incremental: bool,
+) -> Result<String, (StatusCode, String)> {
+    let build = |history: &[serde_json::Value]| match question {
+        Some(question) => side_agent_prompt(history, question, incremental),
+        None => fork_prompt(id, title, history),
+    };
+    let mut prompt = build(history)?;
+    if backend != "antigravity" || crate::antigravity::validate_prompt(&prompt).is_ok() {
+        return Ok(prompt);
+    }
+    let context = serde_json::to_string(history).map_err(internal_error)?;
+    let mut budget = 8 * 1024;
+    while budget > 0 {
+        let mut head = (budget / 4).min(context.len());
+        while !context.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = context.len().saturating_sub(budget - head).max(head);
+        while !context.is_char_boundary(tail) {
+            tail += 1;
+        }
+        let excerpt = format!(
+            "Historical excerpts (middle omitted to fit the native prompt budget):\n{}\n[...]\n{}",
+            &context[..head],
+            &context[tail..]
+        );
+        prompt = build(&[serde_json::json!({"role":"context", "content":excerpt})])?;
+        if crate::antigravity::validate_prompt(&prompt).is_ok() {
+            return Ok(prompt);
+        }
+        budget /= 2;
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        "The current fork request exceeds Antigravity's native prompt budget".into(),
+    ))
+}
+
 fn fork_prompt(
     id: Uuid,
     title: Option<&str>,
@@ -299,6 +347,44 @@ fn workspace_command(source_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_forks_bound_history_and_preserve_current_instructions() {
+        let history = vec![
+            serde_json::json!({"role":"user","content":"ORIGINAL_OBJECTIVE"}),
+            serde_json::json!({"role":"assistant","content":"é🌲".repeat(20_000)}),
+            serde_json::json!({"role":"user","content":"LATEST_DIRECTION"}),
+        ];
+        for question in [None, Some("CURRENT_QUESTION")] {
+            let prompt = initial_prompt(
+                Uuid::nil(),
+                Some("Source"),
+                &history,
+                "antigravity",
+                question,
+                false,
+            )
+            .unwrap();
+            assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
+            assert!(prompt.contains("ORIGINAL_OBJECTIVE"));
+            assert!(prompt.contains("LATEST_DIRECTION"));
+            assert!(prompt.contains("middle omitted"));
+            if let Some(question) = question {
+                assert!(prompt.ends_with(question));
+            } else {
+                assert!(prompt.contains("First inspect the current workspace state"));
+            }
+        }
+        assert!(initial_prompt(
+            Uuid::nil(),
+            None,
+            &history,
+            "antigravity",
+            Some(&"x".repeat(20_000)),
+            true
+        )
+        .is_err());
+    }
+
     #[test]
     fn preserves_conversation_roles_and_literal_content() {
         let history = vec![

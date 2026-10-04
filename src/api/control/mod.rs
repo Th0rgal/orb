@@ -8849,7 +8849,7 @@ fn native_backend_prefix(raw_model: &str) -> Option<&str> {
         return None;
     }
     match prefix {
-        "codex" | "claudecode" | "gemini" | "grok" => Some(prefix),
+        "codex" | "claudecode" | "gemini" | "grok" | "antigravity" => Some(prefix),
         _ => None,
     }
 }
@@ -8859,6 +8859,7 @@ fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "claudecode" => Some("claudecode"),
         "gemini" => Some("gemini"),
+        "antigravity" => Some("antigravity"),
         "grok" => Some("grok"),
         _ => None,
     }
@@ -11531,7 +11532,7 @@ pub(super) async fn create_mission_inner(
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "gemini" | "grok" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui")
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -11636,9 +11637,15 @@ pub(super) async fn create_mission_inner(
     }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
-        if matches!(backend_id, "codex" | "claudecode" | "gemini" | "grok") {
+        if matches!(
+            backend_id,
+            "codex" | "claudecode" | "gemini" | "grok" | "antigravity"
+        ) {
             if let Some(workspace) = state.workspaces.get(ws_id).await {
-                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "gemini") {
+                let cli_path = if matches!(
+                    backend_id,
+                    "claudecode" | "codex" | "gemini" | "antigravity"
+                ) {
                     state
                         .backend_configs
                         .get(backend_id)
@@ -12621,8 +12628,14 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
-    &["claudecode", "opencode", "grok", "codex", "gemini"];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &[
+    "claudecode",
+    "opencode",
+    "grok",
+    "codex",
+    "gemini",
+    "antigravity",
+];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -12658,6 +12671,11 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 /// from the client's selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
+    Antigravity {
+        model: Option<String>,
+        prompt: String,
+        resume_session_id: Option<String>,
+    },
     Gemini {
         model: Option<String>,
         prompt: String,
@@ -12704,6 +12722,10 @@ impl RemoteHarnessPlan {
 
     pub(crate) fn label(&self) -> String {
         match self {
+            RemoteHarnessPlan::Antigravity { model, .. } => format!(
+                "antigravity/{}",
+                model.as_deref().unwrap_or("account default")
+            ),
             RemoteHarnessPlan::Gemini { model, .. } => format!(
                 "gemini/{}",
                 model.as_deref().unwrap_or("node default model")
@@ -12762,6 +12784,7 @@ pub(crate) fn plan_remote_harness(
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
         "gemini" => Ok(RemoteHarnessPlan::Gemini { model, prompt }),
+        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { model, prompt, resume_session_id: None }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
             // Claude Code expects bare model ids.
@@ -12994,6 +13017,26 @@ pub(crate) fn remote_execution_for_plan(
             new_session_id.as_deref(),
             label,
         ),
+        RemoteHarnessPlan::Antigravity {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
+            let args =
+                crate::antigravity::args(model.as_deref(), resume_session_id.as_deref(), prompt);
+            RemoteExecution {
+                managed_auth: vec!["antigravity".into()],
+                command: format!(
+                    "exec agy {} 2>/dev/null",
+                    args.iter()
+                        .map(|arg| shell_single_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
+                label,
+            }
+        }
         RemoteHarnessPlan::Gemini { model, prompt } => {
             let mut command = String::from("command -v gemini >/dev/null 2>&1 || { echo 'gemini is not installed on this node' >&2; exit 127; }; gemini --yolo");
             if let Some(model) = model {
@@ -13924,16 +13967,50 @@ async fn finalize_remote_mission(
     content: String,
     status_reason: &str,
     native_stream: bool,
+    usage: Option<crate::cost::TokenUsage>,
+    ledger_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
+    // Recovery and the live observer can both see the same terminal receipt.
+    // Serialize with dispatch, then require that this job still owns the run.
+    // A duplicate old receipt must never complete a newer continuation.
+    let _admission = DISPATCH_ADMISSION.lock().await;
+    let _file = match ledger_dir {
+        Some(root) => Some(dispatch_admission::durable_lock_root(root).await?),
+        None => None,
+    };
+    if let Some(job_id) = job_id {
+        let active = owner
+            .mission_store
+            .get_active_mission_run(mission_id)
+            .await?;
+        if active.is_none_or(|run| run.owner_actor_id != remote_job_lease_owner(job_id)) {
+            return Ok(());
+        }
+        let current = owner.mission_store.get_mission(mission_id).await?;
+        if !should_finalize_remote_job(current.map(|mission| mission.status)) {
+            return Ok(());
+        }
+    }
+
+    let model = if usage.is_some() {
+        owner
+            .mission_store
+            .get_mission(mission_id)
+            .await?
+            .and_then(|mission| mission.model_override)
+    } else {
+        None
+    };
+    let model_normalized = model.as_deref().map(crate::cost::normalized_model);
     let event = AgentEvent::AssistantMessage {
         id: Uuid::new_v4(),
         content,
         success,
         cost_cents: 0,
         cost_source: crate::agents::CostSource::Unknown,
-        usage: None,
-        model: None,
-        model_normalized: None,
+        usage,
+        model,
+        model_normalized,
         mission_id: Some(mission_id),
         shared_files: None,
         resumable: !success,
@@ -14129,6 +14206,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Antigravity { prompt, .. }
         | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
@@ -14177,6 +14255,7 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { prompt, .. }
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
+        | RemoteHarnessPlan::Antigravity { prompt, .. }
         | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
         _ => "",
@@ -14300,6 +14379,9 @@ async fn submit_leased_remote_job(
                 .to_string(),
         ))
     };
+    if let RemoteHarnessPlan::Antigravity { prompt, .. } = plan {
+        crate::antigravity::validate_prompt(prompt)?;
+    }
     let (mut execution, proxy_key_id) = if plan.uses_core_proxy() {
         let api_base_url = super::mission_runner::public_api_base_url_from_env()
             .ok_or_else(|| {
@@ -14346,6 +14428,7 @@ async fn submit_leased_remote_job(
             RemoteHarnessPlan::OpenCode { .. } => "opencode",
             RemoteHarnessPlan::Grok { .. } => "grok",
             RemoteHarnessPlan::Gemini { .. } => "gemini",
+            RemoteHarnessPlan::Antigravity { .. } => "antigravity",
             RemoteHarnessPlan::Raw { .. } => unreachable!(),
         };
         let env = execution.env.get_or_insert_with(HashMap::new);
@@ -14372,6 +14455,11 @@ async fn submit_leased_remote_job(
             "gemini" => execution.command.replacen(
                 "gemini --yolo",
                 "/usr/local/bin/sandboxed-mcp launch --harness gemini -- gemini --yolo",
+                1,
+            ),
+            "antigravity" => execution.command.replacen(
+                "exec agy ",
+                "exec /usr/local/bin/sandboxed-mcp launch --harness antigravity -- agy ",
                 1,
             ),
             "grok" => execution.command.replacen(
@@ -14457,6 +14545,34 @@ async fn submit_leased_remote_job(
         }
         remote_grok::note_allocated_claude_session(job_id);
     }
+    let antigravity_claim = if matches!(
+        plan,
+        RemoteHarnessPlan::Antigravity {
+            resume_session_id: None,
+            ..
+        }
+    ) {
+        let claim = async {
+            let run = control.mission_store.get_active_mission_run(mission.id).await?
+                .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+                .ok_or("Antigravity launch lost its run lease")?;
+            let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+            if !control.mission_store.claim_native_prompt(mission.id, "antigravity", None, Some(&fence), job_id).await? {
+                return Err("Prior Antigravity launch has no recorded conversation identity; reconcile it before retrying".to_string());
+            }
+            Ok::<_, String>(fence)
+        }.await;
+        match claim {
+            Ok(fence) => Some(fence),
+            Err(error) => {
+                crate::remote_node::job_ledger::remove(&ledger_dir, job_id).await;
+                retire_proxy_key().await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let accepted = match client.submit_job(&node, &shared_token, &request).await {
         Ok(accepted) => accepted,
         Err(crate::remote_node::RemoteNodeError::Request(message)) => {
@@ -14481,6 +14597,15 @@ async fn submit_leased_remote_job(
         Err(error) => {
             // A node HTTP rejection is definitive: the handler did not queue
             // the job, so this pre-submit handle can be discarded.
+            if let Some(fence) = &antigravity_claim {
+                if let Err(error) = control
+                    .mission_store
+                    .release_native_prompt_no_launch(mission.id, "antigravity", Some(fence), job_id)
+                    .await
+                {
+                    tracing::error!(mission_id = %mission.id, %error, "Could not release rejected Antigravity launch claim");
+                }
+            }
             if let Some((session_id, fence)) = &claude_session {
                 if let Err(rollback) = control
                     .mission_store
@@ -15434,6 +15559,9 @@ async fn poll_remote_job(
                         content,
                         "remote_node_lost",
                         grok.is_some(),
+                        grok.as_ref()
+                            .and_then(remote_grok::NativeGrokObserver::usage),
+                        Some(ledger_dir),
                     )
                     .await;
                     fleet.record_outcome(outcome(
@@ -15555,6 +15683,9 @@ async fn poll_remote_job(
                             content,
                             status_reason,
                             grok.is_some(),
+                            grok.as_ref()
+                                .and_then(remote_grok::NativeGrokObserver::usage),
+                            Some(ledger_dir),
                         )
                         .await
                         {
@@ -15563,20 +15694,44 @@ async fn poll_remote_job(
                             continue;
                         }
                     } else {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            job_id = %job_id,
-                            node = %node.id,
-                            state = %status.state,
-                            "remote job reached a terminal state after operator interruption; preserving mission status"
-                        );
-                        // The status is preserved, but the outcome must still
-                        // be visible in the mission's durable history; the
-                        // incident mission had no record at all of what
-                        // happened to its node job. Log once, then settle
-                        // the observer's lease with the node's verdict.
-                        if !preserved_terminal_noted {
-                            let note = AgentEvent::AssistantMessage {
+                        // The live observer may have already settled this receipt while
+                        // recovery was polling it. Fence notes as well as status updates.
+                        let _admission = DISPATCH_ADMISSION.lock().await;
+                        let _file = match dispatch_admission::durable_lock_root(ledger_dir).await {
+                            Ok(lock) => lock,
+                            Err(error) => {
+                                tracing::warn!(%mission_id, %job_id, %error, "Cannot fence remote terminal note");
+                                continue;
+                            }
+                        };
+                        let active = match owner
+                            .mission_store
+                            .get_active_mission_run(mission_id)
+                            .await
+                        {
+                            Ok(active) => active,
+                            Err(error) => {
+                                tracing::warn!(%mission_id, %job_id, %error, "Cannot inspect remote terminal note ownership");
+                                continue;
+                            }
+                        };
+                        if active
+                            .is_some_and(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
+                        {
+                            tracing::info!(
+                                mission_id = %mission_id,
+                                job_id = %job_id,
+                                node = %node.id,
+                                state = %status.state,
+                                "remote job reached a terminal state after operator interruption; preserving mission status"
+                            );
+                            // The status is preserved, but the outcome must still
+                            // be visible in the mission's durable history; the
+                            // incident mission had no record at all of what
+                            // happened to its node job. Log once, then settle
+                            // the observer's lease with the node's verdict.
+                            if !preserved_terminal_noted {
+                                let note = AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: format!(
                                     "Remote node '{}' job {} reached state '{}' (exit {:?}) after the mission left Active ({}); the mission status is preserved.{}\n\nlog tail:\n{}",
@@ -15605,26 +15760,27 @@ async fn poll_remote_job(
                                 resumable: false,
                                 completion_evidence: None,
                             };
-                            if let Err(error) =
-                                owner.mission_store.log_event(mission_id, &note).await
+                                if let Err(error) =
+                                    owner.mission_store.log_event(mission_id, &note).await
+                                {
+                                    tracing::warn!(%mission_id, %job_id, %error,
+                                    "remote terminal note persistence failed; retaining ownership and retrying");
+                                    continue;
+                                }
+                                owner.send(note);
+                                preserved_terminal_noted = true;
+                            }
+                            if let Err(error) = finish_remote_job_lease(
+                                owner.mission_store.as_ref(),
+                                mission_id,
+                                job_id,
+                                &format!("remote_job_{}", status.state),
+                            )
+                            .await
                             {
                                 tracing::warn!(%mission_id, %job_id, %error,
-                                    "remote terminal note persistence failed; retaining ownership and retrying");
-                                continue;
-                            }
-                            owner.send(note);
-                            preserved_terminal_noted = true;
-                        }
-                        if let Err(error) = finish_remote_job_lease(
-                            owner.mission_store.as_ref(),
-                            mission_id,
-                            job_id,
-                            &format!("remote_job_{}", status.state),
-                        )
-                        .await
-                        {
-                            tracing::warn!(%mission_id, %job_id, %error,
                                 "remote job run lease could not be finished after preserved interruption");
+                            }
                         }
                     }
                     if let Err(error) = crate::remote_node::job_ledger::finalize_with_artifacts(
@@ -16246,7 +16402,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "gemini" | "grok" | "chatgpt_ui"
+            "claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui"
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -29092,7 +29248,8 @@ async fn run_single_control_turn(
     } else if (backend_id.as_deref() == Some("opencode")
         && effective_config_profile.is_some()
         && requested_model.is_none())
-        || (backend_id.as_deref() == Some("grok") && requested_model.is_none())
+        || (matches!(backend_id.as_deref(), Some("grok" | "antigravity"))
+            && requested_model.is_none())
     {
         config.default_model = None;
     } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
@@ -29412,6 +29569,46 @@ async fn run_single_control_turn(
                     extras: crate::api::runners::TurnExtras::None,
                 }),
             )
+            .await
+        }
+        Some("antigravity") => {
+            let mid = match require_mission_id(mission_id, "Antigravity", &events_tx) {
+                Ok(id) => id,
+                Err(r) => return r,
+            };
+            use crate::api::runners::HarnessRunner as _;
+            let framed = crate::util::frame_turn_prompt(&history_context, &user_message);
+            let handoff = super::mission_runner::antigravity_handoff_prompt(
+                &history_context,
+                &user_message,
+                &convo[framed.len()..],
+            );
+            Box::pin(crate::api::runners::AntigravityRunner.run_turn(
+                crate::api::runners::TurnContext {
+                    mission_store: Some(mission_store.clone()),
+                    workspace: exec_workspace,
+                    work_dir: &ctx.working_dir,
+                    message: if session_id.is_none() {
+                        &handoff
+                    } else {
+                        &user_message
+                    },
+                    model: config.default_model.as_deref(),
+                    model_effort: None,
+                    fast_mode: false,
+                    agent: config.opencode_agent.as_deref(),
+                    mission_id: mid,
+                    events_tx: events_tx.clone(),
+                    cancel,
+                    app_working_dir: &config.working_dir,
+                    session_id: session_id.as_deref(),
+                    is_continuation: force_session_resume
+                        || history.iter().any(|(role, _)| role == "assistant"),
+                    extras: crate::api::runners::TurnExtras::Antigravity {
+                        current_message: &user_message,
+                    },
+                },
+            ))
             .await
         }
         Some("chatgpt_ui") => {
@@ -39106,16 +39303,28 @@ Investigate <service/> failures.
             .await
             .unwrap();
         let owner = RemoteMissionOwner::offline(Arc::clone(&store));
+        let old_job = Uuid::new_v4();
+        store
+            .begin_mission_run(mission.id, &remote_job_lease_owner(old_job), None)
+            .await
+            .unwrap();
 
         finalize_remote_mission(
             &owner,
             mission.id,
-            None,
+            Some(old_job),
             "node-a",
             true,
             "remote result".to_string(),
             "remote_node_job",
             true,
+            Some(crate::cost::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                cache_read_input_tokens: Some(7),
+                ..Default::default()
+            }),
+            Some(dir.path()),
         )
         .await
         .unwrap();
@@ -39132,6 +39341,52 @@ Investigate <service/> failures.
             "offline native finalization remains durable"
         );
         assert_eq!(events[0].content, "remote result");
+        assert_eq!(events[0].metadata["usage"]["input_tokens"], 11);
+        assert_eq!(events[0].metadata["usage"]["cache_read_input_tokens"], 7);
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        let next_job = Uuid::new_v4();
+        let next = store
+            .begin_mission_run(mission.id, &remote_job_lease_owner(next_job), None)
+            .await
+            .unwrap();
+        finalize_remote_mission(
+            &owner,
+            mission.id,
+            Some(old_job),
+            "node-a",
+            true,
+            "duplicate old receipt".into(),
+            "remote_node_job",
+            true,
+            None,
+            Some(dir.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get_mission(mission.id).await.unwrap().unwrap().status,
+            MissionStatus::Active
+        );
+        assert_eq!(
+            store
+                .get_active_mission_run(mission.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id,
+            next.run_id
+        );
+        assert_eq!(
+            store
+                .get_events(mission.id, Some(&["assistant_message"]), None, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

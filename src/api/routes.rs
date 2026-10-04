@@ -319,6 +319,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Box::new(crate::backend::codex::CodexBackend::new()),
         Box::new(crate::backend::gemini::GeminiBackend::new()),
         Box::new(crate::backend::grok::GrokBackend::new()),
+        Box::new(crate::backend::antigravity::AntigravityBackend::new()),
         Box::new(crate::backend::chatgpt_ui::ChatGptUiBackend::new()),
     ];
     struct BackendProbe {
@@ -407,8 +408,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // a fixed preference order. The preference list lives here (operational
     // policy) but the "is it available" answer comes from the probe map so
     // we don't restate CLI names.
-    const DEFAULT_BACKEND_PRIORITY: &[&str] =
-        &["claudecode", "opencode", "grok", "gemini", "codex"];
+    const DEFAULT_BACKEND_PRIORITY: &[&str] = &[
+        "claudecode",
+        "opencode",
+        "grok",
+        "gemini",
+        "codex",
+        "antigravity",
+    ];
     let default_backend = config.default_backend.clone().unwrap_or_else(|| {
         let detected = |id: &str| {
             probes
@@ -445,9 +452,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     backend_registry.register(crate::backend::codex::registry_entry());
     backend_registry.register(crate::backend::gemini::registry_entry());
     backend_registry.register(crate::backend::grok::registry_entry());
+    backend_registry.register(crate::backend::antigravity::registry_entry());
     backend_registry.register(crate::backend::chatgpt_ui::registry_entry());
     let backend_registry = Arc::new(RwLock::new(backend_registry));
-    tracing::info!("Backend registry initialized with {} backends", 6);
+    tracing::info!("Backend registry initialized with {} backends", 7);
 
     // Note: No central OpenCode server cleanup needed - missions use per-workspace CLI execution
 
@@ -1336,6 +1344,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/providers/snapshots",
             get(super::providers::export_model_snapshots),
+        )
+        .route(
+            "/api/providers/antigravity-models",
+            get(super::providers::node_antigravity_models),
         )
         .route(
             "/api/providers/backend-models",

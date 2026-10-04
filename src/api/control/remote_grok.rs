@@ -151,6 +151,7 @@ pub(crate) async fn require_node_managed_auth(
     let profile = match plan {
         RemoteHarnessPlan::Grok { .. } => "grok",
         RemoteHarnessPlan::Gemini { .. } => "gemini",
+        RemoteHarnessPlan::Antigravity { .. } => "antigravity",
         _ => return Ok(()),
     };
     let Some(node) = state.config.remote_nodes.node(node_id) else {
@@ -177,7 +178,7 @@ pub(crate) async fn require_node_managed_auth(
     } else if heartbeat.managed_auth.iter().any(|p| p == profile) {
         Ok(())
     } else {
-        Err(format!("{REMOTE_AUTH_REQUIRED}: remote node '{node_id}' has no managed Gemini login; install Gemini CLI and configure SANDBOXED_NODE_GEMINI_HOME with the service account's private file-based OAuth login"))
+        Err(format!("{REMOTE_AUTH_REQUIRED}: remote node '{node_id}' has no verified {profile} login; authenticate the CLI as the node execution user and configure its managed-auth profile"))
     }
 }
 
@@ -231,6 +232,7 @@ pub(crate) enum StreamUpdate {
 /// non-JSON (stderr) lines.
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
+    antigravity: Option<crate::antigravity::Stream>,
     claude: bool,
     claude_message_streamed: bool,
     claude_boundary: bool,
@@ -328,6 +330,29 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if let Some(stream) = self.antigravity.as_mut() {
+            let tools = stream.feed(&value);
+            self.progress |= !tools.is_empty() || !stream.text.is_empty();
+            if stream.session != self.session_id {
+                self.session_id = stream.session.clone();
+                if let Some(id) = &self.session_id {
+                    updates.push(StreamUpdate::SessionId(id.clone()));
+                }
+            }
+            self.text = stream.text.clone();
+            updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+            self.ended = stream.success;
+            self.stop_reason = stream.success.then(|| "end_turn".into());
+            self.error = stream.error.clone();
+            for tool in tools {
+                let completed = tool["type"] == "tool_call_update";
+                updates.push(StreamUpdate::Tool {
+                    update: tool,
+                    completed,
+                });
+            }
+            return;
+        }
         if self.claude {
             self.feed_claude(&value, updates);
             return;
@@ -664,6 +689,18 @@ fn take_allocated_claude_session(job_id: Uuid) -> bool {
 }
 
 impl NativeGrokObserver {
+    pub(crate) fn usage(&self) -> Option<crate::cost::TokenUsage> {
+        self.stream
+            .antigravity
+            .as_ref()
+            .map(|stream| crate::cost::TokenUsage {
+                input_tokens: stream.input_tokens,
+                output_tokens: stream.output_tokens,
+                cache_read_input_tokens: Some(stream.cache_read_tokens),
+                cache_creation_input_tokens: None,
+            })
+    }
+
     /// Attach to a native Grok job without a host goal driver.
     pub(crate) async fn attach(
         owner: &RemoteMissionOwner,
@@ -675,7 +712,7 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex"
+                    GROK_BACKEND | "opencode" | "codex" | "antigravity"
                 ) || (mission.backend == "claudecode" && mission.session_id.is_some()) =>
             {
                 mission
@@ -689,6 +726,11 @@ impl NativeGrokObserver {
             session_persisted: mission.session_id.clone(),
             stream: GrokStream {
                 claude: mission.backend == "claudecode",
+                antigravity: (mission.backend == "antigravity").then(|| {
+                    let mut stream = crate::antigravity::Stream::default();
+                    stream.expected_session = mission.session_id.clone();
+                    stream
+                }),
                 ..Default::default()
             },
             mission,
@@ -788,6 +830,11 @@ impl NativeGrokObserver {
             self.log_len = chunk.log_len;
             self.stream = GrokStream {
                 claude: self.mission.backend == "claudecode",
+                antigravity: (self.mission.backend == "antigravity").then(|| {
+                    let mut stream = crate::antigravity::Stream::default();
+                    stream.expected_session = self.session_persisted.clone();
+                    stream
+                }),
                 ..Default::default()
             };
             return;
@@ -796,7 +843,10 @@ impl NativeGrokObserver {
         self.log_offset = chunk.next_offset;
         let updates = self.stream.feed(&chunk.data);
         self.broadcast(updates).await;
-        if self.stream.auth_required && !self.auth_cancel_requested {
+        if (self.stream.auth_required
+            || (self.stream.antigravity.is_some() && self.stream.error.is_some()))
+            && !self.auth_cancel_requested
+        {
             // The CLI is blocked on a browser callback that never comes;
             // cancel instead of burning the job timeout.
             if let Err(error) = client.cancel_job(node, shared_token, self.job_id).await {
@@ -1051,7 +1101,19 @@ impl NativeGrokObserver {
         // Raw remote commands predate stream-json. Require a Claude result only
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
+        if self.stream.antigravity.is_some()
+            && (self.stream.session_id.is_none()
+                || self.session_persisted != self.stream.session_id)
+        {
+            self.stream.error =
+                Some("Antigravity conversation identity was not durably persisted".into());
+        }
         let success = succeeded
+            && self
+                .stream
+                .antigravity
+                .as_ref()
+                .is_none_or(|s| s.finish().is_ok())
             && (!self.stream.claude || legacy_claude || self.stream.ended)
             && !auth_required
             && self.stream.error.is_none()
@@ -1305,7 +1367,7 @@ pub(crate) async fn reject_local_followup(
 pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacement) -> String {
     if matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
     ) {
         format!(
             "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {} runs natively on remote node '{}'; \
@@ -1627,7 +1689,7 @@ async fn continue_inner(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1746,7 +1808,13 @@ async fn continue_inner(
     } else {
         RESUME_SOURCE.to_string()
     };
-    let plan = if mission.backend == "codex" {
+    let plan = if mission.backend == "antigravity" {
+        RemoteHarnessPlan::Antigravity {
+            model: mission.model_override.clone(),
+            prompt: prompt.clone(),
+            resume_session_id: session_id.clone(),
+        }
+    } else if mission.backend == "codex" {
         RemoteHarnessPlan::Codex {
             effort: mission.model_effort.clone(),
             fast_mode: mission.fast_mode,
@@ -1854,6 +1922,30 @@ fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn antigravity_remote_stream_records_progress_and_rejects_wrong_resume() {
+        let mut stream = GrokStream {
+            antigravity: Some(Default::default()),
+            ..Default::default()
+        };
+        stream.feed(include_str!(
+            "../../../tests/fixtures/antigravity_turn.jsonl"
+        ));
+        stream.finish();
+        assert!(stream.progress);
+        assert!(stream.ended);
+        assert!(stream.antigravity.as_ref().unwrap().finish().is_ok());
+        let mut native = crate::antigravity::Stream::default();
+        native.expected_session = Some("expected".into());
+        let mut resumed = GrokStream {
+            antigravity: Some(native),
+            ..Default::default()
+        };
+        resumed.feed("{\"event\":\"init\",\"conversation_id\":\"wrong\"}\n");
+        assert!(resumed.error.is_some());
+        assert_ne!(resumed.session_id.as_deref(), Some("wrong"));
+    }
+
     const SPARK_STREAM: &str =
         include_str!("../../../tests/fixtures/native_grok_goal_resume.jsonl");
     const SPARK_TEXT: &str = include_str!("../../../tests/fixtures/native_grok_goal_resume.txt");
@@ -1945,6 +2037,8 @@ mod tests {
             verdict.content,
             verdict.status_reason,
             true,
+            observer.usage(),
+            None,
         )
         .await
         .unwrap();

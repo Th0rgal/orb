@@ -3,18 +3,18 @@ import { For, Show, createSignal, createEffect, onMount, onCleanup } from "solid
 import { forkMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
 import { effortLabel, supportedEfforts } from "./effort";
 
-export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; destination: string; position?: { x: number; y: number }; onClose: () => void; onFork: (mission: Mission) => void }) {
+export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; destination: string; position?: { x: number; y: number }; onOpen?: () => void; onClose: () => void; onFork: (mission: Mission) => void }) {
   const [backend, setBackend] = createSignal(p.mission.backend ?? p.choices[0]?.backend.id ?? "");
   const choices = () => p.choices.find(c => c.backend.id === backend())?.models ?? [];
   const [model, setModel] = createSignal(choices().find(m => m.value === p.mission.model_override)?.value ?? choices()[0]?.value ?? "");
   const [effortOpen, setEffortOpen] = createSignal(false);
-  const unavailable = (id: string) => !!p.mission.remote_node_id && !["grok", "claudecode", "opencode"].includes(id);
+  const unavailable = (id: string) => !!p.mission.remote_node_id && !["grok", "claudecode", "opencode", "antigravity"].includes(id);
   const [effort, setEffort] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const key = crypto.randomUUID();
   const fork = async () => {
-    if (busy() || !backend() || !model()) return;
+    if (busy() || !backend() || unavailable(backend()) || !choices().some(m => m.value === model())) return;
     setBusy(true); setError("");
     try {
       p.onFork(await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort(), idempotency_key: key }));
@@ -35,6 +35,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     });
   });
   onMount(() => {
+    p.onOpen?.();
     const outside = (e: PointerEvent) => { if (!busy() && !(root.parentElement?.closest(".popup-menu") ?? (p.position ? root : root.parentElement))?.contains(e.target as Node)) p.onClose(); };
     const escape = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy()) { e.preventDefault(); p.onClose(); } };
     window.addEventListener("pointerdown", outside);

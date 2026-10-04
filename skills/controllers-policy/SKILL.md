@@ -296,6 +296,12 @@ over `get_mission` over `get_mission_events`; never call synchronous `ask_missio
 failed/interrupted attempts so they leave the snapshot. Full rules:
 `references/context-budget.md`.
 
+Antigravity uses the selected execution machine's native Google login. Treat
+`get_backend_auth_status` with `ready: null` as unverified, not unavailable;
+check that machine's model discovery and launch receipt. Keep the requested
+`antigravity` backend and model, and require an explicit successful native
+result plus the successful execution receipt before accepting completion.
+
 ## Topic router
 
 Load only what this tick needs; each name is `references/<name>.md`.

@@ -25,6 +25,7 @@ const HARNESSES: &[(&str, &str)] = &[
     ("grok", "grok"),
     ("opencode", "opencode"),
     ("gemini", "gemini"),
+    ("antigravity", "agy"),
 ];
 
 #[tauri::command]
@@ -40,6 +41,8 @@ pub struct ScanRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ScanRow {
+    pub models: Vec<(String, String)>,
+    pub auth_error: Option<String>,
     pub id: String,
     pub bin: String,
     pub path: Option<String>,
@@ -143,6 +146,12 @@ pub async fn local_agents_scan(request: ScanRequest) -> Result<Vec<ScanRow>, Str
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn local_antigravity_models(path: String) -> Result<Vec<(String, String)>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::antigravity::models(Path::new(&path)))
+        .await.map_err(|error| error.to_string())?
+}
+
 fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
     HARNESSES
         .iter()
@@ -158,6 +167,7 @@ fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));
             ScanRow {
+                models: vec![], auth_error: None,
                 id: (*id).to_string(),
                 bin: (*bin).to_string(),
                 // A slow version probe must not hide an installed CLI.
@@ -344,7 +354,7 @@ pub(crate) fn start_with_env_fenced(
         error,
         resumed,
     };
-    watch_exit(software_execution, interaction, run.clone());
+    watch_exit(software_execution, interaction, run.clone(), request.harness == "antigravity");
     map.insert(request.id, run);
     Ok(())
 }
@@ -353,6 +363,7 @@ fn watch_exit(
     software_execution: crate::agent_software::Execution,
     mission_id: crate::interactions::Session,
     run: Run,
+    strict_terminal: bool,
 ) {
     let Run {
         child,
@@ -401,6 +412,9 @@ fn watch_exit(
             *slot = status.and_then(|status| status.code());
         }
         output.wait_drained(None);
+        if strict_terminal && error.lock().is_ok_and(|error| error.is_some()) {
+            if let Ok(mut slot) = exit_code.lock() { *slot = Some(1); }
+        }
         done.store(true, Ordering::SeqCst);
         output.finish(PollState {
             text: output.snapshot(),
@@ -527,6 +541,7 @@ fn spawn_harness(
     env: &[(String, String)],
 ) -> Result<Child, String> {
     match request.harness.as_str() {
+        "antigravity" => spawn_antigravity(request, text, session_id, error, env),
         "claudecode" => spawn_claude(request, text, session_id, error, env),
         "codex" => spawn_codex(request, text, session_id, error, done, env),
         "grok" => spawn_piped(
@@ -558,6 +573,85 @@ fn spawn_harness(
         ),
         other => Err(format!("unknown local harness {other}")),
     }
+}
+
+// A durable create-new marker also fences retries after an Orb restart or lost stdout.
+// Only a confirmed OS spawn failure may release it; a known native ID can resume.
+fn claim_antigravity_attempt(root: &std::path::Path, id: &str, cwd: &std::path::Path, session: Option<&str>) -> Result<Option<PathBuf>, String> {
+    if session.is_some_and(|id| !id.trim().is_empty()) { return Ok(None); }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    use sha2::{Digest, Sha256};
+    let mut key = Sha256::new();
+    key.update(id.as_bytes());
+    key.update([0]);
+    key.update(cwd.canonicalize().map_err(|e| e.to_string())?.as_os_str().as_encoded_bytes());
+    let name = format!("{:x}", key.finalize());
+    let path = root.join(name);
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        .map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "Antigravity has an earlier launch without a recorded conversation ID. Reconcile that native conversation before retrying; automatic replay is blocked.".to_string()
+        } else { e.to_string() })?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    std::fs::File::open(root).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
+    Ok(Some(path))
+}
+
+fn spawn_antigravity(
+    request: &StartRequest, text: &Arc<Output>, session_id: &Arc<Mutex<Option<String>>>,
+    error: &Arc<Mutex<Option<String>>>, env: &[(String, String)],
+) -> Result<Child, String> {
+    crate::antigravity::validate_prompt(&request.prompt)?;
+    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let mut claim_root = PathBuf::from(home).join(".orb/antigravity-attempts");
+    if request.session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+        let bindings = crate::local_bindings(None, None)?;
+        if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
+            let transfer = uuid::Uuid::parse_str(transfer).map_err(|_| "Invalid transfer identity")?;
+            claim_root = claim_root.join(transfer.to_string());
+        }
+    }
+    let claim = claim_antigravity_attempt(&claim_root, &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
+    let mut command = mission_command(request, env);
+    let mut child = command.current_dir(&request.cwd)
+        .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|e| {
+            if let Some(path) = &claim { let _ = std::fs::remove_file(path); }
+            format!("Cannot start Antigravity: {e}")
+        })?;
+    let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
+    let output = Arc::clone(text);
+    let slot = Arc::clone(session_id);
+    let error = Arc::clone(error);
+    let expected = request.session_id.clone();
+    let pid = child.id();
+    let guard = text.reader();
+    thread::spawn(move || {
+        let _guard = guard;
+        let mut stream = crate::antigravity::Stream::default();
+        stream.expected_session = expected.clone();
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break; };
+            let Ok(value) = serde_json::from_str(&line) else { continue; };
+            for tool in stream.feed(&value) { output.native_activity(&tool); }
+            output.publish_activities();
+            if let Some(id) = &stream.session {
+                if expected.as_deref().is_some_and(|old| old != id) {
+                    stream.error = Some("Antigravity resumed a different conversation".into());
+                } else if let Ok(mut slot) = slot.lock() { *slot = Some(id.clone()); }
+            }
+            output.replace(stream.text.clone());
+            if stream.error.is_some() {
+                #[cfg(unix)]
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                break;
+            }
+        }
+        if let Err(message) = stream.finish() {
+            if let Ok(mut error) = error.lock() { *error = Some(message); }
+        }
+    });
+    Ok(child)
 }
 
 fn gemini_args(request: &StartRequest) -> Vec<String> {
@@ -2226,6 +2320,55 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None).unwrap().unwrap();
+        assert!(marker.is_file());
+        let destination = tempfile::tempdir().unwrap();
+        assert!(claim_antigravity_attempt(root.path(), "mission", destination.path(), None).is_ok());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), None).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("")).is_err());
+        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("native-id")).unwrap().is_none());
+        assert!(claim_antigravity_attempt(root.path(), "other", root.path(), None).is_ok());
+    }
+
+    #[test]
+    fn antigravity_process_requires_terminal_result_and_preserves_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        for outcome in ["SUCCESS", "MISSING", "ERROR"] {
+            let success = outcome == "SUCCESS";
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("agy-fixture");
+            let mut script = String::from("#!/bin/sh\nprintf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"native-session\"}'\n");
+            if success {
+                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"SUCCESS\",\"response\":\"Ready\"}}'\n");
+            }
+            if outcome == "ERROR" {
+                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"ERROR\",\"response\":\"Partial answer\"}}'\n");
+            }
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let request = StartRequest {
+                cyber_revision: None, cyber_access: None, image_paths: vec![],
+                id: "antigravity-fixture".into(), harness: "antigravity".into(),
+                bin: bin.to_string_lossy().into_owned(), cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "hello".into(), model: Some("agy-demo".into()), session_id: Some("native-session".into()),
+            };
+            let output = Arc::new(Output::default());
+            let session = Arc::new(Mutex::new(None));
+            let error = Arc::new(Mutex::new(None));
+            let mut child = spawn_harness(&request, &output, &session, &error, &Arc::new(AtomicBool::new(false)), &[]).unwrap();
+            let status = child.wait().unwrap();
+            if outcome != "ERROR" { assert!(status.success()); }
+            assert!(output.wait_drained(Some(Duration::from_secs(2))));
+            assert_eq!(session.lock().unwrap().as_deref(), Some("native-session"));
+            assert_eq!(error.lock().unwrap().is_none(), success);
+            if success { assert_eq!(output.snapshot(), "Ready"); }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn gemini_stream_preserves_session_and_only_emits_assistant_deltas() {

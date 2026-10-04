@@ -3012,6 +3012,12 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
     let h = Harness::new().await;
     let owner = h.writer(MissionStatus::Active, Some("repo#244")).await;
     let job_id = Uuid::new_v4();
+    // Accepted jobs own a durable run, as established by real dispatch.
+    h.control
+        .mission_store
+        .begin_mission_run(owner.id, &remote_job_lease_owner(job_id), None)
+        .await
+        .unwrap();
     let phase = Arc::new(AtomicUsize::new(0));
     let failed_cancels = Arc::new(AtomicUsize::new(0));
     let acknowledged_cancels = Arc::new(AtomicUsize::new(0));
@@ -6183,6 +6189,30 @@ async fn poll_loop_surfaces_terminal_outcome_after_operator_interruption() {
         .unwrap()
         .iter()
         .all(|handle| handle.job_id != job_id));
+    // A concurrent recovery observer can still hold this already-settled receipt.
+    poll_remote_job(
+        &working_dir,
+        RemoteMissionOwner::live(&h.control),
+        h.state.fleet.clone(),
+        crate::remote_node::RemoteNodeClient::default(),
+        fixture.node.clone(),
+        "fixture-token".into(),
+        mission.id,
+        job_id,
+        chrono::Utc::now(),
+    )
+    .await;
+    let notes = store
+        .get_events(mission.id, Some(&["assistant_message"]), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|event| event.content.contains("after the mission left Active"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
