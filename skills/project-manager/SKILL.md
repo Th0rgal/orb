@@ -42,6 +42,11 @@ until it settles before reporting the change as applied. An action marked
 do not repeat it under a new key. A completed launch action means its mission
 was created, not that the mission finished or its evidence was accepted.
 
+For Antigravity attempts, preserve `backend="antigravity"` and the selected
+machine's native model ID. An indeterminate native-login status is not evidence
+of missing credentials. Require target-account discovery and execution receipts;
+do not substitute the Gemini API backend or another machine's model catalog.
+
 ## Reading state (do this before opining)
 
 1. `list_projects` — the roster with buckets (attention/active/paused) and
