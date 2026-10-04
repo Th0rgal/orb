@@ -362,7 +362,8 @@ impl MissionStore for InMemoryMissionStore {
             paused_at: None,
             resumable: false,
             desktop_sessions: Vec::new(),
-            session_id: (backend != Some("grok")).then(|| Uuid::new_v4().to_string()),
+            session_id: (!matches!(backend, Some("grok" | "antigravity")))
+                .then(|| Uuid::new_v4().to_string()),
             terminal_reason: None,
             terminal_evidence: None,
             parent_mission_id,

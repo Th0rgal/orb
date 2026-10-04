@@ -3965,7 +3965,8 @@ impl MissionStore for SqliteMissionStore {
             paused_at: None,
             resumable: false,
             desktop_sessions: Vec::new(),
-            session_id: (backend != "grok").then(|| session_id.clone()),
+            session_id: (!matches!(backend.as_str(), "grok" | "antigravity"))
+                .then(|| session_id.clone()),
             terminal_reason: None,
             terminal_evidence: None,
             parent_mission_id,
