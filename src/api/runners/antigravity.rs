@@ -186,7 +186,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
                 AgentEvent::ToolResult {
                     tool_call_id: id,
                     name,
-                    result: tool["output"].clone(),
+                    result: tool.clone(),
                     mission_id: Some(ctx.mission_id),
                 }
             };

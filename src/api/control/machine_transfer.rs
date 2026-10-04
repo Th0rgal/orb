@@ -11,7 +11,7 @@ fn context_path(id: Uuid) -> String {
 }
 
 fn portable_prompt(t: &Transfer) -> String {
-    if t.context.len() <= INLINE_CONTEXT_BYTES {
+    if t.backend != "antigravity" && t.context.len() <= INLINE_CONTEXT_BYTES {
         return t.context.clone();
     }
     format!(
@@ -21,7 +21,7 @@ fn portable_prompt(t: &Transfer) -> String {
 }
 
 fn include_context_file(a: &Transfer, manifest: &mut Manifest) -> Result<(), Error> {
-    if a.context.len() <= INLINE_CONTEXT_BYTES {
+    if a.backend != "antigravity" && a.context.len() <= INLINE_CONTEXT_BYTES {
         return Ok(());
     }
     use sha2::{Digest, Sha256};
@@ -1334,6 +1334,17 @@ mod portable_context_tests {
             context: content,
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn antigravity_transfer_always_archives_context_for_argv_budget() {
+        let mut transfer = action("history".repeat(4_000));
+        transfer.backend = "antigravity".into();
+        let mut manifest = Manifest::default();
+        include_context_file(&transfer, &mut manifest).unwrap();
+        assert_eq!(manifest.bytes, transfer.context.len() as u64);
+        assert!(portable_prompt(&transfer).contains(&context_path(transfer.id)));
+        assert!(crate::antigravity::validate_prompt(&portable_prompt(&transfer)).is_ok());
     }
 
     #[test]

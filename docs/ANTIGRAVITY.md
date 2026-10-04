@@ -110,3 +110,9 @@ An isolated Core-to-node mission passed three immediate turns with scoped MCP
 calls, independent file assertions, a stable native conversation ID, and durable
 per-turn input/output/cache usage. Its node model endpoint rejected unauthenticated
 requests and returned the selected account's Argon model when authenticated.
+
+Core's native model catalog runs discovery through the selected workspace's
+execution environment (`workspace_id` on `/api/providers/backend-models`,
+defaulting to the host workspace). Container account models are never inferred
+from the API process login. Antigravity transfer history is always archived in
+the checkpoint and referenced by a short prompt, including medium conversations.

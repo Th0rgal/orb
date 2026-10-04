@@ -364,6 +364,8 @@ pub struct FullCatalogResponse {
 /// Query parameters for backend models endpoint.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BackendModelsQuery {
+    /// Discover native account models in this execution workspace (default: host workspace).
+    pub workspace_id: Option<uuid::Uuid>,
     /// Include providers even if they are not configured/authenticated.
     #[serde(default)]
     pub include_all: bool,
@@ -2117,24 +2119,88 @@ pub async fn list_backend_model_options(
 
     let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
-    if let Ok(Ok(models)) =
-        tokio::task::spawn_blocking(move || crate::antigravity::models(std::path::Path::new(&cli)))
-            .await
+    if let Some(workspace) = state
+        .workspaces
+        .get(query.workspace_id.unwrap_or(uuid::Uuid::nil()))
+        .await
     {
-        backends.insert(
-            "antigravity".into(),
-            models
-                .into_iter()
-                .map(|(value, label)| BackendModelOption {
-                    value,
-                    label,
-                    description: Some("Antigravity account model".into()),
-                    provider_id: None,
-                })
-                .collect(),
-        );
+        if let Ok(models) =
+            workspace_antigravity_models(workspace, &state.config.working_dir, &cli).await
+        {
+            backends.insert(
+                "antigravity".into(),
+                models
+                    .into_iter()
+                    .map(|(value, label)| BackendModelOption {
+                        value,
+                        label,
+                        description: Some("Antigravity account model".into()),
+                        provider_id: None,
+                    })
+                    .collect(),
+            );
+        }
     }
     Json(BackendModelOptionsResponse { backends })
+}
+
+/// Use the same workspace environment and user as a native mission turn.
+async fn workspace_antigravity_models(
+    workspace: crate::workspace::Workspace,
+    work_dir: &std::path::Path,
+    cli: &str,
+) -> Result<Vec<(String, String)>, String> {
+    use tokio::io::AsyncReadExt;
+    let cwd = crate::workspace::configured_project_dir(&workspace, work_dir);
+    let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
+    let mut child = exec
+        .spawn_streaming(&cwd, cli, &["models".into()], Default::default())
+        .await
+        .map_err(|_| "Antigravity is unavailable in the selected workspace")?;
+    drop(child.stdin.take());
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or("Model discovery stderr unavailable")?;
+    let drain = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+    });
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("Model discovery stdout unavailable")?
+        .take(1024 * 1024);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut text = String::new();
+        stdout
+            .read_to_string(&mut text)
+            .await
+            .map_err(|_| "Cannot read workspace models")?;
+        if !child
+            .wait()
+            .await
+            .map_err(|_| "Model discovery failed")?
+            .success()
+        {
+            return Err("Sign in with agy inside the selected workspace");
+        }
+        let models: Vec<_> = text
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(id, label)| !id.is_empty() && !label.is_empty())
+            .map(|(id, label)| (id.to_owned(), label.to_owned()))
+            .collect();
+        if models.is_empty() {
+            return Err("No Antigravity models in the selected workspace");
+        }
+        Ok(models)
+    })
+    .await;
+    let _ = child.kill().await;
+    drain.abort();
+    result
+        .map_err(|_| "Workspace model discovery timed out".to_string())?
+        .map_err(str::to_string)
 }
 
 /// Drop Claude models this deployment has retired.
@@ -2439,6 +2505,35 @@ fn is_grok_backend_model_id(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_models_use_workspace_account_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let cli = root.path().join("agy-fixture");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nprintf '%s\\t%s\\n' \"$TEST_AGY_MODEL\" 'Workspace account'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for account in ["account-one", "account-two"] {
+            let mut workspace =
+                crate::workspace::Workspace::default_host(root.path().to_path_buf());
+            workspace
+                .env_vars
+                .insert("TEST_AGY_MODEL".into(), account.into());
+            let models =
+                workspace_antigravity_models(workspace, root.path(), cli.to_str().unwrap())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                models,
+                vec![(account.to_string(), "Workspace account".to_string())]
+            );
+        }
+    }
 
     #[test]
     fn opus_55_catalog_survives_retirement_policy() {

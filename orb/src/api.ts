@@ -324,9 +324,9 @@ export async function listBackends(): Promise<BackendInfo[]> {
   return Array.isArray(data) ? data : (data.backends ?? []);
 }
 
-export async function listBackendModels(): Promise<Record<string, BackendModelOption[]>> {
+export async function listBackendModels(workspaceId?: string): Promise<Record<string, BackendModelOption[]>> {
   const [data, chains] = await Promise.all([
-    cachedCatalog<{ backends?: Record<string, BackendModelOption[]> }>("/api/providers/backend-models"),
+    cachedCatalog<{ backends?: Record<string, BackendModelOption[]> }>("/api/providers/backend-models" + (workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "")),
     cachedCatalog<{id:string;name:string;is_default?:boolean}[]>("/api/model-routing/chains"),
   ]);
   // Route identity comes from the chain store, never provider display labels.
