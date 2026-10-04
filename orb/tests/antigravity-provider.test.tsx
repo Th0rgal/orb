@@ -52,3 +52,14 @@ it("reloads the machine inventory when the backend changes",async()=>{
  expect(ui.queryByRole("option",{name:"old-agent"})).toBeNull();
  expect((ui.getByLabelText("Antigravity machine") as HTMLSelectElement).value).toBe("core");
 });
+
+it("refreshes the machine inventory after an initial discovery failure",async()=>{
+ vi.spyOn(api,"getRemoteNodes").mockRejectedValueOnce(new Error("offline")).mockResolvedValue({enabled:true,nodes:[{id:"new-node"}] as api.RemoteNodeView[]});
+ vi.spyOn(api,"listNodeAntigravityModels").mockResolvedValue([]);
+ const ui=render(()=><AntigravityProvider/>);
+ fireEvent.click(ui.getByRole("button",{name:/Antigravity CLI/}));
+ await waitFor(()=>expect(ui.getByText("No models available")).toBeTruthy());
+ expect(ui.queryByRole("option",{name:"new-node"})).toBeNull();
+ window.dispatchEvent(new Event("orb:providers-refresh"));
+ await waitFor(()=>expect(ui.getByRole("option",{name:"new-node"})).toBeTruthy());
+});

@@ -9,7 +9,7 @@ export function AntigravityProvider() {
   const [models, setModels] = createSignal<[string, string][]>([]);
   const [phase, setPhase] = createSignal<"loading" | "ready" | "error">("loading");
   const [open, setOpen] = createSignal(false);
-  let generation = 0, disposed = false;
+  let generation = 0, inventoryGeneration = 0, disposed = false;
   const refresh = async () => {
     const request = ++generation, version = connectionVersion(), target = machine();
     setModels([]); setPhase("loading");
@@ -22,15 +22,23 @@ export function AntigravityProvider() {
     }
   };
   createEffect(() => { machine(); connectionVersion(); void refresh(); });
-  createEffect(on(connectionVersion, version => {
+  const refreshNodes = async () => {
+    const version = connectionVersion(), request = ++inventoryGeneration;
+    try {
+      const result = await getRemoteNodes();
+      if (disposed || version !== connectionVersion() || request !== inventoryGeneration) return;
+      const available = (result.nodes ?? []).map(node => node.id);
+      setNodes(available);
+      if (machine() !== "core" && !available.includes(machine())) setMachine("core");
+    } catch { /* Keep the current inventory; Refresh can recover a transient failure. */ }
+  };
+  const reload = () => { void refreshNodes(); void refresh(); };
+  createEffect(on(connectionVersion, () => {
     setMachine("core");
     setNodes([]);
-    void getRemoteNodes().then(result => {
-      if (!disposed && version === connectionVersion()) setNodes((result.nodes ?? []).map(node => node.id));
-    }).catch(() => {});
+    void refreshNodes();
   }));
   onMount(() => {
-    const reload = () => void refresh();
     window.addEventListener("orb:providers-refresh", reload);
     onCleanup(() => window.removeEventListener("orb:providers-refresh", reload));
   });
@@ -54,7 +62,7 @@ export function AntigravityProvider() {
         <p class="s-row-desc">Models available to the Google account signed in with Antigravity CLI on this machine.</p>
         <Show when={phase() === "ready" && models().length}><ul aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
         <Show when={phase() === "error"}><p class="s-row-desc" role="status">Check this machine’s connection and Antigravity sign-in, then refresh.</p></Show>
-        <div class="p-acc-actions"><button class="s-btn" disabled={phase() === "loading"} onClick={() => void refresh()}>Refresh account</button></div>
+        <div class="p-acc-actions"><button class="s-btn" disabled={phase() === "loading"} onClick={reload}>Refresh account</button></div>
       </div></Show>
     </div>
   </section>;
