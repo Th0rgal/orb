@@ -4861,6 +4861,8 @@ impl ControlHub {
         super::cloud_agents::worker::start(
             state.mission_store.clone(),
             self.config.working_dir.clone(),
+            self.config.clone(),
+            user.id.clone(),
         );
         sessions.insert(user.id.clone(), state.clone());
 

@@ -844,6 +844,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/:id/cloud/artifact",
             get(super::cloud_agents::http::artifact),
         )
+        .route(
+            "/api/cloud/hermes/options",
+            get(super::cloud_agents::hermes::options),
+        )
+        .route(
+            "/api/control/missions/:id/cloud/children",
+            get(super::cloud_agents::hermes::children),
+        )
+        .route(
+            "/api/control/missions/:id/cloud/approval",
+            post(super::cloud_agents::hermes::approval),
+        )
         .route("/api/cloud/usage", get(super::cloud_agents::usage::get))
         .route(
             "/api/mcp/session",

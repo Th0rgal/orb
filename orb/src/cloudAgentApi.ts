@@ -1,10 +1,10 @@
 import { api, ApiError, createMission, type Mission } from './api';
-export type CloudProvider = 'chatgpt' | 'grok_bot' | 'cursor_cloud';
-export const cloudNames: Record<CloudProvider, string> = { chatgpt: 'ChatGPT', grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud' };
+export type CloudProvider = 'chatgpt' | 'grok_bot' | 'cursor_cloud' | 'hermes';
+export const cloudNames: Record<CloudProvider, string> = { chatgpt: 'ChatGPT', grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud', hermes: 'Hermes' };
 export interface ModelParam {id:string;value:string}
 export interface CloudSelection { model_params?: ModelParam[]; provider: CloudProvider; account: string; repository?: string; git_ref?: string; model?: string }
 export interface CloudAccount { id: string; provider: CloudProvider; label: string; available: boolean; experimental: boolean; reason?: string; capabilities: { models: boolean; repository: boolean; attachments: boolean; follow_up: boolean; cancel: boolean; artifacts: boolean; detailed_events: boolean } }
-export interface CloudTurn { model?:string; model_params?: ModelParam[]; key: string; prompt: string; phase: string; external_id?: string; result?: string; detail?: string; artifacts: { path: string; sizeBytes?: number }[]; branches: { branch?: string; prUrl?: string }[]; usage?: unknown }
+export interface CloudTurn { model?:string; model_params?: ModelParam[]; key: string; prompt: string; phase: string; external_id?: string; result?: string; detail?: string; artifacts: { kind?: string; run_id?:string; request?:{request_id?:string;command?:string;choices?:string[]}; path: string; sizeBytes?: number }[]; branches: { branch?: string; prUrl?: string }[]; usage?: unknown }
 export interface CloudExecution { mission_id: string; revision: number; selection: CloudSelection; external_url?: string; turns: CloudTurn[] }
 export async function cloudAccounts(): Promise<CloudAccount[]> { try { return await api<CloudAccount[]>('/api/cloud/accounts'); } catch (error) { if (error instanceof ApiError && error.status === 404) throw new Error('Cloud agents are not available on this Core yet. Core needs the cloud agent update.'); throw error; } }
 export const cloudExecution = (id: string) => api<CloudExecution>(`/api/control/missions/${encodeURIComponent(id)}/cloud`);

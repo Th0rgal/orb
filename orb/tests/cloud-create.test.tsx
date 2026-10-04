@@ -12,7 +12,7 @@ describe('cloud creation', () => {
   fakes.accounts.mockResolvedValue([{id:'grok',provider:'grok_bot',label:'Grok Bot',available:false,experimental:true,reason:'Protocol not validated',capabilities}]);
   render(() => <CloudAgentPage project="demo" path="notes" onCreated={() => {}} />);
   fireEvent.click(screen.getByLabelText('Service'));
-  expect(screen.getAllByRole('menuitemradio').map(e => e.textContent?.replace('✓','').trim())).toEqual(['ChatGPT','Grok Bot','Cursor Cloud']);
+  expect(screen.getAllByRole('menuitemradio').map(e => e.textContent?.replace('✓','').trim())).toEqual(['ChatGPT','Grok Bot','Cursor Cloud','Hermes']);
   fireEvent.click(screen.getByRole('menuitemradio',{name:'Grok Bot'}));
   await screen.findByText('Protocol not validated');
   expect((screen.getByRole('button',{name:'Create cloud agent'}) as HTMLButtonElement).disabled).toBe(true);
