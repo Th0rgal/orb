@@ -8,7 +8,7 @@ export function destinationHarnessChoices(
 ): HarnessChoice[] {
   const choices = core.filter(choice => choice.backend.id !== "antigravity");
   if (accountModels.length) choices.push({
-    backend: { id: "antigravity", name: "Antigravity" },
+    backend: { id: "antigravity", name: "Antigravity CLI" },
     models: accountModels.map(([value, label]) => ({ value, label })),
   });
   return choices;

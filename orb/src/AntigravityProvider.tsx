@@ -1,0 +1,61 @@
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
+import { ProviderLogo } from "./ProviderLogo";
+
+/** Native Google accounts live on the execution machine, outside the API-key store. */
+export function AntigravityProvider() {
+  const [machine, setMachine] = createSignal("core");
+  const [nodes, setNodes] = createSignal<string[]>([]);
+  const [models, setModels] = createSignal<[string, string][]>([]);
+  const [phase, setPhase] = createSignal<"loading" | "ready" | "error">("loading");
+  const [open, setOpen] = createSignal(false);
+  let generation = 0, disposed = false;
+  const refresh = async () => {
+    const request = ++generation, version = connectionVersion(), target = machine();
+    setModels([]); setPhase("loading");
+    try {
+      const result = await listNodeAntigravityModels(target);
+      if (disposed || request !== generation || version !== connectionVersion()) return;
+      setModels(result); setPhase("ready");
+    } catch {
+      if (!disposed && request === generation && version === connectionVersion()) setPhase("error");
+    }
+  };
+  createEffect(() => { machine(); connectionVersion(); void refresh(); });
+  createEffect(on(connectionVersion, version => {
+    setMachine("core");
+    setNodes([]);
+    void getRemoteNodes().then(result => {
+      if (!disposed && version === connectionVersion()) setNodes((result.nodes ?? []).map(node => node.id));
+    }).catch(() => {});
+  }));
+  onMount(() => {
+    const reload = () => void refresh();
+    window.addEventListener("orb:providers-refresh", reload);
+    onCleanup(() => window.removeEventListener("orb:providers-refresh", reload));
+  });
+  onCleanup(() => { disposed = true; generation++; });
+  return <section class="s-sec" aria-label="Antigravity CLI">
+    <h3>Native CLI accounts</h3>
+    <div class="s-card p-acc-wrap">
+      <button class="s-row p-acc p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
+        <ProviderLogo type="antigravity" />
+        <div class="s-row-text">
+          <div class="s-row-title">Antigravity CLI</div>
+          <div class="s-row-desc"><span class={`p-st ${phase() === "ready" && models().length ? "connected" : "not_configured"}`}>
+            {phase() === "loading" ? "Checking account…" : phase() === "error" ? "Account unavailable" : models().length ? `Connected · ${models().length} ${models().length === 1 ? "model" : "models"}` : "No models available"}
+          </span><span class="p-dot">·</span>{machine() === "core" ? "Core" : machine()}</div>
+        </div><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
+      </button>
+      <Show when={open()}><div class="p-acc-body">
+        <label class="s-row-desc">Machine <select class="s-input" aria-label="Antigravity machine" value={machine()} onChange={event => setMachine(event.currentTarget.value)}>
+          <option value="core">Core</option><For each={nodes()}>{node => <option value={node}>{node}</option>}</For>
+        </select></label>
+        <p class="s-row-desc">Models available to the Google account signed in with Antigravity CLI on this machine.</p>
+        <Show when={phase() === "ready" && models().length}><ul aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
+        <Show when={phase() === "error"}><p class="s-row-desc" role="status">Check this machine’s connection and Antigravity sign-in, then refresh.</p></Show>
+        <div class="p-acc-actions"><button class="s-btn" disabled={phase() === "loading"} onClick={() => void refresh()}>Refresh account</button></div>
+      </div></Show>
+    </div>
+  </section>;
+}

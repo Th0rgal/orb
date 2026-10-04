@@ -1,3 +1,4 @@
+import { AntigravityProvider } from "./AntigravityProvider";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
@@ -342,6 +343,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </div>
       </section>
 
+      <AntigravityProvider />
       <CloudProviders />
 
       <section class="s-sec">
