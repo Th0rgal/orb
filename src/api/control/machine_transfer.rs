@@ -866,7 +866,7 @@ pub async fn operate(
             let inventory = matches!(operation, Operation::Inventory);
             let mut value = adapter(&state, &a, &side, operation).await?;
             // The archived conversation joins the snapshot and counts in its limits.
-            if inventory && a.context.len() > INLINE_CONTEXT_BYTES {
+            if inventory && archive_context(&a) {
                 let reserved = &mut value["reserved"];
                 *reserved = json!({
                     "bytes": reserved["bytes"].as_u64().unwrap_or(0) + a.context.len() as u64,
