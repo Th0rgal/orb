@@ -7037,6 +7037,43 @@ async fn native_grok_auto_track_continuation(
         ack["warnings"],
         json!(["unrecognized fields ignored: unexpected_field"])
     );
+    // Losing the response must not strand an already accepted iOS request
+    // after the project changes. It returns its receipt, without a second job.
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("reassigned-project".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let retried = h
+        .request(
+            false,
+            id,
+            json!({
+                "content":"  keep optimizing  ", "client_message_id":message_id,
+                "continue_identity":identity
+            }),
+        )
+        .await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried: Value = retried.json().await.unwrap();
+    assert_eq!(retried["id"], message_id.to_string());
+    assert_eq!(retried["message_accepted"], true);
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 3);
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(current.project.project.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let mut saw_followup = false;
     while let Ok(event) = events.try_recv() {
         if let AgentEvent::UserMessage {

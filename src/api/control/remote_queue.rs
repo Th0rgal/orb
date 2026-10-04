@@ -111,17 +111,6 @@ pub(super) async fn enqueue(
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
-    // Older iOS clients send an identity assertion for remote jobs. Validate
-    // under admission so reassignment cannot race the persisted queue snapshot.
-    if let Some(expected) = expected {
-        writer_reuse_or_conflict(
-            &mission,
-            &crate::api::writer_recycle::WriterIdentityPatch {
-                continue_identity: Some(expected.clone()),
-                ..Default::default()
-            },
-        )?;
-    }
     if !matches!(
         mission.backend.as_str(),
         "grok" | "codex" | "claudecode" | "opencode" | "antigravity"
@@ -189,6 +178,18 @@ pub(super) async fn enqueue(
             ));
         }
         return Ok(());
+    }
+    // Validate only new messages: an accepted ID retains its receipt even if
+    // the assignment changed after a response was lost. Admission protects
+    // this identity read and the persisted queue snapshot from reassignment.
+    if let Some(expected) = expected {
+        writer_reuse_or_conflict(
+            &mission,
+            &crate::api::writer_recycle::WriterIdentityPatch {
+                continue_identity: Some(expected.clone()),
+                ..Default::default()
+            },
+        )?;
     }
     save(
         &state.projects,
