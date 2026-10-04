@@ -13025,7 +13025,7 @@ pub(crate) fn remote_execution_for_plan(
             RemoteExecution {
                 managed_auth: vec!["antigravity".into()],
                 command: format!(
-                    "exec agy {}",
+                    "exec agy {} 2>/dev/null",
                     args.iter()
                         .map(|arg| shell_single_quote(arg))
                         .collect::<Vec<_>>()

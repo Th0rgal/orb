@@ -350,7 +350,7 @@ pub(crate) fn start_with_env_fenced(
         error,
         resumed,
     };
-    watch_exit(software_execution, interaction, run.clone());
+    watch_exit(software_execution, interaction, run.clone(), request.harness == "antigravity");
     map.insert(request.id, run);
     Ok(())
 }
@@ -359,6 +359,7 @@ fn watch_exit(
     software_execution: crate::agent_software::Execution,
     mission_id: crate::interactions::Session,
     run: Run,
+    strict_terminal: bool,
 ) {
     let Run {
         child,
@@ -407,6 +408,9 @@ fn watch_exit(
             *slot = status.and_then(|status| status.code());
         }
         output.wait_drained(None);
+        if strict_terminal && error.lock().is_ok_and(|error| error.is_some()) {
+            if let Ok(mut slot) = exit_code.lock() { *slot = Some(1); }
+        }
         done.store(true, Ordering::SeqCst);
         output.finish(PollState {
             text: output.snapshot(),
@@ -586,7 +590,7 @@ fn spawn_antigravity(
     thread::spawn(move || {
         let _guard = guard;
         let mut stream = crate::antigravity::Stream::default();
-        stream.session = expected.clone();
+        stream.expected_session = expected.clone();
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break; };
             let Ok(value) = serde_json::from_str(&line) else { continue; };
@@ -2281,12 +2285,16 @@ mod tests {
     #[test]
     fn antigravity_process_requires_terminal_result_and_preserves_resume() {
         use std::os::unix::fs::PermissionsExt;
-        for success in [true, false] {
+        for outcome in ["SUCCESS", "MISSING", "ERROR"] {
+            let success = outcome == "SUCCESS";
             let dir = tempfile::tempdir().unwrap();
             let bin = dir.path().join("agy-fixture");
             let mut script = String::from("#!/bin/sh\nprintf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"native-session\"}'\n");
             if success {
                 script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"SUCCESS\",\"response\":\"Ready\"}}'\n");
+            }
+            if outcome == "ERROR" {
+                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"ERROR\",\"response\":\"Partial answer\"}}'\n");
             }
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2300,7 +2308,8 @@ mod tests {
             let session = Arc::new(Mutex::new(None));
             let error = Arc::new(Mutex::new(None));
             let mut child = spawn_harness(&request, &output, &session, &error, &Arc::new(AtomicBool::new(false)), &[]).unwrap();
-            assert!(child.wait().unwrap().success());
+            let status = child.wait().unwrap();
+            if outcome != "ERROR" { assert!(status.success()); }
             assert!(output.wait_drained(Some(Duration::from_secs(2))));
             assert_eq!(session.lock().unwrap().as_deref(), Some("native-session"));
             assert_eq!(error.lock().unwrap().is_none(), success);

@@ -126,7 +126,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         input_tokens: stream.input_tokens,
         output_tokens: stream.output_tokens,
         cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
+        cache_read_input_tokens: Some(stream.cache_read_tokens),
     });
     if let Some(model) = ctx.model {
         result = result.with_model(model.to_string());

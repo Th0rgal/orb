@@ -82,3 +82,8 @@ against an isolated loopback test gateway: the advertised tool was called,
 its marker was returned, and the temporary project MCP configuration was
 removed afterward. Core and Orb native test binaries both compile and pass
 their focused Antigravity checks.
+
+An isolated Linux Core instance also passed initial and follow-up Argon turns,
+with file assertions, scoped MCP calls, and an unchanged persisted native
+conversation ID. Production services and the installed Orb app still require
+a coordinated upgrade.

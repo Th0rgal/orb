@@ -21,11 +21,13 @@ pub fn args(model: Option<&str>, session: Option<&str>, prompt: &str) -> Vec<Str
 #[derive(Debug, Default)]
 pub struct Stream {
     pub session: Option<String>,
+    pub expected_session: Option<String>,
     pub text: String,
     pub error: Option<String>,
     pub success: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
     completed_steps: HashSet<u64>,
     tools: HashSet<String>,
 }
@@ -41,7 +43,12 @@ impl Stream {
             _ => return vec![],
         };
         if let Some(id) = body["conversation_id"].as_str().filter(|s| !s.is_empty()) {
-            if self.session.as_deref().is_some_and(|old| old != id) {
+            if self.session.as_deref().is_some_and(|old| old != id)
+                || self
+                    .expected_session
+                    .as_deref()
+                    .is_some_and(|old| old != id)
+            {
                 self.error =
                     Some("Antigravity changed conversation identity during the turn".into());
                 return vec![];
@@ -78,6 +85,7 @@ impl Stream {
             self.completed_steps.insert(step);
             self.input_tokens += body["usage"]["input_tokens"].as_u64().unwrap_or(0);
             self.output_tokens += body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            self.cache_read_tokens += body["usage"]["cache_read_tokens"].as_u64().unwrap_or(0);
         }
         if body["step_type"] == "agent_response" {
             if let Some(delta) = body["text_delta"].as_str() {
@@ -183,6 +191,7 @@ mod tests {
         assert!(stream.finish().is_ok());
         assert!(tools >= 4);
         assert!(stream.input_tokens > 0);
+        assert_eq!(stream.cache_read_tokens, 40593);
         assert!(stream.text.contains("node --test"));
     }
     #[test]
@@ -205,6 +214,25 @@ mod tests {
         assert!(s.finish().is_err());
         s.feed(&json!({"event":"result","result":{"conversation_id":"two","status":"SUCCESS"}}));
         assert!(s.finish().is_err());
+    }
+    #[test]
+    fn resume_requires_reported_matching_identity() {
+        let mut s = Stream {
+            expected_session: Some("expected".into()),
+            ..Default::default()
+        };
+        s.feed(&json!({"event":"result","result":{"status":"SUCCESS"}}));
+        assert!(s.finish().is_err());
+        s.feed(&json!({"event":"init","conversation_id":"different"}));
+        assert!(s.finish().is_err());
+        let mut s = Stream {
+            expected_session: Some("expected".into()),
+            ..Default::default()
+        };
+        s.feed(
+            &json!({"event":"result","result":{"conversation_id":"expected","status":"SUCCESS"}}),
+        );
+        assert!(s.finish().is_ok());
     }
     #[test]
     fn resumes_exact_session_and_keeps_prompt_one_argument() {

@@ -716,7 +716,7 @@ impl NativeGrokObserver {
                 claude: mission.backend == "claudecode",
                 antigravity: (mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
-                    stream.session = mission.session_id.clone();
+                    stream.expected_session = mission.session_id.clone();
                     stream
                 }),
                 ..Default::default()
@@ -820,7 +820,7 @@ impl NativeGrokObserver {
                 claude: self.mission.backend == "claudecode",
                 antigravity: (self.mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
-                    stream.session = self.session_persisted.clone();
+                    stream.expected_session = self.session_persisted.clone();
                     stream
                 }),
                 ..Default::default()
@@ -1089,6 +1089,13 @@ impl NativeGrokObserver {
         // Raw remote commands predate stream-json. Require a Claude result only
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
+        if self.stream.antigravity.is_some()
+            && (self.stream.session_id.is_none()
+                || self.session_persisted != self.stream.session_id)
+        {
+            self.stream.error =
+                Some("Antigravity conversation identity was not durably persisted".into());
+        }
         let success = succeeded
             && self
                 .stream
@@ -1917,7 +1924,7 @@ mod tests {
         assert!(stream.ended);
         assert!(stream.antigravity.as_ref().unwrap().finish().is_ok());
         let mut native = crate::antigravity::Stream::default();
-        native.session = Some("expected".into());
+        native.expected_session = Some("expected".into());
         let mut resumed = GrokStream {
             antigravity: Some(native),
             ..Default::default()

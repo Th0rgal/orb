@@ -138,21 +138,14 @@ const loadPick = (): HarnessPick | null => {
   }
 };
 const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
-const harnessChoices = createMemo(() => {
+const harnessChoices = (machine = "core"): HarnessChoice[] => {
   const choices = remoteHarnessChoices().map(choice => ({ ...choice, models: [...choice.models] }));
+  if (machine !== "local") return choices;
+  const local = choices.filter(choice => choice.backend.id !== "antigravity");
   const models = localInstalled().find(row => row.id === "antigravity")?.models ?? [];
-  if (models.length) {
-    let choice = choices.find(choice => choice.backend.id === "antigravity");
-    if (!choice) {
-      choice = { backend: { id: "antigravity", name: "Antigravity" }, models: [] };
-      choices.push(choice);
-    }
-    for (const [value, label] of models) {
-      if (!choice.models.some(model => model.value === value)) choice.models.push({ value, label });
-    }
-  }
-  return choices;
-});
+  if (models.length) local.push({ backend: { id: "antigravity", name: "Antigravity" }, models: models.map(([value, label]) => ({ value, label })) });
+  return local;
+};
 const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
 const setHarnessPick = (p: HarnessPick) => {
   setHarnessPickRaw(p);
@@ -466,7 +459,7 @@ export function Composer(p: {
 
   const [slashHi, setSlashHi] = createSignal(0);
   const [model, setModel] = createSignal(MODELS[0]);
-  const live = () => isConnected() && harnessChoices().length > 0;
+  const live = () => isConnected() && harnessChoices(p.uploadTarget).length > 0;
   const [menu, setMenu] = createSignal(false);
   const [ctx, setCtx] = createSignal(false);
   const [which, setWhich] = createSignal<"harness" | "model" | "effort" | null>(null);
@@ -483,7 +476,7 @@ export function Composer(p: {
   createEffect(() => {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
   });
-  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices().find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
@@ -718,7 +711,7 @@ export function Composer(p: {
   );
   // Two pickers, Cursor-style: harness first (Claude Code, Codex, …), then
   // the model that harness can run. Changing the harness resets the model.
-  const choice = () => harnessChoices().find((c) => c.backend.id === pick()?.backend);
+  const choice = () => harnessChoices(p.uploadTarget).find((c) => c.backend.id === pick()?.backend);
   const modelLabel = () => {
     const m = choice()?.models.find((x) => x.value === pick()?.model);
     return m ? shortModelLabel(m.label) : (pick()?.model ?? "Model");
@@ -764,7 +757,7 @@ export function Composer(p: {
             </button>
             <Show when={which() === "harness"}>
               <div class="menu">
-                <For each={harnessChoices().filter((c) => !p.harnessIds || p.harnessIds.includes(c.backend.id))}>
+                <For each={harnessChoices(p.uploadTarget).filter((c) => !p.harnessIds || p.harnessIds.includes(c.backend.id))}>
                   {(c) => (
                     <button
                       class={`menu-item ${c.backend.id === pick()?.backend ? "on" : ""}`}
@@ -1281,7 +1274,7 @@ export default function App() {
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;
-    const choice = harnessChoices().find(c => c.backend.id === backend);
+    const choice = harnessChoices(local ? "local" : "core").find(c => c.backend.id === backend);
     const model = mission?.model_override || binding?.model;
     const modelLabel = choice?.models.find(m => m.value === model)?.label;
     const effort = normalizeEffort(mission?.model_effort, backend);
@@ -1451,7 +1444,7 @@ export default function App() {
       const selectedCyber = draftCyber();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
       try {
-        if (!pick || !harnessChoices().some(c => c.backend.id === pick.backend && c.models.some(m => m.value === pick.model))) throw new Error("Choose an available harness and model before starting. Your draft is kept.");
+        if (!pick || !harnessChoices(machine).some(c => c.backend.id === pick.backend && c.models.some(m => m.value === pick.model))) throw new Error("Choose an available harness and model before starting. Your draft is kept.");
         if (projectSlug === DEFAULT_PROJECT.slug && !liveProjects().some(project => project.slug === projectSlug)) {
           const version = connectionVersion();
           const project = await ensureDefaultProject();
