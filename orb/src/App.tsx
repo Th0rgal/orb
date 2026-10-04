@@ -660,13 +660,13 @@ export function Composer(p: {
     setCtx(false);
     setWhich(null);
     if (slash()) setSlashOff(true);
-    if (at()) setAtOff(true);
+    if (atQuery(text(), caret()).open) setAtOff(true);
   };
   const onEsc = (e: KeyboardEvent) => {
     if (e.defaultPrevented || hasFocusScope()) return;
-    // `close()` already dismisses the `@` picker; it was missing from this
-    // guard, so Escape did nothing while only that picker was open.
-    if (e.key === "Escape" && (menu() || ctx() || which() || slash() || at())) {
+    // Dismiss a pending mention query too: its file catalog can arrive
+    // after Escape and must not reopen the picker over the next Enter.
+    if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
       e.stopPropagation();
       close();
     }

@@ -3012,6 +3012,12 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
     let h = Harness::new().await;
     let owner = h.writer(MissionStatus::Active, Some("repo#244")).await;
     let job_id = Uuid::new_v4();
+    // Accepted jobs own a durable run, as established by real dispatch.
+    h.control
+        .mission_store
+        .begin_mission_run(owner.id, &remote_job_lease_owner(job_id), None)
+        .await
+        .unwrap();
     let phase = Arc::new(AtomicUsize::new(0));
     let failed_cancels = Arc::new(AtomicUsize::new(0));
     let acknowledged_cancels = Arc::new(AtomicUsize::new(0));

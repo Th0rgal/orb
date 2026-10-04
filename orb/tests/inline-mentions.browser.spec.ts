@@ -170,3 +170,18 @@ test("sending waits for the attachment catalog instead of silently dropping type
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0].attachments).toEqual([{ kind: "file", path: "notes.md" }]);
 });
+
+
+test("Escape dismisses a mention before its file catalog arrives", async ({ page }) => {
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  const { posts, input } = await setup(page, ready);
+  await input.pressSequentially("check @notes.md");
+  await input.press("Escape");
+  release();
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByRole("listbox", { name: "Context" })).toBeHidden();
+  await input.press("Enter");
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].attachments).toEqual([{ kind: "file", path: "notes.md" }]);
+});
