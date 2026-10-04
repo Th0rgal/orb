@@ -11,7 +11,7 @@
 //! - Working directory (isolated per mission)
 
 /// Preserve the current request and instructions; trim only synthesized history.
-fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &str) -> String {
+pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &str) -> String {
     let full = crate::util::frame_turn_prompt(history, message) + suffix;
     if crate::antigravity::validate_prompt(&full).is_ok() {
         return full;

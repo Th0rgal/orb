@@ -29538,13 +29538,19 @@ async fn run_single_control_turn(
                 Err(r) => return r,
             };
             use crate::api::runners::HarnessRunner as _;
+            let framed = crate::util::frame_turn_prompt(&history_context, &user_message);
+            let handoff = super::mission_runner::antigravity_handoff_prompt(
+                &history_context,
+                &user_message,
+                &convo[framed.len()..],
+            );
             Box::pin(crate::api::runners::AntigravityRunner.run_turn(
                 crate::api::runners::TurnContext {
                     mission_store: Some(mission_store.clone()),
                     workspace: exec_workspace,
                     work_dir: &ctx.working_dir,
                     message: if session_id.is_none() {
-                        &convo
+                        &handoff
                     } else {
                         &user_message
                     },
