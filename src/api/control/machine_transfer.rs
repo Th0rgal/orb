@@ -433,7 +433,7 @@ async fn listed_node_capabilities(state: &AppState) -> Vec<Result<Value, Error>>
         .unwrap_or_default()
 }
 
-async fn core_antigravity_ready(state: &AppState) -> bool {
+async fn core_antigravity_ready(state: &AppState, model: Option<&str>) -> bool {
     let Some(workspace) = state.workspaces.get(Uuid::nil()).await else {
         return false;
     };
@@ -441,7 +441,7 @@ async fn core_antigravity_ready(state: &AppState) -> bool {
         .unwrap_or_else(|| "agy".into());
     crate::api::providers::workspace_antigravity_models(workspace, &state.config.working_dir, &cli)
         .await
-        .is_ok()
+        .is_ok_and(|models| model.is_none_or(|wanted| models.iter().any(|(id, _)| id == wanted)))
 }
 
 async fn capabilities(state: &AppState) -> Vec<Value> {
@@ -453,7 +453,7 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
         .into_iter()
         .map(|b| b.id)
         .collect();
-    if !core_antigravity_ready(state).await {
+    if !core_antigravity_ready(state, None).await {
         harnesses.retain(|id| id != "antigravity");
     }
     let mut rows = vec![
@@ -574,6 +574,7 @@ async fn validate_destination(
     state: &AppState,
     dest: &Machine,
     backend: &str,
+    model: Option<&str>,
 ) -> Result<(), Error> {
     match dest {
         Machine::Node { id } => {
@@ -590,13 +591,26 @@ async fn validate_destination(
             {
                 return Err(conflict("Selected harness is not ready on this machine"));
             }
+            if backend == "antigravity" {
+                if let Some(model) = model {
+                    let models = node_request(state, id, "/antigravity/models", None).await?;
+                    if !models
+                        .as_array()
+                        .is_some_and(|rows| rows.iter().any(|row| row[0].as_str() == Some(model)))
+                    {
+                        return Err(conflict(
+                            "Selected Antigravity model is unavailable on the destination node",
+                        ));
+                    }
+                }
+            }
         }
         Machine::Core => {
             if state.backend_registry.read().await.get(backend).is_none() {
                 return Err(conflict("Selected harness is unavailable on Core"));
             }
-            if backend == "antigravity" && !core_antigravity_ready(state).await {
-                return Err(conflict("Antigravity is not ready in the Core workspace; install agy and sign in before transferring"));
+            if backend == "antigravity" && !core_antigravity_ready(state, model).await {
+                return Err(conflict("Antigravity or the selected model is not ready in the Core workspace; check agy sign-in and models before transferring"));
             }
         }
         Machine::Client { id } => {
@@ -675,7 +689,7 @@ pub async fn operate(
         let backend = backend.unwrap_or(m.backend.clone());
         let model = model.or(m.model_override.clone());
         validate_cyber_model(&state, id, &backend, model.as_deref())?;
-        validate_destination(&state, &destination, &backend).await?;
+        validate_destination(&state, &destination, &backend, model.as_deref()).await?;
         let (source, mut source_root) = source(&state, &control, &m, client_id).await?;
         if matches!(source, Machine::Client { .. }) && source_root.is_none() {
             source_root = client_root;
@@ -767,7 +781,7 @@ pub async fn operate(
             if a.phase != "verified" {
                 return Err(conflict("Destination verification is incomplete"));
             }
-            validate_destination(&state, &a.destination, &a.backend).await?;
+            validate_destination(&state, &a.destination, &a.backend, a.model.as_deref()).await?;
             if let Machine::Client { id } = &a.source {
                 if client_source_verified.as_ref() != Some(id) {
                     return Err(conflict(

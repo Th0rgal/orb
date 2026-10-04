@@ -602,7 +602,15 @@ fn spawn_antigravity(
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    let claim = claim_antigravity_attempt(&PathBuf::from(home).join(".orb/antigravity-attempts"), &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
+    let mut claim_root = PathBuf::from(home).join(".orb/antigravity-attempts");
+    if request.session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+        let bindings = crate::local_bindings(None, None)?;
+        if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
+            let transfer = uuid::Uuid::parse_str(transfer).map_err(|_| "Invalid transfer identity")?;
+            claim_root = claim_root.join(transfer.to_string());
+        }
+    }
+    let claim = claim_antigravity_attempt(&claim_root, &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
     let mut command = mission_command(request, env);
     let mut child = command.current_dir(&request.cwd)
         .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))

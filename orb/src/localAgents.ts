@@ -46,6 +46,7 @@ export interface LocalBinding {
   cwd: string;
   model?: string;
   sessionId?: string;
+  transferId?: string;
 }
 
 export interface LocalFile {

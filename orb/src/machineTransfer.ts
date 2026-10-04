@@ -113,11 +113,11 @@ export async function adoptTransferredWorkspace(action: TransferAction) {
   if (action.destination.id !== await machineIdentity()) return;
   if (!action.destination_root) throw new Error("Destination receipt has no workspace.");
   const old = localBinding(action.mission_id);
-  if (old?.cwd === action.destination_root) return; // retain the new native session on subsequent reads
+  if (old?.cwd === action.destination_root && (action.backend !== "antigravity" || old.transferId === action.id)) return; // retain the new native session on subsequent reads
   const rows = await refreshLocalAgents();
   const cli = rows.find(r => r.id === action.backend && r.installed && r.path);
   if (!cli?.path) throw new Error("Install the selected harness on this computer before continuing.");
-  await rememberBinding(action.mission_id, { harness: action.backend, bin: cli.path, cwd: action.destination_root, model: action.model ?? undefined });
+  await rememberBinding(action.mission_id, { harness: action.backend, bin: cli.path, cwd: action.destination_root, model: action.model ?? undefined, transferId: action.id });
 }
 export async function activateTransfer(action: TransferAction): Promise<Mission> {
   let clientSourceVerified: string | undefined;
