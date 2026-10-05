@@ -126,3 +126,20 @@ test('action details expand above their trigger without moving it off screen',as
  const detail=await page.locator('.st-tool-detail').boundingBox();const trigger=await tool.boundingBox();
  expect(detail!.y+detail!.height).toBeLessThanOrEqual(trigger!.y+1);
 });
+
+
+test("Gemini progress survives persisted snapshot refreshes",async({page})=>{
+ await page.goto("/tests/transcript.html");
+ await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+ const first={type:"text_delta",eventId:"text_delta_latest",storedId:700,sequence:100,data:{content:"Checking proofs."}};
+ const latest={...first,sequence:104,data:{content:"Checking proofs. Compilation finished."}};
+ const tool={type:"tool_call",data:{tool_call_id:"proof",name:"bash",args:{command:"lake build"}}};
+ await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool]);
+ await page.evaluate(event=>(window as any).transcriptHarness.apply(event),{type:"text_delta",data:latest.data});
+ await expect(page.locator(".st-text")).toHaveText(latest.data.content);
+ // Periodic recovery rebuilds cached history plus newly persisted revisions.
+ await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool,latest]);
+ await expect(page.locator(".st-text")).toHaveText(latest.data.content);
+ await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool,latest,first]);
+ await expect(page.locator(".st-text")).toHaveText(latest.data.content);
+});

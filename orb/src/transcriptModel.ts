@@ -52,6 +52,9 @@ export class TranscriptReducer {
   }
   apply(ev: StreamEvent) {
     this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
+    // The persisted text snapshot keeps its row/event ID as its sequence advances.
+    // Each revision must replay; the same row can also serve a later user turn.
+    if (ev.type === "text_delta" && ev.sequence != null) this.identity = `text-revision:${ev.sequence}`;
     const d = ev.data;
     // Status notifications are not assistant completions: do not close live text/tools.
     if (ev.type === "assistant_message" && d.success !== false && isGeneratedRemoteJobStatus({content: str(d.content), metadata: d})) return;
@@ -97,7 +100,7 @@ export class TranscriptReducer {
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);
-    const identity = d.canonical === true && ev.sequence != null ? `canonical:${ev.sequence}` : id ? `${ev.type}:${id}` : ev.sequence != null ? `stored:${ev.sequence}:${ev.type}` : undefined;
+    const identity = ev.type === "text_delta" && ev.sequence != null ? `text-revision:${ev.sequence}` : d.canonical === true && ev.sequence != null ? `canonical:${ev.sequence}` : id ? `${ev.type}:${id}` : ev.sequence != null ? `stored:${ev.sequence}:${ev.type}` : undefined;
     if (identity && this.seen.has(identity)) return;
     if (identity) this.seen.add(identity);
     const bubble = str(d.bubble_id) || "text_delta_latest";

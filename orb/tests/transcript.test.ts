@@ -119,3 +119,23 @@ it("ignores live remote status without finalizing the agent response",()=>{
  expect(texts(items)).toMatchObject([{text:"Voici le résultat.",live:false}]);
  expect(buildTranscript([ev("assistant_message",{content:status,success:false})])[0].kind).toBe("error");
 });
+
+it("replays newer revisions of the same stored text snapshot after live progress",()=>{
+  const revision=(sequence:number,content:string)=>storedToStream({id:700,event_id:"text_delta_latest",sequence,event_type:"text_delta",content,timestamp:""})!;
+  const first=revision(100,"Checking proofs.");
+  const latest=revision(104,"Checking proofs. Compilation finished.");
+  const history=[first,tool,result,latest];
+  expect(texts(buildTranscript(history))).toMatchObject([{text:"Checking proofs. Compilation finished."}]);
+  let live=buildTranscript([first,tool,result]);
+  live=applyStreamEvent(live,snap("Checking proofs. Compilation finished."));
+  expect(texts(buildTranscript(history))).toEqual(texts(live));
+  // Retries and older pages cannot roll the text back.
+  expect(texts(buildTranscript([...history,latest,first]))).toMatchObject([{text:"Checking proofs. Compilation finished."}]);
+});
+
+it("accepts the stored snapshot row reused in the next user turn",()=>{
+  const revision=(sequence:number,content:string)=>storedToStream({id:700,event_id:"text_delta_latest",sequence,event_type:"text_delta",content,timestamp:""})!;
+  const items=buildTranscript([revision(100,"First"),final("First"),ev("user_message",{id:"follow-up",content:"Continue"}),revision(104,"Second")]);
+  expect(texts(items)).toMatchObject([{text:"First",live:false},{text:"Second",live:true}]);
+  expect(new Set(texts(items).map(item=>item.key)).size).toBe(2);
+});
