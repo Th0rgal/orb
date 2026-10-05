@@ -2129,51 +2129,14 @@ impl ModelChainStore {
 
             // When Google is requested, prioritize the direct Gemini API key
             // (from AIProviderStore or standard_accounts above) and append
-            // CLIProxyAPI routes (ready Antigravity subscription accounts and
-            // google-cli-proxy) as lower-priority fallbacks so requests fail
+            // the CLIProxyAPI Google/Antigravity pool as a lower-priority fallback
+            // so requests fail
             // over to CLIProxyAPI if the direct Gemini API is unavailable or
             // rate-limited.
             if matches!(provider_type, crate::ai_providers::ProviderType::Google) {
-                if crate::api::oauth_owner::management_enabled() {
-                    let antigravity_accounts = ai_providers
-                        .get_all_by_type(crate::ai_providers::ProviderType::Antigravity)
-                        .await;
-                    for ag_account in &antigravity_accounts {
-                        if seen_account_ids.contains(&ag_account.id)
-                            || !ag_account.has_credentials()
-                            || crate::api::cli_proxy_accounts::needs_reconnect(ag_account)
-                            || !health_tracker.is_healthy(ag_account.id).await
-                        {
-                            continue;
-                        }
-                        let subscription_key = store_account_subscription_key(
-                            crate::ai_providers::ProviderType::Antigravity,
-                            ag_account,
-                        );
-                        if !health_tracker
-                            .subscription_is_healthy(subscription_key.as_ref())
-                            .await
-                        {
-                            continue;
-                        }
-                        if let Some(ref key) = subscription_key {
-                            if !seen_subscriptions.insert(key.clone()) {
-                                continue;
-                            }
-                        }
-                        seen_account_ids.insert(ag_account.id);
-                        resolved.push(ResolvedEntry {
-                            provider_id: "antigravity".to_string(),
-                            model_id: entry.model_id.clone(),
-                            account_id: ag_account.id,
-                            api_key: None,
-                            has_oauth: true,
-                            base_url: ag_account.base_url.clone(),
-                            subscription_key,
-                        });
-                    }
-                }
-
+                // Antigravity is already included in CLIProxyAPI's Google pool.
+                // Appending projected store accounts would retry that same pool
+                // under a different account ID and evade its cooldown.
                 if !configured_google_oauth
                     && !duplicate_google_proxy_key
                     && crate::api::ai_providers::google_cli_proxy_account_available()
@@ -2720,6 +2683,81 @@ mod tests {
             cooling.iter().all(|entry| entry.api_key.is_none()),
             "an environment copy must not evade the store account cooldown"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_google_proxy_pool_only_once() {
+        // Isolate environment-backed proxy discovery from other parallel tests.
+        const CHILD: &str = "SANDBOXED_TEST_GOOGLE_PROXY_POOL";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(
+                dir.path().join("antigravity-test.json"),
+                serde_json::json!({
+                    "type":"antigravity", "prefix":"antigravity", "email":"test@example.invalid",
+                    "access_token":"fixture-access", "refresh_token":"fixture-refresh",
+                    "expired":"2099-01-01T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider_health::tests::resolve_google_proxy_pool_only_once",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("CLI_PROXY_AUTH_DIR", dir.path())
+                .env("CLI_PROXY_MANAGEMENT_KEY", "fixture-management")
+                .env("SANDBOXED_OAUTH_OWNER", "cli-proxy")
+                .env("CLAUDE_CODE_DISABLE_CLI_PROXY", "false")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let mut account = AIProvider::new(ProviderType::Antigravity, "Antigravity".into());
+        account.cli_proxy_auth_file = Some("antigravity-test.json".into());
+        account.oauth = Some(OAuthCredentials {
+            access_token: "fixture-access".into(),
+            refresh_token: "fixture-refresh".into(),
+            expires_at: future_ms(6),
+        });
+        assert!(!crate::api::cli_proxy_accounts::needs_reconnect(&account));
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google-cli-proxy"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(i64::MAX),
+        }];
+        let health = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert_eq!(resolved.len(), 1);
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::RateLimit, None)
+            .await;
+        assert!(chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
