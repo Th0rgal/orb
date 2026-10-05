@@ -42,10 +42,11 @@ vi.mock('@/lib/api', () => ({
 function renderDialog(
   onCreate: Parameters<typeof NewMissionDialog>[0]['onCreate'],
   workspaces: Workspace[] = [],
+  initialValues?: Parameters<typeof NewMissionDialog>[0]['initialValues'],
 ) {
   return render(
     <SWRConfig value={{ provider: () => new Map() }}>
-      <NewMissionDialog workspaces={workspaces} onCreate={onCreate} />
+      <NewMissionDialog workspaces={workspaces} onCreate={onCreate} initialValues={initialValues} />
     </SWRConfig>
   );
 }
@@ -118,6 +119,24 @@ describe('NewMissionDialog', () => {
     fireEvent.click(screen.getByRole('button', {name: 'Create here'}));
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
       backend: 'antigravity', workspaceId: 'workspace-b', modelOverride: 'workspace-model', agent: undefined,
+    })));
+  });
+
+  it.each([undefined, 'build'])('requires replacing a historical Gemini selection with agent %s', async agent => {
+    const onCreate = vi.fn().mockResolvedValue({id: 'replacement'});
+    renderDialog(onCreate, [], {backend: 'gemini', agent, modelOverride: 'retired-model'});
+    fireEvent.click(screen.getByRole('button', {name: /new mission/i}));
+    await screen.findByRole('option', {name: 'Select a supported agent'});
+    expect(screen.queryByRole('option', {name: /gemini/i})).not.toBeInTheDocument();
+    const create = screen.getByRole('button', {name: 'Create here'});
+    expect(create).toBeDisabled();
+    fireEvent.click(create);
+    expect(onCreate).not.toHaveBeenCalled();
+    const codex = await screen.findByRole('option', {name: 'Codex default'});
+    fireEvent.change(codex.closest('select')!, {target: {value: 'codex:'}});
+    fireEvent.click(create);
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      backend: 'codex', modelOverride: undefined,
     })));
   });
 

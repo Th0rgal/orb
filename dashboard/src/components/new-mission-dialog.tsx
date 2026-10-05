@@ -322,7 +322,7 @@ export function NewMissionDialog({
 
   const preservedSelectedAgent = useMemo(() => {
     const parsed = parseSelectedValue(selectedAgentValue);
-    if (!parsed) return null;
+    if (!parsed || parsed.backend === 'gemini') return null;
     if (allAgents.some(a => a.value === selectedAgentValue)) return null;
 
     const backendHasDefaultOption =
@@ -342,6 +342,8 @@ export function NewMissionDialog({
   const selectedBackend = useMemo(() => {
     return parseSelectedValue(selectedAgentValue)?.backend || 'claudecode';
   }, [selectedAgentValue]);
+  const retiredSelection = selectedBackend === 'gemini'
+    || (initialValues?.backend === 'gemini' && !selectedAgentValue);
   const isAntigravity = selectedBackend === 'antigravity';
   const { data: antigravityModels, error: antigravityError, isLoading: antigravityLoading, mutate: refreshAntigravityModels } = useSWR(
     open && isAntigravity ? ['antigravity-models', newMissionWorkspace] : null,
@@ -502,6 +504,15 @@ export function NewMissionDialog({
     // Set workspace from initialValues if provided
     if (initialValues?.workspaceId) {
       setNewMissionWorkspace(initialValues.workspaceId);
+    }
+
+    // Historical Gemini missions require an explicit replacement harness.
+    if (initialValues?.backend === 'gemini') {
+      setSelectedAgentValue('');
+      setModelOverride('');
+      setModelEffort('');
+      setDefaultSet(true);
+      return;
     }
 
     // Set model override from initialValues if provided
@@ -673,7 +684,7 @@ export function NewMissionDialog({
   };
 
   const handleCreate = async (openInNewTab: boolean) => {
-    if (disabled || submitting || (isAntigravity && !antigravityReady)) return;
+    if (disabled || submitting || retiredSelection || (isAntigravity && !antigravityReady)) return;
     if (!isChatGptUi && newMissionWorkspace) {
       const ws = workspaces.find(w => w.id === newMissionWorkspace);
       if (ws && ws.status !== 'ready') {
@@ -731,7 +742,7 @@ export function NewMissionDialog({
     }
   };
 
-  const isBusy = disabled || submitting || (isAntigravity && !antigravityReady);
+  const isBusy = disabled || submitting || retiredSelection || (isAntigravity && !antigravityReady);
 
   return (
     <div className="relative" ref={dialogRef}>
@@ -848,6 +859,9 @@ export function NewMissionDialog({
                   <option value="" className="bg-[#1a1a1a]">
                     Loading agents…
                   </option>
+                )}
+                {initialValues?.backend === 'gemini' && !selectedAgentValue && (
+                  <option value="" disabled>Select a supported agent</option>
                 )}
                 {preservedSelectedAgent && (
                   <optgroup

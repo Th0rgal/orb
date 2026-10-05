@@ -8,7 +8,7 @@ systemd-nspawn container isolation.
 > — one command gets you running on any OS.
 
 Sandboxed.sh is the orchestrator/UI backend. **It does not run model inference**;
-it executes OpenCode, Claude Code, Codex, Gemini, and Grok **inside each
+it executes OpenCode, Claude Code, Codex, Antigravity (`agy`), and Grok **inside each
 workspace** (host/container), so bash commands and file operations are scoped correctly. A
 standalone OpenCode server is **optional** and only required if you want
 centralized OpenCode services (provider/auth management, health checks, etc.).
@@ -328,9 +328,9 @@ via the API.
 
 ---
 
-## 3.5) Configure Codex, Gemini, and Grok
+## 3.5) Configure Codex, Antigravity (`agy`), and Grok
 
-Codex, Gemini, and Grok use their native CLIs plus credentials stored in the
+Codex, Antigravity (`agy`), and Grok use their native CLIs plus credentials stored in the
 provider settings or the CLI's own login cache.
 
 ### 3.5.1 Codex
