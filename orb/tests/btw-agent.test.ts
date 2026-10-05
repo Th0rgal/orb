@@ -187,3 +187,19 @@ it('rotates rejected content keys but retains uncertain launch keys',async()=>{
  await expect(ask()).rejects.toThrow('Unavailable');
  expect(attempt()).toBe(fresh);
 });
+
+it('replays the exact payload after a lost response despite fresh context paths',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='retry-parent'?'active':'awaiting_user',history:[],tags:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Recovered answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'manifest /first',cursor:{sequence:1,visibleHash:'first'}});
+ vi.mocked(api).mockRejectedValueOnce(new Error('lost response'));
+ await expect(askBtwAgent('retry-parent','Q','context',[],new AbortController().signal,()=>{})).rejects.toThrow('lost response');
+ const original=vi.mocked(api).mock.calls.at(-1)![1]!.body;
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'manifest /second',cursor:{sequence:2,visibleHash:'second'}});
+ vi.mocked(api).mockResolvedValueOnce({id:'recovered-child'});
+ await askBtwAgent('retry-parent','Q','new context',[],new AbortController().signal,()=>{});
+ expect(vi.mocked(api).mock.calls.at(-1)![1]!.body).toBe(original);
+ expect(btwSession('retry-parent')?.conversationCursor).toEqual({sequence:1,visibleHash:'first'});
+});

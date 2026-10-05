@@ -150,9 +150,17 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
-   const attempt=localStorage.getItem(attemptKey)||crypto.randomUUID();localStorage.setItem(attemptKey,attempt);
+   const stored=localStorage.getItem(attemptKey);
+   let cached:{id:string;logical:string;prompt:string;snapshot:typeof snapshot}|undefined;
+   try{const parsed=JSON.parse(stored||'null');if(parsed?.id)cached=parsed;}catch{/* Legacy UUID-only attempt. */}
+   const attachmentDigest=attachments.length?Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(attachments)))),b=>b.toString(16).padStart(2,'0')).join(''):'';
+   const logical=JSON.stringify([question,attachmentDigest]);
+   const attempt=cached?.id||stored||crypto.randomUUID();
+   if(cached?.logical===logical){prompt=cached.prompt;snapshot=cached.snapshot;}
+   const retained=cached??{id:attempt,logical,prompt,snapshot};
+   localStorage.setItem(attemptKey,JSON.stringify(retained));
    const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
-    if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===attempt)localStorage.removeItem(attemptKey);
+    if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
     throw error;
    });
    s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);
