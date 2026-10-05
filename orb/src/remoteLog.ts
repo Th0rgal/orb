@@ -21,9 +21,21 @@ export function remoteLog(raw: string): { text: string; details?: string } {
     // Claude's remote runner already returns plain Markdown. Only unwrap the
     // exact successful receipt. Other logs belong in diagnostics, not Markdown.
     const success = /^Remote node '[^']+' job [0-9a-f-]{36} finished with state 'succeeded' \(exit Some\(0\)\)$/.test(raw.slice(0, marker));
-    if (success && log.trim() && !/^[\s]*[\[{]/.test(log)) return { text: log, details: raw };
+    if (success && log.trim() && !structuredHarnessLog(log)) return { text: log, details: raw };
     return { text: raw.slice(0, marker), details: raw };
   }
   const failed = !/finished with state 'succeeded'/.test(raw.slice(0, marker));
   return { text: (failed ? raw.slice(0, marker) + "\n\n" : "") + parts.join("\n\n"), details: raw };
+}
+
+function structuredHarnessLog(log: string): boolean {
+  return log.split("\n").some(line => {
+    try {
+      const event = JSON.parse(line);
+      if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+      // Recognize transport envelopes, not arbitrary requested JSON responses.
+      return (typeof event.event === "string" && event[event.event] != null)
+        || (typeof event.type === "string" && (typeof event.sessionID === "string" || typeof event.session_id === "string"));
+    } catch { return false; }
+  });
 }

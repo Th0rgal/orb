@@ -9,13 +9,21 @@ describe("legacy OpenCode remote log", () => {
   });
   it("leaves ordinary JSON alone and collapses unrecognized remote logs", () => {
     expect(remoteLog(text)).toEqual({text});
-    for(const raw of [envelope+'',envelope+JSON.stringify({type:"text",data:"hello"})]) expect(remoteLog(raw)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:raw});
+    for(const raw of [envelope+'',envelope+JSON.stringify({event:"step_update",step_update:{state:"DONE"}})]) expect(remoteLog(raw)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:raw});
   });
   it("retains failure status even when the log contains a text part", () => {
     const raw=envelope.replace("'succeeded'", "'failed'")+text;
     expect(remoteLog(raw).text).toContain("'failed'");
     expect(remoteLog(raw).text).toContain("## Status\n");
   });
+});
+
+it("preserves successful Markdown links and requested JSON replies", () => {
+ for (const answer of ['[documentation](https://example.com)', '{"status":"ok","results":[1,2]}', '[1, 2, 3]']) {
+  expect(remoteLog(envelope+answer)).toEqual({text:answer,details:envelope+answer});
+ }
+ const log='truncated first line...\n'+JSON.stringify({event:'result',result:{status:'SUCCESS',response:'done'}});
+ expect(remoteLog(envelope+log)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:envelope+log});
 });
 
 it("unwraps successful Claude Markdown while keeping the receipt in details",()=>{
