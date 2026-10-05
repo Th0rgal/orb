@@ -2,7 +2,7 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey} from './sideQuestionStorage';
-import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun} from './localAgents';
+import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
@@ -22,7 +22,7 @@ import {transferFile} from './uploads';
 import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
-export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number};
+export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
 export function btwSession(parent:string):BtwSession|undefined{try{return JSON.parse(localStorage.getItem(storageKey(parent))??'null')??undefined;}catch{return undefined;}}
 function save(parent:string,s:BtwSession){localStorage.setItem(storageKey(parent),JSON.stringify(s));}
@@ -126,6 +126,13 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    // Native completion can precede its transcript/status update to Core.
    // A queued local follow-up must observe that update before the status guard.
    if(s.local&&!s.active)await finishing.get(s.id);
+   if(s.local&&s.launchPending){
+    // Native recovery proves the prior attempt stopped before releasing Core.
+    // Transport failures and live processes retain the fence.
+    await recoverLocalLaunch(s.id);
+    await setClientMissionStatus(s.id,'interrupted');
+    s={...s,launchPending:false,active:false};save(parent,s);
+   }
    try {
     const current=await getMission(s.id);
     if(['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
@@ -184,7 +191,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     await createSide();
    }
   }
-  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
+  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;s!.conversationCursor=snapshot.cursor;s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
  }finally{locks.delete(key);}
  await watchBtw(parent,signal,receive);

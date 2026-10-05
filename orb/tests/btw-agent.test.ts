@@ -2,7 +2,7 @@ vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:s
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
-vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
+vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
@@ -237,4 +237,25 @@ it('installs completion synchronization before announcing a restored local run a
  release();await watching;
  expect(setClientMissionStatus).toHaveBeenCalledWith('restored-child','awaiting_user',undefined);
  expect(events.at(-1).type).toBe('done');
+});
+
+it('recovers a failed native launch before retrying its pending Core mission',async()=>{
+ const {recoverLocalLaunch}=await import('../src/localAgents');
+ const {setClientMissionStatus}=await import('../src/api');
+ let settled=false;
+ vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='failed-launch-parent'?'active':settled?'interrupted':'pending',history:[],tags:id==='failed-launch-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child'}).mockResolvedValueOnce({id:'retry-launch-child'});
+ vi.mocked(startLocal).mockRejectedValueOnce(new Error('native launch failed'));
+ const ask=()=>askBtwAgent('failed-launch-parent','Q','context',[],new AbortController().signal,()=>{});
+ await expect(ask()).rejects.toThrow('native launch failed');
+ expect(btwSession('failed-launch-parent')?.launchPending).toBe(true);
+ vi.mocked(recoverLocalLaunch).mockRejectedValueOnce(new Error('process still running'));
+ await expect(ask()).rejects.toThrow('process still running');
+ expect(setClientMissionStatus).not.toHaveBeenCalled();
+ vi.mocked(setClientMissionStatus).mockImplementationOnce(async()=>{settled=true;});
+ await ask();
+ expect(recoverLocalLaunch).toHaveBeenCalledWith('failed-launch-child');
+ expect(setClientMissionStatus).toHaveBeenCalledWith('failed-launch-child','interrupted');
+ expect(btwSession('failed-launch-parent')?.id).toBe('retry-launch-child');
 });
