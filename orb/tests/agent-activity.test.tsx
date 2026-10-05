@@ -85,3 +85,21 @@ it('groups CI waits and preserves unrelated work and action details',()=>{
  expect(isCiWait({...task,label:'Wait for user input'})).toBe(false);
  expect(isCiWait({...task,label:'Build CI binaries'})).toBe(false);
 });
+
+it('keeps Antigravity progress visible between tools and replays reported usage',()=>{
+ const status:LocalActivity={id:'antigravity:status',kind:'status',label:'Working…',done:false,failed:false,started_at:Date.now()-5000,updated_at:Date.now(),thinking_tokens:42,detail:'Antigravity CLI does not currently expose reasoning text.'};
+ const [items,setItems]=createSignal<LocalActivity[]>([status]);
+ const [running,setRunning]=createSignal(true);
+ render(()=><AgentActivity items={items()} running={running()}/>);
+ expect(screen.getByText('Working…')).toBeTruthy();
+ expect(screen.getByText(/42 thinking tokens reported/)).toBeTruthy();
+ expect(screen.getByText('Reasoning text unavailable').title).toContain('does not currently expose');
+ setItems([status,{id:'tool',label:'Run command',done:false,failed:false}]);
+ expect(screen.getByText('Run command')).toBeTruthy();
+ setItems([status,{id:'tool',label:'Run command',done:true,failed:false}]);
+ expect(screen.getByText('Working…')).toBeTruthy();
+ setRunning(false);
+ expect(screen.queryByText('Working…')).toBeNull();
+ expect(screen.queryByText(/Last event/)).toBeNull();
+ expect(screen.getByText(/42 thinking tokens reported/)).toBeTruthy();
+});

@@ -40,6 +40,8 @@ pub struct Stream {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    pub thinking_tokens: Option<u64>,
+    pub agent_response_active: bool,
     completed_steps: HashSet<u64>,
     tools: HashSet<String>,
 }
@@ -97,9 +99,13 @@ impl Stream {
             self.completed_steps.insert(step);
             self.input_tokens += body["usage"]["input_tokens"].as_u64().unwrap_or(0);
             self.output_tokens += body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            if let Some(tokens) = body["usage"]["thinking_tokens"].as_u64() {
+                *self.thinking_tokens.get_or_insert(0) += tokens;
+            }
             self.cache_read_tokens += body["usage"]["cache_read_tokens"].as_u64().unwrap_or(0);
         }
         if body["step_type"] == "agent_response" {
+            self.agent_response_active = body["state"] == "ACTIVE";
             if let Some(delta) = body["text_delta"].as_str() {
                 self.text.push_str(delta);
             }
@@ -107,6 +113,7 @@ impl Stream {
         if body["step_type"] != "tool" {
             return vec![];
         }
+        self.agent_response_active = false;
         let id = format!("{}:{step}", self.session.as_deref().unwrap_or("unknown"));
         let info = &body["tool_info"];
         let name = body["tool_name"]
@@ -204,6 +211,22 @@ pub fn models_in_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thinking_usage_is_per_turn_and_duplicate_steps_are_idempotent() {
+        let mut s = Stream::default();
+        assert_eq!(s.thinking_tokens, None);
+        let active = json!({"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response"}});
+        s.feed(&active);
+        assert!(s.agent_response_active);
+        let done = json!({"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","usage":{"thinking_tokens":42}}});
+        s.feed(&done);
+        s.feed(&done);
+        assert!(!s.agent_response_active);
+        assert_eq!(s.thinking_tokens, Some(42));
+        s.feed(&json!({"event":"result","result":{"status":"SUCCESS","usage":{"thinking_tokens":9999}}}));
+        assert_eq!(s.thinking_tokens, Some(42));
+        assert!(s.text.is_empty());
+    }
     #[test]
     fn real_argon_turn_has_tools_usage_and_an_explicit_result() {
         let mut stream = Stream::default();

@@ -2622,3 +2622,5 @@ select.orb-select-native:disabled { cursor: default; }
 .reminder-details pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.6; margin:0 0 8px; }
 .reminder-details [role=status] { margin-left:8px; }
 .next-reminder { display:flex; gap:8px; color:var(--fg-3); font-size:12px; padding:10px; }
+
+.agent-progress-meta { color: var(--fg-3); font-size: 11px; line-height: 1.6; padding-top: 3px; overflow-wrap: anywhere; }
