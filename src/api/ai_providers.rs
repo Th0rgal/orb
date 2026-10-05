@@ -1825,9 +1825,16 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
 /// These are used by chain resolution to include standard providers alongside
 /// custom providers from `AIProviderStore`.
 pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health::StandardAccount> {
+    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
+    read_standard_accounts_with_auth(working_dir, &auth)
+}
+
+fn read_standard_accounts_with_auth(
+    working_dir: &Path,
+    auth: &serde_json::Value,
+) -> Vec<crate::provider_health::StandardAccount> {
     let config_path = get_opencode_config_path(working_dir);
     let opencode_config = read_opencode_config(&config_path).unwrap_or_default();
-    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
     let auth_obj = auth.as_object();
 
     let mut accounts = Vec::new();
@@ -2082,6 +2089,37 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
     }
 
     accounts
+}
+
+#[cfg(test)]
+mod google_standard_account_tests {
+    use super::*;
+    #[test]
+    fn google_auth_accepts_gemini_alias_and_its_gateway() {
+        assert_eq!(
+            opencode_auth_keys(ProviderType::Google),
+            vec!["google", "gemini"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("opencode.json"),
+            r#"{"provider":{"gemini":{"baseURL":"https://gateway.example/v1"}}}"#,
+        )
+        .unwrap();
+        let accounts = read_standard_accounts_with_auth(
+            dir.path(),
+            &serde_json::json!({"gemini":{"type":"api","key":"test-gemini-alias"}}),
+        );
+        let account = accounts
+            .iter()
+            .find(|a| a.api_key.as_deref() == Some("test-gemini-alias"))
+            .unwrap();
+        assert_eq!(account.provider_type, ProviderType::Google);
+        assert_eq!(
+            account.base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
+    }
 }
 
 pub(crate) fn anthropic_cli_proxy_account_available() -> bool {
@@ -2397,31 +2435,30 @@ pub(crate) fn google_cli_proxy_account_available() -> bool {
     env_var_bool("CLI_PROXY_GEMINI_ENABLED", false)
         || has_refreshable_cli_proxy_account_of_type("antigravity-", "antigravity")
         || has_refreshable_cli_proxy_account_of_type("gemini-", "gemini")
-        || cli_proxy_config_has_gemini_key()
+        || !cli_proxy_config_gemini_keys().is_empty()
 }
 
-fn cli_proxy_config_has_gemini_key() -> bool {
+pub(crate) fn cli_proxy_config_gemini_keys() -> Vec<String> {
     let path = match std::env::var("CLI_PROXY_CONFIG_PATH") {
         Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
-        _ if cfg!(test) => return false,
+        _ if cfg!(test) => return vec![],
         _ => std::path::PathBuf::from("/etc/cli-proxy-api/config.yaml"),
     };
     let Ok(contents) = std::fs::read_to_string(path) else {
-        return false;
+        return vec![];
     };
     let Ok(value) = serde_yaml::from_str::<serde_json::Value>(&contents) else {
-        return false;
+        return vec![];
     };
     value
         .get("gemini-api-key")
         .and_then(|v| v.as_array())
-        .is_some_and(|arr| {
-            arr.iter().any(|item| {
-                item.get("api-key")
-                    .and_then(|k| k.as_str())
-                    .is_some_and(|k| !k.trim().is_empty())
-            })
-        })
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("api-key").and_then(|k| k.as_str()))
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn has_refreshable_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
@@ -7078,6 +7115,7 @@ fn opencode_auth_keys(provider_type: ProviderType) -> Vec<&'static str> {
     match provider_type {
         ProviderType::Custom => Vec::new(),
         ProviderType::OpenAI => vec!["openai", "codex"],
+        ProviderType::Google => vec!["google", "gemini"],
         _ => vec![provider_type.id()],
     }
 }
@@ -7136,7 +7174,14 @@ fn get_provider_config_entry(
     provider: ProviderType,
 ) -> Option<ProviderConfigEntry> {
     let providers = config.get("provider")?.as_object()?;
-    let entry = providers.get(provider.id())?.as_object()?;
+    let entry = providers
+        .get(provider.id())
+        .or_else(|| {
+            (provider == ProviderType::Google)
+                .then(|| providers.get("gemini"))
+                .flatten()
+        })?
+        .as_object()?;
     let name = entry
         .get("name")
         .and_then(|v| v.as_str())
@@ -7170,6 +7215,11 @@ fn get_provider_config_entry(
 pub(crate) fn provider_explicitly_disabled(working_dir: &Path, provider: ProviderType) -> bool {
     let config = read_opencode_config(&get_opencode_config_path(working_dir)).unwrap_or_default();
     get_provider_config_entry(&config, provider).and_then(|entry| entry.enabled) == Some(false)
+        || (provider == ProviderType::Google
+            && config
+                .pointer("/provider/gemini/enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false))
 }
 
 fn set_provider_config_entry(

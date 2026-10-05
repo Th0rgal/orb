@@ -169,7 +169,7 @@ impl ProviderType {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::OpenAI),
-            "google" => Some(Self::Google),
+            "google" | "gemini" => Some(Self::Google),
             "antigravity" => Some(Self::Antigravity),
             "amazon-bedrock" => Some(Self::AmazonBedrock),
             "azure" => Some(Self::Azure),

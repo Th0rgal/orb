@@ -1200,6 +1200,23 @@ impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
     }
 }
 
+fn google_proxy_duplicates_direct_key(
+    stored: &[crate::ai_providers::AIProvider],
+    standard: &[StandardAccount],
+    proxy_keys: &[String],
+) -> bool {
+    stored
+        .iter()
+        .filter_map(|a| a.api_key.as_ref())
+        .chain(
+            standard
+                .iter()
+                .filter(|a| a.provider_type == crate::ai_providers::ProviderType::Google)
+                .filter_map(|a| a.api_key.as_ref()),
+        )
+        .any(|key| proxy_keys.contains(key))
+}
+
 /// Tests resolve without a refresher unless they inject one, so no test can
 /// send a fixture token to a provider.
 fn default_oauth_refresher() -> Option<&'static dyn StoreOAuthRefresher> {
@@ -1768,7 +1785,28 @@ impl ModelChainStore {
                 crate::account_limits::prefer_most_remaining_quota(store_accounts, |account| {
                     health_tracker.remaining_quota(account.id)
                 });
+            // The proxy selects from its own pool. If that pool contains a direct
+            // key, its synthetic identity must not bypass the key's cooldown.
+            let duplicate_google_proxy_key = provider_type
+                == crate::ai_providers::ProviderType::Google
+                && google_proxy_duplicates_direct_key(
+                    &store_accounts,
+                    standard_accounts,
+                    &crate::api::ai_providers::cli_proxy_config_gemini_keys(),
+                );
             let mut store_contributed_entry = false;
+            let store_has_google_oauth = provider_type == crate::ai_providers::ProviderType::Google
+                && store_accounts
+                    .iter()
+                    .any(|account| account.api_key.is_none() && account.oauth.is_some());
+            // Presence is separate from successful resolution: a mirrored login
+            // in cooldown must not reappear under a standard or synthetic ID.
+            let configured_google_oauth = store_has_google_oauth
+                || standard_accounts.iter().any(|account| {
+                    account.provider_type == crate::ai_providers::ProviderType::Google
+                        && account.has_oauth
+                        && account.api_key.is_none()
+                });
             let mut store_contributed_google_oauth = false;
 
             for account in &store_accounts {
@@ -2011,6 +2049,30 @@ impl ModelChainStore {
                     if seen_account_ids.contains(&sa.account_id) {
                         continue;
                     }
+                    if provider_type == crate::ai_providers::ProviderType::Google {
+                        // Store, auth.json and environment can describe the same
+                        // route under different IDs. Do not retry an identical
+                        // credential with a second independent cooldown.
+                        let duplicate_oauth = sa.has_oauth
+                            && sa.api_key.is_none()
+                            && (store_has_google_oauth || store_contributed_google_oauth);
+                        let duplicate_api_key = !sa.has_oauth
+                            && sa.api_key.is_some()
+                            && (store_accounts.iter().any(|account| {
+                                // Keep the store identity even when it is cooling
+                                // down; an environment copy must not bypass it.
+                                account.api_key == sa.api_key && account.base_url == sa.base_url
+                            }) || resolved[resolved_start..].iter().any(|candidate| {
+                                !candidate.has_oauth
+                                    && candidate.api_key == sa.api_key
+                                    && candidate.base_url == sa.base_url
+                            }));
+                        let duplicate_proxy = duplicate_google_proxy_key
+                            && sa.account_id == stable_provider_uuid("google-cli-proxy");
+                        if duplicate_oauth || duplicate_api_key || duplicate_proxy {
+                            continue;
+                        }
+                    }
                     if !health_tracker.is_healthy(sa.account_id).await {
                         tracing::debug!(
                             account_id = %sa.account_id,
@@ -2067,52 +2129,16 @@ impl ModelChainStore {
 
             // When Google is requested, prioritize the direct Gemini API key
             // (from AIProviderStore or standard_accounts above) and append
-            // CLIProxyAPI routes (ready Antigravity subscription accounts and
-            // google-cli-proxy) as lower-priority fallbacks so requests fail
+            // the CLIProxyAPI Google/Antigravity pool as a lower-priority fallback
+            // so requests fail
             // over to CLIProxyAPI if the direct Gemini API is unavailable or
             // rate-limited.
             if matches!(provider_type, crate::ai_providers::ProviderType::Google) {
-                if crate::api::oauth_owner::management_enabled() {
-                    let antigravity_accounts = ai_providers
-                        .get_all_by_type(crate::ai_providers::ProviderType::Antigravity)
-                        .await;
-                    for ag_account in &antigravity_accounts {
-                        if seen_account_ids.contains(&ag_account.id)
-                            || !ag_account.has_credentials()
-                            || crate::api::cli_proxy_accounts::needs_reconnect(ag_account)
-                            || !health_tracker.is_healthy(ag_account.id).await
-                        {
-                            continue;
-                        }
-                        let subscription_key = store_account_subscription_key(
-                            crate::ai_providers::ProviderType::Antigravity,
-                            ag_account,
-                        );
-                        if !health_tracker
-                            .subscription_is_healthy(subscription_key.as_ref())
-                            .await
-                        {
-                            continue;
-                        }
-                        if let Some(ref key) = subscription_key {
-                            if !seen_subscriptions.insert(key.clone()) {
-                                continue;
-                            }
-                        }
-                        seen_account_ids.insert(ag_account.id);
-                        resolved.push(ResolvedEntry {
-                            provider_id: "antigravity".to_string(),
-                            model_id: entry.model_id.clone(),
-                            account_id: ag_account.id,
-                            api_key: None,
-                            has_oauth: true,
-                            base_url: ag_account.base_url.clone(),
-                            subscription_key,
-                        });
-                    }
-                }
-
-                if !store_contributed_google_oauth
+                // Antigravity is already included in CLIProxyAPI's Google pool.
+                // Appending projected store accounts would retry that same pool
+                // under a different account ID and evade its cooldown.
+                if !configured_google_oauth
+                    && !duplicate_google_proxy_key
                     && crate::api::ai_providers::google_cli_proxy_account_available()
                 {
                     let cli_proxy_account_id = stable_provider_uuid("google-cli-proxy");
@@ -2156,7 +2182,15 @@ impl ModelChainStore {
         for entry in entries {
             let provider_type = crate::ai_providers::ProviderType::from_id(&entry.provider_id)
                 .unwrap_or(crate::ai_providers::ProviderType::Custom);
-            for account in ai_providers.get_all_by_type(provider_type).await {
+            let store_accounts = ai_providers.get_all_by_type(provider_type).await;
+            let duplicate_google_proxy_key = provider_type
+                == crate::ai_providers::ProviderType::Google
+                && google_proxy_duplicates_direct_key(
+                    &store_accounts,
+                    standard_accounts,
+                    &crate::api::ai_providers::cli_proxy_config_gemini_keys(),
+                );
+            for account in store_accounts {
                 if !account.has_credentials() {
                     continue;
                 }
@@ -2178,12 +2212,15 @@ impl ModelChainStore {
             }
             for account in standard_accounts {
                 if account.provider_type == provider_type
+                    && !(duplicate_google_proxy_key
+                        && account.account_id == stable_provider_uuid("google-cli-proxy"))
                     && (account.api_key.is_some() || account.has_oauth)
                 {
                     ids.insert(account.account_id);
                 }
             }
             if matches!(provider_type, crate::ai_providers::ProviderType::Google)
+                && !duplicate_google_proxy_key
                 && crate::api::ai_providers::google_cli_proxy_account_available()
             {
                 ids.insert(stable_provider_uuid("google-cli-proxy"));
@@ -2575,6 +2612,194 @@ mod tests {
             resolved
         );
         assert_eq!(resolved[0].account_id, standard[0].account_id);
+    }
+
+    #[test]
+    fn google_proxy_pool_deduplicates_direct_keys_even_before_health_filtering() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google API".into());
+        account.api_key = Some("same-key".into());
+        let proxy = vec!["same-key".into(), "different-key".into()];
+        assert!(google_proxy_duplicates_direct_key(&[account], &[], &proxy));
+        let standard = StandardAccount {
+            account_id: stable_provider_uuid("google-env-api-key"),
+            provider_type: ProviderType::Google,
+            api_key: Some("same-key".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        };
+        assert!(google_proxy_duplicates_direct_key(
+            &[],
+            std::slice::from_ref(&standard),
+            &proxy
+        ));
+        assert!(!google_proxy_duplicates_direct_key(
+            &[],
+            &[standard],
+            &["independent-key".into()]
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_google_deduplicates_store_and_environment_key() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google API".into());
+        account.api_key = Some("same-google-key".into());
+        account.status = ProviderStatus::Connected;
+        let store_id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google-env-api-key"),
+            provider_type: ProviderType::Google,
+            api_key: Some("same-google-key".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        }];
+        let health = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        let direct: Vec<_> = resolved
+            .iter()
+            .filter(|entry| entry.api_key.is_some())
+            .collect();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].account_id, store_id);
+        health
+            .record_entry_failure(direct[0], CooldownReason::RateLimit, None)
+            .await;
+        let cooling = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert!(
+            cooling.iter().all(|entry| entry.api_key.is_none()),
+            "an environment copy must not evade the store account cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_google_proxy_pool_only_once() {
+        // Isolate environment-backed proxy discovery from other parallel tests.
+        const CHILD: &str = "SANDBOXED_TEST_GOOGLE_PROXY_POOL";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(
+                dir.path().join("antigravity-test.json"),
+                serde_json::json!({
+                    "type":"antigravity", "prefix":"antigravity", "email":"test@example.invalid",
+                    "access_token":"fixture-access", "refresh_token":"fixture-refresh",
+                    "expired":"2099-01-01T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider_health::tests::resolve_google_proxy_pool_only_once",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("CLI_PROXY_AUTH_DIR", dir.path())
+                .env("CLI_PROXY_MANAGEMENT_KEY", "fixture-management")
+                .env("SANDBOXED_OAUTH_OWNER", "cli-proxy")
+                .env("CLAUDE_CODE_DISABLE_CLI_PROXY", "false")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let mut account = AIProvider::new(ProviderType::Antigravity, "Antigravity".into());
+        account.cli_proxy_auth_file = Some("antigravity-test.json".into());
+        account.oauth = Some(OAuthCredentials {
+            access_token: "fixture-access".into(),
+            refresh_token: "fixture-refresh".into(),
+            expires_at: future_ms(6),
+        });
+        assert!(!crate::api::cli_proxy_accounts::needs_reconnect(&account));
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google-cli-proxy"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(i64::MAX),
+        }];
+        let health = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert_eq!(resolved.len(), 1);
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::RateLimit, None)
+            .await;
+        assert!(chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_google_oauth_mirror_preserves_store_cooldown() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google OAuth".into());
+        account.oauth = Some(OAuthCredentials {
+            access_token: "oauth-access".into(),
+            refresh_token: "oauth-refresh".into(),
+            expires_at: future_ms(6),
+        });
+        account.status = ProviderStatus::Connected;
+        let store_id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(future_ms(6)),
+        }];
+        let health = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].account_id, store_id);
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::RateLimit, None)
+            .await;
+        assert!(chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
