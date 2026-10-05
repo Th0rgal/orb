@@ -212,9 +212,10 @@ pub async fn run_opencode_turn(
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic);
     let openai_via_proxy =
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI);
-    let google_via_proxy = has_google;
-
     let refresh_provider = provider_hint.as_deref().or(fallback_provider);
+    // Availability alone must not force a Google connectivity probe for a
+    // turn explicitly routed to another provider.
+    let google_via_proxy = matches!(refresh_provider, Some("google" | "gemini"));
     let refresh_result = match refresh_provider {
         Some("anthropic") | Some("claude") if anthropic_via_proxy => Ok(()),
         Some("openai") | Some("codex") if openai_via_proxy => Ok(()),

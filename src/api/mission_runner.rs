@@ -5761,16 +5761,6 @@ pub(crate) fn detect_opencode_provider_auth(
         has_google = true;
         configured_providers.insert("google".to_string());
     }
-    if app_working_dir.is_some_and(|working_dir| {
-        crate::api::ai_providers::provider_explicitly_disabled(
-            working_dir,
-            crate::ai_providers::ProviderType::Google,
-        )
-    }) {
-        has_google = false;
-        configured_providers.remove("google");
-        configured_providers.remove("gemini");
-    }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
@@ -5823,6 +5813,18 @@ pub(crate) fn detect_opencode_provider_auth(
                 }
             }
         }
+    }
+
+    // Explicit provider configuration wins over every credential source.
+    if app_working_dir.is_some_and(|working_dir| {
+        crate::api::ai_providers::provider_explicitly_disabled(
+            working_dir,
+            crate::ai_providers::ProviderType::Google,
+        )
+    }) {
+        has_google = false;
+        configured_providers.remove("google");
+        configured_providers.remove("gemini");
     }
 
     OpenCodeAuthState {
@@ -12447,6 +12449,33 @@ mod tests {
                 .unwrap()
                 .starts_with("http://10.88.0.1:"));
         }
+    }
+
+    #[test]
+    fn detect_opencode_google_disablement_wins_over_managed_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_dir = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store_dir).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Google,
+            "Google".into(),
+        );
+        provider.api_key = Some("test-google-key".into());
+        fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(super::detect_opencode_provider_auth(Some(temp.path())).has_google);
+        fs::write(
+            temp.path().join("opencode.json"),
+            r#"{"provider":{"google":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        let auth = super::detect_opencode_provider_auth(Some(temp.path()));
+        assert!(!auth.has_google);
+        assert!(!auth.configured_providers.contains("google"));
+        assert!(!auth.configured_providers.contains("gemini"));
     }
 
     #[test]
