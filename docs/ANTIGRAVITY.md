@@ -123,3 +123,8 @@ Fresh backend configuration enables Antigravity even when `agy` is installed
 only inside a workspace. Existing saved enable/disable settings are preserved;
 if an older host-only probe disabled it, enable Antigravity in backend settings.
 The selected workspace must still pass native model discovery and launch preflight.
+
+Legacy assistant/Telegram channels configured for Gemini, or linked to a Gemini
+mission, are deactivated before webhook registration. Configure Antigravity and
+a workspace-native model, migrate linked missions without reusing Gemini native
+session IDs, then reactivate the channel. Historical mission records are retained.
