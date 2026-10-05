@@ -23140,6 +23140,7 @@ async fn control_actor_loop(
     let mut running_backend_id: Option<String> = None;
     let mut running_run: Option<MissionRun> = None;
     let mut parallel_followup_retry = std::time::Instant::now();
+    let mut parallel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut queued_delivery_retry = tokio::time::interval(std::time::Duration::from_secs(1));
     let mut execution_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     execution_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -23886,29 +23887,6 @@ async fn control_actor_loop(
                                 if let Err(error) = dispatch_admission::validate_followup(&admission, mid).await {
                                     let _ = respond.send(UserMessageAck::Rejected(error));
                                     continue;
-                                }
-                                // A targeted follow-up must not wait behind an unrelated
-                                // main turn. Keep its durable queue on an idle parallel
-                                // runner; the retry pump applies capacity and admission.
-                                if running.is_some() && running_mission_id != Some(mid)
-                                    && !parallel_runners.contains_key(&mid)
-                                    && !queue_has_pending_target_mission(&queue, mid)
-                                {
-                                    let mission = match mission_store.get_mission(mid).await {
-                                        Ok(Some(mission)) => mission,
-                                        _ => { let _ = respond.send(UserMessageAck::Rejected("Queued mission unavailable".into())); continue; }
-                                    };
-                                    let mut runner = super::mission_runner::MissionRunner::new(
-                                        mid, mission.workspace_id, mission.agent.clone(), Some(mission.backend.clone()),
-                                        mission.session_id.clone(), mission.config_profile.clone(),
-                                        model_for_dispatch(&mission_store, &mission).await,
-                                        mission.model_effort.clone(), mission.fast_mode,
-                                    );
-                                    runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
-                                    runner.working_directory = mission.working_directory.clone();
-                                    runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
-                                    runner.history.extend(mission.history.iter().map(|entry| (entry.role.clone(), entry.content.clone())));
-                                    parallel_runners.insert(mid, runner);
                                 }
                                 if let Some(runner) = parallel_runners.get_mut(&mid) {
                                     if runner.cancellation_requested() {
@@ -27648,14 +27626,10 @@ async fn control_actor_loop(
                 // Start next queued message, if any.
                 if let Some((mid, msg, per_msg_agent, msg_target_mid, msg_source)) = pop_next_runnable_control_queue(&mut queue, &mission_store).await {
                     if host_followup_source(msg_source.as_deref()) {
-                        let admitted = dispatch_admission::admit_followup(
-                            &control_hub, &mission_store, msg_target_mid.unwrap(), &msg,
-                        ).await;
-                        if let Err(error) = admitted {
-                            park_followup(&mut queue, (mid, msg, per_msg_agent, msg_target_mid, msg_source));
-                            tracing::debug!(message_id=%mid, %error, "Follow-up remains queued pending execution admission");
-                            continue;
-                        }
+                        // The parallel delivery pump owns admission, capacity,
+                        // run acquisition and rollback for every host follow-up.
+                        queue.push_front((mid, msg, per_msg_agent, msg_target_mid, msg_source));
+                        continue;
                     }
                     // Persist the dequeue before the awaits that start the run, so
                     // a crash here can't restore + re-run it.
@@ -27914,7 +27888,7 @@ async fn control_actor_loop(
                 }
             }
             // Poll parallel runners for completion
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+            _ = parallel_poll.tick() => {
                 // A parked Claude session takes the next message queued for its
                 // mission on its stdin: starting another process would stop the
                 // background tasks it is waiting for. The message went through
@@ -27992,6 +27966,39 @@ async fn control_actor_loop(
                 }
                 if parallel_followup_retry.elapsed() >= std::time::Duration::from_secs(1) {
                     parallel_followup_retry = std::time::Instant::now();
+                    // Promote durable host queues even while an unrelated main
+                    // turn runs. Preserve each mission's FIFO and leave work on
+                    // the main queue if its current turn or legacy entries own it.
+                    let targets: HashSet<_> = queue.iter().filter(|entry| host_followup_source(entry.4.as_deref())).filter_map(|entry| entry.3).collect();
+                    for mid in targets {
+                        if (running.is_some() && running_mission_id == Some(mid))
+                            || queue.iter().find(|entry| entry.3 == Some(mid)).is_some_and(|entry| !host_followup_source(entry.4.as_deref())) { continue; }
+                        if let std::collections::hash_map::Entry::Vacant(slot) = parallel_runners.entry(mid) {
+                            let Ok(Some(mission)) = mission_store.get_mission(mid).await else { continue; };
+                            let mut runner = super::mission_runner::MissionRunner::new(
+                                mid, mission.workspace_id, mission.agent.clone(), Some(mission.backend.clone()),
+                                mission.session_id.clone(), mission.config_profile.clone(),
+                                model_for_dispatch(&mission_store, &mission).await,
+                                mission.model_effort.clone(), mission.fast_mode,
+                            );
+                            runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+                            runner.working_directory = mission.working_directory.clone();
+                            runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
+                            runner.history.extend(mission.history.iter().map(|entry| (entry.role.clone(), entry.content.clone())));
+                            slot.insert(runner);
+                        }
+                        let runner = parallel_runners.get_mut(&mid).unwrap();
+                        if runner.cancellation_requested() { continue; }
+                        let mut legacy_precedes = false;
+                        queue.retain(|entry| {
+                            if entry.3 == Some(mid) && !host_followup_source(entry.4.as_deref()) { legacy_precedes = true; }
+                            if entry.3 == Some(mid) && !legacy_precedes {
+                                runner.queue_message(entry.0, entry.1.clone(), entry.2.clone(), entry.4.clone());
+                                false
+                            } else { true }
+                        });
+                    }
+
                     let mut ready = Vec::new();
                     let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
                     let occupied = parallel_runners.values().filter(|runner| runner.is_running()).count() + usize::from(running.is_some());
