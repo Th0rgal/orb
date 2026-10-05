@@ -49,3 +49,17 @@ it('shows host follow-ups with the blocking writer and cancellation', async () =
   await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
   await waitFor(()=>expect(cancel).toHaveBeenCalledWith('host'));
 });
+
+it('shows sending and confirmed receipts without waiting for a slow queue poll', async () => {
+  backend.list.mockReturnValue(new Promise(()=>{}));
+  const {createSignal} = await import('solid-js');
+  const [pending,setPending]=createSignal<{id:string;content:string}|undefined>({id:'next',content:'Continue overnight'});
+  const [confirmed,setConfirmed]=createSignal<{id:string;content:string}[]>([]);
+  render(()=><RemoteQueue mission="remote" pending={pending()} confirmed={confirmed()} onRows={()=>{}} onCancel={()=>{}}/>);
+  expect(screen.getByText('Continue overnight')).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'Cancel'})).toBeNull();
+  setConfirmed([{id:'next',content:'Continue overnight'}]);setPending(undefined);
+  await screen.findByText('1 Queued');
+  expect(screen.getAllByText('Continue overnight')).toHaveLength(1);
+  expect(screen.getByRole('button',{name:'Cancel'})).toBeTruthy();
+});
