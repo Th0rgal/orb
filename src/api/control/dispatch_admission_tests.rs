@@ -11325,6 +11325,43 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     assert_eq!(changed.0, StatusCode::CONFLICT);
     assert!(changed.1.contains("different launch content"));
 
+    // Accepted executions remain idempotent after failure or interruption.
+    for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
+        h.control
+            .mission_store
+            .update_mission_status(child.id, status)
+            .await
+            .unwrap();
+        let recovered = super::fork::btw_agent(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(parent.id),
+            Json(super::fork::ForkRequest {
+                backend: "opencode".into(),
+                model_override: "builtin/smart".into(),
+                model_effort: None,
+                idempotency_key: "btw-original".into(),
+                side_question: Some("Original question".into()),
+                side_context_mode: Some("incremental".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.0["id"], child.id.to_string());
+    }
+    // Remove all acceptance evidence to model an actual pre-dispatch failure.
+    h.control
+        .mission_store
+        .set_deferred_goal(child.id, None)
+        .await
+        .unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        child.id,
+        &format!("btw:{}:btw-original", parent.id),
+        "unaccepted-fixture",
+    )
+    .unwrap();
     // Unaccepted attempts must reach new-launch validation, not return receipts.
     for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
         h.control

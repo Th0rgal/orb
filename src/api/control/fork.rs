@@ -58,18 +58,23 @@ pub async fn fork_mission(
         // Launch receipts exist even when the parent has no project/track.
         // Recover completed attempts too: losing the response must not rerun it.
         let mut existing_live = None;
-        for existing in rows.iter().filter(|mission| {
-            !matches!(
-                mission.status,
-                MissionStatus::Failed | MissionStatus::Interrupted
-            )
-        }) {
+        for existing in &rows {
             let Some(receipt) = side_launch_receipt(&state.config.working_dir, existing.id)
                 .map_err(internal_error)?
             else {
                 continue;
             };
             if receipt.key == side_request_key(id, &req.idempotency_key) {
+                // Terminal executions still own their accepted idempotency key.
+                // Only a failure before dispatch may be replaced by a new launch.
+                if matches!(
+                    existing.status,
+                    MissionStatus::Failed | MissionStatus::Interrupted
+                ) && !receipt.accepted
+                    && !reconcile_side_launch(&state, &control, existing).await?
+                {
+                    continue;
+                }
                 if Some(receipt.fingerprint.as_str()) != fingerprint.as_deref() {
                     return Err((StatusCode::CONFLICT, "This side request key was already used for different launch content; the new question was not sent.".into()));
                 }
