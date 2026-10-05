@@ -27,6 +27,12 @@ pub async fn fork_mission(
     } else {
         None
     };
+    if req.side_question.is_some() && req.idempotency_key.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Side questions require an idempotency key".into(),
+        ));
+    }
     let control = control_for_user(&state, &user).await;
     if req.side_question.is_some() {
         let rows = control
@@ -41,20 +47,22 @@ pub async fn fork_mission(
             )
             .await
             .map_err(internal_error)?;
+        // Launch receipts exist even when the parent has no project/track.
+        // Recover completed attempts too: losing the response must not rerun it.
+        for existing in &rows {
+            if side_launch_key(&state.config.working_dir, existing.id)
+                .map_err(internal_error)?
+                .is_some_and(|key| key == req.idempotency_key.trim())
+            {
+                return Ok(Json(
+                    mission_create_response(&state, &control, existing.clone()).await?,
+                ));
+            }
+        }
         if let Some(existing) = rows
             .into_iter()
             .find(|mission| side_session_live(mission.status))
         {
-            let same_attempt = state
-                .projects
-                .lease_by_key(&format!("lease:{}", req.idempotency_key.trim()))
-                .map_err(internal_error)?
-                .is_some_and(|lease| lease.attempt_id == existing.id.to_string());
-            if same_attempt {
-                return Ok(Json(
-                    mission_create_response(&state, &control, existing).await?,
-                ));
-            }
             return Err((StatusCode::CONFLICT, format!(
                 "A side agent is already queued or running for this conversation ({}). Reconnect to or stop that side session before starting another; this question was not sent.", existing.id
             )));
@@ -479,4 +487,43 @@ mod tests {
             assert_eq!(run().status.code(), Some(78));
         }
     }
+}
+
+// Core-owned metadata, outside the mission workspace and freeform tags. The
+// creation route writes it before dispatch; continuations read the same receipt.
+fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+    root.join("mission-side-launches")
+        .join(format!("{id}.json"))
+}
+
+pub(super) fn side_launch_key(root: &std::path::Path, id: Uuid) -> Result<Option<String>, String> {
+    match std::fs::read(side_launch_path(root, id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(super) fn record_side_launch(
+    root: &std::path::Path,
+    id: Uuid,
+    key: &str,
+) -> Result<(), String> {
+    let destination = side_launch_path(root, id);
+    std::fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temporary = destination.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(key.trim()).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, &destination).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }

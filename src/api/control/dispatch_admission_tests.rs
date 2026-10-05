@@ -11225,20 +11225,14 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     assert!(result.1.contains("question was not sent"));
 
     // A transport retry of the original dispatch must recover that session.
-    h.state
-        .projects
-        .absorb_track("lido", "btw-retry", None, None)
-        .unwrap();
-    h.state
-        .projects
-        .acquire_track_lease(&crate::api::track_leases::lease_request(
-            "lido",
-            "btw-retry",
-            &child.id.to_string(),
-            "reader",
-            Some("btw-original"),
-        ))
-        .unwrap();
+    assert!(child.project.project.is_none());
+    assert!(
+        super::fork::side_launch_key(&h.state.config.working_dir, child.id)
+            .unwrap()
+            .is_none(),
+        "freeform side tags cannot grant side capacity"
+    );
+    super::fork::record_side_launch(&h.state.config.working_dir, child.id, "btw-original").unwrap();
     let retry = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),

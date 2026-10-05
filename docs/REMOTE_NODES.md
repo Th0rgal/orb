@@ -965,7 +965,9 @@ waited for other live work to finish and did not use the force override.
 
 ### Side-question capacity
 
-Core marks remote `/btw` launches with `RawCommand.side_question = true`.
+Core records a private launch receipt for `/btw` before dispatch and uses it
+to set `RawCommand.side_question = true`. Freeform mission tags do not grant
+side capacity. The receipt also recovers projectless retries without track leases.
 Each updated node reserves one additional execution permit for these jobs,
 separate from `SANDBOXED_NODE_CAPACITY` (including synchronous execution).
 Side questions serialize with each other; ordinary jobs retain their existing

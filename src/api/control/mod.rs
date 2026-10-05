@@ -12134,6 +12134,17 @@ pub(super) async fn create_mission_inner(
         }
     }
 
+    if shared_side_workspace {
+        if let Err(error) = fork::record_side_launch(
+            &state.config.working_dir,
+            mission.id,
+            req.idempotency_key.as_deref().unwrap_or_default(),
+        ) {
+            interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
+            return Err(internal_error(error));
+        }
+    }
+
     // Match actor/sweep lock order before taking the PR-writer lock. The track
     // conflict path may reconcile a terminal predecessor, so admission must
     // remain serialized until the new lease and assignment are both persisted.
@@ -14632,11 +14643,7 @@ async fn submit_leased_remote_job(
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
-            side_question: mission
-                .project
-                .tags
-                .iter()
-                .any(|tag| tag.starts_with("btw-parent:")),
+            side_question: fork::side_launch_key(&state.config.working_dir, mission.id)?.is_some(),
             long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,
