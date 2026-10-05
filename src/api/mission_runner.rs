@@ -5761,6 +5761,16 @@ pub(crate) fn detect_opencode_provider_auth(
         has_google = true;
         configured_providers.insert("google".to_string());
     }
+    if app_working_dir.is_some_and(|working_dir| {
+        crate::api::ai_providers::provider_explicitly_disabled(
+            working_dir,
+            crate::ai_providers::ProviderType::Google,
+        )
+    }) {
+        has_google = false;
+        configured_providers.remove("google");
+        configured_providers.remove("gemini");
+    }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
@@ -6499,6 +6509,17 @@ pub(crate) fn ensure_opencode_provider_for_model(
         Some(map) => map,
         None => return,
     };
+
+    if matches!(provider_id, "google" | "gemini")
+        && providers_map
+            .get("google")
+            .or_else(|| providers_map.get("gemini"))
+            .and_then(|provider| provider.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+    {
+        return;
+    }
 
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
@@ -7999,7 +8020,14 @@ pub(crate) async fn check_opencode_connectivity(
     has_google: bool,
     has_zai: bool,
     has_minimax: bool,
+    google_proxy_url: Option<&str>,
 ) -> Result<(), String> {
+    if has_google {
+        if let Some(url) = google_proxy_url {
+            return check_api_reachability(workspace_exec, cwd, "Sandboxed Google proxy", url)
+                .await;
+        }
+    }
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
@@ -12362,6 +12390,34 @@ mod tests {
             provider["models"]["k3-256k"]["capabilities"]["interleaved"]["field"],
             "reasoning_content"
         );
+    }
+
+    #[test]
+    fn ensure_opencode_provider_preserves_disabled_google() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            config_dir.join("opencode.json"),
+            r#"{"provider":{"google":{"enabled":false}}}"#,
+        )
+        .unwrap();
+
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "google/gemini-4-argon-eap",
+            "10.88.0.1",
+            None,
+        );
+
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        assert_eq!(config["provider"]["google"]["enabled"], false);
+        assert!(config["provider"]["google"].get("options").is_none());
     }
 
     #[test]

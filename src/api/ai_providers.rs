@@ -7167,6 +7167,11 @@ fn get_provider_config_entry(
     })
 }
 
+pub(crate) fn provider_explicitly_disabled(working_dir: &Path, provider: ProviderType) -> bool {
+    let config = read_opencode_config(&get_opencode_config_path(working_dir)).unwrap_or_default();
+    get_provider_config_entry(&config, provider).and_then(|entry| entry.enabled) == Some(false)
+}
+
 fn set_provider_config_entry(
     config: &mut serde_json::Value,
     provider: ProviderType,

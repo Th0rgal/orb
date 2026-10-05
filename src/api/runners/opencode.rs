@@ -279,6 +279,10 @@ pub async fn run_opencode_turn(
         return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
     };
 
+    let workspace_host_ip = workspace.host_ip_from_workspace();
+    let proxy_port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let google_proxy_url = format!("http://{}:{}/v1/models", workspace_host_ip, proxy_port);
+
     // Proactive network connectivity check - fail fast if API is unreachable
     // This catches DNS/network issues immediately instead of waiting for a timeout
     if let Err(err_msg) = check_opencode_connectivity(
@@ -289,6 +293,7 @@ pub async fn run_opencode_turn(
         has_google,
         auth_state.has_zai,
         auth_state.configured_providers.contains("minimax"),
+        google_via_proxy.then_some(google_proxy_url.as_str()),
     )
     .await
     {
@@ -322,7 +327,6 @@ pub async fn run_opencode_turn(
     }
     // Inject provider definitions into opencode.json for models not in
     // OpenCode's built-in snapshot.
-    let workspace_host_ip = workspace.host_ip_from_workspace();
     if let Some(model_override) = resolved_model.as_deref() {
         ensure_opencode_provider_for_model(
             &opencode_config_dir_host,
