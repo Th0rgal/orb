@@ -1769,6 +1769,18 @@ impl ModelChainStore {
                     health_tracker.remaining_quota(account.id)
                 });
             let mut store_contributed_entry = false;
+            let store_has_google_oauth = provider_type == crate::ai_providers::ProviderType::Google
+                && store_accounts
+                    .iter()
+                    .any(|account| account.api_key.is_none() && account.oauth.is_some());
+            // Presence is separate from successful resolution: a mirrored login
+            // in cooldown must not reappear under a standard or synthetic ID.
+            let configured_google_oauth = store_has_google_oauth
+                || standard_accounts.iter().any(|account| {
+                    account.provider_type == crate::ai_providers::ProviderType::Google
+                        && account.has_oauth
+                        && account.api_key.is_none()
+                });
             let mut store_contributed_google_oauth = false;
 
             for account in &store_accounts {
@@ -2015,8 +2027,9 @@ impl ModelChainStore {
                         // Store, auth.json and environment can describe the same
                         // route under different IDs. Do not retry an identical
                         // credential with a second independent cooldown.
-                        let duplicate_oauth =
-                            sa.has_oauth && sa.api_key.is_none() && store_contributed_google_oauth;
+                        let duplicate_oauth = sa.has_oauth
+                            && sa.api_key.is_none()
+                            && (store_has_google_oauth || store_contributed_google_oauth);
                         let duplicate_api_key = !sa.has_oauth
                             && sa.api_key.is_some()
                             && (store_accounts.iter().any(|account| {
@@ -2133,7 +2146,7 @@ impl ModelChainStore {
                     }
                 }
 
-                if !store_contributed_google_oauth
+                if !configured_google_oauth
                     && crate::api::ai_providers::google_cli_proxy_account_available()
                 {
                     let cli_proxy_account_id = stable_provider_uuid("google-cli-proxy");
@@ -2641,6 +2654,48 @@ mod tests {
             cooling.iter().all(|entry| entry.api_key.is_none()),
             "an environment copy must not evade the store account cooldown"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_google_oauth_mirror_preserves_store_cooldown() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google OAuth".into());
+        account.oauth = Some(OAuthCredentials {
+            access_token: "oauth-access".into(),
+            refresh_token: "oauth-refresh".into(),
+            expires_at: future_ms(6),
+        });
+        account.status = ProviderStatus::Connected;
+        let store_id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(future_ms(6)),
+        }];
+        let health = ProviderHealthTracker::new();
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].account_id, store_id);
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::RateLimit, None)
+            .await;
+        assert!(chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
