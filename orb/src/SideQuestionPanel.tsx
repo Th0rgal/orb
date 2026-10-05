@@ -25,6 +25,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [history,setHistory]=createSignal<SideExchange[]>([]),[open,setOpen]=createSignal(false),[busy,setBusy]=createSignal(false);
  const [turnId,setTurnId]=createSignal(crypto.randomUUID());
  const [preparing,setPreparing]=createSignal(false);
+ const [runStatus,setRunStatus]=createSignal('');
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  let scroll:HTMLDivElement|undefined;
@@ -73,7 +74,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
    void watchBtw(p.mission,controller.signal,event=>{
     if(stale||controller.signal.aborted)return;
-    if(event.type==='start')setModel(event.model);
+    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
+    if(event.type==='status')setRunStatus(event.text);
     if(event.type==='snapshot')setAnswer(event.text);
     if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(String(e));setBusy(false);}});
@@ -116,7 +118,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   revealSentQuestion();
   void askBtwAgent(p.mission,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
-   if(event.type==='start')setModel(event.model);
+   if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
+    if(event.type==='status')setRunStatus(event.text);
    if(event.type==='snapshot')setAnswer(event.text);
    if(event.type==='delta')setAnswer(value=>value+event.text);
    if(event.type==='done'){
@@ -172,6 +175,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
     </section></Show>
     <Show when={!history().length&&!question()}><p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p></Show>
+    <Show when={busy() && runStatus()}><p class="dim" role="status">{runStatus()}</p></Show>
     <AgentActivity items={btwActivities(p.mission)} running={busy()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>

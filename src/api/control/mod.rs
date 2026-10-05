@@ -14632,6 +14632,11 @@ async fn submit_leased_remote_job(
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
+            side_question: mission
+                .project
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("btw-parent:")),
             long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,

@@ -11,7 +11,7 @@ export async function sideAttachments(images:DraftImage[], files:UploadedFile[])
  if(result.reduce((n,f)=>n+f.data_base64.length,0)>24*1024*1024)throw new Error('Side question attachments must total at most 18 MiB.');
  return result;
 }
-export type SideEvent = {type:"snapshot";text:string}| {type:"start";model:string}|{type:"delta";text:string}|{type:"done";answer:string}|{type:"error";message:string};
+export type SideEvent = {type:"status";text:string}|{type:"snapshot";text:string}| {type:"start";model:string}|{type:"delta";text:string}|{type:"done";answer:string}|{type:"error";message:string};
 function byteTail(text:string,limit:number):string {
   const bytes=new TextEncoder().encode(text);
   if(bytes.length<=limit)return text;

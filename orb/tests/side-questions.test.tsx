@@ -152,3 +152,14 @@ it('keeps the same side-turn DOM node while streaming and committing the answer'
  expect(screen.getAllByText('A stable question')).toHaveLength(1);
  expect(screen.queryByText('Side agent is working…')).toBeNull();
 });
+
+it('shows the remote capacity wait while a side question is pending',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream({start(controller){
+  controller.enqueue(new TextEncoder().encode('event: btw\ndata: {"type":"start","model":"opencode · builtin/smart"}\n\nevent: btw\ndata: {"type":"status","text":"Waiting for capacity on old-agent…"}\n\n'));
+ }}))));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="capacity-wait" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Inspect the running mission');
+ await waitFor(()=>expect(screen.getByText('Waiting for capacity on old-agent…')).toBeTruthy());
+ expect(screen.getByPlaceholderText('Queue a side question…')).toBeTruthy();
+});

@@ -19,7 +19,47 @@ pub async fn fork_mission(
     Path(id): Path<Uuid>,
     Json(req): Json<ForkRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Serialize side-session discovery and creation, including retries from
+    // another Orb window whose local storage has no session pointer.
+    static SIDE_CREATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _side_creation = if req.side_question.is_some() {
+        Some(SIDE_CREATION.lock().await)
+    } else {
+        None
+    };
     let control = control_for_user(&state, &user).await;
+    if req.side_question.is_some() {
+        let rows = control
+            .mission_store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    tag: Some(format!("btw-parent:{id}")),
+                    ..Default::default()
+                },
+                usize::MAX,
+                0,
+            )
+            .await
+            .map_err(internal_error)?;
+        if let Some(existing) = rows
+            .into_iter()
+            .find(|mission| side_session_live(mission.status))
+        {
+            let same_attempt = state
+                .projects
+                .lease_by_key(&format!("lease:{}", req.idempotency_key.trim()))
+                .map_err(internal_error)?
+                .is_some_and(|lease| lease.attempt_id == existing.id.to_string());
+            if same_attempt {
+                return Ok(Json(
+                    mission_create_response(&state, &control, existing).await?,
+                ));
+            }
+            return Err((StatusCode::CONFLICT, format!(
+                "A side agent is already queued or running for this conversation ({}). Reconnect to or stop that side session before starting another; this question was not sent.", existing.id
+            )));
+        }
+    }
     let source = control
         .mission_store
         .get_mission(id)
@@ -158,6 +198,13 @@ pub async fn fork_mission(
     )
     .await?;
     Ok(response)
+}
+
+fn side_session_live(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Active | MissionStatus::Pending | MissionStatus::Paused
+    )
 }
 
 /// Separate route: older servers must fail closed instead of starting a normal fork.

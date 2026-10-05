@@ -11170,3 +11170,89 @@ async fn host_followup_during_cooldown_persists_before_writer_admission() {
         MissionStatus::Pending
     );
 }
+
+#[tokio::test]
+async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Active, None).await;
+    let child = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child.id, MissionStatus::Pending)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{}", parent.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let result = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: Uuid::new_v4().to_string(),
+            side_question: Some("New question".into()),
+            side_context_mode: Some("incremental".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(result.0, StatusCode::CONFLICT);
+    assert!(result.1.contains(&child.id.to_string()));
+    assert!(result.1.contains("question was not sent"));
+
+    // A transport retry of the original dispatch must recover that session.
+    h.state
+        .projects
+        .absorb_track("lido", "btw-retry", None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            "btw-retry",
+            &child.id.to_string(),
+            "reader",
+            Some("btw-original"),
+        ))
+        .unwrap();
+    let retry = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "btw-original".into(),
+            side_question: Some("Original question".into()),
+            side_context_mode: Some("incremental".into()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.0["id"], child.id.to_string());
+}
