@@ -136,9 +136,10 @@ it('reports remote capacity waits instead of pretending the side agent is answer
  expect(btwQueueStatus({status:'active',remote_job:{node_id:'old-agent',node_state:'queued'}} as any)).toBe('Waiting for capacity on old-agent…');
  expect(btwQueueStatus({status:'active',remote_job:{node_id:'old-agent',node_state:'running'}} as any)).toBe('');
  expect(btwQueueStatus({status:'pending'} as any)).toBe('Waiting to start…');
+ expect(btwQueueStatus({status:'paused'} as any)).toBe('Side agent paused');
 });
 
-it.each(['pending','waiting_background'])('does not create another side agent when a stale local flag hides a %s session',async(status)=>{
+it.each(['pending','waiting_background','paused'])('does not create another side agent when a stale local flag hides a %s session',async(status)=>{
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='stale-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
  const {getMissionEvents}=await import('../src/stream');
  vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'First answer',sequence:1,id:1,timestamp:''}]);
