@@ -30,10 +30,11 @@ export function AgentActivity(p: {items: LocalActivity[]; running: boolean; comp
   const [now, setNow] = createSignal(Date.now());
   const timer = setInterval(() => { if (p.running) setNow(Date.now()); }, 1000);
   onCleanup(() => clearInterval(timer));
+  const progress = () => p.items.find(a => a.id === 'antigravity:status');
   const tasks = createMemo(() => p.items.filter(a => a.background || a.id.startsWith('task:')));
   const tools = createMemo(() => {
     const spawned = new Set(tasks().map(a => a.tool_use_id).filter(Boolean));
-    return p.items.filter(a => !a.background && !a.id.startsWith('task:') && !spawned.has(a.id));
+    return p.items.filter(a => a.kind !== 'status' && !a.background && !a.id.startsWith('task:') && !spawned.has(a.id));
   });
   const all = createMemo(() => [...tasks(), ...tools()]);
   const isActive = (a: LocalActivity) => p.running && !a.done && !a.failed && a.status !== 'stopped';
@@ -68,7 +69,7 @@ export function AgentActivity(p: {items: LocalActivity[]; running: boolean; comp
     const item = createMemo<LocalActivity | undefined>(previous => all().find(a=>a.id===id) ?? previous);
     return <Show when={item()}>{value => <ActivityRow item={value()} running={p.running} now={now()} />}</Show>;
   };
-  const current = () => all().find(a => visible().includes(a.id) && isActive(a));
+  const current = () => all().find(a => visible().includes(a.id) && isActive(a)) ?? (p.running ? progress() : undefined);
   return <Show when={p.items.length}><section class="agent-activity" classList={{'is-completed': !!p.completed}} aria-label="Agent activity" aria-hidden={p.completed || undefined} inert={!!p.completed}>
     <div class="agent-activity-collapse"><div class="agent-activity-content">
     <ActivityHistory ids={[...all().filter(a=>!isActive(a)), ...all().filter(isActive)].map(a=>a.id)} label={historyLabel() || 'Activity'} failures={failures()} row={id => row(id)} active={!!current()} lead={<Show when={current()} keyed>{item => <>
@@ -78,6 +79,12 @@ export function AgentActivity(p: {items: LocalActivity[]; running: boolean; comp
       <Show when={all().filter(isActive).length > 1}><span class="agent-task-state">+{all().filter(isActive).length - 1} running</span></Show>
       <Show when={history().length}><span class="agent-task-state">{historyLabel()}</span></Show>
     </>}</Show>} />
+    <Show when={progress()}>{status => <div class="agent-progress-meta" title={status().detail ?? undefined}>
+      <span tabIndex={0} title={status().detail ?? undefined}>Reasoning text unavailable</span>
+      <Show when={status().thinking_tokens != null}> · {status().thinking_tokens?.toLocaleString()} thinking tokens reported</Show>
+      <Show when={p.running && status().updated_at}> · Last event {Math.max(0, Math.floor((now() - status().updated_at!) / 1000))}s ago</Show>
+      <Show when={p.running && current()?.id !== status().id}> · Elapsed {activityDuration(status(), now(), true)}</Show>
+    </div>}</Show>
     </div></div>
   </section></Show>;
 }

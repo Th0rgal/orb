@@ -630,10 +630,15 @@ fn spawn_antigravity(
         let _guard = guard;
         let mut stream = crate::antigravity::Stream::default();
         stream.expected_session = expected.clone();
+        output.antigravity_progress(&stream);
+        output.publish_activities();
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break; };
             let Ok(value) = serde_json::from_str(&line) else { continue; };
             for tool in stream.feed(&value) { output.native_activity(&tool); }
+            if matches!(value["event"].as_str(), Some("init" | "step_update" | "result")) {
+                output.antigravity_progress(&stream);
+            }
             output.publish_activities();
             if let Some(id) = &stream.session {
                 if expected.as_deref().is_some_and(|old| old != id) {

@@ -33,6 +33,7 @@ pub struct Activity {
     pub started_at: u64,
     pub updated_at: u64,
     pub finished_at: Option<u64>,
+    pub thinking_tokens: Option<u64>,
 }
 fn activity_now() -> u64 {
     std::time::SystemTime::now()
@@ -56,6 +57,7 @@ impl Activity {
             started_at: now,
             updated_at: now,
             finished_at: None,
+            thinking_tokens: None,
         }
     }
     fn finish(&mut self, status: &str) {
@@ -178,6 +180,21 @@ impl Output {
         }
         drop(activities);
         self.publish_activities();
+    }
+    /// A status snapshot, not a tool or a fabricated reasoning message.
+    pub fn antigravity_progress(&self, stream: &crate::antigravity::Stream) {
+        let mut activities = self.2.lock().unwrap();
+        let index = activities.iter().position(|a| a.id == "antigravity:status").unwrap_or_else(|| {
+            activities.push(Activity::new("antigravity:status".into(), "Working…".into(), "status", false));
+            activities.len() - 1
+        });
+        let activity = &mut activities[index];
+        activity.updated_at = activity_now();
+        activity.thinking_tokens = stream.thinking_tokens;
+        activity.label = if stream.agent_response_active { "Generating response…" } else { "Working…" }.into();
+        activity.detail = Some("Antigravity CLI does not currently expose reasoning text. Thinking-token counts are reported usage, not readable thoughts.".into());
+        if stream.error.is_some() { activity.finish("failed"); }
+        else if stream.success { activity.finish("completed"); }
     }
     pub fn native_activity(&self, value: &serde_json::Value) {
         if matches!(
@@ -622,6 +639,25 @@ mod tests {
         assert_eq!(events.lock().unwrap().len(), 4);
         assert!(output.0.lock().unwrap().terminal.as_ref().unwrap().done);
         assert!(output.0.lock().unwrap().listeners.is_empty());
+    }
+    #[test]
+    fn antigravity_progress_survives_snapshot_replay_without_becoming_a_tool() {
+        let output = Output::default();
+        let mut stream = crate::antigravity::Stream::default();
+        output.antigravity_progress(&stream);
+        stream.thinking_tokens = Some(42);
+        output.antigravity_progress(&stream);
+        let rows = output.activities();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "status");
+        assert_eq!(rows[0].thinking_tokens, Some(42));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let events = captured.clone();
+        output.subscribe(Channel::new(move |event| { events.lock().unwrap().push(event); Ok(()) })).unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 1);
+        stream.success = true;
+        output.antigravity_progress(&stream);
+        assert!(output.activities()[0].done);
     }
     #[test]
     fn stale_unsubscribe_cannot_remove_another_run_subscription() {

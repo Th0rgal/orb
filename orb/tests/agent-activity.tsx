@@ -3,6 +3,7 @@ import {render} from 'solid-js/web';
 import {AgentActivity,activityShouldCollapse} from '../src/AgentActivity';
 import '../src/styles.css';
 import {FindBar} from '../src/FindBar';
+const antigravity=new URLSearchParams(location.search).has("antigravity");
 const longHistory=new URLSearchParams(location.search).has("long");
 const ciWait=new URLSearchParams(location.search).has("ci");
 const now=Date.now();
@@ -10,7 +11,7 @@ const [completed,setCompleted]=createSignal(false);
 Object.assign(window,{completeActivity:()=>setCompleted(true),resumeActivity:()=>setCompleted(false)});
 render(()=><main data-find-conversation style={{padding:'32px','max-width':'760px',margin:'auto'}}>
 <p style={{'margin-top':longHistory?'600px':undefined}}>The importer analysis is back. The repository inventory and verification are still running.</p>
-<AgentActivity running={!completed()} completed={activityShouldCollapse(completed() ? "awaiting_user" : "active", !completed())} items={[
+<AgentActivity running={!completed()} completed={activityShouldCollapse(completed() ? "awaiting_user" : "active", !completed())} items={antigravity ? [{id:"antigravity:status",kind:"status",label:"Working…",done:false,failed:false,started_at:now-92000,updated_at:now-3000,thinking_tokens:1033,detail:"Antigravity CLI does not currently expose reasoning text."},{id:"tool",label:"Run command",done:true,failed:false}] : [
  {id:'task:agent',label:ciWait?'Wait for Verity Verify proofs run':'Inventory root files, documentation and scripts',kind:'agent',background:true,done:false,failed:false,started_at:now-92000,detail:'Latest tool: Read'},
  {id:'task:build',label:ciWait?'Wait for Verity CI result file':'Regenerate verification artifacts',kind:'command',background:true,done:false,failed:false,started_at:now-132000,detail:'python3 scripts/generate_verification_status.py'},
  {id:'task:finished',label:'Map the Vault importer dependencies',kind:'agent',background:true,done:true,failed:false,status:'completed',started_at:now-120000,finished_at:now-30000,detail:'The smoke tests depend on the legacy importer. Update the build targets before removing it.'},
