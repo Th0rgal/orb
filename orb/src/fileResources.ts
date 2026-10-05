@@ -393,7 +393,7 @@ export function relativeFilePath(
   document: string,
   target: string,
 ): string | null {
-  if (target.startsWith("/")) return target;
+  if (target.startsWith("/") || /^[a-z]:[/\\]/i.test(target)) return target;
   const parts = document.split("/").slice(0, -1);
   for (const part of target.split("/")) {
     if (!part || part === ".") continue;
