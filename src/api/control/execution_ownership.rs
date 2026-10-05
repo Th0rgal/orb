@@ -10,6 +10,7 @@ struct Owner {
     status: MissionStatus,
     reason: Option<String>,
     pr: Option<String>,
+    pr_known: bool,
     read_only: bool,
 }
 
@@ -17,6 +18,7 @@ struct Owner {
 pub(crate) struct Snapshot {
     owners: HashMap<Uuid, Vec<Owner>>,
     unresolved: HashSet<Uuid>,
+    queued_assignments: HashSet<Uuid>,
     /// Accepted remote handles per mission with the repository each one
     /// validates. `None` is a raw command or legacy handle whose target is
     /// unknown; it cannot prove that the mission is unrelated to any PR.
@@ -81,6 +83,7 @@ impl Snapshot {
             status: mission.status,
             reason: mission.terminal_reason,
             pr: mission.project.github_pr,
+            pr_known: true,
         });
     }
 
@@ -91,19 +94,22 @@ impl Snapshot {
         let items: Vec<QueuedMessage> = serde_json::from_str(payload).map_err(|e| e.to_string())?;
         // Consumed messages are idempotency markers; their actual execution is
         // represented by a run/actor/remote handle, not by historical content.
-        self.unresolved.extend(
-            items
-                .into_iter()
-                .filter(|m| !m.inflight)
-                .filter_map(|m| m.mission_id),
-        );
+        for message in items.into_iter().filter(|m| !m.inflight) {
+            if let Some(id) = message.mission_id {
+                if host_followup_source(message.source.as_deref()) {
+                    self.queued_assignments.insert(id);
+                } else {
+                    self.unresolved.insert(id);
+                }
+            }
+        }
         Ok(())
     }
 
     /// None proves that no enumerated store knows this owner. Some(false)
     /// proves all known presentations terminal and no unresolved execution.
     pub(crate) fn holds_track(&self, id: Uuid) -> Option<bool> {
-        if self.unresolved.contains(&id) {
+        if self.unresolved.contains(&id) || self.queued_assignments.contains(&id) {
             return Some(true);
         }
         self.owners.get(&id).map(|owners| {
@@ -154,10 +160,11 @@ impl Snapshot {
                 let conflicting = owners.map_or(remote, |owners| {
                     owners.iter().any(|owner| {
                         !owner.read_only
-                            && owner
-                                .pr
-                                .as_deref()
-                                .map_or(remote, |pr| canonical_github_pr(pr) == target)
+                            && ((!owner.pr_known && remote)
+                                || owner
+                                    .pr
+                                    .as_deref()
+                                    .is_some_and(|pr| canonical_github_pr(pr) == target))
                     })
                 });
                 conflicting.then(|| PrWriterLease {
@@ -230,6 +237,7 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
             status,
             reason,
             pr,
+            pr_known: cols.contains("github_pr"),
             read_only,
         });
     }
@@ -375,5 +383,44 @@ mod repository_identity_tests {
         ] {
             assert_eq!(canonical_github_repository(raw), None, "{raw}");
         }
+    }
+}
+
+#[cfg(test)]
+mod followup_tests {
+    use super::*;
+    #[test]
+    fn queued_followup_protects_assignment_without_claiming_execution() {
+        let id = Uuid::new_v4();
+        let mut snapshot = Snapshot::default();
+        snapshot.queue(&serde_json::json!([{"id":Uuid::new_v4(),"content":"continue","mission_id":id,"agent":null,"source":"host-queue:api:test"}]).to_string()).unwrap();
+        assert_eq!(snapshot.holds_track(id), Some(true));
+        assert!(!snapshot.unresolved.contains(&id));
+    }
+    #[test]
+    fn missing_owner_is_distinct_from_explicitly_unassigned_pr() {
+        let id = Uuid::new_v4();
+        let mut snapshot = Snapshot::default();
+        snapshot.unresolved.insert(id);
+        snapshot.remote.insert(id, vec![None]);
+        assert!(snapshot.unresolved_pr_writer("org/repo#1", None).is_some());
+        snapshot.owners.insert(
+            id,
+            vec![Owner {
+                status: MissionStatus::Active,
+                reason: None,
+                pr: None,
+                pr_known: true,
+                read_only: false,
+            }],
+        );
+        assert!(snapshot.unresolved_pr_writer("org/repo#1", None).is_none());
+        snapshot.owners.get_mut(&id).unwrap()[0].pr_known = false;
+        assert!(snapshot.unresolved_pr_writer("org/repo#1", None).is_some());
+        let owner = &mut snapshot.owners.get_mut(&id).unwrap()[0];
+        owner.pr_known = true;
+        owner.pr = Some("org/repo#2".into());
+        assert!(snapshot.unresolved_pr_writer("org/repo#1", None).is_none());
+        assert!(snapshot.unresolved_pr_writer("org/repo#2", None).is_some());
     }
 }

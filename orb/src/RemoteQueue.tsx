@@ -21,7 +21,7 @@ export function RemoteQueue(p: {
       loading = true;
       const started = revision;
       try {
-        const pending = (await listQueuedMessages(mission)).filter(row => row.source === "remote-queue");
+        const pending = (await listQueuedMessages(mission)).filter(row => !row.inflight && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
         if (disposed || started !== revision || version !== connectionVersion()) return;
         setRows(pending); p.onRows(pending.map(row => row.id));
       } catch { /* Keep the last confirmed inbox during a network interruption. */ }
@@ -44,7 +44,7 @@ export function RemoteQueue(p: {
     finally { setCancelling(undefined); }
   };
   return <Show when={rows().length}>
-    <section class="followup-queue" aria-label="Remote queued messages" aria-live="polite">
+    <section class="followup-queue" aria-label="Queued messages" aria-live="polite">
       <header><span class="queue-count">{rows().length} Queued</span></header>
       <ol><For each={rows()}>{row => <li class="queue-row">
         <div class="queue-line">

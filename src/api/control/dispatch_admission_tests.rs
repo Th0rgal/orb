@@ -5488,7 +5488,7 @@ async fn interrupted_remote_launch_settles_its_own_lease_and_never_runs_locally(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_known() {
+async fn remote_build_without_assigned_pr_never_claims_another_pr() {
     use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind, RemoteJobIdentity};
     let identity = |repository: &str| RemoteJobIdentity {
         version: job_ledger::IDENTITY_VERSION,
@@ -5520,13 +5520,12 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
         wake_on_terminal: true,
     };
     let target = "https://github.com/lfglabs-dev/verity/pull/2406";
-    let cases: Vec<(&str, Vec<Option<&str>>, bool)> = vec![
+    let cases: Vec<(&str, Vec<Option<&str>>)> = vec![
         (
             "different repository",
             vec![Some(
                 "https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure",
             )],
-            false,
         ),
         (
             "different repository, several handles",
@@ -5534,23 +5533,19 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
                 Some("https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure.git"),
                 Some("git@github.com:lfglabs-dev/pareto-credit-vault-proof-closure.git"),
             ],
-            false,
         ),
         (
             "same repository",
             vec![Some("https://github.com/lfglabs-dev/verity.git")],
-            true,
         ),
         (
             "same repository, scp form and case",
             vec![Some("git@github.com:LFGLabs-dev/Verity.git")],
-            true,
         ),
-        ("unknown repository (raw handle)", vec![None], true),
+        ("unknown repository (raw handle)", vec![None]),
         (
             "unknown repository (not a GitHub identity)",
             vec![Some("https://example.invalid/lfglabs-dev/other.git")],
-            true,
         ),
         (
             "disjoint plus unknown",
@@ -5558,10 +5553,9 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
                 Some("https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure"),
                 None,
             ],
-            true,
         ),
     ];
-    for (case, repositories, expect_conflict) in cases {
+    for (case, repositories) in cases {
         let h = Harness::new().await;
         let store = h.control.mission_store.clone();
         // The Pareto shape: writer intent, no github_pr, parked on a remote
@@ -5592,11 +5586,7 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
             .await
             .unwrap()
             .map(|lease| lease.id);
-        assert_eq!(
-            found,
-            expect_conflict.then_some(m.id),
-            "{case}: {repositories:?}"
-        );
+        assert_eq!(found, None, "{case}: {repositories:?}");
         // Self-exclusion and an explicit same-PR assignment are unchanged.
         assert!(
             find_existing_pr_writer_global(&h.state.control, target, Some(m.id))
@@ -10589,5 +10579,167 @@ async fn cyber_client_storage_failure_preserves_idle_status_without_a_run() {
             .unwrap()
             .revision,
         saved.revision
+    );
+}
+
+#[tokio::test]
+async fn host_followup_queue_persists_fifo_deduplicates_and_cancels_under_pr_conflict() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("org/repo#42")).await;
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            blocker.id,
+            MissionProjectPatch {
+                github_pr: Some(Some("org/repo#42".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for id in [first, second, first] {
+        let response = h.request(false, target.id, json!({"content":"Continue the same work", "queue_followup":true, "client_message_id":id, "continue_identity":Harness::assertion(&target)})).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        let receipt: Value = response.json().await.unwrap();
+        assert_eq!(receipt["queued"], true);
+        assert_eq!(receipt["message_accepted"], true);
+    }
+    let reopened = SqliteMissionStore::new(h._dir.path().join("missions"), &h.user.id)
+        .await
+        .unwrap();
+    let snapshot: Vec<QueuedMessage> =
+        serde_json::from_str(&reopened.load_control_queue(&h.user.id).await.unwrap()).unwrap();
+    let ids: Vec<_> = snapshot
+        .iter()
+        .filter(|m| m.mission_id == Some(target.id))
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, vec![first, second]);
+    let Json(queue) = get_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Query(QueueQuery {
+            mission_id: Some(target.id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(queue.iter().all(|row| row
+        .queue_error
+        .as_deref()
+        .is_some_and(|e| e.contains(&blocker.id.to_string()))));
+    let _ = remove_from_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(first),
+    )
+    .await
+    .unwrap();
+    let snapshot: Vec<QueuedMessage> = serde_json::from_str(
+        &h.control
+            .mission_store
+            .load_control_queue(&h.user.id)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!snapshot.iter().any(|m| m.id == first));
+    assert!(snapshot.iter().any(|m| m.id == second));
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(target.id)
+        .await
+        .unwrap()
+        .is_none());
+    // Release the actual owner and unpause: idle queues must retry without a new send.
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(target.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    wait_until(
+        "queued follow-up dispatched after lease release",
+        10,
+        || async {
+            h.control
+                .mission_store
+                .get_latest_mission_run(target.id)
+                .await
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn host_followup_queue_rejects_stale_identity_without_persisting() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("org/repo#1")).await;
+    let mut assertion = Harness::assertion(&target);
+    assertion["github_pr"] = json!("org/repo#2");
+    let id = Uuid::new_v4();
+    let response=h.request(false,target.id,json!({"content":"Continue", "queue_followup":true,"client_message_id":id,"continue_identity":assertion})).await;
+    assert!(!response.status().is_success());
+    assert!(!h
+        .control
+        .mission_store
+        .load_control_queue(&h.user.id)
+        .await
+        .unwrap()
+        .contains(&id.to_string()));
+}
+
+#[test]
+fn host_followup_parking_preserves_fifo_without_blocking_other_missions() {
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let entry = |target, content: &str| {
+        (
+            Uuid::new_v4(),
+            content.to_string(),
+            None,
+            Some(target),
+            Some("host-queue:api:test".into()),
+        )
+    };
+    let first = entry(a, "a1");
+    let mut queue = VecDeque::from([entry(a, "a2"), entry(b, "b1"), entry(a, "a3")]);
+    park_followup(&mut queue, first);
+    assert_eq!(
+        queue.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(),
+        vec!["b1", "a1", "a2", "a3"]
     );
 }
