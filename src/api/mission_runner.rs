@@ -6340,7 +6340,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 model_id: model_entry.clone()
             }
         })),
-        "builtin" => {
+        "builtin" | "antigravity" => {
             // Point at the local OpenAI-compatible proxy that handles model
             // chain resolution and failover.  The proxy runs on the same host
             // and is accessible from shared-network workspaces.
@@ -6361,11 +6361,15 @@ pub(crate) fn ensure_opencode_provider_for_model(
                     crate::api::proxy_liveness::MISSION_ID_HEADER: mid
                 });
             }
+            let mut model = serde_json::json!({"name": model_id});
+            if provider_id == "antigravity" {
+                model["id"] = serde_json::json!(format!("antigravity/{model_id}"));
+            }
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "Builtin",
+                "name": if provider_id == "antigravity" { "Antigravity subscription" } else { "Builtin" },
                 "models": {
-                    model_id: { "name": model_id }
+                    model_id: model
                 },
                 "options": options
             }))
@@ -6439,7 +6443,11 @@ pub(crate) fn ensure_opencode_provider_for_model(
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
-    if provider_id == "builtin" || provider_id == "kimi" || cli_proxy_owned_provider {
+    if provider_id == "builtin"
+        || provider_id == "kimi"
+        || provider_id == "antigravity"
+        || cli_proxy_owned_provider
+    {
         // Always overwrite proxy-backed providers — the proxy secret
         // (options.apiKey) changes on every server restart, Kimi must not
         // keep a stale api.kimi.com block from workspace config, and a
@@ -12314,6 +12322,34 @@ mod tests {
             .as_str()
             .expect("mission id header");
         assert_eq!(mission_header, "00000000-0000-0000-0000-000000000123");
+    }
+
+    #[test]
+    fn ensure_opencode_provider_antigravity_keeps_explicit_proxy_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "antigravity/claude-sonnet",
+            "10.88.0.1",
+            None,
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        let provider = &config["provider"]["antigravity"];
+        assert_eq!(
+            provider["models"]["claude-sonnet"]["id"],
+            "antigravity/claude-sonnet"
+        );
+        assert!(provider["options"]["baseURL"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://10.88.0.1:"));
     }
 
     #[test]

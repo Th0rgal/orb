@@ -10,7 +10,7 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 `src/api/oauth_owner.rs` decides who owns a provider's OAuth credential.
 
 - With server-only `CLI_PROXY_MANAGEMENT_KEY` configured and ownership set to
-  `cli-proxy`, **CLIProxyAPI owns Anthropic, OpenAI, xAI and Kimi subscriptions**,
+  `cli-proxy`, **CLIProxyAPI owns Anthropic, OpenAI, xAI, Kimi and Antigravity subscriptions**,
   including missing/expired logins. sandboxed.sh never resumes token renewal
   when a proxy login fails: the user reconnects through the UI instead.
 - `CLI_PROXY_AUTH_DIR` is the authoritative account store. sandboxed.sh projects
@@ -79,3 +79,27 @@ for each matching native `auth.json`, and `--kimi-device-file` for the existing
 `sandboxed-sh/kimi_device_id`. Imported metadata preserves the original row UUID,
 including identityless Kimi accounts. Enable strict ownership before applying
 the import, so sandboxed.sh has stopped renewing the source token generation.
+
+## Antigravity subscriptions and native agents
+
+Orb Providers → Add subscription account obtains the supported login types from
+`GET /api/ai/providers/cli-proxy-login`. Select Google Antigravity, open the
+consent link, then paste the complete localhost callback URL into Orb. Additional
+accounts use the same flow. Reconnect preserves the existing account identity;
+a different Google account must be added as a new account.
+
+Antigravity is a distinct provider type, not Gemini CLI OAuth. Its proxy auth
+files use the `antigravity` prefix, and model discovery reads that account's
+management catalog. Requests retain `antigravity/<model>` all the way to the
+proxy, so a Claude model selected through Google cannot consume a Claude
+subscription by accident. No Google refresh token is exported to a workspace.
+
+The native `agy` agent remains a machine-local harness, with installation and
+login controls under Orb Settings. Connecting a proxy subscription enables
+model inference through the backend; it does not replace the native agent's
+session protocol or sign it in on other machines.
+
+After rollout, reconnect any account marked as needing authentication. A
+rejected refresh token requires fresh browser consent; importing it again
+cannot repair it. Account disable and removal act on the connected backend's
+proxy store. Cancellation and retry are available in the login dialog.

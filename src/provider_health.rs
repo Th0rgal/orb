@@ -1819,7 +1819,11 @@ impl ModelChainStore {
                 let anthropic_oauth_cli_proxy_routable =
                     (matches!(provider_type, crate::ai_providers::ProviderType::Anthropic)
                         || (crate::api::oauth_owner::management_enabled()
-                            && matches!(provider_type, crate::ai_providers::ProviderType::Kimi)))
+                            && matches!(
+                                provider_type,
+                                crate::ai_providers::ProviderType::Kimi
+                                    | crate::ai_providers::ProviderType::Antigravity
+                            )))
                         && account.api_key.is_none()
                         && account.oauth.is_some()
                         && crate::api::oauth_owner::cli_proxy_owns(provider_type);

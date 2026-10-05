@@ -1314,7 +1314,10 @@ pub fn get_api_key_for_provider(
             // ChatGPT/Codex and Grok Build OAuth are CLI/subscription credentials;
             // neither is a replacement for an API Platform key on the respective
             // OpenAI-compatible API.
-            if !matches!(provider_type, ProviderType::OpenAI | ProviderType::Xai) {
+            if !matches!(
+                provider_type,
+                ProviderType::OpenAI | ProviderType::Xai | ProviderType::Antigravity
+            ) {
                 if let Some(ref oauth) = provider.oauth {
                     if !oauth.access_token.is_empty() {
                         return Some(oauth.access_token.clone());

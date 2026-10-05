@@ -350,7 +350,8 @@ pub(crate) fn default_base_url(provider_type: ProviderType) -> Option<&'static s
         ProviderType::Perplexity => Some("https://api.perplexity.ai"),
         // Kimi Code subscription endpoint (OpenAI Chat Completions compatible).
         ProviderType::Kimi => Some("https://api.kimi.com/coding/v1"),
-        ProviderType::Custom => None, // uses account's base_url
+        ProviderType::Custom => None,      // uses account's base_url
+        ProviderType::Antigravity => None, // routed only through CLIProxyAPI
         // Non-OpenAI-compatible providers
         ProviderType::Anthropic => None,
         ProviderType::Google => None,
@@ -501,6 +502,7 @@ pub(crate) fn has_routable_proxy_credentials(
                 || (has_oauth && crate::api::ai_providers::xai_cli_proxy_account_available())
         }
         ProviderType::Google => has_api_key || has_oauth,
+        ProviderType::Antigravity => has_oauth && super::oauth_owner::management_enabled(),
         // Kimi access tokens live ~300s, so between refresh cycles the stored
         // token is routinely expired and the resolved entry carries no
         // hoisted `api_key`. The proxy refreshes the OAuth token at request
@@ -2176,6 +2178,9 @@ pub(crate) async fn chat_completions_inner(
             && entry.has_oauth
             && entry.api_key.is_none()
             && crate::api::oauth_owner::management_enabled();
+        let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
+            && entry.has_oauth
+            && super::oauth_owner::management_enabled();
         let use_google_oauth_adapter = provider_type == ProviderType::Google && entry.has_oauth;
         let (url, upstream_body, extra_headers) = if use_anthropic_oauth_cli_proxy_adapter {
             let upstream_body = match rewrite_model_for_anthropic_cli_proxy(&body, &entry.model_id)
@@ -2228,6 +2233,23 @@ pub(crate) async fn chat_completions_inner(
                 format!("kimi-{}", entry.model_id)
             };
             let upstream_body = match rewrite_model_for_kimi(&body, &model) {
+                Ok(body) => body,
+                Err(_) => {
+                    server_error_count += 1;
+                    continue;
+                }
+            };
+            (
+                cli_proxy_chat_completions_url(),
+                upstream_body,
+                build_cli_proxy_headers(),
+            )
+        } else if use_antigravity_cli_proxy_adapter {
+            let model = format!(
+                "antigravity/{}",
+                entry.model_id.trim_start_matches("antigravity/")
+            );
+            let upstream_body = match rewrite_model(&body, &model) {
                 Ok(body) => body,
                 Err(_) => {
                     server_error_count += 1;
@@ -2375,6 +2397,7 @@ pub(crate) async fn chat_completions_inner(
             && !use_openai_oauth_cli_proxy_adapter
             && !use_xai_oauth_cli_proxy_adapter
             && !use_kimi_oauth_cli_proxy_adapter
+            && !use_antigravity_cli_proxy_adapter
         {
             if let Some(api_key) = &entry.api_key {
                 upstream_req = upstream_req.header("Authorization", format!("Bearer {}", api_key));

@@ -12,6 +12,7 @@ pub(crate) struct ProxyAccount {
     pub identity: String,
     pub oauth: OAuthCredentials,
     pub disabled: bool,
+    pub prefix: Option<String>,
 }
 
 pub(crate) fn auth_dir() -> Option<PathBuf> {
@@ -31,6 +32,7 @@ pub(crate) fn parse_account(file: &str, value: &Value) -> Option<ProxyAccount> {
         "codex" => ProviderType::OpenAI,
         "xai" => ProviderType::Xai,
         "kimi" => ProviderType::Kimi,
+        "antigravity" => ProviderType::Antigravity,
         _ => return None,
     };
     let access_token = value.get("access_token")?.as_str()?.to_string();
@@ -56,6 +58,10 @@ pub(crate) fn parse_account(file: &str, value: &Value) -> Option<ProxyAccount> {
         .to_string();
     Some(ProxyAccount {
         file: file.to_string(),
+        prefix: value
+            .get("prefix")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         original_id: value
             .get("sandboxed_provider_id")
             .and_then(Value::as_str)
@@ -108,6 +114,8 @@ pub(crate) fn account_for(provider: &AIProvider) -> Option<ProxyAccount> {
 pub(crate) fn needs_reconnect(provider: &AIProvider) -> bool {
     account_for(provider).is_none_or(|a| {
         a.disabled
+            || (a.provider == ProviderType::Antigravity
+                && a.prefix.as_deref() != Some("antigravity"))
             || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
                 < chrono::Utc::now().timestamp_millis()
     })
