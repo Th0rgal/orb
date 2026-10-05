@@ -7042,6 +7042,11 @@ mod tests {
                 .await
                 .unwrap();
             let mut channel = test_paloma_channel(vec![]);
+            channel.mission_id = store
+                .create_mission(None, None, None, None, None, Some("opencode"), None)
+                .await
+                .unwrap()
+                .id;
             if source == "default" {
                 channel.default_backend = Some("gemini".into());
             }
