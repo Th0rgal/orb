@@ -99,7 +99,7 @@ final class OrbFlowUITests: XCTestCase {
         host.tap(); host.typeText("phone-test.example")
         app.buttons["Save"].tap()
         XCTAssertTrue(app.staticTexts["iPhone address"].waitForExistence(timeout: 10))
-        app.navigationBars["Backend"].buttons["Settings"].tap()
+        app.navigationBars["Machines"].buttons["Settings"].tap()
         app.buttons["settings.providers"].tap()
         XCTAssertTrue(app.staticTexts["Fixture provider"].waitForExistence(timeout: 10))
         capture(app, "settings-providers")
