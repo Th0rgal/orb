@@ -6590,7 +6590,15 @@ fn extract_openai_parts(content: Option<&serde_json::Value>) -> Vec<serde_json::
                     .and_then(|v| v.get("url"))
                     .and_then(|v| v.as_str())
                 {
-                    out.push(serde_json::json!({ "text": format!("[image:{}]", url) }));
+                    if let Some(data) = url.strip_prefix("data:") {
+                        if let Some((mime, encoded)) = data.split_once(";base64,") {
+                            if mime.starts_with("image/") && !encoded.is_empty() {
+                                out.push(serde_json::json!({"inlineData":{"mimeType":mime,"data":encoded}}));
+                            }
+                        }
+                    } else if url.starts_with("https://") || url.starts_with("http://") {
+                        out.push(serde_json::json!({"fileData":{"fileUri":url}}));
+                    }
                 }
             }
             _ => {}
@@ -9047,6 +9055,31 @@ mod tests {
         let direct_gemini = parse_direct_model_entry("gemini/gemini-4-argon-eap").unwrap();
         assert_eq!(direct_gemini.provider_id, "google");
         assert_eq!(direct_gemini.model_id, "gemini-4-argon-eap");
+    }
+
+    #[test]
+    fn google_native_request_preserves_image_parts() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"Describe"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}},
+            {"type":"image_url","image_url":{"url":"https://example.com/image.jpg"}}
+        ]}]});
+        let (_, bytes) = build_google_api_upstream_request(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-pro",
+            None,
+            false,
+        )
+        .unwrap();
+        let native: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let parts = &native["contents"][0]["parts"];
+        assert_eq!(parts[0]["text"], "Describe");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "aGVsbG8=");
+        assert_eq!(
+            parts[2]["fileData"]["fileUri"],
+            "https://example.com/image.jpg"
+        );
     }
 
     #[test]

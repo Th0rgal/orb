@@ -329,9 +329,6 @@ pub async fn run_opencode_turn(
     let mut total_cache_read_input_tokens: u64 = 0;
     let agent_model = resolve_opencode_model_from_config(&opencode_config_dir_host, agent)
         .map(|model| canonicalize_configured_opencode_model(&model, app_working_dir));
-    if resolved_model.is_none() {
-        resolved_model = agent_model.clone();
-    }
     // Inject provider definitions into opencode.json for models not in
     // OpenCode's built-in snapshot.
     if let Some(model_override) = resolved_model.as_deref() {
@@ -344,7 +341,11 @@ pub async fn run_opencode_turn(
         );
     }
     if let Some(ref am) = agent_model {
-        if resolved_model.as_deref() != Some(am) {
+        if am
+            .split_once('/')
+            .is_none_or(|(provider, _)| provider_available(&provider.to_lowercase()))
+            && resolved_model.as_deref() != Some(am)
+        {
             ensure_opencode_provider_for_model(
                 &opencode_config_dir_host,
                 app_working_dir,
