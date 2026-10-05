@@ -23862,6 +23862,29 @@ async fn control_actor_loop(
                                     let _ = respond.send(UserMessageAck::Rejected(error));
                                     continue;
                                 }
+                                // A targeted follow-up must not wait behind an unrelated
+                                // main turn. Keep its durable queue on an idle parallel
+                                // runner; the retry pump applies capacity and admission.
+                                if running.is_some() && running_mission_id != Some(mid)
+                                    && !parallel_runners.contains_key(&mid)
+                                    && !queue_has_pending_target_mission(&queue, mid)
+                                {
+                                    let mission = match mission_store.get_mission(mid).await {
+                                        Ok(Some(mission)) => mission,
+                                        _ => { let _ = respond.send(UserMessageAck::Rejected("Queued mission unavailable".into())); continue; }
+                                    };
+                                    let mut runner = super::mission_runner::MissionRunner::new(
+                                        mid, mission.workspace_id, mission.agent.clone(), Some(mission.backend.clone()),
+                                        mission.session_id.clone(), mission.config_profile.clone(),
+                                        model_for_dispatch(&mission_store, &mission).await,
+                                        mission.model_effort.clone(), mission.fast_mode,
+                                    );
+                                    runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+                                    runner.working_directory = mission.working_directory.clone();
+                                    runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
+                                    runner.history.extend(mission.history.iter().map(|entry| (entry.role.clone(), entry.content.clone())));
+                                    parallel_runners.insert(mid, runner);
+                                }
                                 if let Some(runner) = parallel_runners.get_mut(&mid) {
                                     if runner.cancellation_requested() {
                                         let _ = respond.send(UserMessageAck::Rejected("Mission is stopping".into()));
@@ -27942,7 +27965,11 @@ async fn control_actor_loop(
                 if parallel_followup_retry.elapsed() >= std::time::Duration::from_secs(1) {
                     parallel_followup_retry = std::time::Instant::now();
                     let mut ready = Vec::new();
+                    let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
+                    let occupied = parallel_runners.values().filter(|runner| runner.is_running()).count() + usize::from(running.is_some());
+                    let available = max_parallel.saturating_sub(occupied);
                     for (mid, runner) in parallel_runners.iter_mut() {
+                        if ready.len() >= available { break; }
                         match prepare_host_parallel_followup(&control_hub, &mission_store, &events_tx, runner, &format!("control:{session_user_id}")).await {
                             Ok(Some(previous)) => ready.push((*mid, previous)),
                             Ok(None) => {},

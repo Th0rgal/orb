@@ -69,11 +69,21 @@ impl Harness {
         nodes: Vec<crate::remote_node::RemoteNodeConfig>,
         enabled: bool,
     ) -> Self {
+        Self::with_capacity(dir, nodes, enabled, 1).await
+    }
+
+    async fn with_capacity(
+        dir: FixtureDir,
+        nodes: Vec<crate::remote_node::RemoteNodeConfig>,
+        enabled: bool,
+        max_parallel: usize,
+    ) -> Self {
         let path = dir.path();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::new(path.to_path_buf());
         config.port = listener.local_addr().unwrap().port();
         config.automations_enabled = enabled;
+        config.max_parallel_missions = max_parallel;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
@@ -10880,4 +10890,65 @@ async fn host_parallel_followup_preserves_cooldown_and_cancellable_rollback() {
         runner.remove_from_queue(first),
         "rejected delivery remains cancellable"
     );
+}
+
+#[tokio::test]
+async fn host_followup_dispatches_in_parallel_with_unrelated_main_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = Harness::with_capacity(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        Vec::new(),
+        true,
+        2,
+    )
+    .await;
+    let main = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("held main"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let main_dir = install_native_fixture(&h, main.id, "before").await;
+    assert!(h
+        .request(false, main.id, json!({"content":"/goal hold main"}))
+        .await
+        .status()
+        .is_success());
+    wait_native_file(&main_dir.join("started")).await;
+    let target = h.writer(MissionStatus::AwaitingUser, None).await;
+    let target_dir = install_native_fixture(&h, target.id, "after").await;
+    let response = h.request(false, target.id, json!({"content":"Continue independently", "queue_followup":true, "continue_identity":Harness::assertion(&target)})).await;
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
+    wait_native_file(&target_dir.join("requests.jsonl")).await;
+    wait_native_status(&h, target.id, MissionStatus::AwaitingUser).await;
+    assert!(
+        !main_dir.join("release").exists(),
+        "target must run before the unrelated main turn is released"
+    );
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(main.id)
+        .await
+        .unwrap()
+        .is_some());
+    std::fs::write(main_dir.join("release"), "").unwrap();
+    wait_native_status(&h, main.id, MissionStatus::Blocked).await;
+    NATIVE_FIXTURES.lock().unwrap().remove(&main.id);
+    NATIVE_FIXTURES.lock().unwrap().remove(&target.id);
 }
