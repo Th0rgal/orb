@@ -2129,6 +2129,7 @@ pub(crate) async fn chat_completions_inner(
     // 4. Try each entry in order (waterfall)
     let mut rate_limit_count: u32 = 0;
     let mut client_error_count: u32 = 0;
+    let mut transport_validation_errors = Vec::new();
     let mut server_error_count: u32 = 0;
     let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
 
@@ -2200,8 +2201,10 @@ pub(crate) async fn chat_completions_inner(
         let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
             && entry.has_oauth
             && super::oauth_owner::management_enabled();
-        let use_google_api_adapter =
-            provider_type == ProviderType::Google && !entry.has_oauth && entry.api_key.is_some();
+        let use_google_api_adapter = provider_type == ProviderType::Google
+            && !entry.has_oauth
+            && entry.api_key.is_some()
+            && uses_native_google_api(entry.base_url.as_deref());
         let use_google_oauth_cli_proxy_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
             && entry.api_key.is_none()
@@ -2254,10 +2257,11 @@ pub(crate) async fn chat_completions_inner(
                 build_cli_proxy_headers(),
             )
         } else if use_kimi_oauth_cli_proxy_adapter {
-            let model = if entry.model_id.starts_with("kimi-") {
-                entry.model_id.clone()
-            } else {
-                format!("kimi-{}", entry.model_id)
+            let model = match entry.model_id.as_str() {
+                "kimi-for-coding" => "kimi-k3".to_string(),
+                "kimi-for-coding-highspeed" => "kimi-k2.7-code-highspeed".to_string(),
+                id if id.starts_with("kimi-") => id.to_string(),
+                id => format!("kimi-{id}"),
             };
             let upstream_body = match rewrite_model_for_kimi(&body, &model) {
                 Ok(body) => body,
@@ -2324,8 +2328,8 @@ pub(crate) async fn chat_completions_inner(
             ) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::error!("Failed to build Google API upstream request: {}", e);
-                    server_error_count += 1;
+                    transport_validation_errors.push(e);
+                    client_error_count += 1;
                     continue;
                 }
             };
@@ -3703,6 +3707,13 @@ pub(crate) async fn chat_completions_inner(
 
     let attempted = rate_limit_count + client_error_count + server_error_count;
 
+    if attempted > 0 && attempted as usize == transport_validation_errors.len() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            transport_validation_errors.remove(0),
+            "invalid_request_error",
+        );
+    }
     if attempted == 0 {
         // No upstream requests were made — every entry was skipped due to
         // missing credentials, unknown provider type, or incompatible API.
@@ -6296,7 +6307,7 @@ fn build_google_request_object(
         let mut parts: Vec<serde_json::Value> = if role == "tool" {
             Vec::new()
         } else {
-            extract_openai_parts(message.get("content"))
+            extract_openai_parts(message.get("content"))?
         };
 
         if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
@@ -6514,6 +6525,17 @@ fn build_google_upstream_request(
     ))
 }
 
+// Explicit compatible gateways retain their chat-completions transport.
+fn uses_native_google_api(base_url: Option<&str>) -> bool {
+    let Some(base) = base_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    url::Url::parse(base).is_ok_and(|url| {
+        url.host_str() == Some("generativelanguage.googleapis.com")
+            && !url.path().trim_end_matches('/').ends_with("/openai")
+    })
+}
+
 fn build_google_api_upstream_request(
     openai_body: &[u8],
     model_id: &str,
@@ -6549,18 +6571,20 @@ fn build_google_api_upstream_request(
     ))
 }
 
-fn extract_openai_parts(content: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+fn extract_openai_parts(
+    content: Option<&serde_json::Value>,
+) -> Result<Vec<serde_json::Value>, String> {
     let Some(content) = content else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if let Some(s) = content.as_str() {
         if s.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        return vec![serde_json::json!({ "text": s })];
+        return Ok(vec![serde_json::json!({ "text": s })]);
     }
     let Some(arr) = content.as_array() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for part in arr {
@@ -6577,13 +6601,27 @@ fn extract_openai_parts(content: Option<&serde_json::Value>) -> Vec<serde_json::
                     .and_then(|v| v.get("url"))
                     .and_then(|v| v.as_str())
                 {
-                    out.push(serde_json::json!({ "text": format!("[image:{}]", url) }));
+                    if let Some(data) = url.strip_prefix("data:") {
+                        let (mime, encoded) = data.split_once(";base64,").filter(|(mime, encoded)| mime.starts_with("image/") && !encoded.is_empty())
+                            .ok_or_else(|| "Invalid Gemini image data URI: expected image MIME type and base64 data".to_string())?;
+                        out.push(
+                            serde_json::json!({"inlineData":{"mimeType":mime,"data":encoded}}),
+                        );
+                    } else if url::Url::parse(url).is_ok_and(|u| {
+                        u.scheme() == "https"
+                            && u.host_str() == Some("generativelanguage.googleapis.com")
+                            && u.path().starts_with("/v1beta/files/")
+                    }) {
+                        out.push(serde_json::json!({"fileData":{"fileUri":url}}));
+                    } else {
+                        return Err("Native Gemini images require a base64 data URI or a Gemini Files API URI. Upload external images as base64 data URIs.".into());
+                    }
                 }
             }
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 fn extract_openai_message_text(content: Option<&serde_json::Value>) -> String {
@@ -9034,6 +9072,65 @@ mod tests {
         let direct_gemini = parse_direct_model_entry("gemini/gemini-4-argon-eap").unwrap();
         assert_eq!(direct_gemini.provider_id, "google");
         assert_eq!(direct_gemini.model_id, "gemini-4-argon-eap");
+    }
+
+    #[test]
+    fn google_native_request_preserves_image_parts() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"Describe"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}},
+            {"type":"image_url","image_url":{"url":"https://generativelanguage.googleapis.com/v1beta/files/image123"}}
+        ]}]});
+        let (_, bytes) = build_google_api_upstream_request(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-pro",
+            None,
+            false,
+        )
+        .unwrap();
+        let native: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let parts = &native["contents"][0]["parts"];
+        assert_eq!(parts[0]["text"], "Describe");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "aGVsbG8=");
+        assert_eq!(
+            parts[2]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/image123"
+        );
+    }
+
+    #[test]
+    fn google_native_request_rejects_external_image_urls() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+        ]}]});
+        assert!(build_google_api_upstream_request(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-pro",
+            None,
+            false
+        )
+        .unwrap_err()
+        .contains("base64 data URI"));
+    }
+
+    #[test]
+    fn google_custom_gateways_keep_compatible_transport() {
+        assert!(uses_native_google_api(None));
+        assert!(uses_native_google_api(Some(
+            "https://generativelanguage.googleapis.com/v1beta"
+        )));
+        for base in [
+            "https://gateway.example/v1",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ] {
+            assert!(!uses_native_google_api(Some(base)));
+            assert_eq!(
+                completions_url(ProviderType::Google, Some(base)),
+                Some(format!("{base}/chat/completions"))
+            );
+        }
+        assert_eq!(ProviderType::from_id("gemini"), Some(ProviderType::Google));
     }
 
     #[test]
