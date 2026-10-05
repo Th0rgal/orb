@@ -163,3 +163,24 @@ test("reserved attachment reference rejection keeps the follow-up draft and atta
   await expect(page.locator(".scroll .user").filter({hasText:prose})).toHaveCount(1);await expect(field).toHaveValue("");
   await expect(page.locator('.followup-queue')).toHaveCount(0);
 });
+
+
+test("remote queue appears while the message request is still pending",async({page})=>{
+  const state=await setup(page,true);state.releaseSlow();
+  let release!:()=>void;
+  const receipt=new Promise<void>(resolve=>release=resolve);
+  await page.route("**/api/control/message",async route=>{await receipt;await route.fallback();});
+  await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
+  const field=page.getByPlaceholder("Send follow-up");
+  await field.fill("Continue overnight despite a slow connection");await field.press("Enter");
+  const queue=page.getByRole("region",{name:"Queued messages",exact:true});
+  await expect(queue).toContainText("Continue overnight despite a slow connection");
+  await expect(queue).toContainText("Sending…");
+  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toHaveCount(0);
+  expect(state.posts).toHaveLength(0);
+  release();
+  await expect(queue).toContainText("1 Queued");
+  await expect(queue.locator(".queue-row")).toHaveCount(1);
+  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toBeVisible();
+  expect(state.posts).toHaveLength(1);
+});
