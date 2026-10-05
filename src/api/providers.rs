@@ -326,6 +326,7 @@ pub(crate) async fn catalog_model_options_for_state(
         state.config.working_dir.as_path(),
     );
     drop(cached);
+    apply_cli_proxy_catalog(&mut providers, &store_providers).await;
 
     let mut models = Vec::new();
     for provider in &providers {
@@ -1684,6 +1685,113 @@ fn apply_connection_models(providers: &mut Vec<Provider>, store: &[AIProvider], 
     }
 }
 
+/// OAuth subscriptions are limited to the live CLIProxyAPI model registry.
+/// Public/API-key catalogs may contain models that this transport cannot route.
+async fn apply_cli_proxy_catalog(providers: &mut [Provider], store: &[AIProvider]) {
+    if !super::oauth_owner::management_enabled() {
+        return;
+    }
+    let Some(endpoint) = super::oauth_owner::cli_proxy_endpoint() else {
+        return;
+    };
+    let url = format!("{}/models", endpoint.openai_v1_url());
+    type Cache = Option<(String, Instant, serde_json::Value)>;
+    static CACHE: OnceLock<tokio::sync::Mutex<Cache>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(None))
+        .lock()
+        .await;
+    if !cache
+        .as_ref()
+        .is_some_and(|(key, until, _)| key == &url && *until > Instant::now())
+    {
+        let response = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(&endpoint.api_key)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await;
+        if let Ok(response) = response {
+            if response.status().is_success() {
+                if let Ok(value) = response.json::<serde_json::Value>().await {
+                    if value.get("data").is_some_and(serde_json::Value::is_array) {
+                        *cache =
+                            Some((url.clone(), Instant::now() + Duration::from_secs(30), value));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, _, value)) = cache
+        .as_ref()
+        .filter(|(key, until, _)| key == &url && *until > Instant::now())
+    {
+        apply_cli_proxy_catalog_value(providers, store, value);
+    } else {
+        apply_cli_proxy_catalog_value(providers, store, &serde_json::json!({"data":[]}));
+    }
+}
+
+fn apply_cli_proxy_catalog_value(
+    providers: &mut [Provider],
+    store: &[AIProvider],
+    value: &serde_json::Value,
+) {
+    let Some(rows) = value.get("data").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for provider in providers {
+        let Some(kind) = ProviderType::from_id(&provider.id) else {
+            continue;
+        };
+        let accounts: Vec<_> = store
+            .iter()
+            .filter(|a| a.enabled && a.provider_type == kind)
+            .collect();
+        if accounts.is_empty() || accounts.iter().any(|a| a.api_key.is_some()) {
+            continue;
+        }
+        let owner = match kind {
+            ProviderType::Anthropic => "anthropic",
+            ProviderType::OpenAI => "openai",
+            ProviderType::Kimi => "moonshot",
+            ProviderType::Xai => "xai",
+            ProviderType::Antigravity => "antigravity",
+            _ => continue,
+        };
+        provider.models = rows
+            .iter()
+            .filter_map(|row| {
+                if row.get("owned_by")?.as_str()? != owner {
+                    return None;
+                }
+                let raw = row.get("id")?.as_str()?;
+                let id = if kind == ProviderType::Antigravity {
+                    raw.strip_prefix("antigravity/")?
+                } else if raw.contains('/') {
+                    return None;
+                } else if kind == ProviderType::Kimi {
+                    raw.strip_prefix("kimi-").unwrap_or(raw)
+                } else {
+                    raw
+                };
+                if (kind == ProviderType::OpenAI && !is_codex_backend_model_id(id))
+                    || (kind == ProviderType::Xai && !is_grok_backend_model_id(id))
+                {
+                    return None;
+                }
+                Some(ProviderModel {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    description: None,
+                })
+            })
+            .collect();
+        provider.models.sort_by(|a, b| a.id.cmp(&b.id));
+        provider.models.dedup_by(|a, b| a.id == b.id);
+    }
+}
+
 pub async fn model_discovery_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let snapshot = crate::model_catalog::read_state(&state.config.working_dir);
     let providers = discovery_accounts(state.ai_providers.list().await);
@@ -2573,6 +2681,66 @@ fn is_grok_backend_model_id(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_proxy_catalog_replaces_subscription_only_models_and_keeps_api_models() {
+        let mut accounts = Vec::new();
+        let mut providers = Vec::new();
+        for kind in [
+            ProviderType::OpenAI,
+            ProviderType::Kimi,
+            ProviderType::Antigravity,
+            ProviderType::Anthropic,
+        ] {
+            let mut account = AIProvider::new(kind, "Account".into());
+            account.enabled = true;
+            if kind == ProviderType::Anthropic {
+                account.api_key = Some("independent-api-key".into());
+            }
+            accounts.push(account);
+            providers.push(Provider {
+                id: kind.id().into(),
+                name: kind.id().into(),
+                billing: "subscription".into(),
+                description: String::new(),
+                models: vec![ProviderModel {
+                    id: "stale".into(),
+                    name: "Stale".into(),
+                    description: None,
+                }],
+            });
+        }
+        apply_cli_proxy_catalog_value(
+            &mut providers,
+            &accounts,
+            &serde_json::json!({"data":[
+                {"id":"gpt-6.1-sol","owned_by":"openai"},
+                {"id":"gpt-image-2","owned_by":"openai"},
+                {"id":"kimi-k3","owned_by":"moonshot"},
+                {"id":"antigravity/gemini-3-flash","owned_by":"antigravity"},
+                {"id":"gemini-3-flash","owned_by":"antigravity"}
+            ]}),
+        );
+        let ids = |kind: ProviderType| {
+            providers
+                .iter()
+                .find(|p| p.id == kind.id())
+                .unwrap()
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(ProviderType::OpenAI), vec!["gpt-6.1-sol"]);
+        assert_eq!(ids(ProviderType::Kimi), vec!["k3"]);
+        assert_eq!(ids(ProviderType::Antigravity), vec!["gemini-3-flash"]);
+        assert_eq!(ids(ProviderType::Anthropic), vec!["stale"]);
+        apply_cli_proxy_catalog_value(&mut providers, &accounts, &serde_json::json!({"data":[]}));
+        assert!(providers
+            .iter()
+            .filter(|p| p.id != "anthropic")
+            .all(|p| p.models.is_empty()));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
