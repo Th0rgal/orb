@@ -123,6 +123,7 @@ pub(crate) enum TurnExtras<'a> {
         tool_hub: Option<Arc<FrontendToolHub>>,
     },
     ClaudeCode {
+        owner: Option<crate::api::auth::AuthUser>,
         secrets: Option<Arc<SecretsStore>>,
         tool_hub: Option<Arc<FrontendToolHub>>,
         status: Option<Arc<RwLock<ControlStatus>>>,
@@ -186,38 +187,50 @@ impl HarnessRunner for ClaudeCodeRunner {
         &'a self,
         ctx: TurnContext<'a>,
     ) -> Pin<Box<dyn Future<Output = AgentResult> + Send + 'a>> {
-        let (secrets, tool_hub, status, history, max_history_total_chars) = match ctx.extras {
+        let (owner, secrets, tool_hub, status, history, max_history_total_chars) = match ctx.extras
+        {
             TurnExtras::ClaudeCode {
+                owner,
                 secrets,
                 tool_hub,
                 status,
                 history,
                 max_history_total_chars,
-            } => (secrets, tool_hub, status, history, max_history_total_chars),
+            } => (
+                owner,
+                secrets,
+                tool_hub,
+                status,
+                history,
+                max_history_total_chars,
+            ),
             _ => {
                 tracing::debug!("ClaudeCodeRunner invoked without ClaudeCode extras");
-                (None, None, None, &[][..], 0)
+                (None, None, None, None, &[][..], 0)
             }
         };
-        Box::pin(claudecode::run_claudecode_turn_with_recovery(
-            ctx.mission_store,
-            ctx.workspace,
-            ctx.work_dir,
-            ctx.message,
-            ctx.model,
-            ctx.model_effort,
-            ctx.agent,
-            ctx.mission_id,
-            ctx.events_tx,
-            ctx.cancel,
-            secrets,
-            ctx.app_working_dir,
-            ctx.session_id,
-            ctx.is_continuation,
-            tool_hub,
-            status,
-            history,
-            max_history_total_chars,
+        Box::pin(claudecode::MCP_LAUNCH_OWNER.scope(
+            owner,
+            claudecode::run_claudecode_turn_with_recovery(
+                ctx.mission_store,
+                ctx.workspace,
+                ctx.work_dir,
+                ctx.message,
+                ctx.model,
+                ctx.model_effort,
+                ctx.agent,
+                ctx.mission_id,
+                ctx.events_tx,
+                ctx.cancel,
+                secrets,
+                ctx.app_working_dir,
+                ctx.session_id,
+                ctx.is_continuation,
+                tool_hub,
+                status,
+                history,
+                max_history_total_chars,
+            ),
         ))
     }
 }

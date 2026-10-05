@@ -4545,6 +4545,7 @@ async fn run_mission_turn(
             );
             let extras = if backend_id == "claudecode" {
                 super::runners::TurnExtras::ClaudeCode {
+                    owner: boss_user_id.clone(),
                     secrets: secrets.clone(),
                     tool_hub: Some(Arc::clone(&tool_hub)),
                     status: Some(Arc::clone(&status)),
