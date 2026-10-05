@@ -2050,6 +2050,9 @@ impl ModelChainStore {
                         }
                     }
                     seen_account_ids.insert(sa.account_id);
+                    if provider_is_google && sa.has_oauth && sa.api_key.is_none() {
+                        store_contributed_google_oauth = true;
+                    }
                     resolved.push(ResolvedEntry {
                         provider_id: entry.provider_id.clone(),
                         model_id: entry.model_id.clone(),
