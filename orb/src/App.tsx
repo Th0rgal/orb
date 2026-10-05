@@ -2502,6 +2502,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
   };
 
+  // A terminal snapshot from either SSE or polling reconciles durable output.
+  createEffect(on(() => mission()?.status, status => {
+    if (p.id && status && !missionPhase({status} as Mission, false).moving) void resync(true);
+  }));
+
   let olderPending:Promise<void>|undefined;
   const loadOlder=()=>{
     if(olderPending)return olderPending;
@@ -2540,6 +2545,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
     void refresh();
+    // History must load even when the live connection has not opened yet.
+    void resync(true);
     const stopStream = streamMission(
       p.id,
       (ev) => {
@@ -2561,7 +2568,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
     const stopPoll = pollWhileVisible(async () => {
+      const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
+      // Reconcile through completion even if the live stream misses output.
+      const transcript = items();
+      const lastUser = transcript.reduce((last, item, index) => item.kind === "user" && !item.queued ? index : last, -1);
+      // Partial text, thinking, and tools are activity, not a final reply.
+      const hasFinalReply = transcript.slice(lastUser + 1).some(item =>
+        (item.kind === "text" && !item.live && !!item.text.trim()) || item.kind === "error");
+      const waitingForReply = ["awaiting_user", "waiting_user", "completed", "done"].includes(mission()?.status ?? "")
+        && !hasFinalReply && viewItems().some(item => item.kind === "user" && !item.queued);
+      if (wasMoving || missionPhase(mission(), activity()).moving || waitingForReply) await resync(true);
       // Queue failures are recoverable independently of the mission stream.
       // A healthy stream must not leave a transient startup warning forever.
       if (queueError()) await resync(true);
@@ -2605,7 +2622,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (localRunActive(p.id) && localActivities(p.id).length > 0) return true;
     const list = viewItems();
     const lastUser = list.reduce((last, item, index) => item.kind === "user" && !item.queued ? index : last, -1);
-    return list.slice(lastUser + 1).some(i => ["text", "tool", "think"].includes(i.kind));
+    return list.slice(lastUser + 1).some(i => (i.kind === "tool" || ((i.kind === "text" || i.kind === "think") && !!i.text.trim())));
   };
   /**
    * The mission is working and has produced nothing yet: the window where the

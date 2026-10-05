@@ -69,3 +69,37 @@ it('shows a remote queued follow-up once and removes it without reopening the co
  await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
  await waitFor(()=>expect(screen.queryByText('Durable remote follow-up')).toBeNull());
 });
+
+it('recovers a stored Antigravity answer on completion when live text was missed',async()=>{
+ const polling=await import('../src/poll');
+ let poll:undefined|(()=>void|Promise<unknown>);
+ const pollSpy=vi.spyOn(polling,'pollWhileVisible').mockImplementation((run,ms)=>{if(ms===10000)poll=run;return ()=>{};});
+ const id='antigravity-missed-final';
+ const mission={id,backend:'antigravity',status:'active',history:[],created_at:'',updated_at:''};
+ const {getMission}=await import('../src/api');
+ vi.mocked(getMission).mockImplementation(async()=>({...mission}));
+ let complete=false;
+ vi.stubGlobal('fetch',vi.fn(async url=>{
+  if(String(url).includes('/events'))return Response.json(complete?[{id:2,event_id:'agy-answer',sequence:2,event_type:'assistant_message',content:'I am Gemini inside Antigravity.',timestamp:''}]:[],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false',...(complete?{'X-Next-Cursor':'2','X-Page-Max-Sequence':'2'}:{})}});
+  return Response.json([]);
+ }));
+ const view=render(()=><NativeMissionView id={id} initial={mission} launch={{prompt:'What model are you?',nodeId:'core',destination:'Core'}}/>);
+ await waitFor(()=>expect(state.event).toBeTypeOf('function'));
+ await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).not.toBeNull());
+ state.event!({type:'text_delta',data:{content:''}});
+ expect(view.container.querySelector('.agent-wait-status')).not.toBeNull();
+ state.event!({type:'thinking',data:{content:'Checking the requested model.',done:true}});
+ state.event!({type:'tool_call',data:{tool_call_id:'partial-tool',name:'read',args:{}}});
+ state.event!({type:'text_delta',data:{content:'I am'}});
+ mission.status='awaiting_user';
+ state.event!({type:'mission_status_changed',data:{status:'awaiting_user'}});
+ await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).toBeNull());
+ // Durable history lags the terminal status, and the live final never arrives.
+ expect(screen.queryByText('I am Gemini inside Antigravity.')).toBeNull();
+ complete=true;
+ await poll!();
+ await waitFor(()=>expect(screen.getByText('I am Gemini inside Antigravity.')).toBeDefined());
+ expect(screen.queryByText('I am', {exact:true})).toBeNull();
+ pollSpy.mockRestore();
+ expect(view.container.querySelector('.agent-wait-status')).toBeNull();
+});

@@ -1,7 +1,6 @@
 import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api, connectionVersion, type Mission } from "./api";
 import { missionSettingsIdle } from "./missionLaunch";
-import { ChevronDown } from "./icons";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";
 export interface CyberSelection { mode: CyberMode; status: "requested" | "confirmed"; confirmed_program?: string | null; confirmed_model?: string | null; revision: string }
@@ -28,14 +27,13 @@ export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;no
  const key=(e:KeyboardEvent)=>{if(e.key==='Escape')setOpen(false);};
  onMount(()=>{window.addEventListener('pointerdown',close);window.addEventListener('keydown',key);});
  onCleanup(()=>{window.removeEventListener('pointerdown',close);window.removeEventListener('keydown',key);});
- createEffect(()=>{if(p.disabled)setOpen(false);});
  return <div class="cyber-picker model-wrap under-model-wrap" ref={root}>
-  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} disabled={p.disabled} aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={p.note??(p.confirmed?'Provider-confirmed program':'Requested program; activation is not confirmed')} onClick={()=>setOpen(!open())}>
+  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>setOpen(!open())}>
    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 4 6v6c0 4 5 8 8 9 3-1 8-5 8-9V6z"/></svg>
-   Cyber: {cyberLabels[p.value]}<Show when={p.value==='daybreak'}><span class="cyber-state">{p.confirmed?'active':'requested'}</span></Show><ChevronDown size={10}/>
   </button>
   <Show when={open()}><div class="menu cyber-menu" role="menu" aria-label="Cyber program">
-   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={!!cyberCompatibility(mode,p.model)} title={cyberCompatibility(mode,p.model)} onClick={()=>{p.onChange(mode);setOpen(false);}}>
+   <p>Cyber: {cyberLabels[p.value]}<Show when={p.value==='daybreak'}> — {p.confirmed?'active':'requested'}</Show></p>
+   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={p.disabled||!!cyberCompatibility(mode,p.model)} title={cyberCompatibility(mode,p.model)} onClick={()=>{p.onChange(mode);setOpen(false);}}>
     <span><span class="pick-name">{cyberLabels[mode]}</span><small>{cyberCompatibility(mode,p.model)??({standard:'Use standard safeguards.',daybreak:'Request the approved access for this model. Account authorization is checked at launch.',automatic:'Let the provider choose from this account’s approved access.'}[mode])}</small></span><span class="pick-check">{p.value===mode?'✓':''}</span>
    </button>}</For><p>{p.note??'Applies to the next launch. Does not grant account access or change system permissions.'}</p>
   </div></Show>

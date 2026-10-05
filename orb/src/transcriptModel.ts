@@ -154,10 +154,11 @@ export class TranscriptReducer {
         }
         if (index == null && bubble === "text_delta_latest" && this.lastFinal != null) {
           const finalized = this.items[this.lastFinal];
-          if (finalized?.kind === "text" && !finalized.live && snapshot != null && snapshot === finalized.text) {
-            index = this.lastFinal;
-            this.bubbles.set(bubble, index);
-            live = false;
+          if (finalized?.kind === "text" && !finalized.live && snapshot != null && finalized.text.startsWith(snapshot)) {
+            // Recovery may replay an unsequenced live prefix after its durable
+            // final. A delivered user turn resets lastFinal, so new replies
+            // with identical text remain independent.
+            return;
           }
         }
         if (index == null) {

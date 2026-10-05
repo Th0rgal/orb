@@ -33,7 +33,7 @@ test('cyber menu saves per mission, preserves failures, and separates requested 
  await expect(picker).toBeVisible();await picker.click();
  await page.screenshot({path:'/tmp/orb-cyber-menu.png',animations:'disabled'});
  await page.getByRole('menuitemradio',{name:/Daybreak/}).click();
- await expect(page.getByRole('button',{name:'Cyber program: Daybreak'})).toContainText('requested');
+ await expect(page.getByRole('button',{name:'Cyber program: Daybreak'})).toHaveAttribute('title',/requested/);
  expect(patches).toBe(1);expect(mode).toBe('daybreak');
  fail=true;await page.getByRole('button',{name:'Cyber program: Daybreak'}).click();
  await page.getByRole('menuitemradio',{name:/Standard/}).click();
