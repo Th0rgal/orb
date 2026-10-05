@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { remoteLog } from "../src/remoteLog";
 const envelope = "Remote node 'dgx-spark' job 3dff58d2-508c-458e-90c1-701e402a6b5f finished with state 'succeeded' (exit Some(0))\n\nlog tail:\n";
 const text = JSON.stringify({type:"text",sessionID:"ses_native",part:{id:"part_1",text:"## Status\n\nRunning and durable."}});
+const step = {event:"step_update",step_update:{conversation_id:"1e2969c3-c37e-4bfb-816b-876b6df1f6a4",step_index:749,state:"DONE"}};
 describe("legacy OpenCode remote log", () => {
   it("decodes text after a truncated line and retains the exact log", () => {
     const raw=envelope+'truncated JSON...\n'+text+'\n'+text+'\n'+JSON.stringify({type:"step_finish",sessionID:"ses_native",part:{tokens:{total:38487}}});
@@ -9,7 +10,7 @@ describe("legacy OpenCode remote log", () => {
   });
   it("leaves ordinary JSON alone and collapses unrecognized remote logs", () => {
     expect(remoteLog(text)).toEqual({text});
-    for(const raw of [envelope+'',envelope+JSON.stringify({event:"step_update",step_update:{state:"DONE"}})]) expect(remoteLog(raw)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:raw});
+    for(const raw of [envelope+'',envelope+JSON.stringify(step)]) expect(remoteLog(raw)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:raw});
   });
   it("retains failure status even when the log contains a text part", () => {
     const raw=envelope.replace("'succeeded'", "'failed'")+text;
@@ -19,10 +20,10 @@ describe("legacy OpenCode remote log", () => {
 });
 
 it("preserves successful Markdown links and requested JSON replies", () => {
- for (const answer of ['[documentation](https://example.com)', '{"status":"ok","results":[1,2]}', '[1, 2, 3]']) {
+ for (const answer of ['[documentation](https://example.com)', '{"status":"ok","results":[1,2]}', '[1, 2, 3]', '{"event":"result","result":{"status":"ok"}}', '{"type":"report","session_id":"abc"}']) {
   expect(remoteLog(envelope+answer)).toEqual({text:answer,details:envelope+answer});
  }
- const log='truncated first line...\n'+JSON.stringify({event:'result',result:{status:'SUCCESS',response:'done'}});
+ const log='truncated first line...\n'+JSON.stringify({event:'result',result:{conversation_id:step.step_update.conversation_id,status:'SUCCESS',response:'done',duration_seconds:30}});
  expect(remoteLog(envelope+log)).toEqual({text:envelope.split('\n\nlog tail:')[0],details:envelope+log});
 });
 

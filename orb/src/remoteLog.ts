@@ -34,8 +34,15 @@ function structuredHarnessLog(log: string): boolean {
       const event = JSON.parse(line);
       if (!event || typeof event !== "object" || Array.isArray(event)) return false;
       // Recognize transport envelopes, not arbitrary requested JSON responses.
-      return (typeof event.event === "string" && event[event.event] != null)
-        || (typeof event.type === "string" && (typeof event.sessionID === "string" || typeof event.session_id === "string"));
+      if (typeof event.sessionID === "string" && event.sessionID.startsWith("ses_")) {
+        return ["text", "tool_use", "step_start", "step_finish", "error"].includes(event.type)
+          && event.part != null;
+      }
+      const payload = event.event === "step_update" ? event.step_update : event.event === "result" ? event.result : null;
+      if (!payload || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(payload.conversation_id ?? "")) return false;
+      return event.event === "step_update"
+        ? Number.isInteger(payload.step_index) && ["ACTIVE", "DONE", "ERROR"].includes(payload.state)
+        : ["SUCCESS", "ERROR"].includes(payload.status) && typeof payload.duration_seconds === "number";
     } catch { return false; }
   });
 }
