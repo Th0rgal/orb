@@ -212,11 +212,13 @@ pub async fn run_opencode_turn(
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic);
     let openai_via_proxy =
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI);
+    let google_via_proxy = has_google;
 
     let refresh_provider = provider_hint.as_deref().or(fallback_provider);
     let refresh_result = match refresh_provider {
         Some("anthropic") | Some("claude") if anthropic_via_proxy => Ok(()),
         Some("openai") | Some("codex") if openai_via_proxy => Ok(()),
+        Some("google") | Some("gemini") if google_via_proxy => Ok(()),
         Some("anthropic") | Some("claude") => ensure_anthropic_oauth_token_valid().await,
         Some("openai") | Some("codex") => ensure_openai_oauth_token_valid().await,
         Some("google") | Some("gemini") => ensure_google_oauth_token_valid().await,
@@ -341,7 +343,7 @@ pub async fn run_opencode_turn(
             );
         }
     }
-    if needs_google {
+    if needs_google && !google_via_proxy {
         if let Some(project_id) = detect_google_project_id() {
             ensure_opencode_google_project_id(&opencode_config_dir_host, &project_id);
         }

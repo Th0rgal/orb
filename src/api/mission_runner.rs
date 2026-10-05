@@ -5751,6 +5751,16 @@ pub(crate) fn detect_opencode_provider_auth(
             configured_providers.insert("google".to_string());
         }
     }
+    if let Ok(value) = std::env::var("GEMINI_API_KEY") {
+        if !value.trim().is_empty() {
+            has_google = true;
+            configured_providers.insert("google".to_string());
+        }
+    }
+    if crate::api::ai_providers::google_cli_proxy_account_available() {
+        has_google = true;
+        configured_providers.insert("google".to_string());
+    }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
@@ -6155,6 +6165,18 @@ fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
             );
         }
     }
+    if let Ok(key) = std::env::var("SANDBOXED_PROXY_SECRET") {
+        if !key.trim().is_empty() {
+            map.insert(
+                "google".into(),
+                serde_json::json!({"type":"api","key":&key}),
+            );
+            map.insert(
+                "gemini".into(),
+                serde_json::json!({"type":"api","key":&key}),
+            );
+        }
+    }
     if super::oauth_owner::management_enabled() {
         // Kimi uses the host adapter for payload normalization; API auth keeps
         // OpenCode from renewing a copied subscription token independently.
@@ -6425,6 +6447,36 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 "options": options
             }))
         }
+        "google" | "gemini" => {
+            // Route Google/Gemini models (including `gemini-4-argon-eap`) through
+            // the host proxy so the router uses the Gemini API key first and falls
+            // back to CLIProxyAPI automatically.
+            let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+            let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    tracing::error!("SANDBOXED_PROXY_SECRET not set; google proxy auth will fail");
+                    String::new()
+                });
+            let mut options = serde_json::json!({
+                "baseURL": format!("http://{}:{}/v1", host_ip, port),
+                "apiKey": proxy_key
+            });
+            if let Some(mid) = mission_id {
+                options["headers"] = serde_json::json!({
+                    crate::api::proxy_liveness::MISSION_ID_HEADER: mid
+                });
+            }
+            Some(serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Google",
+                "models": {
+                    model_id: { "name": model_id }
+                },
+                "options": options
+            }))
+        }
         _ => custom_opencode_provider_definition(app_working_dir, provider_id),
     };
 
@@ -6454,11 +6506,12 @@ pub(crate) fn ensure_opencode_provider_for_model(
     if provider_id == "builtin"
         || provider_id == "kimi"
         || provider_id == "antigravity"
+        || matches!(provider_id, "google" | "gemini")
         || cli_proxy_owned_provider
     {
         // Always overwrite proxy-backed providers — the proxy secret
-        // (options.apiKey) changes on every server restart, Kimi must not
-        // keep a stale api.kimi.com block from workspace config, and a
+        // (options.apiKey) changes on every server restart, Kimi/Google must not
+        // keep a stale upstream block from workspace config, and a
         // CLIProxyAPI-owned Anthropic/OpenAI block must track the proxy URL.
         providers_map.insert(provider_id.to_string(), provider_def);
     } else if let Some(existing) = providers_map.get_mut(provider_id) {

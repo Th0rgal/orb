@@ -2022,6 +2022,23 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         });
     }
 
+    let google_disabled = get_provider_config_entry(&opencode_config, ProviderType::Google)
+        .and_then(|e| e.enabled)
+        == Some(false);
+    if !seen_types.contains(&ProviderType::Google)
+        && !google_disabled
+        && google_cli_proxy_account_available()
+    {
+        accounts.push(crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("google-cli-proxy"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(i64::MAX),
+        });
+    }
+
     accounts
 }
 
@@ -2326,6 +2343,43 @@ pub(crate) fn xai_cli_proxy_account_available() -> bool {
 
     super::oauth_owner::management_enabled()
         || has_refreshable_cli_proxy_account_of_type("xai-", "xai")
+}
+
+/// True when CLIProxyAPI has a Google / Antigravity / Gemini credential it can
+/// serve as a fallback route.
+pub(crate) fn google_cli_proxy_account_available() -> bool {
+    if env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
+        return false;
+    }
+
+    env_var_bool("CLI_PROXY_GEMINI_ENABLED", false)
+        || has_refreshable_cli_proxy_account_of_type("antigravity-", "antigravity")
+        || has_refreshable_cli_proxy_account_of_type("gemini-", "gemini")
+        || cli_proxy_config_has_gemini_key()
+}
+
+fn cli_proxy_config_has_gemini_key() -> bool {
+    let path = match std::env::var("CLI_PROXY_CONFIG_PATH") {
+        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
+        _ if cfg!(test) => return false,
+        _ => std::path::PathBuf::from("/etc/cli-proxy-api/config.yaml"),
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    value
+        .get("gemini-api-key")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| {
+            arr.iter().any(|item| {
+                item.get("api-key")
+                    .and_then(|k| k.as_str())
+                    .is_some_and(|k| !k.trim().is_empty())
+            })
+        })
 }
 
 fn has_refreshable_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
