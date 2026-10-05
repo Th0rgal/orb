@@ -111,14 +111,15 @@ pub(crate) fn account_for(provider: &AIProvider) -> Option<ProxyAccount> {
     })
 }
 
+fn account_needs_reconnect(a: &ProxyAccount) -> bool {
+    a.disabled
+        || (a.provider == ProviderType::Antigravity && a.prefix.as_deref() != Some("antigravity"))
+        || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
+            < chrono::Utc::now().timestamp_millis()
+}
+
 pub(crate) fn needs_reconnect(provider: &AIProvider) -> bool {
-    account_for(provider).is_none_or(|a| {
-        a.disabled
-            || (a.provider == ProviderType::Antigravity
-                && a.prefix.as_deref() != Some("antigravity"))
-            || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
-                < chrono::Utc::now().timestamp_millis()
-    })
+    account_for(provider).is_none_or(|a| account_needs_reconnect(&a))
 }
 
 pub(crate) fn spawn_projection_loop(store: std::sync::Arc<AIProviderStore>) {
@@ -297,6 +298,19 @@ pub(crate) async fn delete(provider: &AIProvider) -> Result<(), (axum::http::Sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_requires_its_own_routing_prefix() {
+        let mut value = serde_json::json!({"type":"antigravity","access_token":"a","refresh_token":"r","expired":"2099-01-01T00:00:00Z"});
+        for prefix in [None, Some("other"), Some("antigravity")] {
+            value["prefix"] = serde_json::json!(prefix);
+            let account = parse_account("google.json", &value).unwrap();
+            assert_eq!(
+                account_needs_reconnect(&account),
+                prefix != Some("antigravity")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn reconnect_preserves_identity_settings_and_independent_api_key() {
         let dir = tempfile::tempdir().unwrap();

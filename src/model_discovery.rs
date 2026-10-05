@@ -507,6 +507,9 @@ async fn discover_antigravity(
     if !crate::api::oauth_owner::management_enabled() {
         return Err("unsupported_oauth".into());
     }
+    if crate::api::cli_proxy_accounts::needs_reconnect(p) {
+        return Err("needs_reauth".into());
+    }
     let file = p
         .cli_proxy_auth_file
         .as_deref()

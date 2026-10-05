@@ -1768,6 +1768,13 @@ impl ModelChainStore {
                 if !account.has_credentials() {
                     continue;
                 }
+                // Legacy Antigravity files cannot serve our explicit proxy namespace.
+                if provider_type == crate::ai_providers::ProviderType::Antigravity
+                    && (!crate::api::oauth_owner::management_enabled()
+                        || crate::api::cli_proxy_accounts::needs_reconnect(account))
+                {
+                    continue;
+                }
                 // Custom providers are a shared type, so an entry must be tied to
                 // the right account. Entries reference a custom provider two ways:
                 //   - the generic "custom" type id, which matches any custom
@@ -2432,6 +2439,34 @@ mod tests {
             resolved
         );
         assert_eq!(resolved[0].account_id, standard[0].account_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_chain_rejects_antigravity_without_ready_bound_file() {
+        let mut account = AIProvider::new(ProviderType::Antigravity, "Legacy Google".into());
+        account.cli_proxy_auth_file = Some(format!("{}.json", uuid::Uuid::new_v4()));
+        account.oauth = Some(OAuthCredentials {
+            access_token: "projected-token".into(),
+            refresh_token: "projected-refresh".into(),
+            expires_at: future_ms(6),
+        });
+        account.status = ProviderStatus::Connected;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "google-proxy",
+            vec![ChainEntry {
+                provider_id: "antigravity".into(),
+                model_id: "gemini-pro".into(),
+            }],
+        )
+        .await;
+        let resolved = chains
+            .resolve_chain("google-proxy", &store, &[], &ProviderHealthTracker::new())
+            .await;
+        assert!(
+            resolved.is_empty(),
+            "a projected token alone must not make Antigravity routable"
+        );
     }
 
     #[tokio::test]
