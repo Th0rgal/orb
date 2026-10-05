@@ -45,3 +45,30 @@ it("exposes API key editing and keeps real error details", async () => {
   fireEvent.click(screen.getByRole("button", { name: /^zai/ }));
   expect(await screen.findByText("Account unavailable")).toBeTruthy();
 });
+
+it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconnect UUID", async () => {
+  const id = "3be8246a-6fa4-41a5-948c-f0d333e6e247";
+  setConnection("http://core.test", "test-token");
+  vi.spyOn(window, "open").mockReturnValue(null);
+  const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/cli-proxy-login")) {
+      expect(JSON.parse(options!.body as string)).toEqual({ provider: "anthropic", provider_id: id });
+      return new Response(JSON.stringify({ session_id: "proxy-session", auth_url: "https://claude.ai/oauth/authorize", flow: "code", instructions: "Paste the Claude authorization code." }));
+    }
+    if (url.endsWith("/callback")) {
+      expect(JSON.parse(options!.body as string)).toEqual({ url: "approved-code#state" });
+      return new Response(JSON.stringify({ status: "completed" }));
+    }
+    return new Response(JSON.stringify(url.endsWith("/cloud/accounts") ? [] : url.endsWith("/providers") ? [{ id, provider_type: "anthropic", name: "Proxy Claude", enabled: true, uses_oauth: true, credential_owner: "cli_proxy", status: { type: "needs_reauth" } }] : {}));
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", { name: "Actions for Proxy Claude", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Reconnect", exact: true }));
+  const input = await screen.findByLabelText("Authorization code or redirect URL");
+  expect(screen.getByText("Paste the Claude authorization code.")).toBeTruthy();
+  fireEvent.input(input, { target: { value: "approved-code#state" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit callback" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(fetch.mock.calls.some(([url]) => url.includes("/oauth/"))).toBe(false);
+});

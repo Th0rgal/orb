@@ -453,7 +453,8 @@ export type CliProxyLoginStatus = "pending" | "completing" | "completed" | "fail
 export interface CliProxyLoginStart {
   session_id: string;
   auth_url: string;
-  flow?: "redirect" | "device";
+  flow?: "redirect" | "device" | "code";
+  instructions?: string;
 }
 
 export interface CliProxyLoginState {
@@ -462,12 +463,16 @@ export interface CliProxyLoginState {
   message?: string;
 }
 
-export async function startCliProxyLogin(provider: string): Promise<CliProxyLoginStart> {
+export async function startCliProxyLogin(provider: string, providerId?: string): Promise<CliProxyLoginStart> {
   return api("/api/ai/providers/cli-proxy-login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify({ provider, provider_id: providerId }),
   });
+}
+
+export async function cancelCliProxyLogin(sessionId: string): Promise<void> {
+  await api(`/api/ai/providers/cli-proxy-login/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
 export async function getCliProxyLogin(sessionId: string): Promise<CliProxyLoginState> {

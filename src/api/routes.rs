@@ -613,6 +613,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Keep short-lived Kimi OAuth access tokens fresh for the chain resolver.
     super::ai_providers::spawn_kimi_oauth_refresh_loop(Arc::clone(&state));
+    super::cli_proxy_accounts::spawn_projection_loop(state.ai_providers.clone());
 
     // Initialize the metadata LLM client for AI-powered mission titles/descriptions
     {

@@ -1817,12 +1817,12 @@ impl ModelChainStore {
                 // own access token: it resolves as an OAuth-only entry, which
                 // the proxy layer sends through CLIProxyAPI with the proxy key.
                 let anthropic_oauth_cli_proxy_routable =
-                    matches!(provider_type, crate::ai_providers::ProviderType::Anthropic)
+                    (matches!(provider_type, crate::ai_providers::ProviderType::Anthropic)
+                        || (crate::api::oauth_owner::management_enabled()
+                            && matches!(provider_type, crate::ai_providers::ProviderType::Kimi)))
                         && account.api_key.is_none()
                         && account.oauth.is_some()
-                        && crate::api::oauth_owner::cli_proxy_owns(
-                            crate::ai_providers::ProviderType::Anthropic,
-                        );
+                        && crate::api::oauth_owner::cli_proxy_owns(provider_type);
                 let fresh_oauth_token = if oauth_is_fresh && !anthropic_oauth_cli_proxy_routable {
                     account
                         .oauth

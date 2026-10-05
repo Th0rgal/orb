@@ -109,7 +109,8 @@ export interface AIProvider {
 export interface CliProxyLoginStart {
   session_id: string;
   auth_url: string;
-  flow?: "redirect" | "device";
+  flow?: "redirect" | "device" | "code";
+  instructions?: string;
 }
 
 export type CliProxyLoginStatus = "pending" | "completing" | "completed" | "failed";
@@ -121,8 +122,12 @@ export interface CliProxyLoginState {
 }
 
 /** Spawn the CLIProxyAPI login CLI for a provider type; returns the auth URL. */
-export async function startCliProxyLogin(providerType: string): Promise<CliProxyLoginStart> {
-  return apiPost("/api/ai/providers/cli-proxy-login", { provider: providerType }, "Failed to start CLIProxyAPI login");
+export async function startCliProxyLogin(providerType: string, providerId?: string): Promise<CliProxyLoginStart> {
+  return apiPost("/api/ai/providers/cli-proxy-login", { provider: providerType, provider_id: providerId }, "Failed to start CLIProxyAPI login");
+}
+
+export async function cancelCliProxyLogin(sessionId: string): Promise<void> {
+  await apiDel(`/api/ai/providers/cli-proxy-login/${encodeURIComponent(sessionId)}`, "Failed to cancel login");
 }
 
 export async function getCliProxyLogin(sessionId: string): Promise<CliProxyLoginState> {

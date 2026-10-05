@@ -82,12 +82,12 @@ struct OrbProvidersSettings: View {
         provider["uses_oauth"].flag && (provider["has_oauth"].flag || !provider["has_api_key"].flag)
     }
     static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
-        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: !["kimi", "google"].contains(type))
+        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "google")
     }
     static func loginSpec(_ provider: OrbJSON) -> OrbProviderLogin? {
         guard provider["uses_oauth"].flag else { return nil }
         let owner = provider["credential_owner"].text, type = provider["provider_type"].text
-        let proxy = !["kimi", "google"].contains(type) && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
+        let proxy = type != "google" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
         guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }
@@ -246,7 +246,13 @@ struct OrbProviderLoginView: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() }.disabled(busy) } }
         }.interactiveDismissDisabled(busy)
         .task { await startAndPoll() }
-        .onDisappear { callback = "" }
+        .onDisappear {
+            callback = ""
+            if spec.proxy && !session.isEmpty {
+                let id = session
+                Task { _ = try? await client.call("/api/ai/providers/cli-proxy-login/\(OrbCore.escape(id))", method: "DELETE") }
+            }
+        }
     }
     private func accept(_ state: OrbJSON) {
         if state["status"].text == "completed" { finished = true; callback = ""; onSaved(); dismiss() }
@@ -254,7 +260,7 @@ struct OrbProviderLoginView: View {
     }
     private func startAndPoll() async {
         do {
-            let value = try await client.call(spec.proxy ? "/api/ai/providers/cli-proxy-login" : "/api/ai/providers/\(OrbCore.escape(spec.id))/oauth/authorize", method: "POST", body: spec.proxy ? .object(["provider": .string(spec.type)]) : .object(["method_index": .number(0)]))
+            let value = try await client.call(spec.proxy ? "/api/ai/providers/cli-proxy-login" : "/api/ai/providers/\(OrbCore.escape(spec.id))/oauth/authorize", method: "POST", body: spec.proxy ? .object(UUID(uuidString: spec.id) == nil ? ["provider": .string(spec.type)] : ["provider": .string(spec.type), "provider_id": .string(spec.id)]) : .object(["method_index": .number(0)]))
             session = spec.proxy ? value["session_id"].text : spec.id
             let link = value[spec.proxy ? "auth_url" : "url"].text
             guard let parsed = URL(string: link), ["https", "http"].contains(parsed.scheme ?? ""), parsed.host != nil, !session.isEmpty else { throw URLError(.badServerResponse) }
