@@ -11392,3 +11392,32 @@ async fn btw_creation_never_coalesces_an_unrelated_matching_title() {
     assert_eq!(error.0, StatusCode::BAD_REQUEST);
     assert!(error.1.contains("Unknown backend"));
 }
+
+#[tokio::test]
+async fn btw_creation_never_coalesces_an_untrusted_project_lease() {
+    let h = Harness::new().await;
+    let existing = h.writer(MissionStatus::Active, None).await;
+    let key = format!("mission:{}:lido:trio-reserve1", existing.id);
+    assert!(h
+        .state
+        .projects
+        .lease_by_key(&format!("lease:{key}"))
+        .unwrap()
+        .is_some());
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "A different side title", "backend": "missing-side-test-backend",
+        "idempotency_key": key,
+    }))
+    .unwrap();
+    let error = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        true,
+        Some("side-test"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("Unknown backend"));
+}

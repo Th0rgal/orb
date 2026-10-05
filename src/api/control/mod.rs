@@ -11301,7 +11301,7 @@ pub(super) async fn create_mission_inner(
         .idempotency_key
         .as_deref()
         .map(str::trim)
-        .filter(|key| !key.is_empty())
+        .filter(|key| side_launch_fingerprint.is_none() && !key.is_empty())
     {
         if let Ok(Some(lease)) = state.projects.lease_by_key(&format!("lease:{key}")) {
             if let Ok(mission_id) = Uuid::parse_str(&lease.attempt_id) {
@@ -11312,10 +11312,7 @@ pub(super) async fn create_mission_inner(
                     // A dispatch that already failed closed (for example a
                     // rejected remote submission) is not the work the retry
                     // asks for; only live or finished attempts coalesce.
-                    if existing.status != MissionStatus::Failed
-                        && !(side_launch_fingerprint.is_some()
-                            && existing.status == MissionStatus::Interrupted)
-                    {
+                    if existing.status != MissionStatus::Failed {
                         verify_coalesced_attachments(&state.config, &req, &existing)?;
                         tracing::info!(
                             mission_id = %existing.id,
