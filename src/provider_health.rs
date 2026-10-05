@@ -1200,6 +1200,23 @@ impl StoreOAuthRefresher for LockedStoreOAuthRefresher {
     }
 }
 
+fn google_proxy_duplicates_direct_key(
+    stored: &[crate::ai_providers::AIProvider],
+    standard: &[StandardAccount],
+    proxy_keys: &[String],
+) -> bool {
+    stored
+        .iter()
+        .filter_map(|a| a.api_key.as_ref())
+        .chain(
+            standard
+                .iter()
+                .filter(|a| a.provider_type == crate::ai_providers::ProviderType::Google)
+                .filter_map(|a| a.api_key.as_ref()),
+        )
+        .any(|key| proxy_keys.contains(key))
+}
+
 /// Tests resolve without a refresher unless they inject one, so no test can
 /// send a fixture token to a provider.
 fn default_oauth_refresher() -> Option<&'static dyn StoreOAuthRefresher> {
@@ -1768,6 +1785,15 @@ impl ModelChainStore {
                 crate::account_limits::prefer_most_remaining_quota(store_accounts, |account| {
                     health_tracker.remaining_quota(account.id)
                 });
+            // The proxy selects from its own pool. If that pool contains a direct
+            // key, its synthetic identity must not bypass the key's cooldown.
+            let duplicate_google_proxy_key = provider_type
+                == crate::ai_providers::ProviderType::Google
+                && google_proxy_duplicates_direct_key(
+                    &store_accounts,
+                    standard_accounts,
+                    &crate::api::ai_providers::cli_proxy_config_gemini_keys(),
+                );
             let mut store_contributed_entry = false;
             let store_has_google_oauth = provider_type == crate::ai_providers::ProviderType::Google
                 && store_accounts
@@ -2041,7 +2067,9 @@ impl ModelChainStore {
                                     && candidate.api_key == sa.api_key
                                     && candidate.base_url == sa.base_url
                             }));
-                        if duplicate_oauth || duplicate_api_key {
+                        let duplicate_proxy = duplicate_google_proxy_key
+                            && sa.account_id == stable_provider_uuid("google-cli-proxy");
+                        if duplicate_oauth || duplicate_api_key || duplicate_proxy {
                             continue;
                         }
                     }
@@ -2147,6 +2175,7 @@ impl ModelChainStore {
                 }
 
                 if !configured_google_oauth
+                    && !duplicate_google_proxy_key
                     && crate::api::ai_providers::google_cli_proxy_account_available()
                 {
                     let cli_proxy_account_id = stable_provider_uuid("google-cli-proxy");
@@ -2190,7 +2219,15 @@ impl ModelChainStore {
         for entry in entries {
             let provider_type = crate::ai_providers::ProviderType::from_id(&entry.provider_id)
                 .unwrap_or(crate::ai_providers::ProviderType::Custom);
-            for account in ai_providers.get_all_by_type(provider_type).await {
+            let store_accounts = ai_providers.get_all_by_type(provider_type).await;
+            let duplicate_google_proxy_key = provider_type
+                == crate::ai_providers::ProviderType::Google
+                && google_proxy_duplicates_direct_key(
+                    &store_accounts,
+                    standard_accounts,
+                    &crate::api::ai_providers::cli_proxy_config_gemini_keys(),
+                );
+            for account in store_accounts {
                 if !account.has_credentials() {
                     continue;
                 }
@@ -2212,12 +2249,15 @@ impl ModelChainStore {
             }
             for account in standard_accounts {
                 if account.provider_type == provider_type
+                    && !(duplicate_google_proxy_key
+                        && account.account_id == stable_provider_uuid("google-cli-proxy"))
                     && (account.api_key.is_some() || account.has_oauth)
                 {
                     ids.insert(account.account_id);
                 }
             }
             if matches!(provider_type, crate::ai_providers::ProviderType::Google)
+                && !duplicate_google_proxy_key
                 && crate::api::ai_providers::google_cli_proxy_account_available()
             {
                 ids.insert(stable_provider_uuid("google-cli-proxy"));
@@ -2609,6 +2649,32 @@ mod tests {
             resolved
         );
         assert_eq!(resolved[0].account_id, standard[0].account_id);
+    }
+
+    #[test]
+    fn google_proxy_pool_deduplicates_direct_keys_even_before_health_filtering() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google API".into());
+        account.api_key = Some("same-key".into());
+        let proxy = vec!["same-key".into(), "different-key".into()];
+        assert!(google_proxy_duplicates_direct_key(&[account], &[], &proxy));
+        let standard = StandardAccount {
+            account_id: stable_provider_uuid("google-env-api-key"),
+            provider_type: ProviderType::Google,
+            api_key: Some("same-key".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        };
+        assert!(google_proxy_duplicates_direct_key(
+            &[],
+            std::slice::from_ref(&standard),
+            &proxy
+        ));
+        assert!(!google_proxy_duplicates_direct_key(
+            &[],
+            &[standard],
+            &["independent-key".into()]
+        ));
     }
 
     #[tokio::test]

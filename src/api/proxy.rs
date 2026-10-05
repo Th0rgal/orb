@@ -2200,8 +2200,10 @@ pub(crate) async fn chat_completions_inner(
         let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
             && entry.has_oauth
             && super::oauth_owner::management_enabled();
-        let use_google_api_adapter =
-            provider_type == ProviderType::Google && !entry.has_oauth && entry.api_key.is_some();
+        let use_google_api_adapter = provider_type == ProviderType::Google
+            && !entry.has_oauth
+            && entry.api_key.is_some()
+            && uses_native_google_api(entry.base_url.as_deref());
         let use_google_oauth_cli_proxy_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
             && entry.api_key.is_none()
@@ -6514,6 +6516,17 @@ fn build_google_upstream_request(
     ))
 }
 
+// Explicit compatible gateways retain their chat-completions transport.
+fn uses_native_google_api(base_url: Option<&str>) -> bool {
+    let Some(base) = base_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    url::Url::parse(base).is_ok_and(|url| {
+        url.host_str() == Some("generativelanguage.googleapis.com")
+            && !url.path().trim_end_matches('/').ends_with("/openai")
+    })
+}
+
 fn build_google_api_upstream_request(
     openai_body: &[u8],
     model_id: &str,
@@ -9034,6 +9047,25 @@ mod tests {
         let direct_gemini = parse_direct_model_entry("gemini/gemini-4-argon-eap").unwrap();
         assert_eq!(direct_gemini.provider_id, "google");
         assert_eq!(direct_gemini.model_id, "gemini-4-argon-eap");
+    }
+
+    #[test]
+    fn google_custom_gateways_keep_compatible_transport() {
+        assert!(uses_native_google_api(None));
+        assert!(uses_native_google_api(Some(
+            "https://generativelanguage.googleapis.com/v1beta"
+        )));
+        for base in [
+            "https://gateway.example/v1",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ] {
+            assert!(!uses_native_google_api(Some(base)));
+            assert_eq!(
+                completions_url(ProviderType::Google, Some(base)),
+                Some(format!("{base}/chat/completions"))
+            );
+        }
+        assert_eq!(ProviderType::from_id("gemini"), Some(ProviderType::Google));
     }
 
     #[test]
