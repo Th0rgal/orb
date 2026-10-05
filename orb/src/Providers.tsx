@@ -373,7 +373,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
       </section>
 
       <Show when={adding()}><Dialog title="Add subscription account" onClose={() => setAdding(false)} footer={<DialogButton onClick={() => { const kind = loginOptions()?.providers.find(x => x.id === addType()); if (!kind) return; setAdding(false); setReauth({id: "", provider_type: kind.id, provider_type_name: kind.name, name: kind.name, enabled: true, uses_oauth: true, credential_owner: "cli_proxy", status: {type: "needs_auth"}}); }}>Continue in browser</DialogButton>}><Field label="Subscription"><select class="s-input" value={addType()} onChange={e => setAddType(e.currentTarget.value)}><For each={loginOptions()?.providers ?? []}>{kind => <option value={kind.id}>{kind.name}</option>}</For></select></Field><p class="s-row-desc">Choose the account to connect in your browser. You can add more than one account.</p></Dialog></Show>
-      <Show when={removing()}>{account => <Dialog title={`Remove ${account().name}?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove account</DialogButton>}><p class="s-row-desc">This removes the saved login from the connected backend. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
+      <Show when={removing()}>{account => <Dialog title={`Remove ${account().name} and all credentials?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove provider and credentials</DialogButton>}><p class="s-row-desc">This deletes the subscription login and any independent API key saved on this provider. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
         {(a) => (
@@ -770,7 +770,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
         ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
         {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
-        ...(p.onRemove ? [{kind:"item" as const,label:"Remove account",onClick:p.onRemove}] : []),
+        ...(p.onRemove ? [{kind:"item" as const,label:"Remove provider…",onClick:p.onRemove}] : []),
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">

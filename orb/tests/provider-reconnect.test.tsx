@@ -100,3 +100,21 @@ it("adds a second subscription through the backend capability list without a rec
   fireEvent.click(screen.getByRole("button",{name:"Submit callback"}));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
+
+it("warns that removing a combined provider also deletes its independent API key", async () => {
+  setConnection("http://core.test", "test-token");
+  let deleted = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (options?.method === "DELETE") { deleted = true; return new Response(JSON.stringify({status:"ok"})); }
+    const data = url.endsWith("/providers") ? [{id:"combined",name:"Combined account",provider_type:"anthropic",uses_oauth:true,has_api_key:true,credential_owner:"cli_proxy",status:{type:"connected"}}] : url.endsWith("/cloud/accounts") ? [] : {};
+    return new Response(JSON.stringify(data));
+  }));
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", {name:"Actions for Combined account",exact:true}));
+  fireEvent.click(screen.getByRole("menuitem", {name:"Remove provider…",exact:true}));
+  expect(screen.getByText(/any independent API key saved on this provider/)).toBeTruthy();
+  expect(deleted).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name:"Remove provider and credentials",exact:true}));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(deleted).toBe(true);
+});
