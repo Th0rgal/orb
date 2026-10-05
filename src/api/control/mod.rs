@@ -6233,7 +6233,7 @@ pub async fn get_queue(
             continue;
         }
         if let Some(mid) = entry.mission_id {
-            if !blockers.contains_key(&mid) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = blockers.entry(mid) {
                 let error = if let Some(mission) = control
                     .mission_store
                     .get_mission(mid)
@@ -6251,7 +6251,7 @@ pub async fn get_queue(
                 } else {
                     Some("Mission no longer exists".into())
                 };
-                blockers.insert(mid, error);
+                slot.insert(error);
             }
             entry.queue_error = blockers.get(&mid).cloned().flatten();
         }
