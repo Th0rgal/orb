@@ -118,3 +118,8 @@ defaulting to the host workspace). Discovery uses a separate request so a slow
 or stale login cannot block other harnesses in the shared catalog. Container account models are never inferred
 from the API process login. Antigravity transfer history is always archived in
 the checkpoint and referenced by a short prompt, including medium conversations.
+
+Fresh backend configuration enables Antigravity even when `agy` is installed
+only inside a workspace. Existing saved enable/disable settings are preserved;
+if an older host-only probe disabled it, enable Antigravity in backend settings.
+The selected workspace must still pass native model discovery and launch preflight.

@@ -170,6 +170,12 @@ pub struct AppState {
 }
 
 /// Start the HTTP server.
+fn backend_enabled_by_default(id: &str, host_detected: bool) -> bool {
+    // Antigravity may be installed only in the selected workspace. Native model
+    // discovery and launch preflight check readiness there, not on the host.
+    id == "antigravity" || (host_detected && id != "chatgpt_ui")
+}
+
 pub async fn serve(config: Config) -> anyhow::Result<()> {
     let mut config = config;
     // Start monitoring background collector early so clients get history immediately
@@ -364,7 +370,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             let mut entry = BackendConfigEntry::new(&p.id, &p.name, settings);
             // UI automation is opt-in even when Python is installed: the
             // operator must provision an isolated browser profile explicitly.
-            entry.enabled = p.detected && p.id != "chatgpt_ui";
+            entry.enabled = backend_enabled_by_default(&p.id, p.detected);
             entry
         })
         .collect();
@@ -447,7 +453,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     backend_registry.register(crate::backend::antigravity::registry_entry());
     backend_registry.register(crate::backend::chatgpt_ui::registry_entry());
     let backend_registry = Arc::new(RwLock::new(backend_registry));
-    tracing::info!("Backend registry initialized with {} backends", 7);
+    tracing::info!("Backend registry initialized with {} backends", 6);
 
     // Note: No central OpenCode server cleanup needed - missions use per-workspace CLI execution
 
@@ -3379,6 +3385,27 @@ async fn oauth_token_refresher_loop(
 #[cfg(test)]
 mod tests {
     use super::truncate_utf8;
+
+    #[tokio::test]
+    async fn workspace_only_antigravity_defaults_on_but_preserves_explicit_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backends.json");
+        let defaults = || {
+            let mut entry = crate::backend_config::BackendConfigEntry::new(
+                "antigravity",
+                "Antigravity CLI",
+                serde_json::json!({}),
+            );
+            entry.enabled = super::backend_enabled_by_default("antigravity", false);
+            vec![entry]
+        };
+        let store = crate::backend_config::BackendConfigStore::new(path.clone(), defaults()).await;
+        assert!(store.get("antigravity").await.unwrap().enabled);
+        store.set_enabled("antigravity", false).await.unwrap();
+        let reloaded = crate::backend_config::BackendConfigStore::new(path, defaults()).await;
+        assert!(!reloaded.get("antigravity").await.unwrap().enabled);
+        assert!(!super::backend_enabled_by_default("chatgpt_ui", true));
+    }
 
     #[test]
     fn truncate_utf8_passes_through_short_strings() {
