@@ -10952,3 +10952,119 @@ async fn host_followup_dispatches_in_parallel_with_unrelated_main_turn() {
     NATIVE_FIXTURES.lock().unwrap().remove(&main.id);
     NATIVE_FIXTURES.lock().unwrap().remove(&target.id);
 }
+
+#[tokio::test]
+async fn host_followup_delivery_preserves_validated_continuation_semantics() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("repo#244")).await;
+    let content = "Continue RESERVE-1; compare against PR #999 and P-OTHER-2, without changing the assignment";
+    let reply = h.request(false, target.id, json!({"content":content,"queue_followup":true,"continue_identity":Harness::assertion(&target)})).await;
+    assert!(
+        reply.status().is_success(),
+        "{}",
+        reply.text().await.unwrap()
+    );
+    dispatch_admission::admit_followup(
+        &h.state.control,
+        &h.control.mission_store,
+        target.id,
+        content,
+    )
+    .await
+    .unwrap();
+    let after = h
+        .control
+        .mission_store
+        .get_mission(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.github_pr, target.project.github_pr);
+    assert_eq!(after.project.track, target.project.track);
+}
+
+#[tokio::test]
+async fn host_followup_restart_retains_paused_delivery_until_it_can_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteMissionStore::new(dir.path().join("missions"), "admission-test")
+        .await
+        .unwrap();
+    let mission = store
+        .create_mission(
+            Some("paused before restart"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let message = QueuedMessage {
+        id,
+        content: "Restored follow-up".into(),
+        agent: None,
+        mission_id: Some(mission.id),
+        source: Some("host-queue:api:admission-test".into()),
+        inflight: false,
+        queue_error: None,
+    };
+    store
+        .save_control_queue(
+            "admission-test",
+            &serde_json::to_string(&vec![message]).unwrap(),
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let h = Harness::with_directory(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        Vec::new(),
+    )
+    .await;
+    let fixture = install_native_fixture(&h, mission.id, "after").await;
+    // Exercise startup persistence and an idle retry, not merely deserialize.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let snapshot: Vec<QueuedMessage> = serde_json::from_str(
+        &h.control
+            .mission_store
+            .load_control_queue(&h.user.id)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.iter().map(|m| m.id).collect::<Vec<_>>(), vec![id]);
+    assert!(!fixture.join("requests.jsonl").exists());
+    let response = h
+        .request(
+            false,
+            mission.id,
+            json!({"content":"Restored follow-up", "queue_followup":true,"client_message_id":id}),
+        )
+        .await;
+    assert!(response.status().is_success());
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    wait_native_file(&fixture.join("requests.jsonl")).await;
+    wait_native_status(&h, mission.id, MissionStatus::AwaitingUser).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("requests.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    NATIVE_FIXTURES.lock().unwrap().remove(&mission.id);
+}

@@ -23048,7 +23048,9 @@ async fn control_actor_loop(
     // restart doesn't lose pending work. We re-inject them through the normal
     // command channel rather than pushing straight onto `queue`: an idle actor
     // never dequeues a pre-filled `queue` on its own, so the work would
-    // otherwise sit forever. Routing them as commands also de-duplicates against
+    // otherwise sit forever for legacy entries. Accepted host follow-ups now
+    // have an idle retry interval and are restored directly so paused work is
+    // retained. Routing legacy entries as commands also de-duplicates against
     // a client retry of the same id via `accept_user_message_id` (whichever
     // arrives first runs; the other is dropped), so nothing executes twice.
     let mut restored_db_snapshot = String::new();
@@ -23064,6 +23066,17 @@ async fn control_actor_loop(
                         .extend(consumed.into_iter().map(|message| (message.id, message)));
                     let mut replayed = 0usize;
                     for it in pending {
+                        if host_followup_source(it.source.as_deref()) {
+                            // These messages already passed queued admission. Restore
+                            // the durable queue itself, retaining paused/blocked work;
+                            // the idle retry interval will dispatch it when runnable.
+                            enqueue_control_message(
+                                &mut queue,
+                                (it.id, it.content, it.agent, it.mission_id, it.source),
+                            );
+                            replayed += 1;
+                            continue;
+                        }
                         let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
                         if let Err(e) = self_cmd_tx.try_send(ControlCommand::UserMessage {
                             id: it.id,
