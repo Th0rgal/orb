@@ -2963,9 +2963,9 @@ async fn remote_ownership_survives_terminal_presentation_sweep_and_recovery() {
                 find_existing_pr_writer_global(&h.state.control, "repo#244", None)
                     .await
                     .unwrap()
-                    .unwrap()
-                    .id,
-                m.id
+                    .map(|owner| owner.id),
+                pr.map(|_| m.id),
+                "explicitly absent PR ownership must not reserve unrelated PRs"
             );
             assert!(
                 find_existing_pr_writer_global(&h.state.control, "repo#244", Some(m.id))
@@ -10775,5 +10775,109 @@ fn host_followup_parking_preserves_fifo_without_blocking_other_missions() {
     assert_eq!(
         queue.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(),
         vec!["b1", "a1", "a2", "a3"]
+    );
+}
+
+#[tokio::test]
+async fn host_parallel_followup_preserves_cooldown_and_cancellable_rollback() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Pending, None).await;
+    let store = &h.control.mission_store;
+    store
+        .set_mission_scheduling(
+            m.id,
+            &crate::api::mission_store::MissionScheduling {
+                not_before: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_deferred_goal(m.id, Some("Resume after cooldown".into()))
+        .await
+        .unwrap();
+    let previous = store.get_mission(m.id).await.unwrap().unwrap();
+    let mut runner = crate::api::mission_runner::MissionRunner::new(
+        m.id,
+        m.workspace_id,
+        None,
+        Some(m.backend.clone()),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    runner.queue_message(
+        first,
+        "Continue".into(),
+        None,
+        Some("host-queue:api:test".into()),
+    );
+    runner.queue_message(
+        second,
+        "Then report".into(),
+        None,
+        Some("host-queue:api:test".into()),
+    );
+    let (events_tx, _) = broadcast::channel(8);
+    assert!(prepare_host_parallel_followup(
+        &h.state.control,
+        store,
+        &events_tx,
+        &mut runner,
+        "test"
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let parked = store.get_mission(m.id).await.unwrap().unwrap();
+    assert_eq!(parked.status, MissionStatus::Pending);
+    assert_eq!(
+        store.get_deferred_goal(m.id).await.unwrap().as_deref(),
+        Some("Resume after cooldown")
+    );
+    assert!(store.get_active_mission_run(m.id).await.unwrap().is_none());
+    assert!(runner.inflight_message().is_none());
+    assert_eq!(runner.queue.len(), 2);
+
+    // Exercise the same rollback used for rejected run acquisition and failed
+    // consumed-snapshot persistence after optimistic activation.
+    store
+        .update_mission_status(m.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    store.set_deferred_goal(m.id, None).await.unwrap();
+    runner.take_next_message_for_start().unwrap();
+    rollback_host_parallel_followup(
+        store,
+        &events_tx,
+        &mut runner,
+        &previous,
+        Some("Resume after cooldown".into()),
+    )
+    .await
+    .unwrap();
+    let restored = store.get_mission(m.id).await.unwrap().unwrap();
+    assert_eq!(restored.status, MissionStatus::Pending);
+    assert_eq!(
+        store.get_deferred_goal(m.id).await.unwrap().as_deref(),
+        Some("Resume after cooldown")
+    );
+    assert!(runner.inflight_message().is_none());
+    assert_eq!(
+        runner
+            .queue
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert!(
+        runner.remove_from_queue(first),
+        "rejected delivery remains cancellable"
     );
 }

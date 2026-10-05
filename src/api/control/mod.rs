@@ -10406,6 +10406,71 @@ async fn restore_mission_after_failed_run_acquisition(
     Ok(())
 }
 
+fn host_followup_parked(mission: &Mission) -> bool {
+    mission.status == MissionStatus::Paused
+        || (mission.status == MissionStatus::Pending
+            && !mission.is_dispatchable_at(chrono::Utc::now()))
+}
+
+async fn rollback_host_parallel_followup(
+    store: &Arc<dyn MissionStore>,
+    events_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    runner: &mut super::mission_runner::MissionRunner,
+    previous: &Mission,
+    deferred_goal: Option<String>,
+) -> Result<(), String> {
+    if let Some(message) = runner.inflight_message().cloned() {
+        runner.remove_inflight_message(message.id);
+        runner.queue.push_front(message);
+    }
+    restore_mission_after_failed_run_acquisition(store, events_tx, previous).await?;
+    store.set_deferred_goal(previous.id, deferred_goal).await
+}
+
+async fn prepare_host_parallel_followup(
+    hub: &ControlHub,
+    store: &Arc<dyn MissionStore>,
+    events_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    runner: &mut super::mission_runner::MissionRunner,
+    owner: &str,
+) -> Result<Option<(Mission, Option<String>)>, String> {
+    if runner.is_running() || runner.cancellation_requested() {
+        return Ok(None);
+    }
+    let Some(message) = runner.inflight_message().or_else(|| runner.queue.front()) else {
+        return Ok(None);
+    };
+    if !host_followup_source(message.source.as_deref()) {
+        return Ok(None);
+    }
+    let content = message.content.clone();
+    let mission = store
+        .get_mission(runner.mission_id)
+        .await?
+        .ok_or_else(|| "Queued mission no longer exists".to_string())?;
+    if host_followup_parked(&mission) {
+        return Ok(None);
+    }
+    dispatch_admission::admit_followup(hub, store, mission.id, &content).await?;
+    let deferred_goal = store.get_deferred_goal(mission.id).await?;
+    activate_mission_for_message(hub, store, events_tx, &mission, &content).await?;
+    runner.backend_id = mission.backend.clone();
+    runner.agent_override = mission.agent.clone();
+    runner.model_override = mission.model_override.clone();
+    runner.model_effort = mission.model_effort.clone();
+    runner.fast_mode = mission.fast_mode;
+    runner.config_profile = mission.config_profile.clone();
+    runner.session_id = mission.session_id.clone();
+    if runner.inflight_message().is_none() {
+        runner.take_next_message_for_start();
+    }
+    if let Err(error) = runner.acquire_durable_run(store, owner).await {
+        rollback_host_parallel_followup(store, events_tx, runner, &mission, deferred_goal).await?;
+        return Err(error);
+    }
+    Ok(Some((mission, deferred_goal)))
+}
+
 struct MessageWriterLeaseGuard {
     _guard: DurablePrWriterLockGuard,
     retagged: bool,
@@ -27878,32 +27943,23 @@ async fn control_actor_loop(
                     parallel_followup_retry = std::time::Instant::now();
                     let mut ready = Vec::new();
                     for (mid, runner) in parallel_runners.iter_mut() {
-                        if runner.is_running() || runner.cancellation_requested() { continue; }
-                        let Some(message) = runner.inflight_message().or_else(|| runner.queue.front()) else { continue; };
-                        if !host_followup_source(message.source.as_deref()) { continue; }
-                        let content = message.content.clone();
-                        let Some(mission) = mission_store.get_mission(*mid).await.ok().flatten() else { continue; };
-                        if mission.status == MissionStatus::Paused { continue; }
-                        if dispatch_admission::admit_followup(&control_hub, &mission_store, *mid, &content).await.is_err()
-                            || activate_mission_id_for_message(&control_hub, &mission_store, &events_tx, *mid, &content).await.is_err() { continue; }
-                        runner.backend_id = mission.backend;
-                        runner.agent_override = mission.agent;
-                        runner.model_override = mission.model_override;
-                        runner.model_effort = mission.model_effort;
-                        runner.fast_mode = mission.fast_mode;
-                        runner.config_profile = mission.config_profile;
-                        runner.session_id = mission.session_id;
-                        if runner.inflight_message().is_none() { runner.take_next_message_for_start(); }
-                        if runner.acquire_durable_run(&mission_store, &format!("control:{session_user_id}")).await.is_ok() { ready.push(*mid); }
+                        match prepare_host_parallel_followup(&control_hub, &mission_store, &events_tx, runner, &format!("control:{session_user_id}")).await {
+                            Ok(Some(previous)) => ready.push((*mid, previous)),
+                            Ok(None) => {},
+                            Err(error) => tracing::warn!(mission_id = %mid, "Queued parallel delivery deferred: {error}"),
+                        }
                     }
                     if !ready.is_empty() {
                         let persisted = persist_control_queue_if_changed(&mission_store, &session_user_id, &queue, &parallel_runners, &recovered_consumed_user_messages, &mut last_persisted_queue).await.is_ok();
-                        for mid in ready {
+                        for (mid, (previous, deferred_goal)) in ready {
                             let runner = parallel_runners.get_mut(&mid).unwrap();
                             if persisted {
                                 runner.start_next(config.clone(), Arc::clone(&root_agent), Arc::clone(&mcp), Arc::clone(&workspaces), library.clone(), events_tx.clone(), Arc::clone(&tool_hub), Arc::clone(&status), mission_cmd_tx.clone(), Arc::new(RwLock::new(Some(mid))), secrets.clone());
                             } else {
                                 runner.finish_durable_run(&mission_store, Some("queued_snapshot_persist_failed")).await;
+                                if let Err(error) = rollback_host_parallel_followup(&mission_store, &events_tx, runner, &previous, deferred_goal).await {
+                                    tracing::warn!(mission_id = %mid, "Failed to restore queued parallel delivery: {error}");
+                                }
                             }
                         }
                     }
