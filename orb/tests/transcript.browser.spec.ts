@@ -89,6 +89,21 @@ test("successful remote receipt is collapsed beneath the human reply",async({pag
  await expect(page.locator('.legacy-log pre')).toHaveText(receipt);
 });
 
+test('paused Antigravity receipt keeps raw JSON collapsed',async({page})=>{
+ await page.goto('/tests/transcript.html');
+ await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+ const header="Remote node 'old-agent' job 7fb1fd5f-fac8-47b1-a17a-62cfc8846222 reached state 'cancelled' (exit None) after the mission left Active (paused); the mission status is preserved.\nerror: cancelled";
+ const receipt=header+'\n\nlog tail:\n'+',"parameters":{"CommandLine":"python3 ..."}}\n'+JSON.stringify({event:'step_update',step_update:{state:'DONE',tool_name:'view_file'}});
+ await page.evaluate(text=>(window as any).transcriptHarness.reset([{type:'assistant_message',data:{content:text}}]),receipt);
+ await expect(page.locator('.st-text .md')).toHaveText(header.replace('\n',' '));
+ await expect(page.locator('.legacy-log pre')).toBeHidden();
+ await expect(page.locator('.legacy-log')).not.toHaveAttribute('open','');
+ await page.locator('.legacy-log summary').click();
+ await expect(page.locator('.legacy-log pre')).toHaveText(receipt);
+ await page.locator('.legacy-log summary').click();
+ await expect(page.locator('.legacy-log pre')).toBeHidden();
+});
+
 test('action details expand above their trigger without moving it off screen',async({page})=>{
  await page.goto('/tests/transcript.html');
  await page.waitForFunction(()=>!!(window as any).transcriptHarness);

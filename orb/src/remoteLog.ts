@@ -1,5 +1,5 @@
-/** Recover human text from the old remote terminal envelope, without interpreting
- * arbitrary assistant JSON or throwing away the original diagnostic log. */
+/** Recover human text from remote terminal receipts. Raw diagnostics always
+ * remain available in collapsed details, regardless of the harness format. */
 export function remoteLog(raw: string): { text: string; details?: string } {
   if (!/^Remote node '[^']+' job [0-9a-f-]{36} (?:finished with|reached) state '/.test(raw)) return { text: raw };
   const marker = raw.indexOf("\n\nlog tail:\n");
@@ -19,10 +19,10 @@ export function remoteLog(raw: string): { text: string; details?: string } {
   }
   if (!parts.length) {
     // Claude's remote runner already returns plain Markdown. Only unwrap the
-    // exact successful receipt; failures and unknown structured logs stay visible.
+    // exact successful receipt. Other logs belong in diagnostics, not Markdown.
     const success = /^Remote node '[^']+' job [0-9a-f-]{36} finished with state 'succeeded' \(exit Some\(0\)\)$/.test(raw.slice(0, marker));
     if (success && log.trim() && !/^[\s]*[\[{]/.test(log)) return { text: log, details: raw };
-    return { text: raw };
+    return { text: raw.slice(0, marker), details: raw };
   }
   const failed = !/finished with state 'succeeded'/.test(raw.slice(0, marker));
   return { text: (failed ? raw.slice(0, marker) + "\n\n" : "") + parts.join("\n\n"), details: raw };

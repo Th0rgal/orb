@@ -25,6 +25,16 @@ export function safeHref(raw: string): string | null {
   return /^(https?:|mailto:)/i.test(raw.trim()) ? raw.trim() : null;
 }
 
+/** File URLs go through Orb's scoped file resolver, never webview navigation. */
+function fileLinkTarget(raw: string): string {
+  if (!/^file:/i.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    if (url.hostname && url.hostname !== "localhost") return raw;
+    return decodeURIComponent(url.pathname) + url.hash;
+  } catch { return raw; }
+}
+
 function plainInline(text: string, links: boolean): JSX.Element[] {
   text = text.replace(/\\([\\`*_[\]{}()#+.!|>-])/g, "$1");
   if (!links) return [<FileReferenceText text={text}/>];
@@ -56,13 +66,15 @@ function inline(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
   // Keep code spans opaque; currency such as "$15 and $20" is ordinary text.
   // Emphasis that wraps a code span is taken whole first, or the span would
-  // split it and leave its asterisks as text.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?`[^`\n]*`(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  // split it and leave its asterisks as text. Links likewise stay whole so
+  // code-formatted labels do not expose their brackets and destination.
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?`[^`\n]*`(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
     if (match[0].startsWith('**')) out.push(<strong>{inline(match[0].slice(2, -2), links)}</strong>);
     else if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
+    else if (match[0].startsWith('[')) out.push(...inlineText(match[0], links));
     else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
     else out.push(<MathFormula text={match[3] ?? match[4]}/>);
     last = match.index! + match[0].length;
@@ -86,8 +98,8 @@ function inlineText(text: string, links = true): JSX.Element[] {
     }
     else if (m[6] !== undefined) out.push(<em>{inline(m[6], links)}</em>);
     else if (m[1] !== undefined) out.push(<strong>{inline(m[1], links)}</strong>);
-    else if (m[2] !== undefined) out.push(<FileReference raw={m[2]}><code>{m[2]}</code></FileReference>);
-    else if (!safeHref(m[4])) out.push(<FileReference raw={m[4]}>{m[3]}</FileReference>);
+    else if (m[2] !== undefined) out.push(links ? <FileReference raw={m[2]}><code>{m[2]}</code></FileReference> : <code>{m[2]}</code>);
+    else if (!safeHref(m[4])) out.push(<FileReference raw={fileLinkTarget(m[4])}>{inline(m[3], false)}</FileReference>);
     else
       out.push(
         <a

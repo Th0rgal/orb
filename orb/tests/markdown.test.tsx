@@ -103,6 +103,49 @@ import { fireEvent, waitFor } from "@solidjs/testing-library";
 import { vi } from "vitest";
 import { FileReferenceContext } from "../src/fileReferenceContext";
 
+it("renders code-formatted file link labels and opens only the destination", async () => {
+  const path = '/Users/thomas/.orb/project-context/server/account/verity-core/files/Context/Verity.md';
+  const ref = {source: 'workspace', path, name: 'Verity.md'};
+  const open = vi.fn(), resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open, search: () => {}}}>
+    <MdView text={`- [\`Context/Verity.md\`](file://${path}): Covers Verity.`}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'Context/Verity.md'})).toBeTruthy());
+  expect(container.textContent).toBe('Context/Verity.md: Covers Verity.');
+  expect(container.querySelector('button code')?.textContent).toBe('Context/Verity.md');
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+  fireEvent.click(getByRole('button', {name: 'Context/Verity.md'}));
+  expect(open).toHaveBeenCalledWith([ref]);
+});
+
+it("renders formatted link labels even without a file resolver", () => {
+  const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
+  expect(container.textContent).toBe('files/Context/ notes docs');
+  expect(container.querySelectorAll('code')).toHaveLength(2);
+  expect(container.querySelector('strong')?.textContent).toBe('notes');
+  expect(container.querySelector('a code')?.textContent).toBe('docs');
+});
+
+it("decodes local file URLs while keeping unsupported URLs out of the resolver", async () => {
+  const ref = {source: 'workspace', path: '/tmp/My notes.md', name: 'My notes.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {getByRole, container} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`notes`](file://localhost/tmp/My%20notes.md#L12) [`remote`](file://other-host/tmp/notes.md) [`unsafe`](javascript:alert)'} />
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'notes'})).toBeTruthy());
+  expect(resolve).toHaveBeenCalledExactlyOnceWith('/tmp/My notes.md#L12');
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(container.querySelector('a')).toBeNull();
+});
+
+it("keeps a complete Markdown file link inside a code span literal", () => {
+  const text = '`[notes](file:///tmp/notes.md)`';
+  const {container} = render(() => <MdView text={text}/>);
+  expect(container.querySelector('code')?.textContent).toBe('[notes](file:///tmp/notes.md)');
+  expect(container.querySelector('a, button')).toBeNull();
+});
+
 it("renders Codex output citations through the file resolver and opens the original path", async () => {
   const path='/Users/thomas/.orb/local-workspaces/default/output/pdf/index-32.pdf';
   const ref={source:'workspace',path,name:'index-32.pdf'};
