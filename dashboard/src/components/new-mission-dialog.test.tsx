@@ -81,7 +81,11 @@ describe('NewMissionDialog', () => {
     vi.restoreAllMocks();
   });
 
-  it('creates Antigravity missions using only the selected workspace account models', async () => {
+  it.each([true, false])('creates Antigravity missions with workspace models when host CLI availability is %s', async hostAvailable => {
+    vi.mocked(getBackendConfig).mockImplementation(async id => ({
+      id, name: id, enabled: true, settings: {},
+      cli_available: id === 'antigravity' ? hostAvailable : true,
+    }));
     vi.mocked(listBackends).mockResolvedValue([
       { id: 'antigravity', name: 'Antigravity CLI' },
       { id: 'gemini', name: 'Gemini CLI' },
@@ -94,7 +98,7 @@ describe('NewMissionDialog', () => {
       ? new Promise(resolve => { resolveWorkspace = resolve; })
       : Promise.resolve([['host-model', 'Host account model']]));
     const onCreate = vi.fn().mockResolvedValue({ id: 'agy-mission' });
-    renderDialog(onCreate, [{id: 'workspace-b', name: 'Second account', workspace_type: 'host', status: 'ready'} as Workspace]);
+    renderDialog(onCreate, [{id: 'workspace-b', name: 'Second account', workspace_type: 'container', status: 'ready'} as Workspace]);
     fireEvent.click(screen.getByRole('button', { name: /new mission/i }));
     const native = await screen.findByRole('option', {name: 'Antigravity CLI default'});
     fireEvent.change(native.closest('select')!, {target: {value: 'antigravity:'}});

@@ -176,9 +176,12 @@ export function NewMissionDialog({
     { revalidateOnFocus: false, dedupingInterval: 60000 }
   );
 
-  // Filter to only enabled backends with CLI available and (when reported) auth configured.
+  // Antigravity readiness is checked inside the selected workspace by native
+  // model discovery; its control-plane host may not have the CLI installed.
   const enabledBackends = useMemo(() => {
-    return backends?.filter((b) => b.id !== 'gemini' && isBackendAvailable(backendConfigs[b.id])) || [];
+    return backends?.filter((b) => b.id !== 'gemini' && (b.id === 'antigravity'
+      ? !!backendConfigs[b.id] && backendConfigs[b.id]?.enabled !== false
+      : isBackendAvailable(backendConfigs[b.id]))) || [];
   }, [backends, backendConfigs]);
 
   const workspaceProfile = useMemo(() => {
