@@ -11205,6 +11205,31 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         )
         .await
         .unwrap();
+    assert!(child.project.project.is_none());
+    assert!(
+        super::fork::side_launch_key(&h.state.config.working_dir, child.id)
+            .unwrap()
+            .is_none(),
+        "freeform side tags cannot grant side capacity"
+    );
+    let untrusted = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "untrusted-tag-check".into(),
+            side_question: Some("New question".into()),
+            side_context_mode: Some("invalid-new-launch-mode".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(untrusted.0, StatusCode::BAD_REQUEST);
+    assert_eq!(untrusted.1, "Unsupported side context mode");
+    super::fork::record_side_launch(&h.state.config.working_dir, child.id, "btw-original").unwrap();
     let result = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -11225,14 +11250,6 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     assert!(result.1.contains("question was not sent"));
 
     // A transport retry of the original dispatch must recover that session.
-    assert!(child.project.project.is_none());
-    assert!(
-        super::fork::side_launch_key(&h.state.config.working_dir, child.id)
-            .unwrap()
-            .is_none(),
-        "freeform side tags cannot grant side capacity"
-    );
-    super::fork::record_side_launch(&h.state.config.working_dir, child.id, "btw-original").unwrap();
     let retry = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),

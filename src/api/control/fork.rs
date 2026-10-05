@@ -48,25 +48,28 @@ pub async fn fork_mission(
             .map_err(internal_error)?;
         // Launch receipts exist even when the parent has no project/track.
         // Recover completed attempts too: losing the response must not rerun it.
+        let mut existing_live = None;
         for existing in rows.iter().filter(|mission| {
             !matches!(
                 mission.status,
                 MissionStatus::Failed | MissionStatus::Interrupted
             )
         }) {
-            if side_launch_key(&state.config.working_dir, existing.id)
-                .map_err(internal_error)?
-                .is_some_and(|key| key == req.idempotency_key.trim())
-            {
+            let Some(key) =
+                side_launch_key(&state.config.working_dir, existing.id).map_err(internal_error)?
+            else {
+                continue;
+            };
+            if key == req.idempotency_key.trim() {
                 return Ok(Json(
                     mission_create_response(&state, &control, existing.clone()).await?,
                 ));
             }
+            if side_session_live(existing.status) {
+                existing_live = Some(existing);
+            }
         }
-        if let Some(existing) = rows
-            .into_iter()
-            .find(|mission| side_session_live(mission.status))
-        {
+        if let Some(existing) = existing_live {
             return Err((StatusCode::CONFLICT, format!(
                 "A side agent is already queued or running for this conversation ({}). Reconnect to or stop that side session before starting another; this question was not sent.", existing.id
             )));
