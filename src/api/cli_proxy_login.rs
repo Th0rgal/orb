@@ -132,6 +132,18 @@ impl ManagementClient {
         )
         .await
     }
+    async fn cancel(&self, state: &str) -> Result<(), ApiError> {
+        let query: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", state)
+            .finish();
+        self.request(
+            reqwest::Method::DELETE,
+            &format!("/oauth-session?{query}"),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 fn provider_for(name: &str) -> Option<ProviderType> {
@@ -297,16 +309,7 @@ async fn start_login(
                 LoginStatus::Pending | LoginStatus::Completing
             ) {
                 if let Ok(client) = ManagementClient::configured() {
-                    let query: String = url::form_urlencoded::Serializer::new(String::new())
-                        .append_pair("state", &session.state)
-                        .finish();
-                    let _ = client
-                        .request(
-                            reqwest::Method::DELETE,
-                            &format!("/get-auth-status?{query}"),
-                            None,
-                        )
-                        .await;
+                    let _ = client.cancel(&session.state).await;
                 }
             }
         }
@@ -498,16 +501,7 @@ async fn cancel_login(AxumPath(id): AxumPath<String>) -> Result<Json<Value>, Api
     let session = session_for(&id).await?;
     let mut s = session.lock().await;
     if matches!(s.status, LoginStatus::Pending | LoginStatus::Completing) {
-        let query: String = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("state", &s.state)
-            .finish();
-        ManagementClient::configured()?
-            .request(
-                reqwest::Method::DELETE,
-                &format!("/get-auth-status?{query}"),
-                None,
-            )
-            .await?;
+        ManagementClient::configured()?.cancel(&s.state).await?;
         s.status = LoginStatus::Failed;
         s.message = Some("Sign-in cancelled.".into());
     }
@@ -570,13 +564,23 @@ mod tests {
     }
     #[tokio::test]
     async fn management_requests_keep_credentials_server_side() {
-        use axum::http::HeaderMap;
+        use axum::{extract::Query, http::HeaderMap, routing::delete};
         let app = Router::new().route(
             "/get-auth-status",
             get(|headers: HeaderMap| async move {
                 assert_eq!(headers["authorization"], "Bearer management-test-key");
                 Json(json!({"status":"wait"}))
             }),
+        );
+        let app = app.route(
+            "/oauth-session",
+            delete(
+                |headers: HeaderMap, Query(query): Query<HashMap<String, String>>| async move {
+                    assert_eq!(headers["authorization"], "Bearer management-test-key");
+                    assert_eq!(query["state"], "test-state");
+                    Json(json!({"status":"ok","cancelled":true}))
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -587,6 +591,7 @@ mod tests {
             http: reqwest::Client::new(),
         };
         assert_eq!(client.status("test-state").await.unwrap()["status"], "wait");
+        client.cancel("test-state").await.unwrap();
         server.abort();
     }
     #[tokio::test]
