@@ -11311,7 +11311,9 @@ pub(super) async fn create_mission_inner(
                     // A dispatch that already failed closed (for example a
                     // rejected remote submission) is not the work the retry
                     // asks for; only live or finished attempts coalesce.
-                    if existing.status != MissionStatus::Failed {
+                    if existing.status != MissionStatus::Failed
+                        && !(shared_side_workspace && existing.status == MissionStatus::Interrupted)
+                    {
                         verify_coalesced_attachments(&state.config, &req, &existing)?;
                         tracing::info!(
                             mission_id = %existing.id,
