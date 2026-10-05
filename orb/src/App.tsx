@@ -2862,7 +2862,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
           <RemoteQueue mission={p.id}
             pending={!clientPlaced() && optimistic()?.waiting && !sendError() ? {id:optimistic()!.id,content:optimistic()!.text} : undefined}
-            confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text}))}
+            confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
             onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);

@@ -1,10 +1,11 @@
 import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
+import { messagePresentation } from "./messagePresentation";
 import { api, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
 
 /** The server inbox remains authoritative across a stop, reconnect or restart. */
 export function RemoteQueue(p: {
   mission: string;
-  confirmed?: QueuedMessage[];
+  confirmed?: (QueuedMessage & {attached?:boolean})[];
   pending?: {id:string;content:string};
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
@@ -13,8 +14,8 @@ export function RemoteQueue(p: {
   onCleanup(() => { destroyed = true; });
   const [rows, setRows] = createSignal<QueuedMessage[]>([]);
   const visibleRows = () => {
-    const known = new Map(rows().map(row => [row.id, row]));
-    for (const row of p.confirmed ?? []) if (!known.has(row.id)) known.set(row.id, row);
+    const known = new Map<string,QueuedMessage & {attached?:boolean}>(rows().map(row => [row.id, row]));
+    for (const row of p.confirmed ?? []) known.set(row.id, {...known.get(row.id), ...row});
     return [...known.values()];
   };
   const [error, setError] = createSignal("");
@@ -55,7 +56,7 @@ export function RemoteQueue(p: {
       <header><span class="queue-count">{visibleRows().length ? `${visibleRows().length} Queued` : "Sending…"}</span></header>
       <ol><Show when={p.pending && !visibleRows().some(row=>row.id===p.pending?.id)}><li class="queue-row"><div class="queue-line"><span class="queue-text">{p.pending?.content}</span><span role="status">Sending…</span></div></li></Show><For each={visibleRows()}>{row => <li class="queue-row">
         <div class="queue-line">
-          <span class="queue-text" title={row.content}>{row.content}</span>
+          <div class="queue-text"><span title={messagePresentation(row.content).text}>{messagePresentation(row.content).text}</span><Show when={row.attached || messagePresentation(row.content).attached}><small class="user-context">Attached context</small></Show></div>
           <button class="queue-send-now" disabled={cancelling() === row.id} onClick={() => void cancel(row.id)}>Cancel</button>
         </div>
         <Show when={row.queue_error}><small title={row.queue_error ?? undefined}>Delivery paused · {row.queue_error}</small></Show>
