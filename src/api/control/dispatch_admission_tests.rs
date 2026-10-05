@@ -10654,6 +10654,40 @@ async fn host_followup_queue_persists_fifo_deduplicates_and_cancels_under_pr_con
         .queue_error
         .as_deref()
         .is_some_and(|e| e.contains(&blocker.id.to_string()))));
+    // A read-only follow-up sharing this PR must not inherit a writer blocker.
+    h.control
+        .mission_store
+        .update_mission_project(
+            target.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-readonly".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Json(readonly_queue) = get_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Query(QueueQuery {
+            mission_id: Some(target.id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(readonly_queue.len(), 2);
+    assert!(readonly_queue.iter().all(|row| row.queue_error.is_none()));
+    h.control
+        .mission_store
+        .update_mission_project(
+            target.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let _ = remove_from_queue(
         State(h.state.clone()),
         Extension(h.user.clone()),

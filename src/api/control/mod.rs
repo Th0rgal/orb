@@ -6233,13 +6233,23 @@ pub async fn get_queue(
             continue;
         }
         if let Some(mid) = entry.mission_id {
-            if let std::collections::hash_map::Entry::Vacant(slot) = blockers.entry(mid) {
-                let error = if let Some(mission) = control
-                    .mission_store
-                    .get_mission(mid)
+            let mission = control
+                .mission_store
+                .get_mission(mid)
+                .await
+                .map_err(internal_error)?;
+            if let Some(mission) = mission.as_ref() {
+                if !mission_is_pr_writer_in_store(&control.mission_store, mission)
                     .await
                     .map_err(internal_error)?
+                    && !message_requests_pr_writer(mission, &entry.content)
                 {
+                    entry.queue_error = None;
+                    continue;
+                }
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) = blockers.entry(mid) {
+                let error = if let Some(mission) = mission {
                     if let Some(pr) = mission.project.github_pr.as_deref() {
                         find_existing_pr_writer_global(&state.control, pr, Some(mid))
                             .await
