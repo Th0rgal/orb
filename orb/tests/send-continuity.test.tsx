@@ -88,6 +88,9 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).not.toBeNull());
  state.event!({type:'text_delta',data:{content:''}});
  expect(view.container.querySelector('.agent-wait-status')).not.toBeNull();
+ state.event!({type:'thinking',data:{content:'Checking the requested model.',done:true}});
+ state.event!({type:'tool_call',data:{tool_call_id:'partial-tool',name:'read',args:{}}});
+ state.event!({type:'text_delta',data:{content:'I am'}});
  mission.status='awaiting_user';
  state.event!({type:'mission_status_changed',data:{status:'awaiting_user'}});
  await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).toBeNull());
