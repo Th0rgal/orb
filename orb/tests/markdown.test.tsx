@@ -119,6 +119,18 @@ it("renders code-formatted file link labels and opens only the destination", asy
   expect(open).toHaveBeenCalledWith([ref]);
 });
 
+it("does not resolve a plain file label inside an already resolved link", async () => {
+  const path = 'audit/IMPLEMENTATION-BRIEF.md';
+  const ref = {source: 'workspace', path, name: 'IMPLEMENTATION-BRIEF.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[IMPLEMENTATION-BRIEF.md](audit/IMPLEMENTATION-BRIEF.md)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'IMPLEMENTATION-BRIEF.md'})).toBeTruthy());
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
 it("renders formatted link labels even without a file resolver", () => {
   const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
   expect(container.textContent).toBe('files/Context/ notes docs');

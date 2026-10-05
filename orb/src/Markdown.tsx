@@ -37,7 +37,7 @@ function fileLinkTarget(raw: string): string {
 
 function plainInline(text: string, links: boolean): JSX.Element[] {
   text = text.replace(/\\([\\`*_[\]{}()#+.!|>-])/g, "$1");
-  if (!links) return [<FileReferenceText text={text}/>];
+  if (!links) return [text];
   const result: JSX.Element[] = [];
   const pattern = /https?:\/\/[^\s<>"`]+/gi;
   let last = 0;
