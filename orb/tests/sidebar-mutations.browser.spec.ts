@@ -64,3 +64,15 @@ test('off-screen archived rows do not move the project viewport', async ({page})
   await page.waitForTimeout(100);
   expect(await page.locator('.sb-scroll').evaluate(el=>el.scrollTop)).toBe(before);
 });
+
+
+test('project updates above the viewport preserve visible archived rows', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=2100;});
+  const row=page.getByRole('button',{name:'archive8',exact:true});
+  const before=await row.evaluate(el=>el.getBoundingClientRect().top);
+  await page.getByRole('button',{name:'Remove project row',exact:true}).click();
+  await expect(page.getByRole('button',{name:'project0',exact:true})).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
+});

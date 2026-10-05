@@ -24,7 +24,7 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     const scroller = element?.closest<HTMLElement>(".sb-scroll");
     const viewport = scroller?.getBoundingClientRect();
     const scroll = scroller?.scrollTop ?? 0;
-    const anchors = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
+    const anchors = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
       .filter(row => {
         const rect = row.getBoundingClientRect();
         return viewport && rect.bottom > viewport.top && rect.top < viewport.bottom;
@@ -33,7 +33,7 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     setRows(reconcile(next, { key: "id" }));
     queueMicrotask(() => {
       if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
-      const current = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? []);
+      const current = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? []);
       for (const anchor of anchors) {
         const row = current.find(row => row.dataset.treeId === anchor.id);
         if (row) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
