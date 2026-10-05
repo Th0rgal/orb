@@ -6127,6 +6127,14 @@ fn cli_proxy_opencode_provider_definition(
 /// CLIProxyAPI: OpenCode authenticates to the proxy with its key instead.
 fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
+    // Antigravity is proxy-only. Mask any legacy host/workspace OAuth entry
+    // even when management is unavailable; a missing proxy key fails closed.
+    map.insert(
+        "antigravity".into(),
+        serde_json::json!({
+            "type": "api", "key": std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default()
+        }),
+    );
     for (provider, keys) in [
         (
             crate::ai_providers::ProviderType::Anthropic,
@@ -6340,7 +6348,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 model_id: model_entry.clone()
             }
         })),
-        "builtin" => {
+        "builtin" | "antigravity" => {
             // Point at the local OpenAI-compatible proxy that handles model
             // chain resolution and failover.  The proxy runs on the same host
             // and is accessible from shared-network workspaces.
@@ -6361,11 +6369,15 @@ pub(crate) fn ensure_opencode_provider_for_model(
                     crate::api::proxy_liveness::MISSION_ID_HEADER: mid
                 });
             }
+            let mut model = serde_json::json!({"name": model_id});
+            if provider_id == "antigravity" {
+                model["id"] = serde_json::json!(format!("antigravity/{model_id}"));
+            }
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "Builtin",
+                "name": if provider_id == "antigravity" { "Antigravity subscription" } else { "Builtin" },
                 "models": {
-                    model_id: { "name": model_id }
+                    model_id: model
                 },
                 "options": options
             }))
@@ -6439,7 +6451,11 @@ pub(crate) fn ensure_opencode_provider_for_model(
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
-    if provider_id == "builtin" || provider_id == "kimi" || cli_proxy_owned_provider {
+    if provider_id == "builtin"
+        || provider_id == "kimi"
+        || provider_id == "antigravity"
+        || cli_proxy_owned_provider
+    {
         // Always overwrite proxy-backed providers — the proxy secret
         // (options.apiKey) changes on every server restart, Kimi must not
         // keep a stale api.kimi.com block from workspace config, and a
@@ -6685,7 +6701,9 @@ fn build_opencode_auth_from_ai_providers(
 
     let mut map = serde_json::Map::new();
     for provider in providers {
-        if !provider.enabled {
+        if !provider.enabled
+            || provider.provider_type == crate::ai_providers::ProviderType::Antigravity
+        {
             continue;
         }
         let keys: Vec<&str> = match provider.provider_type {
@@ -6817,26 +6835,8 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             }
         }
 
-        if let Some(dest_path) = auth_path.as_ref() {
-            if dest_path.as_path() != source_path.as_path() && source_path.exists() {
-                if let Some(parent) = dest_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        tracing::warn!(
-                            "Failed to create OpenCode auth directory {}: {}",
-                            parent.display(),
-                            e
-                        );
-                    }
-                }
-                if let Err(e) = std::fs::copy(&source_path, dest_path) {
-                    tracing::warn!(
-                        "Failed to copy OpenCode auth.json to workspace {}: {}",
-                        dest_path.display(),
-                        e
-                    );
-                }
-            }
-        }
+        // Write only the merged, ownership-filtered snapshot below. Copying
+        // the raw host file first would briefly expose proxy-owned OAuth.
     }
 
     let managed_auth = build_opencode_auth_from_ai_providers(app_working_dir);
@@ -6940,6 +6940,7 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             ("zai", "Z.AI"),
             ("minimax", "Minimax"),
             ("cerebras", "Cerebras"),
+            ("antigravity", "Antigravity"),
         ];
         for (key, label) in provider_entries {
             let entry = if key == "openai" {
@@ -10720,6 +10721,36 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_oauth_never_reaches_opencode_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Antigravity,
+            "Google".into(),
+        );
+        provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "google-access-must-not-export".into(),
+            refresh_token: "google-refresh-must-not-export".into(),
+            expires_at: i64::MAX,
+        });
+        fs::write(
+            store.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(build_opencode_auth_from_ai_providers(temp.path()).is_none());
+        let mut auth = Some(serde_json::json!({"antigravity": {
+            "type":"oauth", "access":"legacy-access", "refresh":"legacy-refresh"
+        }}));
+        super::overlay_opencode_auth(&mut auth, super::cli_proxy_opencode_auth_overlay().unwrap());
+        let auth = auth.unwrap();
+        assert_eq!(auth["antigravity"]["type"], "api");
+        assert!(auth["antigravity"].get("access").is_none());
+        assert!(auth["antigravity"].get("refresh").is_none());
+    }
+
+    #[test]
     fn muse_provider_auth_is_written_under_opencode_meta_key() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = temp.path().join(".sandboxed-sh");
@@ -12314,6 +12345,34 @@ mod tests {
             .as_str()
             .expect("mission id header");
         assert_eq!(mission_header, "00000000-0000-0000-0000-000000000123");
+    }
+
+    #[test]
+    fn ensure_opencode_provider_antigravity_keeps_explicit_proxy_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "antigravity/claude-sonnet",
+            "10.88.0.1",
+            None,
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        let provider = &config["provider"]["antigravity"];
+        assert_eq!(
+            provider["models"]["claude-sonnet"]["id"],
+            "antigravity/claude-sonnet"
+        );
+        assert!(provider["options"]["baseURL"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://10.88.0.1:"));
     }
 
     #[test]

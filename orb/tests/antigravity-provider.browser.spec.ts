@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 test.use({ browserName: 'webkit' });
-test('Providers shows Antigravity CLI and only account-discovered models', async ({ page }) => {
+test('Settings separates native Antigravity from proxy subscription accounts', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('orb.apiUrl', location.origin);
     localStorage.setItem('orb.jwt', 'test');
@@ -15,10 +15,13 @@ test('Providers shows Antigravity CLI and only account-discovered models', async
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Add subscription account', exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Antigravity CLI', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const native = page.getByRole('region', { name: 'Antigravity CLI', exact: true });
   await native.getByRole('button', { name: /Antigravity CLI/ }).click();
   await expect(native.getByText('Gemini 4 Argon')).toBeVisible();
-  await page.screenshot({ path: '/tmp/antigravity-providers.png', fullPage: true });
+  await page.screenshot({ path: '/tmp/antigravity-settings.png', fullPage: true });
   await native.getByLabel('Antigravity machine').selectOption('old-agent');
   await expect(native.getByText('Gemini Flash')).toBeVisible();
   await expect(native.getByText('Gemini 4 Argon')).toHaveCount(0);

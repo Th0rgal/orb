@@ -1,3 +1,4 @@
+import { AntigravityProvider } from "./AntigravityProvider";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { Select } from "./Select";
@@ -206,6 +207,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <h2>Client</h2>
         <BackendTab />
         <LocalAgentsCard />
+        <Show when={isConnected()}><AntigravityProvider /></Show>
         <CloudAccountsCard />
         <Show when={isConnected()}>
           <section class="s-sec">

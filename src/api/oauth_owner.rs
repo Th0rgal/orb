@@ -51,7 +51,11 @@ pub fn owner_mode() -> OAuthOwnerMode {
 pub(crate) fn provider_is_cli_proxy_capable(provider: ProviderType) -> bool {
     matches!(
         provider,
-        ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Xai | ProviderType::Kimi
+        ProviderType::Anthropic
+            | ProviderType::OpenAI
+            | ProviderType::Xai
+            | ProviderType::Kimi
+            | ProviderType::Antigravity
     )
 }
 

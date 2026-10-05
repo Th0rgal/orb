@@ -20,6 +20,16 @@ pub struct Route {
 }
 
 pub fn route(p: &AIProvider) -> Route {
+    if p.provider_type == ProviderType::Antigravity {
+        return Route {
+            base: crate::api::oauth_owner::cli_proxy_endpoint()
+                .map(|e| e.openai_v1_url())
+                .unwrap_or_default(),
+            profile: "oauth".into(),
+            exportable: false,
+            adapter: "antigravity_proxy",
+        };
+    }
     let oauth = p.api_key.as_ref().is_none_or(|s| s.is_empty()) && p.oauth.is_some();
     let default =
         crate::api::proxy::default_base_url(p.provider_type).unwrap_or(match p.provider_type {
@@ -194,6 +204,9 @@ fn is_text_model(provider: ProviderType, id: &str, entry: &Value) -> bool {
 }
 
 async fn discover(p: &AIProvider, r: &Route) -> Result<(Vec<ProviderModel>, Completeness), String> {
+    if r.adapter == "antigravity_proxy" {
+        return discover_antigravity(p).await;
+    }
     if r.adapter.starts_with("unsupported") {
         return Err(r.adapter.into());
     }
@@ -485,5 +498,86 @@ mod tests {
         assert_eq!(error, "http_307");
         assert!(!error.contains("secret"));
         task.abort();
+    }
+}
+
+async fn discover_antigravity(
+    p: &AIProvider,
+) -> Result<(Vec<ProviderModel>, Completeness), String> {
+    if !crate::api::oauth_owner::management_enabled() {
+        return Err("unsupported_oauth".into());
+    }
+    if crate::api::cli_proxy_accounts::needs_reconnect(p) {
+        return Err("needs_reauth".into());
+    }
+    let file = p
+        .cli_proxy_auth_file
+        .as_deref()
+        .ok_or("missing_proxy_binding")?;
+    let client = crate::api::cli_proxy_login::ManagementClient::configured()
+        .map_err(|_| "proxy_unavailable")?;
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("name", file)
+        .finish();
+    let value = client
+        .request(
+            reqwest::Method::GET,
+            &format!("/auth-files/models?{query}"),
+            None,
+        )
+        .await
+        .map_err(|_| "proxy_catalog_unavailable")?;
+    let models = antigravity_models(&value)?;
+    Ok((models, Completeness::Complete))
+}
+
+fn antigravity_models(value: &Value) -> Result<Vec<ProviderModel>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or("invalid_catalog")?
+        .iter()
+        .filter_map(|m| {
+            // This catalog is already scoped to the bound auth file. Proxy
+            // versions may return raw IDs or namespaced aliases; inference
+            // always restores the explicit routing namespace.
+            let raw = m.get("id")?.as_str()?.trim();
+            let id = raw.strip_prefix("antigravity/").unwrap_or(raw);
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                return None;
+            }
+            Some(ProviderModel {
+                id: id.into(),
+                name: m
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .into(),
+                description: None,
+            })
+        })
+        .collect();
+    Ok(models)
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+    #[test]
+    fn account_catalog_accepts_raw_and_prefixed_models_without_duplicates() {
+        let models = antigravity_models(&serde_json::json!({"models":[{"id":"claude-sonnet","display_name":"Claude on Google"},{"id":"antigravity/claude-sonnet"},{"id":"gemini-pro"},{"id":""}]})).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-sonnet");
+        assert_eq!(models[0].name, "Claude on Google");
+        assert_eq!(models[1].id, "gemini-pro");
+        assert!(antigravity_models(&serde_json::json!({})).is_err());
+    }
+    #[test]
+    fn subscription_uses_proxy_discovery_not_native_machine_login() {
+        let p = AIProvider::new(ProviderType::Antigravity, "Google account".into());
+        let r = route(&p);
+        assert_eq!(r.adapter, "antigravity_proxy");
+        assert!(!r.exportable);
     }
 }

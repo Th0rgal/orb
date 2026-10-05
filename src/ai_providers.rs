@@ -89,6 +89,7 @@ pub enum ProviderType {
     #[serde(rename = "openai")]
     OpenAI,
     Google,
+    Antigravity,
     AmazonBedrock,
     Azure,
     OpenRouter,
@@ -116,6 +117,7 @@ impl ProviderType {
             Self::Anthropic => "Anthropic",
             Self::OpenAI => "OpenAI",
             Self::Google => "Google AI",
+            Self::Antigravity => "Antigravity subscription",
             Self::AmazonBedrock => "Amazon Bedrock",
             Self::Azure => "Azure OpenAI",
             Self::OpenRouter => "OpenRouter",
@@ -141,6 +143,7 @@ impl ProviderType {
             Self::Anthropic => "anthropic",
             Self::OpenAI => "openai",
             Self::Google => "google",
+            Self::Antigravity => "antigravity",
             Self::AmazonBedrock => "amazon-bedrock",
             Self::Azure => "azure",
             Self::OpenRouter => "open-router",
@@ -167,6 +170,7 @@ impl ProviderType {
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::OpenAI),
             "google" => Some(Self::Google),
+            "antigravity" => Some(Self::Antigravity),
             "amazon-bedrock" => Some(Self::AmazonBedrock),
             "azure" => Some(Self::Azure),
             "open-router" => Some(Self::OpenRouter),
@@ -193,6 +197,7 @@ impl ProviderType {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::OpenAI => Some("OPENAI_API_KEY"),
             Self::Google => Some("GOOGLE_API_KEY"),
+            Self::Antigravity => None,
             Self::AmazonBedrock => None, // Uses AWS credentials
             Self::Azure => Some("AZURE_OPENAI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
@@ -223,6 +228,7 @@ impl ProviderType {
                 | Self::Google
                 | Self::Xai
                 | Self::Kimi
+                | Self::Antigravity
         )
     }
 
@@ -264,6 +270,11 @@ impl ProviderType {
                     description: Some("Enter an existing Anthropic API key".to_string()),
                 },
             ],
+            Self::Antigravity => vec![AuthMethod {
+                label: "Google Antigravity".into(),
+                method_type: AuthMethodType::Oauth,
+                description: Some("Connect a Google account for shared model access through CLIProxyAPI.".into()),
+            }],
             Self::GithubCopilot => vec![AuthMethod {
                 label: "GitHub Copilot".to_string(),
                 method_type: AuthMethodType::Oauth,

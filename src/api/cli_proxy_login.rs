@@ -151,6 +151,7 @@ fn provider_for(name: &str) -> Option<ProviderType> {
         "openai" | "codex" => Some(ProviderType::OpenAI),
         "xai" | "grok" => Some(ProviderType::Xai),
         "kimi" => Some(ProviderType::Kimi),
+        "antigravity" => Some(ProviderType::Antigravity),
         _ => None,
     }
 }
@@ -160,6 +161,7 @@ fn login_path(provider: ProviderType) -> &'static str {
         ProviderType::OpenAI => "/codex-auth-url",
         ProviderType::Xai => "/xai-auth-url",
         ProviderType::Kimi => "/kimi-auth-url",
+        ProviderType::Antigravity => "/antigravity-auth-url",
         _ => unreachable!(),
     }
 }
@@ -411,6 +413,19 @@ async fn login_status(
                     ));
                     return Ok(response(&s));
                 }
+            }
+            if s.provider == ProviderType::Antigravity {
+                // Reserve an explicit route so Claude models cannot silently use
+                // a Claude subscription when Antigravity was selected.
+                ManagementClient::configured()?
+                    .request(
+                        reqwest::Method::PATCH,
+                        "/auth-files/fields",
+                        Some(json!({"name":account.file,"prefix":"antigravity"})),
+                    )
+                    .await?;
+            }
+            if let Some(p) = target {
                 if p.cli_proxy_auth_file
                     .as_deref()
                     .is_some_and(|file| file != account.file)
@@ -429,6 +444,12 @@ async fn login_status(
                 super::cli_proxy_accounts::set_enabled(&p, p.enabled).await?;
             }
             super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
+            if s.provider == ProviderType::Antigravity {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let _ = super::providers::refresh_model_catalog(State(state)).await;
+                });
+            }
             s.status = LoginStatus::Completed;
             s.message = Some("Connected. The subscription login will renew automatically.".into());
         }
@@ -534,9 +555,24 @@ async fn cancel_login(AxumPath(id): AxumPath<String>) -> Result<Json<Value>, Api
     Ok(Json(json!({"status":"ok"})))
 }
 
+async fn login_capabilities() -> Json<Value> {
+    let available =
+        super::oauth_owner::management_enabled() && ManagementClient::configured().is_ok();
+    Json(json!({"available": available, "providers": [
+        {"id":"anthropic", "name":"Claude Pro/Max"},
+        {"id":"openai", "name":"ChatGPT Plus/Pro"},
+        {"id":"xai", "name":"SuperGrok"},
+        {"id":"kimi", "name":"Kimi Code"},
+        {"id":"antigravity", "name":"Google Antigravity"}
+    ], "reason": if available { None } else { Some("Subscription login is not configured on this backend.") }}))
+}
+
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
     Router::new()
-        .route("/cli-proxy-login", post(start_login))
+        .route(
+            "/cli-proxy-login",
+            get(login_capabilities).post(start_login),
+        )
         .route(
             "/cli-proxy-login/:id",
             get(login_status).delete(cancel_login),
@@ -547,6 +583,17 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_login_is_distinct_from_google_native_login() {
+        assert_eq!(provider_for("antigravity"), Some(ProviderType::Antigravity));
+        assert_eq!(provider_for("google"), None);
+        assert_eq!(
+            login_path(ProviderType::Antigravity),
+            "/antigravity-auth-url"
+        );
+        assert_eq!(flow_for(ProviderType::Antigravity, "https://accounts.google.com/auth?redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Fcallback"), "redirect");
+    }
+
     #[test]
     fn completed_login_prefers_new_file_and_rejects_ambiguity_or_wrong_identity() {
         let account = |file: &str, token: &str| {
