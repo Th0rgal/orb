@@ -179,6 +179,13 @@ it("keeps citation examples inside code literal and handles spaces and markdown 
 });
 
 describe("emphasis around code spans", () => {
+  it("keeps asterisks in link destinations opaque to surrounding emphasis", () => {
+    const {container} = render(() => <MdView text={'*[docs](https://example.com/search?q=*)* *[file](file:///tmp/a*b.md)* **[`docs`](https://example.com/search?q=**)**'}/>);
+    expect([...container.querySelectorAll('em')].map(node => node.textContent)).toEqual(['docs', 'file']);
+    expect(container.querySelector('strong')?.textContent).toBe('docs');
+    expect([...container.querySelectorAll('a')].map(node => node.getAttribute('href'))).toEqual(['https://example.com/search?q=*', 'https://example.com/search?q=**']);
+    expect(container.textContent).toBe('docs file docs');
+  });
   it("preserves emphasis around links with plain and code-formatted labels", () => {
     const {container} = render(() => <MdView text={'**[docs](https://example.com)** *[notes](file:///tmp/notes.md)* **[`code docs`](https://example.com/code)** *[`code notes`](file:///tmp/notes.md)*'}/>);
     expect([...container.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['docs', 'code docs']);
