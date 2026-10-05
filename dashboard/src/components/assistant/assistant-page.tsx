@@ -78,7 +78,6 @@ const BACKEND_LABELS: Record<string, string> = {
   claudecode: 'Claude Code',
   opencode: 'OpenCode',
   codex: 'Codex',
-  gemini: 'Gemini',
   grok: 'Grok Build',
   chatgpt_ui: 'ChatGPT UI (experimental)',
 };
@@ -336,7 +335,6 @@ export default function AssistantPage() {
     const allowlist =
       backend === 'claudecode' ? new Set(['anthropic']) :
       backend === 'codex' ? new Set(['openai']) :
-      backend === 'gemini' ? new Set(['google']) :
       backend === 'grok' ? new Set(['xai']) : null;
 
     const backendOpts = backendModelOptions?.backends?.[backend];
@@ -1693,7 +1691,7 @@ export default function AssistantPage() {
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'gemini', 'grok', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>
@@ -1889,7 +1887,7 @@ export default function AssistantPage() {
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'gemini', 'grok', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>

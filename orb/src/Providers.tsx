@@ -31,7 +31,7 @@ import {
 } from "./api";
 
 type AuthKind = "oauth" | "api";
-type Owner = "cliproxy" | "sandboxed" | "gemini";
+type Owner = "cliproxy" | "sandboxed";
 type Status = "connected" | "needs_reauth" | "not_configured";
 
 type Method = { label: string; kind: AuthKind; desc: string };
@@ -71,7 +71,7 @@ const KINDS: Kind[] = [
     id: "google",
     name: "Google",
     methods: [
-      { label: "Gemini CLI OAuth", kind: "oauth", desc: "Own oauth_creds.json. Not owned by CLIProxyAPI." },
+      { label: "Google OAuth", kind: "oauth", desc: "Google OAuth for OpenCode, managed by sandboxed.sh." },
       { label: "API key", kind: "api", desc: "Google AI Studio key." },
     ],
   },
@@ -97,7 +97,7 @@ const BACKENDS: Record<string, string[]> = {
   anthropic: ["claudecode", "opencode"],
   openai: ["codex", "opencode"],
   xai: ["grok", "opencode"],
-  google: ["gemini", "opencode"],
+  google: ["opencode"],
   kimi: ["opencode"],
   "github-copilot": ["opencode"],
 };
@@ -107,7 +107,6 @@ const BACKEND_LABEL: Record<string, string> = {
   opencode: "OpenCode",
   codex: "Codex",
   grok: "Grok",
-  gemini: "Gemini",
 };
 
 type Account = {
@@ -125,7 +124,6 @@ type Account = {
 
 function ownerFor(type: string, auth: AuthKind): Owner {
   if (auth === "api") return "sandboxed";
-  if (type === "google") return "gemini";
   if (type === "github-copilot") return "sandboxed";
   if (type === "anthropic" || type === "openai" || type === "xai" || type === "kimi") return "cliproxy";
   return "sandboxed";
@@ -133,7 +131,6 @@ function ownerFor(type: string, auth: AuthKind): Owner {
 
 function ownerLabel(o: Owner) {
   if (o === "cliproxy") return "CLIProxyAPI";
-  if (o === "gemini") return "Gemini CLI";
   return "sandboxed.sh";
 }
 
@@ -178,11 +175,11 @@ const SEED: Account[] = [
     id: "a-gem",
     type: "google",
     name: "Google",
-    method: "Gemini CLI OAuth",
+    method: "Google OAuth",
     auth: "oauth",
-    owner: "gemini",
+    owner: "sandboxed",
     status: "connected",
-    backends: ["gemini", "opencode"],
+    backends: ["opencode"],
     enabled: true,
   },
   {

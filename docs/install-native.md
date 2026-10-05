@@ -320,7 +320,7 @@ To authenticate via CLI (useful for testing):
 
 ```bash
 opencode auth login
-# Select Google provider, then "OAuth with Google (Gemini CLI)"
+# Select Google provider, then "OAuth with Google (OpenCode)"
 ```
 
 For dashboard OAuth integration, see the Settings page which handles this flow
@@ -339,11 +339,12 @@ Configure OpenAI API keys or Codex/ChatGPT credentials in **Settings →
 Providers**. Codex missions use raw model ids such as `gpt-5.5`,
 `gpt-5.3-codex`, or another model visible to the connected account.
 
-### 3.5.2 Gemini
+### 3.5.2 Antigravity
 
-Configure Google/Gemini credentials in **Settings → Providers** or use the
-Gemini CLI login flow. Gemini missions use raw model ids such as
-`gemini-3.1-pro-preview`.
+Install `agy` and sign in as the execution user. Select the `antigravity` backend
+and an exact model ID from `agy models`. Gemini CLI is retired. Google API keys
+and Google OAuth in **Settings → Providers** remain available for OpenCode; they
+do not configure Antigravity.
 
 ### 3.5.3 Grok
 
@@ -973,7 +974,7 @@ are pre-configured:
 | ----------------- | ----------------- | ------------------------------------- |
 | **Anthropic**     | OpenCode's client | None (works out of the box)           |
 | **OpenAI**        | Codex CLI client  | None (works out of the box)           |
-| **Google/Gemini** | Gemini CLI client | Install `opencode-gemini-auth` plugin |
+| **Google/Gemini** | OpenCode Google provider | Install `opencode-gemini-auth` plugin |
 
 OAuth flows use copy-paste for the authorization code. The user:
 

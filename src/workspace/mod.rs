@@ -268,7 +268,7 @@ pub struct Workspace {
 
 /// Harness CLI versions detected inside a container workspace.
 ///
-/// Keyed by CLI name (`claude`, `codex`, `opencode`, `gemini`, `grok`); a CLI
+/// Keyed by CLI name (`claude`, `codex`, `opencode`, `grok`); a CLI
 /// that is not installed is simply absent. The value is the first line of
 /// `<cli> --version`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3946,10 +3946,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         }
 
         // Collect skills (for backends that use skill contents directly)
-        if matches!(
-            backend_id,
-            "claudecode" | "codex" | "gemini" | "grok" | "antigravity"
-        ) {
+        if matches!(backend_id, "claudecode" | "codex" | "grok" | "antigravity") {
             let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
                 Ok(names) => {
                     tracing::debug!(
@@ -4060,7 +4057,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
 
     let unified_mcp = if matches!(
         backend_id,
-        "codex" | "claudecode" | "opencode" | "gemini" | "grok" | "antigravity"
+        "codex" | "claudecode" | "opencode" | "grok" | "antigravity"
     ) {
         if let Some(user) = boss_user_id {
             let (url, token) = crate::control_mcp::launch::bootstrap(mission_id, user)
@@ -5013,7 +5010,6 @@ use crate::util::copy_dir_recursive;
 struct HarnessBootstrapFlags {
     claudecode: bool,
     codex: bool,
-    gemini: bool,
     opencode: bool,
     grok: bool,
 }
@@ -5023,14 +5019,13 @@ impl HarnessBootstrapFlags {
         Self {
             claudecode: env_var_bool("SANDBOXED_SH_BOOTSTRAP_CLAUDECODE", true),
             codex: env_var_bool("SANDBOXED_SH_BOOTSTRAP_CODEX", true),
-            gemini: env_var_bool("SANDBOXED_SH_BOOTSTRAP_GEMINI", true),
             opencode: env_var_bool("SANDBOXED_SH_BOOTSTRAP_OPENCODE", true),
             grok: env_var_bool("SANDBOXED_SH_BOOTSTRAP_GROK", true),
         }
     }
 
     fn any(&self) -> bool {
-        self.claudecode || self.codex || self.gemini || self.opencode || self.grok
+        self.claudecode || self.codex || self.opencode || self.grok
     }
 }
 
@@ -5048,11 +5043,9 @@ fn render_harness_bootstrap_script(
     HARNESS_BOOTSTRAP_TEMPLATE
         .replace("@CLAUDE_VERSION@", &policy.effective_claude_code())
         .replace("@CODEX_PIN@", &pin(&policy.codex))
-        .replace("@GEMINI_PIN@", &pin(&policy.gemini))
         .replace("@OPENCODE_PIN@", &pin(&policy.opencode))
         .replace("@INSTALL_CLAUDECODE@", bool_str(flags.claudecode))
         .replace("@INSTALL_CODEX@", bool_str(flags.codex))
-        .replace("@INSTALL_GEMINI@", bool_str(flags.gemini))
         .replace("@INSTALL_OPENCODE@", bool_str(flags.opencode))
         .replace("@INSTALL_GROK@", bool_str(flags.grok))
 }
@@ -5153,7 +5146,6 @@ fi
 # means "install latest when missing"; a pin also reinstalls on drift.
 CLAUDE_CODE_VERSION="${SANDBOXED_SH_CLAUDECODE_VERSION:-@CLAUDE_VERSION@}"
 CODEX_VERSION="@CODEX_PIN@"
-GEMINI_VERSION="@GEMINI_PIN@"
 OPENCODE_VERSION="@OPENCODE_PIN@"
 
 # Detect package manager: prefer bun, fallback to npm
@@ -5228,13 +5220,6 @@ if [ "@INSTALL_CODEX@" = "true" ] && command -v codex >/dev/null 2>&1 && [ ! -x 
     echo "[sandboxed] Linked codex-code-mode-host -> $host_bin"
   else
     echo "[sandboxed] WARNING: codex-code-mode-host not found in the Codex package; Codex tool calls will fail"
-  fi
-fi
-
-if [ "@INSTALL_GEMINI@" = "true" ] && [ -n "$PKG_MGR" ] && needs_install gemini "$GEMINI_VERSION"; then
-  echo "[sandboxed] Installing Gemini CLI ${GEMINI_VERSION:-latest} via $PKG_MGR..."
-  if ! $PKG_MGR install -g @google/gemini-cli@"${GEMINI_VERSION:-latest}"; then
-    echo "[sandboxed] Gemini CLI install failed"
   fi
 fi
 
@@ -5333,7 +5318,7 @@ const HARNESS_VERSION_LINE_PREFIX: &str = "sandboxed-harness-version:";
 /// line per installed harness CLI. Missing CLIs print nothing.
 const HARNESS_VERSION_PROBE_SCRIPT: &str = r#"
 export PATH="/root/.bun/bin:/root/.cache/.bun/bin:/usr/local/bin:$PATH"
-for cli in claude codex opencode gemini grok; do
+for cli in claude codex opencode grok; do
   if command -v "$cli" >/dev/null 2>&1; then
     v="$(timeout --signal=KILL 10s "$cli" --version 2>/dev/null | head -n1 | tr -d '\r')"
     printf 'sandboxed-harness-version:%s=%s\n' "$cli" "$v"
@@ -6010,7 +5995,6 @@ mod tests {
         HarnessBootstrapFlags {
             claudecode: true,
             codex: true,
-            gemini: true,
             opencode: true,
             grok: true,
         }
@@ -6030,14 +6014,12 @@ mod tests {
             assert!(script.contains("${SANDBOXED_SH_CLAUDECODE_VERSION:-2.2.5}"));
         }
         assert!(script.contains("CODEX_VERSION=\"0.48.0\""));
-        // Unpinned harnesses get an empty pin (= install latest when missing).
-        assert!(script.contains("GEMINI_VERSION=\"\""));
         assert!(script.contains("@openai/codex@"));
+        assert!(!script.contains("gemini"));
         assert!(
             script.contains("codex-code-mode-host"),
             "the Codex sidecar must be linked after install"
         );
-        assert!(script.contains("@google/gemini-cli@"));
         assert!(script.contains("[ \"$ni_installed\" != \"$ni_expected\" ]"));
         assert!(!script.contains("GROK_VERSION="));
         assert!(script.contains("needs_install grok \"\""));
@@ -6065,7 +6047,6 @@ mod tests {
             &HarnessBootstrapFlags {
                 claudecode: true,
                 codex: false,
-                gemini: false,
                 opencode: true,
                 grok: true,
             },

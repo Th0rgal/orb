@@ -19,9 +19,9 @@ POST /api/control/missions
 }
 ```
 
-`backend` can be `"opencode"`, `"claudecode"`, `"codex"`, `"gemini"`, or
+`backend` can be `"opencode"`, `"claudecode"`, `"codex"`, `"antigravity"`, or
 `"grok"`. If omitted, the server uses `DEFAULT_BACKEND` or the first detected
-CLI in priority order: Claude Code, OpenCode, Grok, Gemini, then Codex.
+CLI in priority order: Claude Code, OpenCode, Grok, Codex, then Antigravity.
 
 **Response**: `Mission` object (see below).
 

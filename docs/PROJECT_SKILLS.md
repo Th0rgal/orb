@@ -47,7 +47,7 @@ Native discovery uses these managed entries in the execution directory:
 | Codex | `.agents/skills/<name>` |
 | Claude Code | `.claude/skills/<name>` |
 | OpenCode | `.opencode/skills/<name>` |
-| Gemini CLI | `.gemini/skills/<name>` |
+| Antigravity | `.agents/skills/<name>` |
 | Grok | `.grok/skills/<name>` |
 | ChatGPT UI / hosted agents | No project filesystem discovery integration; unsupported |
 
@@ -90,13 +90,11 @@ helper. Skills with YAML frontmatter also require PyYAML for that Python
 interpreter (`python3-yaml` on Debian/Ubuntu). Core images and new container
 bootstrap provision it; desktop and existing leaf-machine installations report
 an actionable dependency error if it is missing. Frontmatter is parsed as YAML
-before its required name/description strings are validated. Grok and Gemini require trusted working directories. Orb checks their native
+before its required name/description strings are validated. Grok requires trusted working directories. Orb checks its native
 listings and refuses to launch if trust or configuration hides project skills.
 Orb does not change the user's trust configuration. Core resolves the selected
-Grok/Gemini CLI with the runner's existing availability/installation logic before
-inspection, including configured paths and runtime prefixes. Gemini authentication
-setup merges only the selected auth type, retaining folder trust, disabled skills,
-MCPs, and the remaining user settings; invalid existing JSON is not overwritten. Native entries are also
+Grok CLI with the runner's existing availability/installation logic before
+inspection, including configured paths and runtime prefixes. Native entries are also
 refused inside the synchronized source tree so discovery metadata cannot
 contaminate project-file synchronization.
 
@@ -112,7 +110,7 @@ refresh on the next launch/resume, not continuously during a turn.
 | Codex | Official documentation supports symlinked folders and automatic skill changes, with restart as a fallback. `skills/list` on 0.159.3 discovered this implementation's link as a repository skill and reported the original source path. |
 | Claude Code | Current official documentation supports symlinked skill folders. It documents live `SKILL.md` detection, `/reload-skills` for newly created discovery directories, and separate limits for supporting files. Native startup metadata on 2.1.286 listed this implementation's symlinked skill. Runtime instruction following through Orb is still required. |
 | OpenCode | `opencode debug skill` on 1.18.34 discovered this implementation's link and parsed its description/body. New CLI processes scan discovery paths; live session reload was not tested. |
-| Gemini | Official documentation lists workspace `.gemini/skills` and `/skills reload` (alias `/skills refresh`). The 0.62.0 CLI was installed only in a disposable prefix; its native `skills list --all` discovered this implementation's link with private fixture trust settings. Untrusted workspaces omitted both links and copies. |
+| Gemini (retired; historical validation) | Official documentation lists workspace `.gemini/skills` and `/skills reload` (alias `/skills refresh`). The 0.62.0 CLI was installed only in a disposable prefix; its native `skills list --all` discovered this implementation's link with private fixture trust settings. Untrusted workspaces omitted both links and copies. |
 | Grok | `grok inspect --json` on 1.0.44 discovered this implementation's link after trusting only a disposable test directory. An untrusted directory omitted both links and native copies. New-process discovery was verified; live session reload was not tested. |
 
 Sources:

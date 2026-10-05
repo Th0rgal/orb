@@ -271,7 +271,7 @@ impl ProviderType {
             }],
             Self::Google => vec![
                 AuthMethod {
-                    label: "OAuth with Google (Gemini CLI)".to_string(),
+                    label: "OAuth with Google (OpenCode)".to_string(),
                     method_type: AuthMethodType::Oauth,
                     description: Some(
                         "Use your Gemini plan/quotas (including free tier) via Google OAuth"

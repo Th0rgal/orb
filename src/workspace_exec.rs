@@ -2312,7 +2312,7 @@ impl WorkspaceExec {
         let env = self.build_env(env);
         let (launch_program, launch_args) =
             crate::control_mcp::launch::wrap_command(program, args, &env);
-        // Harnesses without a PTY (Codex, OpenCode, Gemini, Grok) get the same
+        // Harnesses without a PTY (Codex, OpenCode, Antigravity, Grok) get the same
         // scope as Claude Code: on 2026-09-29 five Codex workers and their
         // Lean and Forge builds ran in the API's cgroup, at a load of 61.
         let scoped = self.host_scope_invocation(cwd, &launch_program, &launch_args, &env);

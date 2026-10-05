@@ -11,7 +11,7 @@ import type { Workspace } from '@/lib/api';
 import { isBackendAvailable, useBackendConfigs } from '@/lib/use-backend-configs';
 import { toast } from '@/components/toast';
 
-const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'gemini', 'grok', 'chatgpt_ui'] as const;
+const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'chatgpt_ui'] as const;
 const CHATGPT_UI_BACKEND_ID = 'chatgpt_ui';
 
 const CHATGPT_UI_CANONICAL_MODEL = 'gpt-5.6-pro';
@@ -154,7 +154,6 @@ export function NewMissionDialog({
       { id: 'opencode', name: 'OpenCode' },
       { id: 'claudecode', name: 'Claude Code' },
       { id: 'codex', name: 'Codex' },
-      { id: 'gemini', name: 'Gemini CLI' },
       { id: 'grok', name: 'Grok Build' },
       { id: 'chatgpt_ui', name: 'ChatGPT UI (experimental)' },
     ],
@@ -178,7 +177,7 @@ export function NewMissionDialog({
 
   // Filter to only enabled backends with CLI available and (when reported) auth configured.
   const enabledBackends = useMemo(() => {
-    return backends?.filter((b) => isBackendAvailable(backendConfigs[b.id])) || [];
+    return backends?.filter((b) => b.id !== 'gemini' && isBackendAvailable(backendConfigs[b.id])) || [];
   }, [backends, backendConfigs]);
 
   const workspaceProfile = useMemo(() => {
@@ -207,11 +206,6 @@ export function NewMissionDialog({
   const { data: codexAgents, mutate: mutateCodexAgents } = useSWR<BackendAgent[]>(
     open && enabledBackends.some(b => b.id === 'codex') ? 'backend-codex-agents' : null,
     () => listBackendAgents('codex'),
-    { revalidateOnFocus: true, dedupingInterval: 5000 }
-  );
-  const { data: geminiAgents, mutate: mutateGeminiAgents } = useSWR<BackendAgent[]>(
-    open && enabledBackends.some(b => b.id === 'gemini') ? 'backend-gemini-agents' : null,
-    () => listBackendAgents('gemini'),
     { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
   const { data: grokAgents, mutate: mutateGrokAgents } = useSWR<BackendAgent[]>(
@@ -272,11 +266,6 @@ export function NewMissionDialog({
         agents = codexAgents || [
           { id: 'default', name: 'Codex Agent' },
         ];
-      } else if (backend.id === 'gemini') {
-        // Gemini agents
-        agents = geminiAgents || [
-          { id: 'default', name: 'Gemini Agent' },
-        ];
       } else if (backend.id === 'grok') {
         agents = grokAgents || [
           { id: 'build', name: 'Build' },
@@ -303,7 +292,7 @@ export function NewMissionDialog({
     }
 
     return result;
-  }, [enabledBackends, opencodeAgents, claudecodeAgents, codexAgents, geminiAgents, grokAgents, agentsPayload, config, claudeCodeLibConfig]);
+  }, [enabledBackends, opencodeAgents, claudecodeAgents, codexAgents, grokAgents, agentsPayload, config, claudeCodeLibConfig]);
 
   // Group agents by backend for display
   const agentsByBackend = useMemo(() => {
@@ -358,7 +347,6 @@ export function NewMissionDialog({
   const providerAllowlist = useMemo(() => {
     if (selectedBackend === 'claudecode') return new Set(['anthropic']);
     if (selectedBackend === 'codex') return new Set(['openai']);
-    if (selectedBackend === 'gemini') return new Set(['google']);
     if (selectedBackend === 'grok') return new Set(['xai']);
     return null;
   }, [selectedBackend]);
@@ -545,7 +533,7 @@ export function NewMissionDialog({
       }
     }
 
-    // Fallback: use first available backend with priority claudecode → opencode → grok → gemini → codex
+    // Fallback: use first available backend with priority claudecode → opencode → grok → codex
     // Try Claude Code first
     const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
     if (claudeCodeAgent) {
@@ -562,7 +550,7 @@ export function NewMissionDialog({
       return;
     }
 
-    for (const backendId of ['grok', 'gemini', 'codex']) {
+    for (const backendId of ['grok', 'codex']) {
       const agent = allAgents.find(a => a.backend === backendId);
       if (agent) {
         setSelectedAgentValue(agent.value);
@@ -623,7 +611,6 @@ export function NewMissionDialog({
       mutateOpencodeAgents?.(),
       mutateClaudecodeAgents?.(),
       mutateCodexAgents?.(),
-      mutateGeminiAgents?.(),
       mutateGrokAgents?.(),
       mutateAgentsPayload?.(),
       mutateConfig?.(),
@@ -633,7 +620,6 @@ export function NewMissionDialog({
   const getCreateOptions = (): NewMissionDialogOptions => {
     const parsed = parseSelectedValue(selectedAgentValue);
     const agentValue =
-      (selectedBackend === 'gemini' && parsed?.agent === 'default') ||
       (selectedBackend === 'grok' && parsed?.agent === 'build')
         ? undefined
         : parsed?.agent || undefined;

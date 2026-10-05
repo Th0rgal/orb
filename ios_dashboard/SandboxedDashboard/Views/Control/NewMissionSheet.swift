@@ -25,7 +25,7 @@ struct NewMissionSheet: View {
 
     // Backend and agent selection
     @State private var backends: [Backend] = Backend.defaults
-    @State private var enabledBackendIds: Set<String> = ["opencode", "claudecode", "amp", "codex", "gemini", "grok"]
+    @State private var enabledBackendIds: Set<String> = ["opencode", "claudecode", "amp", "codex", "grok"]
     @State private var backendAgents: [String: [BackendAgent]] = [:]
     @State private var selectedAgentValue: String = ""
     
@@ -506,10 +506,6 @@ struct NewMissionSheet: View {
         if backend == "codex" {
             // Only show OpenAI models for Codex
             return providers.filter { $0.id == "openai" }
-        }
-        if backend == "gemini" {
-            // Only show Google models for Gemini
-            return providers.filter { $0.id == "google" }
         }
         if backend == "grok" {
             // Only show xAI models for Grok Build

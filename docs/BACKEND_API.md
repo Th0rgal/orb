@@ -14,7 +14,7 @@ GET /api/backends
   {"id": "opencode", "name": "OpenCode"},
   {"id": "claudecode", "name": "Claude Code"},
   {"id": "codex", "name": "Codex"},
-  {"id": "gemini", "name": "Gemini"},
+  {"id": "antigravity", "name": "Antigravity CLI"},
   {"id": "grok", "name": "Grok Build"}
 ]
 ```
@@ -63,7 +63,7 @@ GET /api/backends/:id/config
 
 For `claudecode`, `settings` includes `api_key_configured` and optional fields
 like `default_model`. Grok settings include an optional `cli_path`. Codex and
-Gemini currently use empty settings unless configured by future backend-specific
+Antigravity currently use empty settings unless configured by future backend-specific
 fields.
 
 ## Update Backend Config

@@ -35,7 +35,7 @@ const RECONNECT_OAUTH_METHODS: Record<string, ReconnectMethod[]> = {
     { index: 0, label: 'ChatGPT Plus/Pro (OAuth)', description: 'Reconnect via official OpenAI OAuth' },
   ],
   google: [
-    { index: 0, label: 'OAuth with Google (Gemini CLI)', description: 'Reconnect via Google OAuth' },
+    { index: 0, label: 'OAuth with Google (OpenCode)', description: 'Reconnect via Google OAuth' },
   ],
   xai: [
     { index: 0, label: 'Grok Build OAuth', description: 'Reconnect via grok.com device authorization' },

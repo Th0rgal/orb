@@ -460,3 +460,8 @@ the action is completed or `cancel_requested` is true.
 
 Discover supported models with `list_cloud_models`; preserve model parameters on retries.
 Cloud attempts reject track leases, writer grants and scheduled admission.
+
+Gemini CLI (`backend="gemini"`) is retired. Use `backend="antigravity"` with
+an exact model from `agy models` on the execution machine. Existing Gemini CLI
+missions must be explicitly switched before resuming; do not reuse their native
+session IDs or treat Google/OpenCode OAuth as an Antigravity login.

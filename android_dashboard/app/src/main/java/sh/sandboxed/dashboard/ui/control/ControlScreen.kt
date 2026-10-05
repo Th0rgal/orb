@@ -1007,7 +1007,6 @@ private fun SelectRow(title: String, subtitle: String?, selected: Boolean, onCli
 private fun filteredProviders(providers: List<Provider>, backend: String): List<Provider> = when (backend) {
     "claudecode", "amp" -> providers.filter { it.id == "anthropic" }
     "codex" -> providers.filter { it.id == "openai" }
-    "gemini" -> providers.filter { it.id == "google" }
     else -> providers
 }
 
