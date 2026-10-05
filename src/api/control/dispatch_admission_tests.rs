@@ -11229,7 +11229,12 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .unwrap_err();
     assert_eq!(untrusted.0, StatusCode::BAD_REQUEST);
     assert_eq!(untrusted.1, "Unsupported side context mode");
-    super::fork::record_side_launch(&h.state.config.working_dir, child.id, "btw-original").unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        child.id,
+        &format!("btw:{}:btw-original", parent.id),
+    )
+    .unwrap();
     let result = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -11310,4 +11315,44 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         assert_eq!(failed_retry.0, StatusCode::BAD_REQUEST);
         assert_eq!(failed_retry.1, "Unsupported side context mode");
     }
+}
+
+#[tokio::test]
+async fn btw_creation_never_coalesces_an_unrelated_matching_title() {
+    let h = Harness::new().await;
+    let existing = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Same title · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(existing.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Same title · btw", "backend": "missing-side-test-backend",
+        "idempotency_key": "different-parent-request"
+    }))
+    .unwrap();
+    // New-launch validation must run, rather than returning the unrelated mission.
+    let error = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("Unknown backend"));
 }

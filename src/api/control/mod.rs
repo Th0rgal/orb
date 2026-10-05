@@ -11339,11 +11339,9 @@ pub(super) async fn create_mission_inner(
     // mission instead of running the work twice. The response carries a header
     // so the caller can tell a coalesced answer from a fresh create; a client
     // that genuinely wants a parallel duplicate retitles it.
-    if let Some(title) = req
-        .title
-        .as_deref()
-        .filter(|t| !t.trim().is_empty() && req.parent_mission_id.is_none())
-    {
+    if let Some(title) = req.title.as_deref().filter(|t| {
+        !shared_side_workspace && !t.trim().is_empty() && req.parent_mission_id.is_none()
+    }) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = find_recent_identical_mission(
             &control_state.mission_store,

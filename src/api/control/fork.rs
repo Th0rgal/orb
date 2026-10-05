@@ -60,7 +60,7 @@ pub async fn fork_mission(
             else {
                 continue;
             };
-            if receipt.key == req.idempotency_key.trim() {
+            if receipt.key == side_request_key(id, &req.idempotency_key) {
                 if !receipt.accepted {
                     return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
                         "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
@@ -203,7 +203,7 @@ pub async fn fork_mission(
         "parent_mission_id": if req.side_question.is_some(){None}else{Some(id)},
         "project": source.project.project,
         "tags": tags,
-        "idempotency_key": req.idempotency_key,
+        "idempotency_key": if req.side_question.is_some() { side_request_key(id, &req.idempotency_key) } else { req.idempotency_key },
         "remote_node_id": placement.map(|p| p.node_id),
         "prompt": prompt,
     }))
@@ -223,6 +223,10 @@ pub async fn fork_mission(
         accept_side_launch(&state.config.working_dir, child_id).map_err(internal_error)?;
     }
     Ok(response)
+}
+
+fn side_request_key(parent: Uuid, key: &str) -> String {
+    format!("btw:{parent}:{}", key.trim())
 }
 
 fn side_creation_lock(user: &str, parent: Uuid) -> Arc<tokio::sync::Mutex<()>> {
