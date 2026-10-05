@@ -142,6 +142,19 @@ it("resolves Windows file URLs without the URL-only leading slash", async () => 
   expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
 });
 
+it("keeps brackets inside code-formatted file link labels", async () => {
+  const path = '/tmp/array.ts';
+  const ref = {source: 'workspace', path, name: 'array.ts'};
+  const resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`array[i].ts`](file:///tmp/array.ts)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'array[i].ts'})).toBeTruthy());
+  expect(container.querySelector('button code')?.textContent).toBe('array[i].ts');
+  expect(container.textContent).toBe('array[i].ts');
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
 it("renders formatted link labels even without a file resolver", () => {
   const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
   expect(container.textContent).toBe('files/Context/ notes docs');

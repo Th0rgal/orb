@@ -85,7 +85,7 @@ function inline(text: string, links = true): JSX.Element[] {
 }
 function inlineText(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
+  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\(([^)]+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(...plainInline(text.slice(last, m.index), links));
@@ -266,7 +266,7 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
+ const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\(([^)]+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
  return parseMarkdown(source).map(block=>block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(plain).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text)).join('\n');
 }
 
