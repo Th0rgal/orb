@@ -131,6 +131,17 @@ it("does not resolve a plain file label inside an already resolved link", async 
   expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
 });
 
+it("resolves Windows file URLs without the URL-only leading slash", async () => {
+  const path = 'C:/Users/Jane/project/readme.md';
+  const ref = {source: 'workspace', path, name: 'readme.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`readme.md`](file:///C:/Users/Jane/project/readme.md)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'readme.md'})).toBeTruthy());
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
 it("renders formatted link labels even without a file resolver", () => {
   const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
   expect(container.textContent).toBe('files/Context/ notes docs');

@@ -31,7 +31,7 @@ function fileLinkTarget(raw: string): string {
   try {
     const url = new URL(raw);
     if (url.hostname && url.hostname !== "localhost") return raw;
-    return decodeURIComponent(url.pathname) + url.hash;
+    return decodeURIComponent(url.pathname).replace(/^\/([a-z]:\/)/i, "$1") + url.hash;
   } catch { return raw; }
 }
 
