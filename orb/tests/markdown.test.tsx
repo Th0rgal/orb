@@ -167,6 +167,15 @@ it("keeps citation examples inside code literal and handles spaces and markdown 
 });
 
 describe("emphasis around code spans", () => {
+  it("preserves emphasis around links with plain and code-formatted labels", () => {
+    const {container} = render(() => <MdView text={'**[docs](https://example.com)** *[notes](file:///tmp/notes.md)* **[`code docs`](https://example.com/code)** *[`code notes`](file:///tmp/notes.md)*'}/>);
+    expect([...container.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['docs', 'code docs']);
+    expect([...container.querySelectorAll('em')].map(node => node.textContent)).toEqual(['notes', 'code notes']);
+    expect(container.querySelectorAll('strong a')).toHaveLength(2);
+    expect(container.querySelector('strong a code')?.textContent).toBe('code docs');
+    expect(container.querySelector('em code')?.textContent).toBe('code notes');
+    expect(container.textContent).toBe('docs notes code docs code notes');
+  });
   it("renders bold that ends with a code span", () => {
     const { container } = render(() => <MdView text={"- **La mission `be655506`** continue de travailler sur `final/*`.\n- **La PR #1 est mergée dans `main`** avec un commit (`12c18b46`)."} />);
     const strong = [...container.querySelectorAll("strong")].map(node => node.textContent);

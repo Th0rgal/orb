@@ -68,11 +68,12 @@ function inline(text: string, links = true): JSX.Element[] {
   // Emphasis that wraps a code span is taken whole first, or the span would
   // split it and leave its asterisks as text. Links likewise stay whole so
   // code-formatted labels do not expose their brackets and destination.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?`[^`\n]*`(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
     if (match[0].startsWith('**')) out.push(<strong>{inline(match[0].slice(2, -2), links)}</strong>);
+    else if (match[0].startsWith('*')) out.push(<em>{inline(match[0].slice(1, -1), links)}</em>);
     else if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
     else if (match[0].startsWith('[')) out.push(...inlineText(match[0], links));
     else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
