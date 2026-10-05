@@ -29792,6 +29792,7 @@ async fn run_single_control_turn(
                     session_id: session_id.as_deref(),
                     is_continuation,
                     extras: crate::api::runners::TurnExtras::ClaudeCode {
+                        owner: boss_user_id.clone(),
                         secrets: None, // not available in control context
                         tool_hub: Some(tool_hub.clone()),
                         status: Some(status.clone()),

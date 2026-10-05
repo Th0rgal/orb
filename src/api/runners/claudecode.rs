@@ -313,6 +313,52 @@ async fn check_claudecode_proxy_health(
     claudecode_proxy_health_verdict(&combined, stdout.trim())
 }
 
+tokio::task_local! {
+    // Supplied by the authenticated Core dispatcher, never by workspace env.
+    pub(crate) static MCP_LAUNCH_OWNER: Option<crate::api::auth::AuthUser>;
+}
+
+async fn fresh_mcp_workspace(workspace: &Workspace, mission_id: Uuid) -> Result<Workspace, String> {
+    fresh_mcp_workspace_with(workspace, mission_id, |id, owner| async move {
+        crate::control_mcp::launch::bootstrap(id, &owner).await
+    })
+    .await
+}
+
+async fn fresh_mcp_workspace_with<F, Fut>(
+    workspace: &Workspace,
+    mission_id: Uuid,
+    bootstrap: F,
+) -> Result<Workspace, String>
+where
+    F: FnOnce(Uuid, crate::api::auth::AuthUser) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, String), String>>,
+{
+    let mut refreshed = workspace.clone();
+    if !workspace.env_vars.contains_key("SANDBOXED_MCP_WRAPPER") {
+        return Ok(refreshed);
+    }
+    let owner = MCP_LAUNCH_OWNER
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .ok_or("Claude MCP launch is missing its trusted owner")?;
+    // Each actual process launch needs a new grant. A long-lived MCP client
+    // renews its own file, not the original workspace environment used by a
+    // subsequent Claude recovery attempt.
+    let (url, token) = bootstrap(mission_id, owner).await?;
+    refreshed
+        .env_vars
+        .insert("SANDBOXED_MCP_API_URL".into(), url);
+    refreshed
+        .env_vars
+        .insert("SANDBOXED_MCP_TOKEN".into(), token);
+    refreshed
+        .env_vars
+        .insert("SANDBOXED_SH_MISSION_ID".into(), mission_id.to_string());
+    Ok(refreshed)
+}
+
 /// Execute a turn using Claude Code CLI backend.
 ///
 /// For Host workspaces: spawns the CLI directly on the host.
@@ -338,6 +384,16 @@ pub fn run_claudecode_turn<'a>(
     force_argv_prompt: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AgentResult> + Send + 'a>> {
     Box::pin(async move {
+        let refreshed_workspace = match fresh_mcp_workspace(workspace, mission_id).await {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return AgentResult::failure(
+                    format!("Claude MCP launch preparation failed: {error}"),
+                    0,
+                )
+            }
+        };
+        let workspace = &refreshed_workspace;
         use crate::api::ai_providers::{
             anthropic_cli_proxy_account_available, ensure_anthropic_oauth_token_valid,
             get_anthropic_auth_for_claudecode, get_anthropic_auth_from_host_with_expiry,
@@ -4450,5 +4506,70 @@ mod rotation_tests {
             "claudecode_transport_failure": { "stage": "mid_turn" }
         }));
         assert!(!rotation_continues_after(&mid_turn));
+    }
+}
+
+#[cfg(test)]
+mod mcp_launch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_claude_attempt_refreshes_the_original_scoped_credential() {
+        let mut workspace = Workspace::new_container("test".into(), "/tmp/test".into());
+        workspace
+            .env_vars
+            .insert("SANDBOXED_MCP_WRAPPER".into(), "/mcp".into());
+        workspace
+            .env_vars
+            .insert("SANDBOXED_MCP_TOKEN".into(), "mcp1.expired".into());
+        workspace
+            .env_vars
+            .insert("SANDBOXED_SH_MISSION_ID".into(), Uuid::new_v4().to_string());
+        let mission_id = Uuid::new_v4();
+        let owner = crate::api::auth::AuthUser {
+            id: "owner".into(),
+            username: "owner".into(),
+        };
+        MCP_LAUNCH_OWNER
+            .scope(Some(owner), async {
+                for attempt in 1..=2 {
+                    let fresh =
+                        fresh_mcp_workspace_with(&workspace, mission_id, |id, user| async move {
+                            assert_eq!(id, mission_id);
+                            assert_eq!(user.id, "owner");
+                            Ok((
+                                "https://core.example".into(),
+                                format!("mcp1.fresh-{attempt}"),
+                            ))
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        fresh.env_vars["SANDBOXED_MCP_TOKEN"],
+                        format!("mcp1.fresh-{attempt}")
+                    );
+                    assert_eq!(
+                        fresh.env_vars["SANDBOXED_SH_MISSION_ID"],
+                        mission_id.to_string()
+                    );
+                    assert_eq!(workspace.env_vars["SANDBOXED_MCP_TOKEN"], "mcp1.expired");
+                }
+                assert!(
+                    fresh_mcp_workspace_with(&workspace, mission_id, |_, _| async {
+                        Err("Core unavailable".into())
+                    })
+                    .await
+                    .is_err(),
+                    "never fall back to the expired grant"
+                );
+            })
+            .await;
+        assert!(
+            fresh_mcp_workspace_with(&workspace, mission_id, |_, _| async {
+                panic!("untrusted workspace must not mint a grant")
+            })
+            .await
+            .is_err()
+        );
     }
 }
