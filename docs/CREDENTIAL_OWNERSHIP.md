@@ -41,6 +41,18 @@ also forces legacy.
 Containers: CLIProxyAPI listens on the host loopback. A container workspace
 needs a shared network to reach it; host workspaces always can.
 
+Native Codex model choices are read from the same proxy's `/v1/models` endpoint.
+The picker retains exact model IDs rather than translating an unavailable model
+to another model. If the catalog is temporarily unavailable, the existing picker
+is retained; this does not establish that those fallback choices are routable.
+
+Account UUID bindings identify credentials for reconnect and quota display; they
+do not pin a native mission to one OAuth account. CLIProxyAPI can select different
+accounts for successive requests in the same mission. Account attribution must
+use the response `X-CPA-TRACE-ID` auth index, rather than a model's self-report or
+global counters while other missions are active. Native pool selection does not
+establish enforcement of sandboxed.sh's per-backend account priorities.
+
 ## UI login and reconnect
 
 Orb, web and iOS call `/api/ai/providers/cli-proxy-login`. The backend requests a
@@ -63,7 +75,7 @@ Set `CLI_PROXY_AUTH_DIR` to the proxy auth directory and ensure the backend can
 read it. Management access requires a loopback proxy endpoint; never distribute
 this key in desktop/mobile builds or workspace configuration.
 
-Before enabling ownership, import only usable, non-rejected credentials; never
+Enable strict ownership before importing usable, non-rejected credentials; never
 replace an existing proxy login with an older sandboxed.sh snapshot. Codex needs
 its account/ID-token metadata and Kimi needs its device metadata, so reconnect
 through the UI when those are unavailable. Rejected refresh tokens require new
