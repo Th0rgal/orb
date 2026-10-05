@@ -6127,6 +6127,14 @@ fn cli_proxy_opencode_provider_definition(
 /// CLIProxyAPI: OpenCode authenticates to the proxy with its key instead.
 fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
+    // Antigravity is proxy-only. Mask any legacy host/workspace OAuth entry
+    // even when management is unavailable; a missing proxy key fails closed.
+    map.insert(
+        "antigravity".into(),
+        serde_json::json!({
+            "type": "api", "key": std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default()
+        }),
+    );
     for (provider, keys) in [
         (
             crate::ai_providers::ProviderType::Anthropic,
@@ -6693,7 +6701,9 @@ fn build_opencode_auth_from_ai_providers(
 
     let mut map = serde_json::Map::new();
     for provider in providers {
-        if !provider.enabled {
+        if !provider.enabled
+            || provider.provider_type == crate::ai_providers::ProviderType::Antigravity
+        {
             continue;
         }
         let keys: Vec<&str> = match provider.provider_type {
@@ -6825,26 +6835,8 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             }
         }
 
-        if let Some(dest_path) = auth_path.as_ref() {
-            if dest_path.as_path() != source_path.as_path() && source_path.exists() {
-                if let Some(parent) = dest_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        tracing::warn!(
-                            "Failed to create OpenCode auth directory {}: {}",
-                            parent.display(),
-                            e
-                        );
-                    }
-                }
-                if let Err(e) = std::fs::copy(&source_path, dest_path) {
-                    tracing::warn!(
-                        "Failed to copy OpenCode auth.json to workspace {}: {}",
-                        dest_path.display(),
-                        e
-                    );
-                }
-            }
-        }
+        // Write only the merged, ownership-filtered snapshot below. Copying
+        // the raw host file first would briefly expose proxy-owned OAuth.
     }
 
     let managed_auth = build_opencode_auth_from_ai_providers(app_working_dir);
@@ -6948,6 +6940,7 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             ("zai", "Z.AI"),
             ("minimax", "Minimax"),
             ("cerebras", "Cerebras"),
+            ("antigravity", "Antigravity"),
         ];
         for (key, label) in provider_entries {
             let entry = if key == "openai" {
@@ -10725,6 +10718,36 @@ mod tests {
             assert_eq!(auth["anthropic"]["access"], "fresh");
             assert_eq!(auth["anthropic"]["expires"], 200);
         }
+    }
+
+    #[test]
+    fn antigravity_oauth_never_reaches_opencode_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Antigravity,
+            "Google".into(),
+        );
+        provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "google-access-must-not-export".into(),
+            refresh_token: "google-refresh-must-not-export".into(),
+            expires_at: i64::MAX,
+        });
+        fs::write(
+            store.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(build_opencode_auth_from_ai_providers(temp.path()).is_none());
+        let mut auth = Some(serde_json::json!({"antigravity": {
+            "type":"oauth", "access":"legacy-access", "refresh":"legacy-refresh"
+        }}));
+        super::overlay_opencode_auth(&mut auth, super::cli_proxy_opencode_auth_overlay().unwrap());
+        let auth = auth.unwrap();
+        assert_eq!(auth["antigravity"]["type"], "api");
+        assert!(auth["antigravity"].get("access").is_none());
+        assert!(auth["antigravity"].get("refresh").is_none());
     }
 
     #[test]
