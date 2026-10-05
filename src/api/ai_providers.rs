@@ -1941,6 +1941,51 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         }
     }
 
+    // The Gemini CLI already treats GEMINI_API_KEY as the most explicit Google
+    // credential, but proxy routing is resolved from StandardAccount entries.
+    // Materialize the process-level key here as well so OpenCode's host-proxy
+    // route can actually use it. Keep it distinct from the auth.json account:
+    // a direct API key and Google OAuth/CLIProxyAPI are intentionally separate
+    // attempts in the same failover chain.
+    let google_disabled = get_provider_config_entry(&opencode_config, ProviderType::Google)
+        .and_then(|e| e.enabled)
+        == Some(false);
+    if !google_disabled {
+        let env_api_key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GOOGLE_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| {
+                std::env::var("GOOGLE_GENERATIVE_AI_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            });
+        if let Some(api_key) = env_api_key.filter(|api_key| {
+            !accounts.iter().any(|account| {
+                account.provider_type == ProviderType::Google
+                    && account.api_key.as_deref() == Some(api_key.as_str())
+            })
+        }) {
+            let base_url = get_provider_config_entry(&opencode_config, ProviderType::Google)
+                .and_then(|entry| entry.base_url);
+            accounts.insert(
+                0,
+                crate::provider_health::StandardAccount {
+                    account_id: crate::provider_health::stable_provider_uuid("google-env-api-key"),
+                    provider_type: ProviderType::Google,
+                    api_key: Some(api_key),
+                    has_oauth: false,
+                    base_url,
+                    oauth_expires_at: None,
+                },
+            );
+        }
+    }
+
     // Anthropic subscription routing is served by CLI Proxy API, which exposes
     // an Anthropic/OpenAI-compatible local endpoint backed by Claude accounts.
     // Those credentials do not live in OpenCode auth.json, so synthesize a
@@ -2022,9 +2067,6 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         });
     }
 
-    let google_disabled = get_provider_config_entry(&opencode_config, ProviderType::Google)
-        .and_then(|e| e.enabled)
-        == Some(false);
     if !seen_types.contains(&ProviderType::Google)
         && !google_disabled
         && google_cli_proxy_account_available()

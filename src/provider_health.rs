@@ -1458,10 +1458,15 @@ impl ModelChainStore {
             // Heal the stock GLM-only assistant chain that predates Hermes. Only
             // touch the exact legacy shape so an operator-customized chain is left
             // alone.
-            if chain.entries.len() == 1
+            let legacy_glm_only = chain.entries.len() == 1
                 && chain.entries[0].provider_id == "zai"
-                && chain.entries[0].model_id == "glm-5.1"
-            {
+                && chain.entries[0].model_id == "glm-5.1";
+            let previous_stock_assistant = chain.entries.len() == 2
+                && chain.entries[0].provider_id == "minimax"
+                && chain.entries[0].model_id == "MiniMax-M3"
+                && chain.entries[1].provider_id == "cerebras"
+                && chain.entries[1].model_id == "zai-glm-4.7";
+            if legacy_glm_only || previous_stock_assistant {
                 chain.name = "Assistant (Hermes)".to_string();
                 chain.entries = vec![
                     ChainEntry {
@@ -1480,7 +1485,7 @@ impl ModelChainStore {
                 chain.strip_thinking = true;
                 chain.updated_at = now;
                 changed = true;
-                tracing::info!("Healed builtin/assistant chain to visible-content providers");
+                tracing::info!("Migrated builtin/assistant chain to current stock providers");
             }
         }
 
@@ -1707,6 +1712,7 @@ impl ModelChainStore {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         for entry in entries {
+            let resolved_start = resolved.len();
             let provider_type = match crate::ai_providers::ProviderType::from_id(&entry.provider_id)
             {
                 Some(pt) => pt,
@@ -1995,7 +2001,9 @@ impl ModelChainStore {
             // live store subscription would have produced the same
             // shared-subscription cooldown anyway, so no real risk of
             // duplicate attempts.
-            if !store_contributed_entry {
+            if !store_contributed_entry
+                || matches!(provider_type, crate::ai_providers::ProviderType::Google)
+            {
                 for sa in standard_accounts {
                     if sa.provider_type != provider_type {
                         continue;
@@ -2120,6 +2128,12 @@ impl ModelChainStore {
                         });
                     }
                 }
+
+                // A direct Gemini API key is the primary route regardless of
+                // account-store quota ordering. OAuth-only Google and
+                // Antigravity entries are CLIProxyAPI fallbacks and must not
+                // jump ahead of a standard/env API key.
+                resolved[resolved_start..].sort_by_key(|candidate| candidate.api_key.is_none());
             }
         }
 
@@ -2476,6 +2490,40 @@ mod tests {
         assert_eq!(zai.model_id, "glm-5.3");
     }
 
+    #[tokio::test]
+    async fn ensure_defaults_prepends_google_to_previous_stock_assistant() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("chains.json");
+        let now = chrono::Utc::now();
+        let chains = vec![ModelChain {
+            id: "builtin/assistant".to_string(),
+            name: "Assistant (Hermes)".to_string(),
+            entries: vec![
+                ChainEntry {
+                    provider_id: "minimax".to_string(),
+                    model_id: "MiniMax-M3".to_string(),
+                },
+                ChainEntry {
+                    provider_id: "cerebras".to_string(),
+                    model_id: "zai-glm-4.7".to_string(),
+                },
+            ],
+            is_default: false,
+            strip_thinking: true,
+            created_at: now,
+            updated_at: now,
+        }];
+        std::fs::write(&path, serde_json::to_string(&chains).unwrap()).unwrap();
+
+        let store = ModelChainStore::new(path).await;
+        std::mem::forget(tmp);
+        let assistant = store.get("builtin/assistant").await.unwrap();
+
+        assert_eq!(assistant.entries.len(), 3);
+        assert_eq!(assistant.entries[0].provider_id, "google");
+        assert_eq!(assistant.entries[0].model_id, "gemini-4-argon-eap");
+    }
+
     fn past_ms(hours: i64) -> i64 {
         chrono::Utc::now().timestamp_millis() - hours * 3600 * 1000
     }
@@ -2524,6 +2572,45 @@ mod tests {
             resolved
         );
         assert_eq!(resolved[0].account_id, standard[0].account_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_google_prioritizes_standard_api_key_over_store_oauth() {
+        let mut oauth = AIProvider::new(ProviderType::Google, "Google OAuth".to_string());
+        oauth.oauth = Some(OAuthCredentials {
+            access_token: "oauth-access".to_string(),
+            refresh_token: "oauth-refresh".to_string(),
+            expires_at: future_ms(6),
+        });
+        oauth.status = ProviderStatus::Connected;
+
+        let store = store_with(vec![oauth]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".to_string(),
+                model_id: "gemini-4-argon-eap".to_string(),
+            }],
+        )
+        .await;
+        let direct_id = stable_provider_uuid("google-env-api-key");
+        let standard = vec![StandardAccount {
+            account_id: direct_id,
+            provider_type: ProviderType::Google,
+            api_key: Some("direct-api-key".to_string()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        }];
+
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &ProviderHealthTracker::new())
+            .await;
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].account_id, direct_id);
+        assert!(resolved[0].api_key.is_some());
+        assert!(resolved[1].has_oauth);
     }
 
     #[tokio::test]
