@@ -428,7 +428,7 @@ private struct MissionRow: View {
     var body: some View {
         HStack(spacing: 14) {
             // Leading tile always identifies the backend (codex / claudecode
-            // / opencode / gemini / grok). Previously this slot painted a
+            // / opencode / antigravity / grok). Previously this slot painted a
             // yellow `play.circle` when `mission.canResume == true` to flag
             // resumability — but `canResume` now also covers `awaiting_user`
             // and `acknowledged` (added with the Needs You refactor), so

@@ -150,7 +150,6 @@ pub(crate) async fn require_node_managed_auth(
 ) -> Result<(), String> {
     let profile = match plan {
         RemoteHarnessPlan::Grok { .. } => "grok",
-        RemoteHarnessPlan::Gemini { .. } => "gemini",
         RemoteHarnessPlan::Antigravity { .. } => "antigravity",
         _ => return Ok(()),
     };

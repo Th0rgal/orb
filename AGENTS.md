@@ -132,12 +132,12 @@ execution context:
   (`src/backend/chatgpt_ui`, `scripts/chatgpt_ui_driver.py`). It is also the
   engine behind ChatGPT cloud agents. See `docs/CHATGPT_UI_HARNESS.md`.
 
-### Gemini and Grok
+### Antigravity and Grok
 
 - Run **per workspace** using their native CLI backends.
-- Reuse the OpenCode-style workspace config path for MCP/tool wiring.
-- Auth is provider-specific: Gemini uses Google credentials/API keys, while Grok
-  uses xAI API keys or the Grok CLI's own login cache.
+- Antigravity uses `agy`, its execution user's native login, and `agy models`
+  for model discovery. Google/OpenCode credentials are not Antigravity credentials.
+- Grok uses xAI API keys or the Grok CLI's own login cache.
 
 ## Tool policy
 
@@ -277,7 +277,7 @@ Recommended smoke tests after changes:
    container workspace directory.
 2. **OpenCode (isolated)**: create a file and verify it exists inside the
    container workspace directory.
-3. **Codex/Gemini/Grok (isolated)**: create a file and verify it exists inside
+3. **Codex/Antigravity/Grok (isolated)**: create a file and verify it exists inside
    the container workspace directory.
 4. **Claude Code (host)**: create a file in the host workspace.
 5. **OpenCode (host)**: create a file in the host workspace.

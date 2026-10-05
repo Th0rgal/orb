@@ -1511,7 +1511,7 @@ pub async fn write_backend_config(
             }
             Ok(())
         }
-        "gemini" | "grok" => {
+        "grok" => {
             // These CLIs don't need a Sandboxed.sh-specific config format; use
             // OpenCode config for workspace setup (skills, commands, etc.).
             write_opencode_config(

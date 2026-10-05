@@ -16,7 +16,7 @@ version: 1.14.0
 
 You manage sandboxed.sh missions on the operator's behalf. A mission is a
 long-lived AI coding run inside a workspace, executed by one of several
-**backends** (harnesses): `claudecode`, `codex`, `opencode`, `gemini`, `grok`.
+**backends** (harnesses): `claudecode`, `codex`, `opencode`, `antigravity`, `grok`.
 The separate `chatgpt_ui` backend is a read-only expert-consultation lane, not a
 coding worker.
 Your job is not to do the coding — it is to **watch the mission, notice when it
@@ -251,8 +251,12 @@ everywhere you write instructions for an agent:
   diagnostics, which makes "where is it stuck" easier to see.
 - `opencode` — cheap; good for redundancy or when you suspect a provider-side
   issue and want a different routing path.
-- `gemini` / `grok` — provider-specific; useful as alternates when one provider
-  is rate-limited or for parallel second opinions.
+- `antigravity` — native Google-account harness (`agy`). Discover exact model IDs
+  with `agy models` as the execution user on the target machine before failover.
+  Its native login is separate from Google API/OpenCode credentials. Gemini CLI
+  (`backend="gemini"`) is retired; switch old missions explicitly, without reusing
+  their native session IDs.
+- `grok` — provider-specific alternate when another provider is rate-limited.
 - `chatgpt_ui` with `model_override: gpt-5.6-pro` — reserve for exceptionally
   difficult, self-contained research, synthesis, or design-conflict questions.
   Start it with `writer: false`; it cannot use workspace tools and must never

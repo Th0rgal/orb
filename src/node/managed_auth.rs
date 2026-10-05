@@ -40,7 +40,6 @@ pub const GROK_AUTH_FILE: &str = "auth.json";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedAuth {
     grok_home: Option<PathBuf>,
-    gemini_home: Option<PathBuf>,
     antigravity_home: Option<PathBuf>,
 }
 
@@ -51,10 +50,6 @@ impl ManagedAuth {
     /// content.
     pub fn from_env() -> Self {
         let mut auth = Self::from_values(std::env::var(GROK_HOME_ENV).ok());
-        auth.gemini_home = std::env::var("SANDBOXED_NODE_GEMINI_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute());
         auth.antigravity_home = std::env::var("SANDBOXED_NODE_ANTIGRAVITY_HOME")
             .ok()
             .map(PathBuf::from)
@@ -80,7 +75,6 @@ impl ManagedAuth {
             });
         Self {
             grok_home,
-            gemini_home: None,
             antigravity_home: None,
         }
     }
@@ -89,7 +83,6 @@ impl ManagedAuth {
     pub fn with_grok_home(path: impl Into<PathBuf>) -> Self {
         Self {
             grok_home: Some(path.into()),
-            gemini_home: None,
             antigravity_home: None,
         }
     }
@@ -105,13 +98,6 @@ impl ManagedAuth {
             if grok_auth_readable(home) {
                 ready.push(PROFILE_GROK.to_string());
             }
-        }
-        if self
-            .gemini_home
-            .as_ref()
-            .is_some_and(|home| private_file_readable(&home.join(".gemini/oauth_creds.json")))
-        {
-            ready.push("gemini".into());
         }
         if self
             .antigravity_home
@@ -152,16 +138,9 @@ impl ManagedAuth {
                         return Err("Antigravity requires SANDBOXED_NODE_ANTIGRAVITY_HOME pointing to the execution user's native CLI profile with a private OAuth login; sign in with agy".into());
                     }
                 }
-                "gemini" => {
-                    if !self.gemini_home.as_ref().is_some_and(|home| {
-                        private_file_readable(&home.join(".gemini/oauth_creds.json"))
-                    }) {
-                        return Err("managed auth profile 'gemini' requires SANDBOXED_NODE_GEMINI_HOME with a private .gemini/oauth_creds.json login owned by the node service account".into());
-                    }
-                }
                 other => {
                     return Err(format!(
-                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, gemini, antigravity)"
+                        "managed auth profile '{other}' is unknown to this node (supported: {PROFILE_GROK}, antigravity)"
                     ));
                 }
             }
@@ -211,15 +190,6 @@ impl ManagedAuth {
         self.validate_request(profiles)?;
         let mut env = Vec::new();
         for profile in profiles {
-            if profile == "gemini" {
-                if let Some(home) = &self.gemini_home {
-                    env.push((
-                        "GEMINI_CLI_HOME".into(),
-                        home.to_string_lossy().into_owned(),
-                    ));
-                    env.push(("GEMINI_FORCE_FILE_STORAGE".into(), "true".into()));
-                }
-            }
             if profile == PROFILE_GROK {
                 if let Some(home) = &self.grok_home {
                     env.push((
@@ -261,36 +231,14 @@ fn private_file_readable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
-    fn gemini_requires_private_node_owned_login_and_exports_only_home() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let auth = ManagedAuth {
-            grok_home: None,
-            gemini_home: Some(root.path().into()),
-            antigravity_home: None,
-        };
-        assert!(auth.advertised().is_empty());
-        assert!(auth.env_for(&["gemini".into()]).is_err());
-        std::fs::create_dir(root.path().join(".gemini")).unwrap();
-        let login = root.path().join(".gemini/oauth_creds.json");
-        std::fs::write(&login, "{\"test_credential\":true}").unwrap();
-        std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(auth.advertised(), vec!["gemini"]);
-        assert_eq!(
-            auth.env_for(&["gemini".into()]).unwrap(),
-            vec![
-                (
-                    "GEMINI_CLI_HOME".into(),
-                    root.path().to_string_lossy().into_owned()
-                ),
-                ("GEMINI_FORCE_FILE_STORAGE".into(), "true".into()),
-            ]
-        );
-        std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(auth.advertised().is_empty());
-        assert!(auth.validate_request(&["gemini".into()]).is_err());
+    fn retired_gemini_auth_profile_is_rejected() {
+        let auth = ManagedAuth::default();
+        assert!(auth
+            .env_for(&["gemini".into()])
+            .unwrap_err()
+            .contains("unknown"));
+        assert!(!auth.advertised().iter().any(|profile| profile == "gemini"));
     }
 
     #[test]

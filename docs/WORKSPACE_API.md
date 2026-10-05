@@ -164,7 +164,8 @@ Note: Mission workspaces generate backend-specific config on execution:
 - **OpenCode**: `opencode.json`, `.opencode/opencode.json`
 - **Claude Code**: `.claude/settings.local.json`, `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`
 - **Codex**: `.codex/config.toml`, `.codex/skills/<name>/SKILL.md`
-- **Gemini/Grok**: OpenCode-style MCP/tool config for the native CLI backend
+- **Grok**: OpenCode-style MCP/tool config for the native CLI backend
+- **Antigravity**: native `agy` profile and `.agents/skills/<name>/SKILL.md`; authenticate as the execution user
 
 Skills are written to the backend-specific skill directory during mission setup.
 

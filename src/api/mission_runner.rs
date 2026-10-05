@@ -62,9 +62,9 @@ use crate::workspace_exec::WorkspaceExec;
 
 use super::automation_variables::substitute_custom_variables;
 use super::control::{
-    resolve_claudecode_default_model, resolve_codex_default_model, resolve_gemini_default_model,
-    resolve_grok_default_model, safe_truncate_index, AgentEvent, AgentTreeNode, ControlRunState,
-    ControlStatus, ExecutionProgress, FrontendToolHub,
+    resolve_claudecode_default_model, resolve_codex_default_model, resolve_grok_default_model,
+    safe_truncate_index, AgentEvent, AgentTreeNode, ControlRunState, ControlStatus,
+    ExecutionProgress, FrontendToolHub,
 };
 use super::library::SharedLibrary;
 
@@ -2189,11 +2189,6 @@ pub(crate) use super::runners::codex::{
     extract_codex_reset_window, run_codex_turn_with_rotation, summarize_codex_usage_caps,
 };
 
-// Gemini runner moved to `super::runners::gemini` (Phase 2). Re-exported so
-// the control.rs dispatch keeps its path.
-#[allow(unused_imports)]
-pub(crate) use super::runners::gemini::run_gemini_turn;
-
 // OpenCode runner moved to `super::runners::opencode` (Phase 2). Re-exported
 // so the control.rs dispatch keeps its path.
 #[allow(unused_imports)]
@@ -3957,10 +3952,6 @@ async fn run_mission_turn(
         config.default_model = Some(resolve_codex_default_model());
     } else if backend_id == "antigravity" && model_override.is_none() {
         config.default_model = None;
-    } else if backend_id == "gemini" && model_override.is_none() {
-        // Pin Gemini to a stable backend default instead of inheriting the
-        // global model or relying on the CLI's own default.
-        config.default_model = Some(resolve_gemini_default_model());
     } else if backend_id == "grok" && model_override.is_none() {
         // Pin Grok Build to its own default model. Without this the global
         // DEFAULT_MODEL (typically `anthropic/claude-opus-5`) flows
@@ -4296,22 +4287,12 @@ async fn run_mission_turn(
         user_message
     };
     let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
-    if project_has_skills && matches!(backend_id.as_str(), "grok" | "gemini") {
+    if project_has_skills && backend_id == "grok" {
         let exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
         let configured = get_backend_string_setting(&backend_id, "cli_path")
-            .or_else(|| {
-                if backend_id == "gemini" {
-                    std::env::var("GEMINI_CLI_PATH").ok()
-                } else {
-                    None
-                }
-            })
             .unwrap_or_else(|| backend_id.clone());
-        let binary = if backend_id == "grok" {
-            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await
-        } else {
-            ensure_gemini_cli_available(&exec, &skill_cwd, &configured).await
-        };
+        let binary =
+            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await;
         match binary {
             Ok(binary) => {
                 workspace
@@ -4494,9 +4475,8 @@ async fn run_mission_turn(
     // send): goal-mode missions need the raw `/goal ...` text preserved;
     // OpenCode resumes its own per-mission session storage (so the framed
     // `convo` would duplicate context the CLI is about to load); grok/codex
-    // see the history-framed convo on normal turns; gemini always gets the
-    // framed convo; Claude Code maintains its own session and gets the raw
-    // user message.
+    // see the history-framed convo on normal turns; Claude Code maintains its
+    // own session and gets the raw user message.
     let is_goal_mode = user_message.trim_start().starts_with("/goal ");
     let has_opencode_session = session_id
         .as_deref()
@@ -4532,7 +4512,6 @@ async fn run_mission_turn(
             },
             is_continuation,
         ),
-        "gemini" => (convo.clone(), is_continuation),
         _ => (user_message.clone(), is_continuation),
     };
 
@@ -9413,10 +9392,6 @@ pub async fn check_backend_prerequisites(
             let cli = cli_path.unwrap_or("codex");
             check_codex_prerequisites(&workspace_exec, cwd, cli).await
         }
-        "gemini" => {
-            let cli = cli_path.unwrap_or("gemini");
-            check_gemini_prerequisites(&workspace_exec, cwd, cli).await
-        }
         "antigravity" => {
             let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;
             BackendPreflightResult { backend_id: "antigravity".into(), available, cli_available: available, auto_install_possible: false, missing_dependencies: if available { vec![] } else { vec!["agy CLI".into()] }, message: Some("Install Antigravity CLI and sign in as the execution user with agy; verify access with agy models".into()) }
@@ -9497,7 +9472,7 @@ pub async fn check_backend_prerequisites(
             auto_install_possible: false,
             missing_dependencies: vec![format!("unknown backend: {}", backend_id)],
             message: Some(format!(
-                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, gemini, grok, chatgpt_ui",
+                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, chatgpt_ui",
                 backend_id
             )),
         },
@@ -9641,266 +9616,6 @@ async fn check_codex_prerequisites(
             Some("Codex CLI not found but can be auto-installed via npm/bun.".to_string())
         },
     }
-}
-
-async fn check_gemini_prerequisites(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    cli_path: &str,
-) -> BackendPreflightResult {
-    let program = cli_path.split_whitespace().next().unwrap_or(cli_path);
-
-    let cli_available = command_available(workspace_exec, cwd, program).await;
-
-    if cli_available {
-        return BackendPreflightResult {
-            backend_id: "gemini".to_string(),
-            available: true,
-            cli_available: true,
-            auto_install_possible: false,
-            missing_dependencies: vec![],
-            message: None,
-        };
-    }
-
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
-
-    let auto_install_possible = has_npm || has_bun;
-
-    BackendPreflightResult {
-        backend_id: "gemini".to_string(),
-        available: auto_install_possible,
-        cli_available: false,
-        auto_install_possible,
-        missing_dependencies: if !auto_install_possible {
-            vec!["npm or bun".to_string()]
-        } else {
-            vec![]
-        },
-        message: if !auto_install_possible {
-            Some("Gemini CLI not found and neither npm nor bun is available. Install Node.js/npm or Bun in the workspace template.".to_string())
-        } else {
-            Some("Gemini CLI not found but can be auto-installed via npm/bun.".to_string())
-        },
-    }
-}
-
-/// Returns the path/command to the Gemini CLI that should be used.
-/// Auto-installs via npm/bun if not found and auto-install is enabled.
-/// If the installed CLI requires Node 20+ but only Node 18 is available,
-/// returns a `bun run <entry_point>` command instead.
-pub(crate) async fn ensure_gemini_cli_available(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    cli_path: &str,
-) -> Result<String, String> {
-    let program = cli_path.split(' ').next().unwrap_or(cli_path);
-
-    // Check if already available
-    if command_available(workspace_exec, cwd, program).await {
-        // Verify Node.js version is sufficient (gemini CLI requires Node 20+)
-        if let Some(bun_cmd) = gemini_bun_fallback_if_needed(workspace_exec, cwd, cli_path).await {
-            return Ok(bun_cmd);
-        }
-        return Ok(cli_path.to_string());
-    }
-
-    // Check bun's global bin directories
-    const BUN_GLOBAL_GEMINI_PATHS: &[&str] =
-        &["/root/.cache/.bun/bin/gemini", "/root/.bun/bin/gemini"];
-    for gemini_path in BUN_GLOBAL_GEMINI_PATHS {
-        if command_available(workspace_exec, cwd, gemini_path).await {
-            tracing::info!(
-                path = %gemini_path,
-                "Found Gemini CLI in bun global bin"
-            );
-            if let Some(bun_cmd) =
-                gemini_bun_fallback_if_needed(workspace_exec, cwd, gemini_path).await
-            {
-                return Ok(bun_cmd);
-            }
-            return Ok(gemini_path.to_string());
-        }
-    }
-
-    // Auto-install Gemini CLI if enabled (defaults to true)
-    let auto_install = env_var_bool("SANDBOXED_SH_AUTO_INSTALL_GEMINI", true);
-    if !auto_install {
-        return Err(format!(
-            "Gemini CLI '{}' not found in workspace. Install it or set GEMINI_CLI_PATH.",
-            cli_path
-        ));
-    }
-
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-
-    if !has_bun && !has_npm {
-        return Err(format!(
-            "Gemini CLI '{}' not found and neither npm nor bun is available in the workspace. Install Node.js/npm or Bun in the workspace template, or set GEMINI_CLI_PATH.",
-            cli_path
-        ));
-    }
-
-    let install_cmd = if has_bun {
-        r#"export PATH="/root/.bun/bin:/root/.cache/.bun/bin:$PATH" && bun install -g @google/gemini-cli@latest 2>&1"#
-    } else {
-        "npm install -g @google/gemini-cli@latest 2>&1"
-    };
-
-    tracing::info!(
-        installer = if has_bun { "bun" } else { "npm" },
-        "Auto-installing Gemini CLI"
-    );
-
-    let output = workspace_exec
-        .output(
-            cwd,
-            "/bin/sh",
-            &["-lc".to_string(), install_cmd.to_string()],
-            std::collections::HashMap::new(),
-        )
-        .await
-        .map_err(|e| format!("Failed to install Gemini CLI: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut message = String::new();
-        if !stderr.trim().is_empty() {
-            message.push_str(stderr.trim());
-        }
-        if !stdout.trim().is_empty() {
-            if !message.is_empty() {
-                message.push_str(" | ");
-            }
-            message.push_str(stdout.trim());
-        }
-        if message.is_empty() {
-            message = "Gemini CLI install failed with no output".to_string();
-        }
-        return Err(format!("Gemini CLI install failed: {}", message));
-    }
-
-    // Re-check availability after install
-    if command_available(workspace_exec, cwd, cli_path).await {
-        if let Some(bun_cmd) = gemini_bun_fallback_if_needed(workspace_exec, cwd, cli_path).await {
-            return Ok(bun_cmd);
-        }
-        return Ok(cli_path.to_string());
-    }
-    for gemini_path in BUN_GLOBAL_GEMINI_PATHS {
-        if command_available(workspace_exec, cwd, gemini_path).await {
-            tracing::info!(
-                path = %gemini_path,
-                "Gemini CLI available after auto-install"
-            );
-            if let Some(bun_cmd) =
-                gemini_bun_fallback_if_needed(workspace_exec, cwd, gemini_path).await
-            {
-                return Ok(bun_cmd);
-            }
-            return Ok(gemini_path.to_string());
-        }
-    }
-
-    Err(format!(
-        "Gemini CLI install completed but '{}' is still not available in workspace PATH.",
-        cli_path
-    ))
-}
-
-/// Check if Node.js version is too old for Gemini CLI (requires 20+).
-/// If so, return a `bun run <entry_point>` command as fallback.
-async fn gemini_bun_fallback_if_needed(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    _cli_path: &str,
-) -> Option<String> {
-    // Check Node.js major version
-    let node_available = workspace_exec
-        .output(
-            cwd,
-            "/bin/sh",
-            &["-lc".to_string(), "node --version 2>/dev/null".to_string()],
-            std::collections::HashMap::new(),
-        )
-        .await
-        .ok();
-
-    if let Some(ref node_version) = node_available {
-        let version_str = String::from_utf8_lossy(&node_version.stdout);
-        let version_str = version_str.trim().trim_start_matches('v');
-        if let Some(major) = version_str
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-        {
-            if major >= 20 {
-                return None; // Node.js version is sufficient
-            }
-            tracing::info!(
-                node_version = %version_str,
-                "Node.js version too old for Gemini CLI (requires 20+), falling back to bun"
-            );
-        } else {
-            tracing::info!("Could not parse Node.js version, falling back to bun");
-        }
-    } else {
-        tracing::info!("Node.js not available, falling back to bun");
-    }
-
-    // Find the gemini CLI entry point and run via bun
-    const GEMINI_ENTRY_POINTS: &[&str] = &[
-        "/root/.cache/.bun/install/global/node_modules/@google/gemini-cli/dist/index.js",
-        "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js",
-        "/usr/lib/node_modules/@google/gemini-cli/dist/index.js",
-    ];
-
-    // Determine which bun path to use
-    let bun_path = if command_available(workspace_exec, cwd, "bun").await {
-        "bun".to_string()
-    } else if command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await {
-        "/root/.bun/bin/bun".to_string()
-    } else if command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/bun").await {
-        "/root/.cache/.bun/bin/bun".to_string()
-    } else {
-        tracing::warn!("Node.js too old and bun not available; gemini CLI may fail");
-        return None;
-    };
-
-    for entry_point in GEMINI_ENTRY_POINTS {
-        let check = workspace_exec
-            .output(
-                cwd,
-                "/bin/sh",
-                &[
-                    "-lc".to_string(),
-                    format!("test -f {} && echo found", entry_point),
-                ],
-                std::collections::HashMap::new(),
-            )
-            .await;
-
-        if let Ok(output) = check {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim() == "found" {
-                let cmd = format!("{} run {}", bun_path, entry_point);
-                tracing::info!(
-                    bun = %bun_path,
-                    entry_point = %entry_point,
-                    "Using bun to run Gemini CLI (Node.js < 20)"
-                );
-                return Some(cmd);
-            }
-        }
-    }
-
-    tracing::warn!("Could not find Gemini CLI entry point for bun fallback");
-    None
 }
 
 pub(crate) fn usage_value_tokens(value: &serde_json::Value, keys: &[&str]) -> u64 {
@@ -10392,6 +10107,30 @@ mod tests {
     use std::fs;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn retired_gemini_preflight_does_not_install_and_antigravity_uses_selected_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::default_host(directory.path().into());
+        let retired =
+            super::check_backend_prerequisites(&workspace, "gemini", Some("/usr/bin/true")).await;
+        assert!(!retired.available);
+        assert!(!retired.auto_install_possible);
+        assert!(retired.message.unwrap().contains("Unknown backend"));
+        let current =
+            super::check_backend_prerequisites(&workspace, "antigravity", Some("/usr/bin/true"))
+                .await;
+        assert!(current.available);
+        assert!(!current.auto_install_possible);
+        let missing = super::check_backend_prerequisites(
+            &workspace,
+            "antigravity",
+            Some("/no-such-agy-binary"),
+        )
+        .await;
+        assert!(!missing.available);
+        assert!(missing.message.unwrap().contains("agy models"));
+    }
 
     #[cfg(unix)]
     #[test]

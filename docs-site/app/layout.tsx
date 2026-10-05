@@ -22,7 +22,7 @@ export const metadata: Metadata = {
     template: "%s | sandboxed.sh",
   },
   description:
-    "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Gemini, and Grok). Mission orchestration, workspace management, and library sync.",
+    "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
   applicationName: "sandboxed.sh",
   generator: "Next.js",
   keywords: [
@@ -46,7 +46,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "sandboxed.sh",
     description:
-      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Gemini, and Grok). Mission orchestration, workspace management, and library sync.",
+      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
     creator: "@music_music_yo",
     images: ["/og-image.png"],
   },
@@ -57,7 +57,7 @@ export const metadata: Metadata = {
     siteName: "sandboxed.sh",
     title: "sandboxed.sh",
     description:
-      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Gemini, and Grok). Mission orchestration, workspace management, and library sync.",
+      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
     images: [
       {
         url: "/og-image.png",

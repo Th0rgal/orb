@@ -132,3 +132,8 @@ After its action completes, follow the result's `next_tool`: use
 `get_cloud_execution` for provider confirmation or `get_mission_health` for
 native runner termination. Do not report cancellation complete solely because
 the action is completed or `cancel_requested` is true.
+
+Gemini CLI (`backend="gemini"`) is retired. Use `backend="antigravity"` with
+an exact model from `agy models` on the execution machine. Existing Gemini CLI
+missions must be explicitly switched before resuming; do not reuse their native
+session IDs or treat Google/OpenCode OAuth as an Antigravity login.

@@ -20,7 +20,6 @@ NATIVE = {
     "codex": ".agents/skills",
     "claudecode": ".claude/skills",
     "opencode": ".opencode/skills",
-    "gemini": ".gemini/skills",
     "grok": ".grok/skills",
 }
 ALIASES = {
@@ -28,9 +27,10 @@ ALIASES = {
     "codex": (".agents/skills", ".codex/skills"),
     "claudecode": (".claude/skills",),
     "opencode": (".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"),
-    "gemini": (".gemini/skills", ".agents/skills"),
     "grok": (".grok/skills", ".agents/skills", ".claude/skills"),
 }
+# Accept old manifests only to clean up entries created by the retired harness.
+RETIRED_SKILL_ROOT = ".gemini/skills"
 MANIFEST = ".orb-project-skills.json"
 
 
@@ -45,7 +45,7 @@ def read_state(directory):
         raise ValueError(f"Invalid managed skill manifest: {path}")
     for relative, target in state["entries"].items():
         path = Path(relative)
-        if not any(relative.startswith(p + "/") for p in NATIVE.values()) or len(path.parts) != 3 or str(path) != relative or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", path.name) or len(path.name) > 64 or not isinstance(target, str):
+        if not any(relative.startswith(p + "/") for p in (*NATIVE.values(), RETIRED_SKILL_ROOT)) or len(path.parts) != 3 or str(path) != relative or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", path.name) or len(path.name) > 64 or not isinstance(target, str):
             raise ValueError(f"Invalid managed skill entry: {relative}")
     state.setdefault("copies", {})
     if not isinstance(state["copies"], dict) or any(p not in state["entries"] for p in state["copies"]):
@@ -149,15 +149,15 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
                 fingerprint(folder)
                 skills[folder.name] = str(folder)
         if skills and harness not in NATIVE:
-            raise ValueError(f"{harness} has no supported project skill discovery mechanism. Select Codex, Claude Code, OpenCode, Gemini or Grok, or remove project skills.")
+            raise ValueError(f"{harness} has no supported project skill discovery mechanism. Select Codex, Claude Code, OpenCode, Antigravity or Grok, or remove project skills.")
 
         entries = state["entries"].copy()
         desired = {f"{NATIVE[harness]}/{name}": target for name, target in skills.items()} if harness in NATIVE and not cleanup_only else {}
         # Other harnesses can scan previously used native aliases. Retained
         # generated copies must all reflect the source before this launch.
         if not cleanup_only:
-            desired.update({relative: skills[Path(relative).name] for relative in state["copies"] if Path(relative).name in skills})
-        stale = {relative: target for relative, target in entries.items() if Path(relative).name not in skills}
+            desired.update({relative: skills[Path(relative).name] for relative in state["copies"] if Path(relative).name in skills and not relative.startswith(RETIRED_SKILL_ROOT + "/")})
+        stale = {relative: target for relative, target in entries.items() if Path(relative).name not in skills or relative.startswith(RETIRED_SKILL_ROOT + "/")}
         # Preflight every mutation before touching anything. A replaced managed
         # link is now user-owned: never remove or overwrite it.
         for relative, target in {**entries, **desired}.items():
@@ -252,23 +252,20 @@ def prepare(source, cwd, harness, verify=True, cleanup_only=False, discovery_roo
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)
-        if skills and harness in ("grok", "gemini") and verify:
+        if skills and harness == "grok" and verify:
             # These harnesses silently omit workspace skills when the folder
             # is untrusted. Listing must confirm discovery before launching.
             binary = os.environ.get("ORB_PROJECT_SKILLS_HARNESS_BIN", harness)
             # Runner availability checks can select an absolute binary or a
-            # runtime command such as `bun /path/to/gemini.js`.
+            # runtime command such as `bun /path/to/grok.js`.
             command = [binary] if Path(binary).is_file() else shlex.split(binary)
-            arguments = command + (["--cwd", str(cwd), "inspect", "--json"] if harness == "grok" else ["skills", "list", "--all"])
+            arguments = command + ["--cwd", str(cwd), "inspect", "--json"]
             inspection = subprocess.run(arguments, cwd=cwd, capture_output=True, text=True, timeout=20)
-            label = "Grok" if harness == "grok" else "Gemini"
+            label = "Grok"
             if inspection.returncode:
                 raise ValueError(f"{label} could not inspect project skills. Update its CLI and check its project configuration before retrying.")
-            if harness == "grok":
-                discovered = json.loads(inspection.stdout)
-                names = {entry.get("name") for entry in discovered.get("skills", []) if isinstance(entry, dict) and entry.get("enabled") is not False and entry.get("disabled") is not True}
-            else:
-                names = set(re.findall(r"^([a-z0-9-]+) \[Enabled\]", inspection.stdout, re.M))
+            discovered = json.loads(inspection.stdout)
+            names = {entry.get("name") for entry in discovered.get("skills", []) if isinstance(entry, dict) and entry.get("enabled") is not False and entry.get("disabled") is not True}
             if not set(skills).issubset(names):
                 raise ValueError(f"{label} did not discover the prepared project skills. Trust this working directory in {label} and enable its project skills, then retry. Orb will not change your trust configuration.")
         return {"skills": len(skills), "source": source}

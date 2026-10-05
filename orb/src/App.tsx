@@ -2859,7 +2859,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               <ol><For each={items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && i.queued === true && clientPlaced() && !remoteQueuedIds().includes(i.messageId ?? ""))}>{item => <li data-message-id={item.messageId}><UserTurn text={item.text} attached={item.attached} /></li>}</For></ol>
             </section>
           </Show>
-          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
+          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})} onOpenSession={p.onFork?async id=>p.onFork?.(await getMission(id)):undefined}/></Show>
           <RemoteQueue mission={p.id}
             pending={!clientPlaced() && optimistic()?.waiting && !sendError() ? {id:optimistic()!.id,content:optimistic()!.text} : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}

@@ -8,7 +8,7 @@ systemd-nspawn container isolation.
 > — one command gets you running on any OS.
 
 Sandboxed.sh is the orchestrator/UI backend. **It does not run model inference**;
-it executes OpenCode, Claude Code, Codex, Gemini, and Grok **inside each
+it executes OpenCode, Claude Code, Codex, Antigravity (`agy`), and Grok **inside each
 workspace** (host/container), so bash commands and file operations are scoped correctly. A
 standalone OpenCode server is **optional** and only required if you want
 centralized OpenCode services (provider/auth management, health checks, etc.).
@@ -320,7 +320,7 @@ To authenticate via CLI (useful for testing):
 
 ```bash
 opencode auth login
-# Select Google provider, then "OAuth with Google (Gemini CLI)"
+# Select Google provider, then "OAuth with Google (OpenCode)"
 ```
 
 For dashboard OAuth integration, see the Settings page which handles this flow
@@ -328,9 +328,9 @@ via the API.
 
 ---
 
-## 3.5) Configure Codex, Gemini, and Grok
+## 3.5) Configure Codex, Antigravity (`agy`), and Grok
 
-Codex, Gemini, and Grok use their native CLIs plus credentials stored in the
+Codex, Antigravity (`agy`), and Grok use their native CLIs plus credentials stored in the
 provider settings or the CLI's own login cache.
 
 ### 3.5.1 Codex
@@ -339,11 +339,12 @@ Configure OpenAI API keys or Codex/ChatGPT credentials in **Settings →
 Providers**. Codex missions use raw model ids such as `gpt-5.5`,
 `gpt-5.3-codex`, or another model visible to the connected account.
 
-### 3.5.2 Gemini
+### 3.5.2 Antigravity
 
-Configure Google/Gemini credentials in **Settings → Providers** or use the
-Gemini CLI login flow. Gemini missions use raw model ids such as
-`gemini-3.1-pro-preview`.
+Install `agy` and sign in as the execution user. Select the `antigravity` backend
+and an exact model ID from `agy models`. Gemini CLI is retired. Google API keys
+and Google OAuth in **Settings → Providers** remain available for OpenCode; they
+do not configure Antigravity.
 
 ### 3.5.3 Grok
 
@@ -973,7 +974,7 @@ are pre-configured:
 | ----------------- | ----------------- | ------------------------------------- |
 | **Anthropic**     | OpenCode's client | None (works out of the box)           |
 | **OpenAI**        | Codex CLI client  | None (works out of the box)           |
-| **Google/Gemini** | Gemini CLI client | Install `opencode-gemini-auth` plugin |
+| **Google/Gemini** | OpenCode Google provider | Install `opencode-gemini-auth` plugin |
 
 OAuth flows use copy-paste for the authorization code. The user:
 

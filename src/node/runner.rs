@@ -1,13 +1,14 @@
 //! Async job runner for the `sandboxed-node` binary.
 //!
 //! Jobs are submitted to an mpsc queue and executed under a capacity
-//! semaphore (`SANDBOXED_NODE_CAPACITY`). Each job runs `bash -lc <command>`
+//! semaphore (`SANDBOXED_NODE_CAPACITY`), with one separate side-question
+//! permit. Each job runs `bash -lc <command>`
 //! in `<workdir>/<mission-id>/` with combined stdout+stderr captured to
 //! `<workdir>/logs/<job-id>.log`. Every terminal path cleans up the process
 //! cgroup when systemd scopes are available, with process-group cleanup as a
 //! fallback, so daemonized children cannot escape queue accounting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -74,6 +75,7 @@ pub struct JobRunner {
     tx: mpsc::UnboundedSender<QueuedJob>,
     max_queued: u32,
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
+    side_jobs: Mutex<HashSet<Uuid>>,
     queued: AtomicU32,
     active: AtomicU32,
     /// External slot provider (`SANDBOXED_NODE_SLOT_PROVIDER`); `None` means
@@ -101,10 +103,8 @@ impl JobRunner {
         )
     }
 
-    /// Start a runner that shares its execution permits with other node work
-    /// (notably synchronous `/execute` requests). This is what makes the
-    /// node-wide capacity limit an admission control boundary rather than a
-    /// heartbeat-only metric.
+    /// Ordinary jobs share execution permits with synchronous `/execute`
+    /// requests. Side questions use one separately bounded permit.
     pub fn spawn_with_admission(
         store: JobStore,
         work_root: PathBuf,
@@ -146,6 +146,7 @@ impl JobRunner {
             tx,
             max_queued: u32::try_from(max_queued).unwrap_or(u32::MAX),
             cancels: Mutex::new(HashMap::new()),
+            side_jobs: Mutex::new(HashSet::new()),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
             slot_provider: match super::slot::SlotProvider::from_env() {
@@ -157,11 +158,24 @@ impl JobRunner {
             },
             managed_auth,
         });
+        // Side questions must be able to inspect a busy main mission. They
+        // share one extra permit, never an unbounded bypass of node admission.
+        let side_admission = Arc::new(Semaphore::new(1));
         let dispatcher = Arc::clone(&runner);
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 let runner = Arc::clone(&dispatcher);
-                let admission = Arc::clone(&admission);
+                let admission = if matches!(
+                    &job.payload,
+                    JobPayload::RawCommand {
+                        side_question: true,
+                        ..
+                    }
+                ) {
+                    Arc::clone(&side_admission)
+                } else {
+                    Arc::clone(&admission)
+                };
                 tokio::spawn(async move {
                     let permit = match admission.acquire_owned().await {
                         Ok(permit) => permit,
@@ -197,6 +211,13 @@ impl JobRunner {
 
     pub fn queued_count(&self) -> u32 {
         self.queued.load(Ordering::Acquire)
+    }
+
+    pub fn side_job_count(&self) -> u32 {
+        self.side_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len() as u32
     }
 
     pub fn active_count(&self) -> u32 {
@@ -243,6 +264,18 @@ impl JobRunner {
             self.queued.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
+        if matches!(
+            &payload,
+            JobPayload::RawCommand {
+                side_question: true,
+                ..
+            }
+        ) {
+            self.side_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(job_id);
+        }
         self.cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -286,6 +319,10 @@ impl JobRunner {
         token.cancel();
         if self.store.cancel_if_queued(job_id).await? {
             self.queued.fetch_sub(1, Ordering::AcqRel);
+            self.side_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&job_id);
         }
         Ok(true)
     }
@@ -300,6 +337,10 @@ impl JobRunner {
     }
 
     fn drop_cancel_token(&self, job_id: Uuid) {
+        self.side_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job_id);
         self.cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -355,6 +396,7 @@ impl JobRunner {
                 timeout_secs,
                 env,
                 managed_auth,
+                side_question,
             } => {
                 // Resolve managed-auth profiles before anything runs; a
                 // profile this node cannot honour fails the job with a clear
@@ -373,7 +415,7 @@ impl JobRunner {
                 // Applied last: the payload env cannot redirect a managed
                 // profile to a mission-controlled path.
                 cmd.envs(managed_env);
-                let limit_secs = if *long_running {
+                let limit_secs = if *long_running && !*side_question {
                     timeout_secs.map(|seconds| seconds.max(1))
                 } else {
                     Some(clamp_timeout(*timeout_secs, self.max_job_secs))
@@ -1089,6 +1131,7 @@ mod tests {
         );
         let job_id = Uuid::new_v4();
         runner.submit(job_id, Uuid::new_v4(), JobPayload::RawCommand {
+            side_question: false,
             long_running: false,
             command: format!("test \"$HOME\" = \"$PWD\" && test \"$GROK_HOME\" = '{}' && test -r \"$GROK_HOME/auth.json\" && printf managed-ok", auth_home.display()),
             timeout_secs: Some(30),
@@ -1118,6 +1161,7 @@ mod tests {
                 job_id,
                 mission_id,
                 JobPayload::RawCommand {
+                    side_question: false,
                     long_running: false,
                     command: "echo hello-from-job && pwd".to_string(),
                     timeout_secs: Some(30),
@@ -1141,10 +1185,11 @@ mod tests {
 
     #[tokio::test]
     async fn native_goal_outlives_node_ceiling_but_explicit_deadline_remains() {
-        for (long_running, timeout_secs, expected) in [
-            (false, None, JobState::Failed),
-            (true, None, JobState::Succeeded),
-            (true, Some(1), JobState::Failed),
+        for (long_running, side_question, timeout_secs, expected) in [
+            (false, false, None, JobState::Failed),
+            (true, false, None, JobState::Succeeded),
+            (true, false, Some(1), JobState::Failed),
+            (true, true, None, JobState::Failed),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let store = JobStore::open(dir.path()).await.unwrap();
@@ -1156,6 +1201,7 @@ mod tests {
                     Uuid::new_v4(),
                     JobPayload::RawCommand {
                         command: "sleep 2; printf finished".into(),
+                        side_question,
                         long_running,
                         timeout_secs,
                         env: None,
@@ -1188,6 +1234,7 @@ mod tests {
                 job_id,
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
+                    side_question: false,
                     long_running: true,
                     command: "sleep 30".to_string(),
                     timeout_secs: None,
@@ -1234,6 +1281,7 @@ mod tests {
                     id,
                     Uuid::new_v4(),
                     JobPayload::RawCommand {
+                        side_question: false,
                         long_running: false,
                         command: "sleep 30".to_string(),
                         timeout_secs: None,
@@ -1292,6 +1340,7 @@ mod tests {
                 job_id,
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
+                    side_question: false,
                     long_running: false,
                     command: "sleep 20".to_string(),
                     timeout_secs: Some(600),
@@ -1520,6 +1569,97 @@ mod tests {
         assert!(outcome.success());
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(!marker.exists(), "setsid descendant escaped the job cgroup");
+    }
+
+    #[tokio::test]
+    async fn side_questions_have_one_independent_cancellable_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let admission = Arc::new(Semaphore::new(1));
+        let main_permit = admission.clone().acquire_owned().await.unwrap();
+        let runner =
+            JobRunner::spawn_with_admission(store.clone(), dir.path().into(), 1, 30, admission);
+        let normal = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for (id, side_question, command) in [
+            (normal, false, "true"),
+            (first, true, "sleep 30"),
+            (second, true, "true"),
+        ] {
+            runner
+                .submit(
+                    id,
+                    Uuid::new_v4(),
+                    JobPayload::RawCommand {
+                        command: command.into(),
+                        side_question,
+                        long_running: false,
+                        timeout_secs: None,
+                        env: None,
+                        managed_auth: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            if id == first {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while store.get(first).await.unwrap().unwrap().state != JobState::Running {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            store.get(normal).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(
+            store.get(second).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(runner.side_job_count(), 2);
+        let cancelled_queued = Uuid::new_v4();
+        runner
+            .submit(
+                cancelled_queued,
+                Uuid::new_v4(),
+                JobPayload::RawCommand {
+                    command: "true".into(),
+                    side_question: true,
+                    long_running: false,
+                    timeout_secs: None,
+                    env: None,
+                    managed_auth: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.side_job_count(), 3);
+        assert!(runner.cancel(cancelled_queued).await.unwrap());
+        assert_eq!(runner.side_job_count(), 2);
+        assert!(runner.cancel(first).await.unwrap());
+        assert_eq!(
+            wait_for_terminal(&store, first).await.state,
+            JobState::Cancelled
+        );
+        assert_eq!(
+            wait_for_terminal(&store, second).await.state,
+            JobState::Succeeded
+        );
+        assert_eq!(
+            store.get(normal).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(runner.side_job_count(), 0);
+        drop(main_permit);
+        assert_eq!(
+            wait_for_terminal(&store, normal).await.state,
+            JobState::Succeeded
+        );
     }
 
     async fn wait_for_terminal(store: &JobStore, job_id: Uuid) -> super::super::JobRecord {

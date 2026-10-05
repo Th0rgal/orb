@@ -184,7 +184,7 @@ canonical row rather than the op log.
   delta would be a React commit.
 - **Claude Code**: emits `assistant_message` only (no inline text
   deltas via SSE). Tool calls flow normally.
-- **Gemini, OpenCode**: tool calls + assistant messages; no streaming
+- **OpenCode**: tool calls + assistant messages; no streaming
   text deltas in the current build.
 
 ## Adding a new backend

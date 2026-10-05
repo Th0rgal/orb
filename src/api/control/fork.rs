@@ -19,7 +19,84 @@ pub async fn fork_mission(
     Path(id): Path<Uuid>,
     Json(req): Json<ForkRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Serialize side-session discovery and creation, including retries from
+    // another Orb window whose local storage has no session pointer.
+    let _side_creation = if req.side_question.is_some() {
+        Some(side_creation_lock(&user.id, id).lock_owned().await)
+    } else {
+        None
+    };
+    if req.side_question.is_some() && req.idempotency_key.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Side questions require an idempotency key".into(),
+        ));
+    }
+    let fingerprint = req.side_question.as_deref().map(|question| {
+        side_payload_fingerprint(
+            &req.backend,
+            &req.model_override,
+            req.model_effort.as_deref(),
+            question,
+            req.side_context_mode.as_deref(),
+        )
+    });
     let control = control_for_user(&state, &user).await;
+    if req.side_question.is_some() {
+        let rows = control
+            .mission_store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    tag: Some(format!("btw-parent:{id}")),
+                    ..Default::default()
+                },
+                usize::MAX,
+                0,
+            )
+            .await
+            .map_err(internal_error)?;
+        // Launch receipts exist even when the parent has no project/track.
+        // Recover completed attempts too: losing the response must not rerun it.
+        let mut existing_live = None;
+        for existing in &rows {
+            let Some(receipt) = side_launch_receipt(&state.config.working_dir, existing.id)
+                .map_err(internal_error)?
+            else {
+                continue;
+            };
+            if receipt.key == side_request_key(id, &req.idempotency_key) {
+                // Terminal executions still own their accepted idempotency key.
+                // Only a failure before dispatch may be replaced by a new launch.
+                if matches!(
+                    existing.status,
+                    MissionStatus::Failed | MissionStatus::Interrupted
+                ) && !receipt.accepted
+                    && !reconcile_side_launch(&state, &control, existing).await?
+                {
+                    continue;
+                }
+                if Some(receipt.fingerprint.as_str()) != fingerprint.as_deref() {
+                    return Err((StatusCode::CONFLICT, "This side request key was already used for different launch content; the new question was not sent.".into()));
+                }
+                if !receipt.accepted && !reconcile_side_launch(&state, &control, existing).await? {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
+                        "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
+                    )));
+                }
+                return Ok(Json(
+                    mission_create_response(&state, &control, existing.clone()).await?,
+                ));
+            }
+            if side_session_live(existing.status) {
+                existing_live = Some(existing);
+            }
+        }
+        if let Some(existing) = existing_live {
+            return Err((StatusCode::CONFLICT, format!(
+                "A side agent is already queued or running for this conversation ({}). Reconnect to or stop that side session before starting another; this question was not sent.", existing.id
+            )));
+        }
+    }
     let source = control
         .mission_store
         .get_mission(id)
@@ -143,7 +220,7 @@ pub async fn fork_mission(
         "parent_mission_id": if req.side_question.is_some(){None}else{Some(id)},
         "project": source.project.project,
         "tags": tags,
-        "idempotency_key": req.idempotency_key,
+        "idempotency_key": if req.side_question.is_some() { side_request_key(id, &req.idempotency_key) } else { req.idempotency_key },
         "remote_node_id": placement.map(|p| p.node_id),
         "prompt": prompt,
     }))
@@ -151,13 +228,125 @@ pub async fn fork_mission(
     // Standard creation retains admission checks, supported-node/harness checks,
     // durable dispatch and idempotency. It never acknowledges/stops the source.
     let (_, response) = create_mission_inner(
-        State(state),
+        State(state.clone()),
         Extension(user),
         Some(Json(create)),
         req.side_question.is_some(),
+        fingerprint.as_deref(),
     )
     .await?;
+    if req.side_question.is_some() {
+        let child_id: Uuid =
+            serde_json::from_value(response.0["id"].clone()).map_err(internal_error)?;
+        // Dispatch is already accepted. Do not turn an acknowledgment-write
+        // failure into an API failure; retries reconcile the durable work record.
+        if let Err(error) = accept_side_launch(&state.config.working_dir, child_id) {
+            tracing::warn!(%child_id, %error, "side launch accepted; receipt promotion pending reconciliation");
+        }
+    }
     Ok(response)
+}
+
+async fn reconcile_side_launch(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+) -> Result<bool, (StatusCode, String)> {
+    let store = &control.mission_store;
+    let mut accepted = store
+        .get_deferred_goal(mission.id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    if let Some(run) = store
+        .get_latest_mission_run(mission.id)
+        .await
+        .map_err(internal_error)?
+    {
+        accepted |= !is_remote_mission_job_owner(&run.owner_actor_id);
+    }
+    if !accepted
+        && mission
+            .project
+            .tags
+            .iter()
+            .any(|tag| tag == "placement:client")
+    {
+        let events = store
+            .get_events(mission.id, Some(&["user_message"]), Some(1), None)
+            .await
+            .map_err(internal_error)?;
+        if let Some(prompt) = events.first() {
+            // Initialization persists the client prompt before publishing its
+            // delivery. Replay the original delivery id, never a second turn.
+            if worker_location::client_owner(mission).is_some()
+                && mission.status == MissionStatus::Pending
+            {
+                worker_location::enqueue(
+                    store,
+                    mission.id,
+                    worker_location::initial_delivery_id(mission.id),
+                    prompt.content.clone(),
+                )
+                .await
+                .map_err(internal_error)?;
+            }
+            accepted = true;
+        }
+    }
+    if !accepted {
+        let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
+            .await
+            .map_err(internal_error)?;
+        accepted = handles
+            .iter()
+            .any(|handle| handle.mission_id == mission.id && handle.accepted_at.is_some());
+        if !accepted {
+            accepted = !crate::remote_node::job_ledger::terminal_receipts_for_mission(
+                &state.config.working_dir,
+                mission.id,
+            )
+            .await
+            .map_err(internal_error)?
+            .is_empty();
+        }
+    }
+    if accepted {
+        if let Err(error) = accept_side_launch(&state.config.working_dir, mission.id) {
+            tracing::warn!(mission_id = %mission.id, %error, "recovered accepted side launch; receipt repair pending");
+        }
+    }
+    Ok(accepted)
+}
+
+pub(super) fn side_payload_fingerprint(
+    backend: &str,
+    model: &str,
+    effort: Option<&str>,
+    question: &str,
+    context: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = serde_json::json!([backend, model, effort, question, context]);
+    format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
+}
+
+fn side_request_key(parent: Uuid, key: &str) -> String {
+    format!("btw:{parent}:{}", key.trim())
+}
+
+fn side_creation_lock(user: &str, parent: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    worker_location::dispatch_lock(&format!("btw:{user}:{parent}"))
+}
+
+fn side_session_live(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Active
+            | MissionStatus::Pending
+            | MissionStatus::Paused
+            | MissionStatus::WaitingBackground
+    )
 }
 
 /// Separate route: older servers must fail closed instead of starting a normal fork.
@@ -347,6 +536,24 @@ fn workspace_command(source_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn btw_creation_lock_only_blocks_the_same_conversation() {
+        let parent = Uuid::new_v4();
+        let held = side_creation_lock("one", parent).lock_owned().await;
+        assert!(side_creation_lock("one", parent).try_lock_owned().is_err());
+        assert!(side_creation_lock("two", parent).try_lock_owned().is_ok());
+        assert!(side_creation_lock("one", Uuid::new_v4())
+            .try_lock_owned()
+            .is_ok());
+        drop(held);
+        assert!(side_creation_lock("one", parent).try_lock_owned().is_ok());
+    }
+
+    #[test]
+    fn btw_background_work_keeps_the_session_live() {
+        assert!(side_session_live(MissionStatus::WaitingBackground));
+    }
     #[test]
     fn antigravity_forks_bound_history_and_preserve_current_instructions() {
         let history = vec![
@@ -432,4 +639,83 @@ mod tests {
             assert_eq!(run().status.code(), Some(78));
         }
     }
+}
+
+// Core-owned metadata, outside the mission workspace and freeform tags. The
+// creation route writes it before dispatch; continuations read the same receipt.
+fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+    root.join("mission-side-launches")
+        .join(format!("{id}.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct SideLaunchReceipt {
+    key: String,
+    fingerprint: String,
+    accepted: bool,
+}
+
+pub(super) fn side_launch_receipt(
+    root: &std::path::Path,
+    id: Uuid,
+) -> Result<Option<SideLaunchReceipt>, String> {
+    match std::fs::read(side_launch_path(root, id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(super) fn record_side_launch(
+    root: &std::path::Path,
+    id: Uuid,
+    key: &str,
+    fingerprint: &str,
+) -> Result<(), String> {
+    write_side_launch(
+        root,
+        id,
+        &SideLaunchReceipt {
+            key: key.trim().into(),
+            fingerprint: fingerprint.into(),
+            accepted: false,
+        },
+    )
+}
+
+pub(super) fn accept_side_launch(root: &std::path::Path, id: Uuid) -> Result<(), String> {
+    let mut receipt = side_launch_receipt(root, id)?.ok_or("Side launch receipt is missing")?;
+    receipt.accepted = true;
+    write_side_launch(root, id, &receipt)
+}
+
+fn write_side_launch(
+    root: &std::path::Path,
+    id: Uuid,
+    receipt: &SideLaunchReceipt,
+) -> Result<(), String> {
+    let destination = side_launch_path(root, id);
+    std::fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temporary = destination.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(receipt).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, &destination).map_err(|e| e.to_string())?;
+        std::fs::File::open(destination.parent().unwrap())
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| e.to_string())?;
+        // Persist the receipt directory itself when it was first created.
+        std::fs::File::open(root)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }

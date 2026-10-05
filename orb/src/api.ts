@@ -267,7 +267,7 @@ export interface CreateMissionBody {
   /** Stable project identifier — groups the mission under the project. */
   project?: string;
   /**
-   * Harness id (claudecode, codex, opencode, grok, gemini). Goal mode has no
+   * Harness id (claudecode, codex, opencode, grok, antigravity). Goal mode has no
    * dedicated create field: a prompt of the form `/goal <objective>` is what
    * makes the server persist `goal_mode` + `goal_objective` (control/mod.rs
    * `parse_goal_objective`).
@@ -336,12 +336,12 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
 }
 
 /** Harness order for the composer: the native agents first, then routers. */
-const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"];
+const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "antigravity"];
 
 export async function listHarnessChoices(): Promise<HarnessChoice[]> {
   const [backends, models] = await Promise.all([listBackends(), listBackendModels()]);
   return backends
-    .filter((b) => (models[b.id]?.length ?? 0) > 0)
+    .filter((b) => HARNESS_ORDER.includes(b.id) && (models[b.id]?.length ?? 0) > 0)
     .sort((a, b) => {
       const ia = HARNESS_ORDER.indexOf(a.id);
       const ib = HARNESS_ORDER.indexOf(b.id);

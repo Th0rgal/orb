@@ -33,13 +33,9 @@ it as a native sidecar; development stages it beside the native executable.
 An explicitly configured absolute `SANDBOXED_MCP_BIN` is also supported. Node
 launches expect `/usr/local/bin/sandboxed-mcp` to be installed before cutover.
 
-Gemini is included in Orb's local CLI detection and composer. A node requires
-`SANDBOXED_NODE_GEMINI_HOME` (an absolute home containing a private
-`.gemini/oauth_creds.json` owned by its service account). The node injects
-`GEMINI_CLI_HOME` and file-based storage at launch; Core does not transmit the
-OAuth credential. Missing managed-auth evidence rejects placement before
-creating a mission. Presence of a private login is readiness evidence, not
-proof that its refresh token remains valid; the live matrix must check that.
+Gemini CLI is retired. Use Antigravity with the execution user's native
+`agy` login; nodes use `SANDBOXED_NODE_ANTIGRAVITY_HOME`. Historical Gemini
+validation notes below describe the former implementation, not a supported harness.
 
 ## Coordinated cutover
 
