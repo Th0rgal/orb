@@ -266,11 +266,7 @@ export function MissionFailure(p: { mission?: Mission | null; error?: string; ac
   </ErrorNotice></Show>;
 }
 
-/**
- * The accessible half of the quiet state: a live region with no visual box, so
- * a screen reader hears "Starting on Core" while sighted users see only the
- * animation on their prompt.
- */
+/** Visible, compact feedback while the first meaningful output is pending. */
 export function MissionPending(p: { destination: string; label: string }) {
-  return <div class="sr-only" role="status" aria-live="polite">{p.label} on {p.destination}…</div>;
+  return <div class="agent-wait-status" role="status" aria-live="polite"><span class="launch-pulse" aria-hidden="true" />{p.label} on {p.destination}…</div>;
 }

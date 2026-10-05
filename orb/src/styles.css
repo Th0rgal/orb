@@ -1554,7 +1554,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .prompt-editor { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: 0; color: var(--fg); font: inherit; line-height: inherit; resize: none; min-height: 1lh; max-height: none; display: block; padding: 0; }
 .user.editing { content-visibility: visible; width:var(--editing-width); min-height:var(--editing-height); max-width:100%; box-sizing:border-box; }
 .prompt-editor-actions .send { flex: none; margin-left: auto; }
-.prompt-editor-actions { position: absolute; right: 8px; bottom: calc(100% + 4px); display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 4px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-elev); z-index: 2; white-space: normal; }
+.prompt-editor-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; white-space: normal; }
 .prompt-editor-actions > span { flex: 1; color: var(--fg-3); font-size: 11px; }
 
 /* Files: conversation stays mounted beside the read-only workbench. */
@@ -2452,7 +2452,7 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-sidebar.maximized .btw-sidebar-content { padding-top:0; }
 /* A sent message keeps its geometry; only the small activity indicator moves. */
 .user.pending { background-image:none; animation:none; opacity:1; }
-.agent-wait-status { min-height:20px; animation:send-status-reveal 120ms ease-out 400ms both; }
+.agent-wait-status { display:flex; align-items:center; gap:7px; color:var(--fg-3); font-size:12px; min-height:20px; animation:send-status-reveal 120ms ease-out both; }
 @keyframes send-status-reveal { from { opacity:0; } to { opacity:1; } }
 @media(prefers-reduced-motion:reduce) { .agent-wait-status { animation:none; } }
 

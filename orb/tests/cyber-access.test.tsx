@@ -7,7 +7,7 @@ describe('cyber selection',()=>{
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);
-  expect(screen.getByText('requested')).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Cyber program: Daybreak'}).title).toContain('requested');
   expect(screen.queryByText('active')).toBeNull();
  });
  it('keeps the model and requires an explicit selection',async()=>{
@@ -15,6 +15,13 @@ describe('cyber selection',()=>{
   await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
   await fireEvent.click(screen.getByRole('menuitemradio',{name:/Daybreak/}));
   expect(selected).toBe('daybreak');
+ });
+ it('opens locked settings for inspection without allowing changes',async()=>{
+  render(()=><CyberPicker value="standard" model="gpt-6.1-sol" disabled note="Stop the current turn to change its cyber program." onChange={()=>{}}/>);
+  await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
+  expect(screen.getByRole('menu',{name:'Cyber program'})).toBeTruthy();
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText('Stop the current turn to change its cyber program.')).toBeTruthy();
  });
  it('disables incompatible choices and explains why',()=>{
   expect(cyberCompatibility('daybreak','unknown-model')).toContain('not been established');

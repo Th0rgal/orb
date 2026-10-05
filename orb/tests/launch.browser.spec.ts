@@ -77,7 +77,7 @@ const composerInput=(page:Page)=>page.getByPlaceholder(/Describe a task, \/ for 
  * — so assert against both, and use `.launch-status` directly only
  * where the test is specifically about the visible banner.
  */
-const phaseStatus=(page:Page)=>page.locator(".scroll .sr-only[role=status]").first();
+const phaseStatus=(page:Page)=>page.locator(".scroll .agent-wait-status[role=status]").first();
 /** A `/goal` turn renders as a Goal tag plus the exact objective, never the raw slash command. */
 async function expectGoalTurn(page:Page,selector:string,text=objective){
  const turn=page.locator(`${selector}:not(.sk-user)`);await expect(turn).toHaveCount(1);
@@ -89,6 +89,8 @@ test("slow local POST shows prompt immediately; accepted mission opens before sl
  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
  await expectGoalTurn(page,".scroll .user");await expect(phaseStatus(page)).toContainText("Working on Core");
  await input.dispatchEvent("keydown",{key:"Enter"});await expect.poll(()=>state.posts.length).toBe(1);
+ await expect(phaseStatus(page)).toBeVisible();
+ await expect(phaseStatus(page)).toHaveCSS("opacity", "1");
  await page.screenshot({path:"test-results/orb-launch-starting.png"});
  // The working indicator is the prompt itself now, and it must not move when
  // the user has asked for reduced motion.

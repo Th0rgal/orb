@@ -1,1 +1,6 @@
 .cyber-picker{position:relative;flex-shrink:0}.cyber-pill{display:inline-flex;align-items:center;gap:5px}.cyber-pill.confirmed{color:#80b9ef}.cyber-state{font-size:10px;opacity:.6}.cyber-picker .menu.cyber-menu{min-width:270px;max-width:min(340px,90vw);bottom:calc(100% + 8px);top:auto}.cyber-picker .cyber-menu .menu-item{align-items:flex-start;white-space:normal;padding:9px 10px;color:var(--fg)}.cyber-menu small{display:block;font-size:11px;line-height:1.4;opacity:.65;margin-top:4px}.cyber-menu p{font-size:11px;line-height:1.4;opacity:.65;padding:6px 12px}.cyber-menu button:disabled{opacity:.45;cursor:not-allowed}
+
+.cyber-picker .cyber-pill { width: 24px; height: 24px; padding: 0; justify-content: center; background: transparent; border: 0; color: var(--fg-3); cursor: pointer; }
+.cyber-picker .cyber-pill:hover, .cyber-picker .cyber-pill[aria-expanded="true"] { background: var(--bg-hover); color: var(--fg); }
+.cyber-picker .cyber-pill svg { width: 13px; height: 13px; flex-shrink: 0; }
+.cyber-picker .cyber-pill.confirmed { color: #80b9ef; }
