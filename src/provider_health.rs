@@ -2019,11 +2019,15 @@ impl ModelChainStore {
                             sa.has_oauth && sa.api_key.is_none() && store_contributed_google_oauth;
                         let duplicate_api_key = !sa.has_oauth
                             && sa.api_key.is_some()
-                            && resolved[resolved_start..].iter().any(|candidate| {
+                            && (store_accounts.iter().any(|account| {
+                                // Keep the store identity even when it is cooling
+                                // down; an environment copy must not bypass it.
+                                account.api_key == sa.api_key && account.base_url == sa.base_url
+                            }) || resolved[resolved_start..].iter().any(|candidate| {
                                 !candidate.has_oauth
                                     && candidate.api_key == sa.api_key
                                     && candidate.base_url == sa.base_url
-                            });
+                            }));
                         if duplicate_oauth || duplicate_api_key {
                             continue;
                         }
@@ -2617,8 +2621,9 @@ mod tests {
             base_url: None,
             oauth_expires_at: None,
         }];
+        let health = ProviderHealthTracker::new();
         let resolved = chains
-            .resolve_chain("argon", &store, &standard, &ProviderHealthTracker::new())
+            .resolve_chain("argon", &store, &standard, &health)
             .await;
         let direct: Vec<_> = resolved
             .iter()
@@ -2626,6 +2631,16 @@ mod tests {
             .collect();
         assert_eq!(direct.len(), 1);
         assert_eq!(direct[0].account_id, store_id);
+        health
+            .record_entry_failure(direct[0], CooldownReason::RateLimit, None)
+            .await;
+        let cooling = chains
+            .resolve_chain("argon", &store, &standard, &health)
+            .await;
+        assert!(
+            cooling.iter().all(|entry| entry.api_key.is_none()),
+            "an environment copy must not evade the store account cooldown"
+        );
     }
 
     #[tokio::test]
