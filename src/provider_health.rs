@@ -2011,6 +2011,23 @@ impl ModelChainStore {
                     if seen_account_ids.contains(&sa.account_id) {
                         continue;
                     }
+                    if provider_type == crate::ai_providers::ProviderType::Google {
+                        // Store, auth.json and environment can describe the same
+                        // route under different IDs. Do not retry an identical
+                        // credential with a second independent cooldown.
+                        let duplicate_oauth =
+                            sa.has_oauth && sa.api_key.is_none() && store_contributed_google_oauth;
+                        let duplicate_api_key = !sa.has_oauth
+                            && sa.api_key.is_some()
+                            && resolved[resolved_start..].iter().any(|candidate| {
+                                !candidate.has_oauth
+                                    && candidate.api_key == sa.api_key
+                                    && candidate.base_url == sa.base_url
+                            });
+                        if duplicate_oauth || duplicate_api_key {
+                            continue;
+                        }
+                    }
                     if !health_tracker.is_healthy(sa.account_id).await {
                         tracing::debug!(
                             account_id = %sa.account_id,
@@ -2575,6 +2592,40 @@ mod tests {
             resolved
         );
         assert_eq!(resolved[0].account_id, standard[0].account_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_google_deduplicates_store_and_environment_key() {
+        let mut account = AIProvider::new(ProviderType::Google, "Google API".into());
+        account.api_key = Some("same-google-key".into());
+        account.status = ProviderStatus::Connected;
+        let store_id = account.id;
+        let store = store_with(vec![account]).await;
+        let chains = store_with_chain(
+            "argon",
+            vec![ChainEntry {
+                provider_id: "google".into(),
+                model_id: "gemini-4-argon-eap".into(),
+            }],
+        )
+        .await;
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google-env-api-key"),
+            provider_type: ProviderType::Google,
+            api_key: Some("same-google-key".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        }];
+        let resolved = chains
+            .resolve_chain("argon", &store, &standard, &ProviderHealthTracker::new())
+            .await;
+        let direct: Vec<_> = resolved
+            .iter()
+            .filter(|entry| entry.api_key.is_some())
+            .collect();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].account_id, store_id);
     }
 
     #[tokio::test]
