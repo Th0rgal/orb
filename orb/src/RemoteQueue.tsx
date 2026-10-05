@@ -4,12 +4,19 @@ import { api, connectionVersion, listQueuedMessages, type QueuedMessage } from "
 /** The server inbox remains authoritative across a stop, reconnect or restart. */
 export function RemoteQueue(p: {
   mission: string;
+  confirmed?: QueuedMessage[];
+  pending?: {id:string;content:string};
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
 }) {
   let revision = 0, destroyed = false;
   onCleanup(() => { destroyed = true; });
   const [rows, setRows] = createSignal<QueuedMessage[]>([]);
+  const visibleRows = () => {
+    const known = new Map(rows().map(row => [row.id, row]));
+    for (const row of p.confirmed ?? []) if (!known.has(row.id)) known.set(row.id, row);
+    return [...known.values()];
+  };
   const [error, setError] = createSignal("");
   const [cancelling, setCancelling] = createSignal<string>();
   createEffect(() => {
@@ -43,10 +50,10 @@ export function RemoteQueue(p: {
     } catch (e) { if (version === connectionVersion() && mission === p.mission) setError(e instanceof Error ? e.message : String(e)); }
     finally { setCancelling(undefined); }
   };
-  return <Show when={rows().length}>
+  return <Show when={visibleRows().length || p.pending}>
     <section class="followup-queue" aria-label="Queued messages" aria-live="polite">
-      <header><span class="queue-count">{rows().length} Queued</span></header>
-      <ol><For each={rows()}>{row => <li class="queue-row">
+      <header><span class="queue-count">{visibleRows().length ? `${visibleRows().length} Queued` : "Sending…"}</span></header>
+      <ol><Show when={p.pending && !visibleRows().some(row=>row.id===p.pending?.id)}><li class="queue-row"><div class="queue-line"><span class="queue-text">{p.pending?.content}</span><span role="status">Sending…</span></div></li></Show><For each={visibleRows()}>{row => <li class="queue-row">
         <div class="queue-line">
           <span class="queue-text" title={row.content}>{row.content}</span>
           <button class="queue-send-now" disabled={cancelling() === row.id} onClick={() => void cancel(row.id)}>Cancel</button>
