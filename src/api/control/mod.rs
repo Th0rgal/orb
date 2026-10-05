@@ -23872,11 +23872,15 @@ async fn control_actor_loop(
                             && admission.patch.title.is_none()
                             && admission.patch.github_pr.is_none()
                             && admission.patch.track.is_none();
-                        let queued_followup = queued_followup && match command.as_ref() {
-                            ControlCommand::UserMessage { target_mission_id: Some(id), .. } =>
-                                mission_store.get_mission(*id).await.ok().flatten().is_some_and(|mission| mission.status != MissionStatus::Pending),
-                            _ => false,
-                        };
+                        let pending_followup = if queued_followup {
+                            match command.as_ref() {
+                                ControlCommand::UserMessage { target_mission_id: Some(id), .. } => mission_store.get_mission(*id).await.ok().flatten(),
+                                _ => None,
+                            }
+                                .filter(|mission| mission.status == MissionStatus::Pending)
+                        } else { None };
+                        let queued_followup = queued_followup && pending_followup.as_ref()
+                            .is_none_or(|mission| !mission.is_dispatchable_at(chrono::Utc::now()));
                         if queued_followup {
                             if let ControlCommand::UserMessage { id, content, agent, target_mission_id: Some(mid), source, respond, .. } = *command {
                                 let _file = match dispatch_admission::durable_lock(&config).await {
@@ -23885,6 +23889,28 @@ async fn control_actor_loop(
                                 };
                                 if let Err(error) = dispatch_admission::validate_followup(&admission, mid).await {
                                     let _ = respond.send(UserMessageAck::Rejected(error));
+                                    continue;
+                                }
+                                if let Some(mission) = pending_followup {
+                                    // Scheduled prompts own the first turn. Append durably
+                                    // before resource admission, preserving their ordering.
+                                    let saved = async {
+                                        let previous = mission_store.get_deferred_goal(mid).await?;
+                                        let combined = deferred_goal_for_incoming_message(
+                                            mission.status, previous.as_deref(),
+                                            &deferred_messages::encode(id, &content),
+                                        );
+                                        mission_store.set_deferred_goal(mid, Some(combined)).await
+                                    }.await;
+                                    if let Err(error) = saved {
+                                        let _ = respond.send(UserMessageAck::Rejected(format!("failed to persist queued delivery: {error}")));
+                                        continue;
+                                    }
+                                    accepted_user_message_ids.insert(id);
+                                    let _ = events_tx.send(AgentEvent::UserMessage {
+                                        id, content, queued: true, mission_id: Some(mid), source,
+                                    });
+                                    let _ = respond.send(UserMessageAck::Queued);
                                     continue;
                                 }
                                 if let Some(runner) = parallel_runners.get_mut(&mid) {

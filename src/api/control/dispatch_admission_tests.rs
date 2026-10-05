@@ -11081,3 +11081,92 @@ async fn host_followup_restart_retains_paused_delivery_until_it_can_run() {
     );
     NATIVE_FIXTURES.lock().unwrap().remove(&mission.id);
 }
+
+#[tokio::test]
+async fn host_followup_during_cooldown_persists_before_writer_admission() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Pending, Some("org/repo#42")).await;
+    h.control
+        .mission_store
+        .set_mission_scheduling(
+            target.id,
+            &crate::api::mission_store::MissionScheduling {
+                not_before: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_deferred_goal(target.id, Some("Original scheduled prompt".into()))
+        .await
+        .unwrap();
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            blocker.id,
+            MissionProjectPatch {
+                github_pr: Some(Some("org/repo#42".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let ids = [Uuid::new_v4(), Uuid::new_v4()];
+    for id in [ids[0], ids[1], ids[0]] {
+        let response = h.request(false, target.id, json!({"content":"Continue after cooldown", "queue_followup":true, "client_message_id":id, "continue_identity":Harness::assertion(&target)})).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(response.json::<Value>().await.unwrap()["queued"], true);
+    }
+    let reopened = SqliteMissionStore::new(h._dir.path().join("missions"), &h.user.id)
+        .await
+        .unwrap();
+    let prompt = reopened
+        .get_deferred_goal(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(prompt.starts_with("Original scheduled prompt"));
+    assert_eq!(
+        deferred_messages::decode(&prompt)
+            .1
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(
+        reopened
+            .get_mission(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Pending
+    );
+}
