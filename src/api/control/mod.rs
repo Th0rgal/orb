@@ -5733,6 +5733,12 @@ fn validate_and_normalize_board_tasks(
                 "every task needs a non-empty task_key and prompt".to_string(),
             ));
         }
+        if t.backend.trim().eq_ignore_ascii_case("gemini") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("task `{}`: {}", t.task_key, board::RETIRED_GEMINI_TASK),
+            ));
+        }
         // Same operator policy as the orchestrator MCP: worker missions never
         // burn Claude tokens. Enforced here too so the API can't be used to
         // bypass the MCP-level check.
@@ -37732,6 +37738,14 @@ And the report:
         assert!(error.contains("codex"));
         assert!(error.contains("grok"));
         assert!(store.list_board_tasks(boss_id).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn retired_gemini_board_task_is_rejected_at_registration() {
+        let mut tasks = vec![board_task_with_backend_and_model("gemini", "old-model")];
+        let (status, error) = validate_and_normalize_board_tasks(&mut tasks).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("agy models"));
     }
 
     #[test]
