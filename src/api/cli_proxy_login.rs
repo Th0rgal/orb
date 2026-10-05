@@ -447,7 +447,7 @@ async fn login_status(
             if s.provider == ProviderType::Antigravity {
                 let state = Arc::clone(&state);
                 tokio::spawn(async move {
-                    super::providers::refresh_model_catalog(State(state)).await;
+                    let _ = super::providers::refresh_model_catalog(State(state)).await;
                 });
             }
             s.status = LoginStatus::Completed;
