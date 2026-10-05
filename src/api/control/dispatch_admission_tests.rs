@@ -11207,7 +11207,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         .unwrap();
     assert!(child.project.project.is_none());
     assert!(
-        super::fork::side_launch_key(&h.state.config.working_dir, child.id)
+        super::fork::side_launch_receipt(&h.state.config.working_dir, child.id)
             .unwrap()
             .is_none(),
         "freeform side tags cannot grant side capacity"
@@ -11250,6 +11250,24 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     assert!(result.1.contains("question was not sent"));
 
     // A transport retry of the original dispatch must recover that session.
+    let incomplete = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "btw-original".into(),
+            side_question: Some("Original question".into()),
+            side_context_mode: Some("incremental".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(incomplete.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(incomplete.1.contains("incomplete initialization"));
+    super::fork::accept_side_launch(&h.state.config.working_dir, child.id).unwrap();
     let retry = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),

@@ -55,12 +55,17 @@ pub async fn fork_mission(
                 MissionStatus::Failed | MissionStatus::Interrupted
             )
         }) {
-            let Some(key) =
-                side_launch_key(&state.config.working_dir, existing.id).map_err(internal_error)?
+            let Some(receipt) = side_launch_receipt(&state.config.working_dir, existing.id)
+                .map_err(internal_error)?
             else {
                 continue;
             };
-            if key == req.idempotency_key.trim() {
+            if receipt.key == req.idempotency_key.trim() {
+                if !receipt.accepted {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
+                        "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
+                    )));
+                }
                 return Ok(Json(
                     mission_create_response(&state, &control, existing.clone()).await?,
                 ));
@@ -206,12 +211,17 @@ pub async fn fork_mission(
     // Standard creation retains admission checks, supported-node/harness checks,
     // durable dispatch and idempotency. It never acknowledges/stops the source.
     let (_, response) = create_mission_inner(
-        State(state),
+        State(state.clone()),
         Extension(user),
         Some(Json(create)),
         req.side_question.is_some(),
     )
     .await?;
+    if req.side_question.is_some() {
+        let child_id: Uuid =
+            serde_json::from_value(response.0["id"].clone()).map_err(internal_error)?;
+        accept_side_launch(&state.config.working_dir, child_id).map_err(internal_error)?;
+    }
     Ok(response)
 }
 
@@ -528,7 +538,16 @@ fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
         .join(format!("{id}.json"))
 }
 
-pub(super) fn side_launch_key(root: &std::path::Path, id: Uuid) -> Result<Option<String>, String> {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct SideLaunchReceipt {
+    key: String,
+    accepted: bool,
+}
+
+pub(super) fn side_launch_receipt(
+    root: &std::path::Path,
+    id: Uuid,
+) -> Result<Option<SideLaunchReceipt>, String> {
     match std::fs::read(side_launch_path(root, id)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
@@ -543,16 +562,44 @@ pub(super) fn record_side_launch(
     id: Uuid,
     key: &str,
 ) -> Result<(), String> {
+    write_side_launch(
+        root,
+        id,
+        &SideLaunchReceipt {
+            key: key.trim().into(),
+            accepted: false,
+        },
+    )
+}
+
+pub(super) fn accept_side_launch(root: &std::path::Path, id: Uuid) -> Result<(), String> {
+    let mut receipt = side_launch_receipt(root, id)?.ok_or("Side launch receipt is missing")?;
+    receipt.accepted = true;
+    write_side_launch(root, id, &receipt)
+}
+
+fn write_side_launch(
+    root: &std::path::Path,
+    id: Uuid,
+    receipt: &SideLaunchReceipt,
+) -> Result<(), String> {
     let destination = side_launch_path(root, id);
     std::fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
     let temporary = destination.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| {
         use std::io::Write;
         let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(key.trim()).map_err(|e| e.to_string())?)
+        file.write_all(&serde_json::to_vec(receipt).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
-        std::fs::rename(&temporary, &destination).map_err(|e| e.to_string())
+        std::fs::rename(&temporary, &destination).map_err(|e| e.to_string())?;
+        std::fs::File::open(destination.parent().unwrap())
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| e.to_string())?;
+        // Persist the receipt directory itself when it was first created.
+        std::fs::File::open(root)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| e.to_string())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);

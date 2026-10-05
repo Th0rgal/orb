@@ -968,6 +968,10 @@ waited for other live work to finish and did not use the force override.
 Core records a private launch receipt for `/btw` before dispatch and uses it
 to set `RawCommand.side_question = true`. Freeform mission tags do not grant
 side capacity. The receipt also recovers projectless retries without track leases.
+It is marked accepted only after initialization and initial delivery succeed.
+An incomplete receipt returns an explicit error with the side mission ID; it
+never masquerades as a successful launch. Both the file and directory entries
+are synced before returning from each receipt write.
 Each updated node reserves one additional execution permit for these jobs,
 separate from `SANDBOXED_NODE_CAPACITY` (including synchronous execution).
 Side questions serialize with each other; ordinary jobs retain their existing

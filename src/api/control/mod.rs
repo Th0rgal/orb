@@ -14645,7 +14645,8 @@ async fn submit_leased_remote_job(
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
-            side_question: fork::side_launch_key(&state.config.working_dir, mission.id)?.is_some(),
+            side_question: fork::side_launch_receipt(&state.config.working_dir, mission.id)?
+                .is_some(),
             long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,
