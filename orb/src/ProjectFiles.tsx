@@ -398,7 +398,19 @@ export function LiveProjectsSection(p: {
   };
   const folderMoved = async (slug: string, path: string, destination: string, project = slug) => {
     setFolderLabel(slug, path, fileBaseName(path));
-    if (expanded[`${slug}:${path}`]) setExpanded(`${project}:${destination}`, true);
+    batch(() => {
+      const oldPrefix = `${slug}:${path}`, newPrefix = `${project}:${destination}`;
+      for (const key of Object.keys(expanded)) {
+        if (key === oldPrefix || key.startsWith(`${oldPrefix}/`)) {
+          setExpanded(newPrefix + key.slice(oldPrefix.length), expanded[key]);
+        }
+      }
+      for (const key of Object.keys(dirs)) {
+        if (key === oldPrefix || key.startsWith(`${oldPrefix}/`)) {
+          setDirs(newPrefix + key.slice(oldPrefix.length), reconcile([...dirs[key]]));
+        }
+      }
+    });
     const selected = p.selected(), prefix = `pf:${slug}:${path}`;
     if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
     try { if (project === slug) await moveFolderWork(slug, path, destination); }
@@ -414,8 +426,8 @@ export function LiveProjectsSection(p: {
         await transferProjectFile(target.slug, target.path, destination);
         if (target.directory) {
           setFileAction(null);
-          await refreshFileParents(target.slug, target.path, destination);
-          await folderMoved(target.slug, target.path, destination);
+          try { await folderMoved(target.slug, target.path, destination); }
+          finally { await refreshFileParents(target.slug, target.path, destination); }
           return;
         }
       } else {
@@ -754,8 +766,9 @@ export function LiveProjectsSection(p: {
         }
       } else {
         await updateProject({ slug: target.slug, title });
+        setProjects(list => list.map(project => project.slug === target.slug ? {...project, title} : project));
+        bumpProjects();
       }
-      bumpProjects();
       setRename(null);
     } catch (e) {
       setRenameError(e instanceof Error ? e.message : String(e));

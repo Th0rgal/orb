@@ -16,13 +16,35 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   const [pointerFocus, setPointerFocus] = createSignal(false);
   const visible = createMemo(() => visibleTree(p.nodes));
   const [rows, setRows] = createStore<TreeRow<T>[]>([]);
-  createEffect(() => setRows(reconcile(visible(), { key: "id" })));
   let element: HTMLDivElement | undefined;
+  // Preserve the visible content when rows above it are inserted or removed.
+  // Keep several candidates so deleting the first visible row has a fallback.
+  createEffect(() => {
+    const next = visible();
+    const scroller = element?.closest<HTMLElement>(".sb-scroll");
+    const top = scroller?.getBoundingClientRect().top ?? 0;
+    const scroll = scroller?.scrollTop ?? 0;
+    const anchors = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
+      .filter(row => row.getBoundingClientRect().bottom > top)
+      .map(row => ({ id: row.dataset.treeId, offset: row.getBoundingClientRect().top }));
+    setRows(reconcile(next, { key: "id" }));
+    queueMicrotask(() => {
+      if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
+      const current = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? []);
+      for (const anchor of anchors) {
+        const row = current.find(row => row.dataset.treeId === anchor.id);
+        if (row) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
+      }
+    });
+  });
+  let revealed: string | null = null;
+  createEffect(on(() => p.selected, () => { revealed = null; }));
   const visibleCurrent = createMemo(() => rows.some(row => row.id === p.selected) ? p.selected : null);
   createEffect(on(visibleCurrent, id => {
-    if (!id) return;
+    if (!id || revealed === id) return;
     const frame = requestAnimationFrame(() => {
       const row = [...(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])].find(row => row.dataset.treeId === id);
+      if (row) revealed = id;
       row?.scrollIntoView({ block: "nearest", inline: "nearest" });
     });
     onCleanup(() => cancelAnimationFrame(frame));
