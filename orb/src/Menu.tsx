@@ -62,7 +62,7 @@ export function PopupMenu(p: { x: number; y: number; items: MenuEntry[]; onClose
     };
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        e.preventDefault(); e.stopPropagation(); p.onClose(); trigger?.focus();
+        e.preventDefault(); e.stopPropagation(); p.onClose(); trigger?.focus({ preventScroll: true });
       } else if (el.contains(e.target as Node) && (e.target as HTMLElement).closest('[role="menu"]') !== el) {
         return;
       } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
@@ -92,7 +92,7 @@ export function PopupMenu(p: { x: number; y: number; items: MenuEntry[]; onClose
       onMouseLeave={() => { cancelDismiss(); dismissTimer = setTimeout(() => p.onDismissSubmenu?.(), 180); }}
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <MenuList items={p.items} onDismissSubmenu={p.onDismissSubmenu} onPick={() => { p.onClose(); trigger?.focus(); }} />
+      <MenuList items={p.items} onDismissSubmenu={p.onDismissSubmenu} onPick={() => { p.onClose(); trigger?.focus({ preventScroll: true }); }} />
       {p.children}
     </div>
   );
