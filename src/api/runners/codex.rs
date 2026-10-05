@@ -694,6 +694,21 @@ pub(crate) async fn run_codex_turn_with_rotation(
     is_continuation: bool,
     tool_hub: Option<Arc<crate::api::control::FrontendToolHub>>,
 ) -> AgentResult {
+    let cyber_access = {
+        // Snapshot once per user turn, including credential retries.
+        // Serialize promotion with next-turn changes from Orb.
+        let _guard = crate::api::control::DISPATCH_ADMISSION.lock().await;
+        let selection = match crate::api::control::cyber::read(app_working_dir, mission_id) {
+            Ok(selection) => selection,
+            Err(error) => return continuity_failure(error),
+        };
+        if let Err(error) =
+            crate::api::control::cyber::write(app_working_dir, mission_id, selection.mode)
+        {
+            return continuity_failure(error);
+        }
+        selection.mode
+    };
     let path = continuity::binding_path(app_working_dir, mission_id);
     let binding = match continuity::read(&path) {
         Ok(binding) => binding,
@@ -733,6 +748,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                 session_id,
                 None,
                 &native_input,
+                cyber_access,
                 tool_hub.clone(),
             )
             .await;
@@ -761,6 +777,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     session_id,
                     None,
                     &native_input,
+                    cyber_access,
                     tool_hub.clone(),
                 )
                 .await;
@@ -789,6 +806,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     session_id,
                     None,
                     &native_input,
+                    cyber_access,
                     tool_hub.clone(),
                 )
                 .await;
@@ -903,6 +921,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     session_id,
                     Some(&credential_override),
                     &native_input,
+                    cyber_access,
                     tool_hub.clone(),
                 )
                 .await;
@@ -933,6 +952,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         session_id,
                         Some(&credential_override),
                         &native_input,
+                        cyber_access,
                         tool_hub.clone(),
                     )
                     .await;
@@ -963,6 +983,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         session_id,
                         Some(&credential_override),
                         &native_input,
+                        cyber_access,
                         tool_hub.clone(),
                     )
                     .await;
@@ -1068,6 +1089,7 @@ async fn run_codex_turn(
     session_id: Option<&str>,
     override_credential: Option<&crate::api::ai_providers::CodexCredentialOverride<'_>>,
     native_input: &NativeTurnInput<'_>,
+    cyber_access: crate::cyber_access::Mode,
     tool_hub: Option<Arc<crate::api::control::FrontendToolHub>>,
 ) -> AgentResult {
     use crate::backend::codex::CodexBackend;
@@ -1339,14 +1361,6 @@ async fn run_codex_turn(
         tx
     });
 
-    let cyber_access = match crate::api::control::cyber::read(app_working_dir, mission_id) {
-        Ok(selection) => selection.mode,
-        Err(error) => return continuity_failure(error),
-    };
-    if let Err(error) = crate::api::control::cyber::write(app_working_dir, mission_id, cyber_access)
-    {
-        return continuity_failure(error);
-    }
     let codex_config = crate::backend::codex::client::CodexConfig {
         cyber_access,
         interactive,

@@ -830,9 +830,6 @@ export function Composer(p: {
               </div>
             </Show>
           </div>
-          <Show when={pick()?.backend === "codex"}>
-            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} onChange={setDraftCyber}/>
-          </Show>
           {/* Effort, after harness and model. Only rendered for a harness the
               core actually accepts an effort for — everything else has
               model_effort forced to null server-side. */}
@@ -879,6 +876,9 @@ export function Composer(p: {
                 </div>
               </Show>
             </div>
+          </Show>
+          <Show when={pick()?.backend === "codex"}>
+            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} onChange={setDraftCyber}/>
           </Show>
         </Show>
       </div>
@@ -2288,7 +2288,6 @@ function MissionDock(p: {
             </Show>
           </Show>
         </div>
-        <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
         <Show when={efforts().length > 0}>
           <span class="under-sep" aria-hidden="true">·</span>
           <div class="under-effort-wrap under-model-wrap">
@@ -2327,6 +2326,7 @@ function MissionDock(p: {
             </Show>
           </div>
         </Show>
+        <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
       </Show>
       <div class="ctx-wrap">
         <button class="ctx" title="Context used" onClick={() => setOpen(!open())}>

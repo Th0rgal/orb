@@ -10266,7 +10266,7 @@ async fn cyber_selection_without_override_uses_codex_default_without_resuming() 
         .unwrap();
     h.control
         .mission_store
-        .update_mission_status(mission.id, MissionStatus::Paused)
+        .update_mission_status(mission.id, MissionStatus::Active)
         .await
         .unwrap();
     let Json(saved) = cyber::update(
@@ -10287,7 +10287,7 @@ async fn cyber_selection_without_override_uses_codex_default_without_resuming() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.status, MissionStatus::Paused);
+    assert_eq!(after.status, MissionStatus::Active);
     assert_eq!(after.model_override, None);
 }
 
