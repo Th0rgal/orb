@@ -1032,6 +1032,19 @@ export function Composer(p: {
   </>);
 }
 
+// Keep the machine picker inside the viewport when its trigger is near an edge.
+function fitMachineMenu(el: HTMLDivElement) {
+  const update = () => {
+    const anchor = el.offsetParent?.getBoundingClientRect().left ?? 0;
+    const left = Math.max(12, Math.min(anchor, window.innerWidth - el.offsetWidth - 12));
+    el.style.left = `${left - anchor}px`;
+  };
+  const observer = new ResizeObserver(update);
+  queueMicrotask(() => { update(); observer.observe(el); });
+  window.addEventListener("resize", update);
+  onCleanup(() => { observer.disconnect(); window.removeEventListener("resize", update); });
+}
+
 // Keep the last message reachable while the transparent dock floats over the transcript.
 export function floatingDock(el: HTMLDivElement) {
   let parent: HTMLElement | null = null;
@@ -1827,7 +1840,7 @@ export default function App() {
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "machine"}>
-                      <div class="menu na-menu machine-menu">
+                      <div class="menu na-menu machine-menu" ref={fitMachineMenu}>
                         <div class="na-menu-list">
                         <Show
                           when={isConnected()}
