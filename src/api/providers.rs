@@ -701,6 +701,16 @@ async fn resolve_visible_codex_models(
     state: &AppState,
     candidates: &[String],
 ) -> Option<HashSet<String>> {
+    // Native Codex uses this endpoint in proxy-owned mode. OpenAI's API
+    // catalog and inference probes describe a different route and can leave
+    // unroutable models visible (for example gpt-5.4-mini).
+    if let Some(endpoint) = crate::api::oauth_owner::codex_via_cli_proxy() {
+        // Preserve the existing picker if the sidecar is temporarily down;
+        // an unavailable catalog must not make an installed harness vanish.
+        return fetch_cli_proxy_model_ids(&state.http_client, &endpoint)
+            .await
+            .ok();
+    }
     let api_keys =
         crate::api::ai_providers::get_all_openai_keys_for_codex(state.config.working_dir.as_path());
     if api_keys.is_empty() {
@@ -758,6 +768,40 @@ async fn resolve_visible_codex_models(
     );
 
     Some(visible_models)
+}
+
+async fn fetch_cli_proxy_model_ids(
+    client: &reqwest::Client,
+    endpoint: &crate::api::oauth_owner::CliProxyEndpoint,
+) -> Result<HashSet<String>, ()> {
+    let base = endpoint.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    let response = client
+        .get(url)
+        .bearer_auth(&endpoint.api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| ())?
+        .error_for_status()
+        .map_err(|_| ())?;
+    let body: serde_json::Value = response.json().await.map_err(|_| ())?;
+    let entries = body.get("data").and_then(|v| v.as_array()).ok_or(())?;
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .ok_or(())
+        })
+        .collect()
 }
 
 /// Default provider configuration.
@@ -2086,6 +2130,25 @@ pub async fn list_backend_model_options(
             if let Some(options) = backends.get_mut("codex") {
                 let before = options.len();
                 options.retain(|opt| visible_models.contains(&opt.value));
+                if crate::api::oauth_owner::codex_via_cli_proxy().is_some() {
+                    let mut additional: Vec<_> = visible_models
+                        .iter()
+                        .filter(|id| {
+                            is_codex_backend_model_id(id)
+                                && !options.iter().any(|opt| &opt.value == *id)
+                        })
+                        .cloned()
+                        .collect();
+                    additional.sort();
+                    for id in additional {
+                        options.push(BackendModelOption {
+                            label: format!("OpenAI — {}", model_id_to_display_name(&id)),
+                            value: id,
+                            description: None,
+                            provider_id: None,
+                        });
+                    }
+                }
                 tracing::info!(
                     before,
                     after = options.len(),
@@ -2570,6 +2633,65 @@ fn is_grok_backend_model_id(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cli_proxy_visibility_uses_model_metadata_and_exact_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for prefix in ["", "/v1"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let size = stream.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..size]);
+                assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+                assert!(!request.contains("/responses"));
+                let body = r#"{"data":[{"id":"gpt-5.5"},{"id":"gpt-6.1-sol"}]}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+                base_url: format!("http://{address}{prefix}"),
+                api_key: "test-only-key".into(),
+            };
+            let ids = fetch_cli_proxy_model_ids(&reqwest::Client::new(), &endpoint)
+                .await
+                .unwrap();
+            assert_eq!(ids, HashSet::from(["gpt-5.5".into(), "gpt-6.1-sol".into()]));
+            assert!(!ids.contains("gpt-5.5-codex"));
+            assert!(!ids.contains("gpt-5.4-mini"));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_proxy_visibility_does_not_accept_invalid_or_failed_catalogs() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, body) in [
+            ("503 Service Unavailable", r#"{"data":[{"id":"gpt-5.5"}]}"#),
+            ("200 OK", r#"{"models":[{"id":"gpt-5.5"}]}"#),
+            ("200 OK", r#"{"data":[{}]}"#),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                stream.read(&mut bytes).await.unwrap();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+                base_url: format!("http://{address}"),
+                api_key: "test-only-key".into(),
+            };
+            assert!(
+                fetch_cli_proxy_model_ids(&reqwest::Client::new(), &endpoint)
+                    .await
+                    .is_err()
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]
