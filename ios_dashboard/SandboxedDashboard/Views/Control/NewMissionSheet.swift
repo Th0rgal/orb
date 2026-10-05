@@ -33,6 +33,12 @@ struct NewMissionSheet: View {
     @State private var providers: [Provider] = []
     @State private var selectedModelOverride: String = ""
     
+    @State private var antigravityRequestID = UUID()
+    @State private var antigravityModels: [[String]] = []
+    @State private var antigravityLoadedKey: String?
+    @State private var antigravityLoading = false
+    @State private var antigravityError: String?
+
     // Loading state
     @State private var isLoading = true
     
@@ -88,6 +94,7 @@ struct NewMissionSheet: View {
                 // Action buttons
                 VStack(spacing: 12) {
                     Button {
+                        guard !isStartDisabled else { return }
                         if isHermesSelected {
                             onCreateHermesSession?()
                             return
@@ -129,6 +136,12 @@ struct NewMissionSheet: View {
         }
         .task {
             await loadData()
+        }
+        .task(id: antigravityRequestKey) {
+            await loadAntigravityModels()
+        }
+        .onChange(of: selectedAgentValue) { _, _ in
+            selectedModelOverride = ""
         }
     }
     
@@ -239,8 +252,19 @@ struct NewMissionSheet: View {
     
     private var isHermesSelected: Bool { selectedAgentValue == hermesAgentValue }
 
+    private var antigravityRequestKey: String? {
+        CombinedAgent.parse(selectedAgentValue)?.backend == "antigravity"
+            ? "antigravity:" + (selectedWorkspaceId ?? "host") : nil
+    }
+
     private var isStartDisabled: Bool {
         if isLoading { return true }
+        if let key = antigravityRequestKey {
+            if antigravityLoading || antigravityError != nil || antigravityLoadedKey != key
+                || !antigravityModels.contains(where: { $0.first == selectedModelOverride }) {
+                return true
+            }
+        }
         // A Hermes session needs no workspace, so an empty workspace list
         // only blocks missions.
         return isHermesSelected ? false : workspaces.isEmpty
@@ -404,19 +428,56 @@ struct NewMissionSheet: View {
     
     private var modelSelector: some View {
         VStack(spacing: 8) {
-            // Default option
-            modelRow(id: "", name: "Default (agent or global)", provider: nil)
-            
-            // Filter providers based on selected backend
-            let selectedBackend = CombinedAgent.parse(selectedAgentValue)?.backend
-            let filteredProviders = filterProviders(for: selectedBackend)
-            
-            ForEach(filteredProviders) { provider in
-                providerSection(provider: provider, selectedBackend: selectedBackend)
+            if antigravityRequestKey != nil {
+                if antigravityLoading || antigravityLoadedKey != antigravityRequestKey {
+                    ProgressView("Discovering workspace models…")
+                } else if let error = antigravityError {
+                    Text(error).font(.caption).foregroundStyle(Theme.warning)
+                } else if antigravityModels.isEmpty {
+                    Text("No Antigravity models available. Sign in with agy in this workspace, then refresh.")
+                        .font(.caption).foregroundStyle(Theme.warning)
+                } else {
+                    ForEach(antigravityModels, id: \.self) { model in
+                        modelRow(id: model[0], name: model[1], provider: nil)
+                    }
+                }
+                Button("Refresh workspace models") {
+                    Task { await loadAntigravityModels() }
+                }
+                .disabled(antigravityLoading)
+            } else {
+                modelRow(id: "", name: "Default (agent or global)", provider: nil)
+                let selectedBackend = CombinedAgent.parse(selectedAgentValue)?.backend
+                ForEach(filterProviders(for: selectedBackend)) { provider in
+                    providerSection(provider: provider, selectedBackend: selectedBackend)
+                }
             }
         }
     }
-    
+
+    @MainActor
+    private func loadAntigravityModels() async {
+        let requestID = UUID()
+        antigravityRequestID = requestID
+        antigravityLoading = false
+        antigravityModels = []
+        antigravityLoadedKey = nil
+        antigravityError = nil
+        selectedModelOverride = ""
+        guard let key = antigravityRequestKey else { return }
+        antigravityLoading = true
+        do {
+            let models = try await api.listAntigravityModels(workspaceId: selectedWorkspaceId)
+            guard !Task.isCancelled, antigravityRequestID == requestID, antigravityRequestKey == key else { return }
+            antigravityModels = models.filter { $0.count == 2 && !$0[0].isEmpty }
+        } catch {
+            guard !Task.isCancelled, antigravityRequestID == requestID, antigravityRequestKey == key else { return }
+            antigravityError = "Antigravity discovery failed. Sign in with agy in this workspace, then refresh."
+        }
+        antigravityLoadedKey = key
+        antigravityLoading = false
+    }
+
     private func providerSection(provider: Provider, selectedBackend: String?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             // Provider header
