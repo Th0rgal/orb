@@ -8012,6 +8012,7 @@ pub(crate) async fn check_claudecode_connectivity(
 
 /// Proactive API connectivity check for OpenCode.
 /// Tests basic internet, then checks the appropriate API based on configured providers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn check_opencode_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
