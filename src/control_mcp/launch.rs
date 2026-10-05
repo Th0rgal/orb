@@ -12,7 +12,7 @@ pub fn require_runtime_owner(
 ) -> Result<(), String> {
     if matches!(
         harness,
-        "codex" | "claudecode" | "opencode" | "gemini" | "grok" | "antigravity"
+        "codex" | "claudecode" | "opencode" | "grok" | "antigravity"
     ) && user.is_none_or(|user| user.id.trim().is_empty())
     {
         return Err("Cannot launch native mission without its authenticated MCP owner".into());
@@ -96,49 +96,6 @@ pub fn overlays(
         }
         "antigravity" => {
             file = Some(json!({"mcpServers":{"sandboxed":server}}));
-        }
-        "gemini" => {
-            let default_path = if cfg!(target_os = "macos") {
-                "/Library/Application Support/GeminiCli/settings.json"
-            } else if cfg!(target_os = "windows") {
-                r"C:\ProgramData\gemini-cli\settings.json"
-            } else {
-                "/etc/gemini-cli/settings.json"
-            };
-            let path = existing
-                .get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
-                .map(String::as_str)
-                .unwrap_or(default_path);
-            let mut config = match std::fs::read(path) {
-                Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
-                    .map_err(|_| "Invalid existing Gemini system settings")?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
-                Err(_) => return Err("Cannot read existing Gemini system settings".into()),
-            };
-            // Gemini derives its defaults path from the system-settings path.
-            // Keep that original path when redirecting only the MCP overlay.
-            if !existing.contains_key("GEMINI_CLI_SYSTEM_DEFAULTS_PATH") {
-                let defaults = Path::new(path).with_file_name("system-defaults.json");
-                env.insert(
-                    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH".into(),
-                    defaults.to_string_lossy().into_owned(),
-                );
-            }
-            if !config.is_object() {
-                return Err("Gemini settings must be an object".into());
-            }
-            if config.get("mcpServers").is_none() {
-                config["mcpServers"] = json!({})
-            }
-            if !config["mcpServers"].is_object() {
-                return Err("Gemini mcpServers must be an object".into());
-            }
-            config["mcpServers"]["sandboxed"] = server;
-            file = Some(config);
-            env.insert(
-                "GEMINI_CLI_SYSTEM_SETTINGS_PATH".into(),
-                settings_file.into(),
-            );
         }
         _ => return Err("Harness does not support the unified MCP launcher".into()),
     }
@@ -498,14 +455,7 @@ mod tests {
 
     #[test]
     fn native_runtime_requires_owner_without_inventing_a_default_identity() {
-        for harness in [
-            "codex",
-            "claudecode",
-            "opencode",
-            "gemini",
-            "grok",
-            "antigravity",
-        ] {
+        for harness in ["codex", "claudecode", "opencode", "grok", "antigravity"] {
             assert!(require_runtime_owner(harness, None).is_err());
             for id in ["", "  "] {
                 let user = crate::api::auth::AuthUser {
@@ -604,14 +554,7 @@ mod tests {
                 json!({"mcp_servers":{"other":{"command":"existing"}}}).to_string(),
             ),
         ]);
-        for harness in [
-            "codex",
-            "claudecode",
-            "opencode",
-            "grok",
-            "gemini",
-            "antigravity",
-        ] {
+        for harness in ["codex", "claudecode", "opencode", "grok", "antigravity"] {
             let (args, env, file) = overlays(
                 harness,
                 "/bin/sandboxed-mcp",

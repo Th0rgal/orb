@@ -2763,6 +2763,39 @@ impl TelegramBridge {
         }
     }
 
+    async fn reject_retired_channel(
+        channel: &TelegramChannel,
+        store: &dyn MissionStore,
+    ) -> Result<(), String> {
+        let mut retired = channel.default_backend.as_deref() == Some("gemini");
+        let mut mission_ids = vec![channel.mission_id];
+        mission_ids.extend(
+            store
+                .list_telegram_chat_missions(channel.id)
+                .await?
+                .into_iter()
+                .map(|mapping| mapping.mission_id),
+        );
+        for id in mission_ids {
+            if store
+                .get_mission(id)
+                .await?
+                .is_some_and(|mission| mission.backend == "gemini")
+            {
+                retired = true;
+                break;
+            }
+        }
+        if retired {
+            let mut inactive = channel.clone();
+            inactive.active = false;
+            inactive.updated_at = now_string();
+            store.update_telegram_channel(inactive).await?;
+            return Err("Gemini CLI is retired; this channel was deactivated. Select Antigravity and an exact model from agy models in the configured workspace, migrate linked Gemini missions without reusing native session IDs, then reactivate the channel.".into());
+        }
+        Ok(())
+    }
+
     /// Register a webhook for a Telegram channel and store routing context.
     pub async fn start_channel(
         self: &Arc<Self>,
@@ -2772,6 +2805,7 @@ impl TelegramBridge {
         mission_store: Arc<dyn MissionStore>,
         public_base_url: &str,
     ) -> Result<(), String> {
+        Self::reject_retired_channel(&channel, mission_store.as_ref()).await?;
         let base_url = format!("https://api.telegram.org/bot{}", channel.bot_token);
         let channel_id = channel.id;
 
@@ -6992,6 +7026,84 @@ mod tests {
             default_agent: None,
             created_at: "2026-05-20T00:00:00Z".to_string(),
             updated_at: "2026-05-20T00:00:00Z".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_gemini_channels_are_deactivated_before_webhook_registration() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore, TelegramChatMission};
+        for source in ["default", "bound", "mapped"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SqliteMissionStore::new(dir.path().to_path_buf(), "test")
+                .await
+                .unwrap();
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("gemini"), None)
+                .await
+                .unwrap();
+            let mut channel = test_paloma_channel(vec![]);
+            channel.mission_id = store
+                .create_mission(None, None, None, None, None, Some("opencode"), None)
+                .await
+                .unwrap()
+                .id;
+            if source == "default" {
+                channel.default_backend = Some("gemini".into());
+            }
+            if source == "bound" {
+                channel.mission_id = mission.id;
+                channel.auto_create_missions = false;
+            }
+            store
+                .create_telegram_channel(channel.clone())
+                .await
+                .unwrap();
+            if source == "mapped" {
+                store
+                    .create_telegram_chat_mission(TelegramChatMission {
+                        id: Uuid::new_v4(),
+                        channel_id: channel.id,
+                        chat_id: 42,
+                        mission_id: mission.id,
+                        chat_title: None,
+                        created_at: super::now_string(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let bridge = Arc::new(TelegramBridge::new());
+            let (cmd_tx, _) = tokio::sync::mpsc::channel(1);
+            let (events_tx, _) = tokio::sync::broadcast::channel(1);
+            let store: Arc<dyn MissionStore> = Arc::new(store);
+            let error = bridge
+                .start_channel(
+                    channel.clone(),
+                    cmd_tx,
+                    events_tx,
+                    store.clone(),
+                    "http://localhost",
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("agy models"), "{source}: {error}");
+            assert!(
+                !store
+                    .get_telegram_channel(channel.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+            assert!(!bridge.is_running(channel.id).await);
+            assert_eq!(
+                store
+                    .get_mission(mission.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .backend,
+                "gemini"
+            );
         }
     }
 

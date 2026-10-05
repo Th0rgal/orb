@@ -6331,7 +6331,7 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
             false,
         )));
         registry.register(Arc::new(crate::backend::grok::GrokBackend::new()));
-        registry.register(Arc::new(crate::backend::gemini::GeminiBackend::new()));
+        registry.register(crate::backend::antigravity::registry_entry());
     }
     let store = h.control.mission_store.clone();
 
@@ -6471,7 +6471,7 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     assert!(detail.contains("managed-auth"), "{detail}");
     let caps = remote_launch_capabilities();
     assert!(caps.typed && caps.raw_command && caps.proxy_url_configured);
-    for harness in ["claudecode", "opencode", "grok", "codex", "gemini"] {
+    for harness in ["claudecode", "opencode", "grok", "codex", "antigravity"] {
         assert!(caps.harnesses.iter().any(|h| h == harness));
     }
     let refused = h
@@ -6479,8 +6479,8 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
         .http_client
         .post(format!("{}/missions", h.url))
         .json(
-            &json!({"prompt":"inspect only", "project":"lido", "backend":"gemini",
-            "remote_node_id":"typed-fixture", "idempotency_key":"gemini-without-node-auth"}),
+            &json!({"prompt":"inspect only", "project":"lido", "backend":"antigravity",
+            "remote_node_id":"typed-fixture", "idempotency_key":"antigravity-without-node-auth"}),
         )
         .send()
         .await

@@ -67,7 +67,7 @@ const getProviderAuthMethods = (providerType: AIProviderType): AIProviderAuthMet
   if (providerType === 'google') {
     return [
       {
-        label: 'OAuth with Google (Gemini CLI)',
+        label: 'OAuth with Google (OpenCode)',
         type: 'oauth',
         description: 'Use your Gemini plan/quotas (including free tier) via Google OAuth',
       },
@@ -252,7 +252,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
     } else if (providerType === 'openai') {
       setSelectedBackends(['opencode', 'codex']);
     } else if (providerType === 'google') {
-      setSelectedBackends(['opencode', 'gemini']);
+      setSelectedBackends(['opencode']);
     } else if (providerType === 'xai') {
       setSelectedBackends(['opencode', 'grok']);
     } else {
@@ -285,7 +285,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
         setSelectedBackends(['opencode', 'codex']);
       }
       if (selectedProvider === 'google') {
-        setSelectedBackends(['opencode', 'gemini']);
+        setSelectedBackends(['opencode']);
       }
       if (selectedProvider === 'xai') {
         // Match the server's `default_backends_for_provider(ProviderType::Xai)`
@@ -720,18 +720,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
                         <div className="text-xs text-white/40">Use for OpenCode agents and missions</div>
                       </div>
                     </label>
-                    <label className="flex items-center gap-3 p-3 rounded-xl border border-white/[0.06] hover:bg-white/[0.02] transition-colors cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={selectedBackends.includes('gemini')}
-                        onChange={() => toggleBackend('gemini')}
-                        className="rounded border-white/20 bg-white/[0.02] text-indigo-500 focus:ring-indigo-500/30 cursor-pointer"
-                      />
-                      <div className="flex-1">
-                        <div className="text-sm text-white">Gemini CLI</div>
-                        <div className="text-xs text-white/40">Use for Gemini CLI-based missions</div>
-                      </div>
-                    </label>
+
                   </>
                 )}
 

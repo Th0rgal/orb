@@ -22,7 +22,6 @@ const TOOLS: &[(&str, &str, &str, Option<&str>)] = &[
     ("opencode", "OpenCode", "opencode", Some("opencode-ai")),
     ("grok", "Grok", "grok", None),
     ("antigravity", "Antigravity", "agy", None),
-    ("gemini", "Gemini", "gemini", Some("@google/gemini-cli")),
 ];
 pub fn now() -> u64 {
     SystemTime::now()
@@ -933,7 +932,7 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
             "queued",
             "untracked agents also fence updates"
         );
-        let unrelated = begin("gemini-session", "gemini", None).unwrap();
+        let unrelated = begin("grok-session", "grok", None).unwrap();
         tick_with_busy(|_| false).unwrap();
         assert_eq!(jobs().last().unwrap().state, "completed");
         drop(unrelated);
@@ -1019,7 +1018,7 @@ chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
         let (manager, args) = native_update(&bun_launcher, "codex", "1.2.0").unwrap();
         assert_eq!(manager, bin.join("bun"));
         assert_eq!(args, vec!["add", "--global", "@openai/codex@1.2.0"]);
-        assert!(native_update(&bun_launcher, "gemini", "1.2.0").is_none());
+        assert!(native_update(&bun_launcher, "grok", "1.2.0").is_none());
         script(
             &bin.join("bun"),
             &format!(

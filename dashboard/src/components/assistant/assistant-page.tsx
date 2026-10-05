@@ -61,6 +61,7 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useAntigravityModels } from '@/lib/use-antigravity-models';
 import { toast } from '@/components/toast';
 import { listModelChains, type ModelChain } from '@/lib/api/model-routing';
 import { getHermesRemoteStatus, rotateHermesRemoteKey, applyHermesRemote, type HermesRemoteStatus } from '@/lib/api/assistant';
@@ -78,8 +79,8 @@ const BACKEND_LABELS: Record<string, string> = {
   claudecode: 'Claude Code',
   opencode: 'OpenCode',
   codex: 'Codex',
-  gemini: 'Gemini',
   grok: 'Grok Build',
+  antigravity: 'Antigravity CLI',
   chatgpt_ui: 'ChatGPT UI (experimental)',
 };
 
@@ -333,10 +334,10 @@ export default function AssistantPage() {
 
   // Model selector options helper
   const getModelOptionsForBackend = useCallback((backend: string) => {
+    if (backend === 'antigravity' || backend === 'gemini') return [];
     const allowlist =
       backend === 'claudecode' ? new Set(['anthropic']) :
       backend === 'codex' ? new Set(['openai']) :
-      backend === 'gemini' ? new Set(['google']) :
       backend === 'grok' ? new Set(['xai']) : null;
 
     const backendOpts = backendModelOptions?.backends?.[backend];
@@ -355,7 +356,8 @@ export default function AssistantPage() {
     return options;
   }, [backendModelOptions, providersResponse]);
 
-  const modelOptions = useMemo(() => getModelOptionsForBackend(createBackend), [getModelOptionsForBackend, createBackend]);
+  const createNative = useAntigravityModels(createBackend, createWorkspaceId, showCreateDialog, createModelOverride);
+  const modelOptions: BackendModelOption[] = createNative.native ? createNative.options : getModelOptionsForBackend(createBackend);
 
   // Edit dialog
   const [editingBot, setEditingBot] = useState<AssistantGateway | null>(null);
@@ -368,7 +370,8 @@ export default function AssistantPage() {
   const [editConfigProfile, setEditConfigProfile] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const editModelOptions = useMemo(() => getModelOptionsForBackend(editBackend || 'claudecode'), [getModelOptionsForBackend, editBackend]);
+  const editNative = useAntigravityModels(editBackend, editWorkspaceId, !!editingBot, editModelOverride);
+  const editModelOptions: BackendModelOption[] = editNative.native ? editNative.options : getModelOptionsForBackend(editBackend || 'claudecode');
 
   const loadChats = async (botId: string) => {
     if (chatsByBot[botId]) return; // already loaded
@@ -509,7 +512,7 @@ export default function AssistantPage() {
   };
 
   const handleCreate = async () => {
-    if (!createBotToken.trim()) return;
+    if (!createBotToken.trim() || !createNative.ready) return;
     setCreating(true);
     try {
       const input: CreateAssistantGatewayInput = {
@@ -611,7 +614,7 @@ export default function AssistantPage() {
   };
 
   const handleSaveEdit = async () => {
-    if (!editingBot) return;
+    if (!editingBot || !editNative.ready) return;
     setSaving(true);
     try {
       await updateAssistantGateway(editingBot.id, {
@@ -620,7 +623,7 @@ export default function AssistantPage() {
         default_backend: editBackend || undefined,
         default_model_override: editModelOverride || undefined,
         default_model_effort: editModelEffort || undefined,
-        default_workspace_id: editWorkspaceId || undefined,
+        default_workspace_id: editWorkspaceId || (editNative.native ? '00000000-0000-0000-0000-000000000000' : undefined),
         default_config_profile: editConfigProfile || undefined,
       });
       await mutateBots();
@@ -1684,16 +1687,16 @@ export default function AssistantPage() {
                 <label className="block text-sm text-white/60 mb-1">Backend</label>
                 <select
                   value={createBackend}
-                  onChange={(e) => setCreateBackend(e.target.value)}
+                  onChange={(e) => { setCreateBackend(e.target.value); setCreateModelOverride(''); }}
                   className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
                 >
                   {backends.length > 0
-                    ? backends.map((b: Backend) => (
+                    ? backends.filter((b: Backend) => b.id !== 'gemini').map((b: Backend) => (
                         <option key={b.id} value={b.id}>
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'gemini', 'grok', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>
@@ -1708,7 +1711,7 @@ export default function AssistantPage() {
                   className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50 text-sm [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
                 >
                   <option value="">
-                    {createBackend === 'claudecode'
+                    {createNative.native ? 'Select a workspace-native model' : createBackend === 'claudecode'
                       ? 'No override (configured default; fallback claude-opus-5)'
                       : 'No override (use default)'}
                   </option>
@@ -1733,6 +1736,7 @@ export default function AssistantPage() {
                   })()}
                 </select>
               </div>
+              {createNative.native && <div className="text-xs text-white/60"><p role="status">{createNative.message}</p><button type="button" onClick={() => void createNative.refresh()}>Refresh workspace models</button></div>}
               {(createBackend === 'claudecode' || createBackend === 'codex') && (
                 <div>
                   <label className="block text-sm text-white/60 mb-1">Model Effort (optional)</label>
@@ -1755,7 +1759,7 @@ export default function AssistantPage() {
                   <label className="block text-sm text-white/60 mb-1">Workspace (optional)</label>
                   <select
                     value={createWorkspaceId}
-                    onChange={(e) => setCreateWorkspaceId(e.target.value)}
+                    onChange={(e) => { setCreateWorkspaceId(e.target.value); if (createNative.native) setCreateModelOverride(''); }}
                     className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
                   >
                     <option value="">Host (default)</option>
@@ -1841,7 +1845,7 @@ export default function AssistantPage() {
               </button>
               <button
                 onClick={handleCreate}
-                disabled={!createBotToken.trim() || creating}
+                disabled={!createBotToken.trim() || creating || !createNative.ready}
                 className="px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {creating ? 'Creating...' : 'Add Gateway'}
@@ -1880,16 +1884,16 @@ export default function AssistantPage() {
                 <label className="block text-sm text-white/60 mb-1">Backend</label>
                 <select
                   value={editBackend}
-                  onChange={(e) => setEditBackend(e.target.value)}
+                  onChange={(e) => { setEditBackend(e.target.value); setEditModelOverride(''); }}
                   className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
                 >
                   {backends.length > 0
-                    ? backends.map((b: Backend) => (
+                    ? backends.filter((b: Backend) => b.id !== 'gemini').map((b: Backend) => (
                         <option key={b.id} value={b.id}>
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'gemini', 'grok', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>
@@ -1904,7 +1908,7 @@ export default function AssistantPage() {
                   className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50 text-sm [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
                 >
                   <option value="">
-                    {(editBackend || 'claudecode') === 'claudecode'
+                    {editNative.native ? 'Select a workspace-native model' : (editBackend || 'claudecode') === 'claudecode'
                       ? 'No override (configured default; fallback claude-opus-5)'
                       : 'No override (use default)'}
                   </option>
@@ -1929,6 +1933,7 @@ export default function AssistantPage() {
                   })()}
                 </select>
               </div>
+              {editNative.native && <div className="text-xs text-white/60"><p role="status">{editNative.message}</p><button type="button" onClick={() => void editNative.refresh()}>Refresh workspace models</button></div>}
               {(editBackend === 'claudecode' || editBackend === 'codex') && (
                 <div>
                   <label className="block text-sm text-white/60 mb-1">Model Effort</label>
@@ -1951,7 +1956,7 @@ export default function AssistantPage() {
                   <label className="block text-sm text-white/60 mb-1">Workspace</label>
                   <select
                     value={editWorkspaceId}
-                    onChange={(e) => setEditWorkspaceId(e.target.value)}
+                    onChange={(e) => { setEditWorkspaceId(e.target.value); if (editNative.native) setEditModelOverride(''); }}
                     className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
                   >
                     <option value="">Host (default)</option>
@@ -2017,7 +2022,7 @@ export default function AssistantPage() {
               </button>
               <button
                 onClick={handleSaveEdit}
-                disabled={saving}
+                disabled={saving || !editNative.ready}
                 className="px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}

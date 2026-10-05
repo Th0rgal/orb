@@ -128,10 +128,10 @@ print(json.dumps(request), flush=True)
             owner = Path(directory) / "owner-login"
             owner.write_text("owner-login")
             owner.chmod(0o600)
-            cli = Path(directory) / "gemini"
+            cli = Path(directory) / "claude"
             cli.write_text("""#!/usr/bin/env python3
-import json, os, pathlib
-config=pathlib.Path(os.environ['GEMINI_CLI_SYSTEM_SETTINGS_PATH'])
+import json, os, pathlib, sys
+config=pathlib.Path(sys.argv[sys.argv.index('--mcp-config')+1])
 server=json.loads(config.read_text())['mcpServers']['sandboxed']
 credential=pathlib.Path(server['args'][server['args'].index('--token-file')+1])
 assert credential.read_text().strip() == 'mcp1.initial'
@@ -142,7 +142,7 @@ print(str(credential))
 """)
             cli.chmod(0o700)
             env = {k: v for k, v in os.environ.items() if not k.startswith('SANDBOXED_MCP_')}
-            result = subprocess.run([str(BINARY), "launch", "--harness", "gemini", "--api-url", url,
+            result = subprocess.run([str(BINARY), "launch", "--harness", "claudecode", "--api-url", url,
                                      "--token-file", str(owner), "--mission-id", MISSION, "--", str(cli)],
                                     capture_output=True, text=True, env=env, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)

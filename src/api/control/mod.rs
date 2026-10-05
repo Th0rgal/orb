@@ -4004,13 +4004,6 @@ pub(crate) fn resolve_codex_default_model() -> String {
     "gpt-6.1-sol".to_string()
 }
 
-/// Return the default model for Gemini CLI when no override is specified.
-pub(crate) fn resolve_gemini_default_model() -> String {
-    // Keep aligned with Google AI's model docs:
-    // https://ai.google.dev/gemini-api/docs/models
-    "gemini-3.1-pro-preview".to_string()
-}
-
 /// Return the default model for Grok Build when no override is specified.
 ///
 /// Mirrors the dashboard's `KNOWN_BACKEND_DEFAULT_MODELS` entry for grok and
@@ -5738,6 +5731,12 @@ fn validate_and_normalize_board_tasks(
             return Err((
                 StatusCode::BAD_REQUEST,
                 "every task needs a non-empty task_key and prompt".to_string(),
+            ));
+        }
+        if t.backend.trim().eq_ignore_ascii_case("gemini") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("task `{}`: {}", t.task_key, board::RETIRED_GEMINI_TASK),
             ));
         }
         // Same operator policy as the orchestrator MCP: worker missions never
@@ -8942,7 +8941,7 @@ fn native_backend_prefix(raw_model: &str) -> Option<&str> {
         return None;
     }
     match prefix {
-        "codex" | "claudecode" | "gemini" | "grok" | "antigravity" => Some(prefix),
+        "codex" | "claudecode" | "grok" | "antigravity" => Some(prefix),
         _ => None,
     }
 }
@@ -8951,7 +8950,6 @@ fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
     match raw_agent.trim().to_ascii_lowercase().as_str() {
         "codex" => Some("codex"),
         "claudecode" => Some("claudecode"),
-        "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
         "grok" => Some("grok"),
         _ => None,
@@ -11685,12 +11683,12 @@ pub(super) async fn create_mission_inner(
     };
 
     // Validate agent exists before creating mission (fail fast with clear error)
-    // Skip validation for Claude Code, Codex, Gemini, and Grok - they have their own built-in agents
+    // Skip validation for Claude Code, Codex, Antigravity, and Grok - they have their own built-in agents
     if let Some(ref agent_name) = agent {
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui")
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -11795,15 +11793,9 @@ pub(super) async fn create_mission_inner(
     }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
-        if matches!(
-            backend_id,
-            "codex" | "claudecode" | "gemini" | "grok" | "antigravity"
-        ) {
+        if matches!(backend_id, "codex" | "claudecode" | "grok" | "antigravity") {
             if let Some(workspace) = state.workspaces.get(ws_id).await {
-                let cli_path = if matches!(
-                    backend_id,
-                    "claudecode" | "codex" | "gemini" | "antigravity"
-                ) {
+                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "antigravity") {
                     state
                         .backend_configs
                         .get(backend_id)
@@ -12786,14 +12778,8 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &[
-    "claudecode",
-    "opencode",
-    "grok",
-    "codex",
-    "gemini",
-    "antigravity",
-];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
+    &["claudecode", "opencode", "grok", "codex", "antigravity"];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -12833,10 +12819,6 @@ pub(crate) enum RemoteHarnessPlan {
         model: Option<String>,
         prompt: String,
         resume_session_id: Option<String>,
-    },
-    Gemini {
-        model: Option<String>,
-        prompt: String,
     },
     Codex {
         effort: Option<String>,
@@ -12883,10 +12865,6 @@ impl RemoteHarnessPlan {
             RemoteHarnessPlan::Antigravity { model, .. } => format!(
                 "antigravity/{}",
                 model.as_deref().unwrap_or("account default")
-            ),
-            RemoteHarnessPlan::Gemini { model, .. } => format!(
-                "gemini/{}",
-                model.as_deref().unwrap_or("node default model")
             ),
             RemoteHarnessPlan::Codex { model, .. } => format!("codex/{model}"),
             RemoteHarnessPlan::Raw { .. } => "raw command".to_string(),
@@ -12941,7 +12919,6 @@ pub(crate) fn plan_remote_harness(
             resume_session_id: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
-        "gemini" => Ok(RemoteHarnessPlan::Gemini { model, prompt }),
         "antigravity" => Ok(RemoteHarnessPlan::Antigravity { model, prompt, resume_session_id: None }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
@@ -13191,21 +13168,6 @@ pub(crate) fn remote_execution_for_plan(
                         .collect::<Vec<_>>()
                         .join(" ")
                 ),
-                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
-                label,
-            }
-        }
-        RemoteHarnessPlan::Gemini { model, prompt } => {
-            let mut command = String::from("command -v gemini >/dev/null 2>&1 || { echo 'gemini is not installed on this node' >&2; exit 127; }; gemini --yolo");
-            if let Some(model) = model {
-                command.push_str(" --model ");
-                command.push_str(&shell_single_quote(model));
-            }
-            command.push_str(" --prompt ");
-            command.push_str(&shell_single_quote(prompt));
-            RemoteExecution {
-                managed_auth: vec!["gemini".into()],
-                command,
                 env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
                 label,
             }
@@ -14364,7 +14326,6 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
-        | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
     };
@@ -14413,7 +14374,6 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
-        | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
         _ => "",
     };
@@ -14584,7 +14544,6 @@ async fn submit_leased_remote_job(
             RemoteHarnessPlan::ClaudeCode { .. } => "claudecode",
             RemoteHarnessPlan::OpenCode { .. } => "opencode",
             RemoteHarnessPlan::Grok { .. } => "grok",
-            RemoteHarnessPlan::Gemini { .. } => "gemini",
             RemoteHarnessPlan::Antigravity { .. } => "antigravity",
             RemoteHarnessPlan::Raw { .. } => unreachable!(),
         };
@@ -14607,11 +14566,6 @@ async fn submit_leased_remote_job(
             "opencode" => execution.command.replacen(
                 "opencode run ",
                 "/usr/local/bin/sandboxed-mcp launch --harness opencode -- opencode run ",
-                1,
-            ),
-            "gemini" => execution.command.replacen(
-                "gemini --yolo",
-                "/usr/local/bin/sandboxed-mcp launch --harness gemini -- gemini --yolo",
                 1,
             ),
             "antigravity" => execution.command.replacen(
@@ -16559,7 +16513,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui"
+            "claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui"
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -29591,8 +29545,6 @@ async fn run_single_control_turn(
             && requested_model.is_none())
     {
         config.default_model = None;
-    } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
-        config.default_model = Some(resolve_gemini_default_model());
     } else if backend_id.as_deref() == Some("chatgpt_ui") && requested_model.is_none() {
         // Web model labels are account-specific. Never invent or inherit a
         // CLI/API model slug for the browser harness.
@@ -29876,33 +29828,6 @@ async fn run_single_control_turn(
                     mission_id: mid,
                     events_tx: events_tx.clone(),
                     cancel: cancel.clone(),
-                    app_working_dir: &config.working_dir,
-                    session_id: session_id.as_deref(),
-                    is_continuation: false,
-                    extras: crate::api::runners::TurnExtras::None,
-                }),
-            )
-            .await
-        }
-        Some("gemini") => {
-            let mid = match require_mission_id(mission_id, "Gemini CLI", &events_tx) {
-                Ok(id) => id,
-                Err(r) => return r,
-            };
-            use crate::api::runners::HarnessRunner as _;
-            Box::pin(
-                crate::api::runners::GeminiRunner.run_turn(crate::api::runners::TurnContext {
-                    mission_store: Some(mission_store.clone()),
-                    workspace: exec_workspace,
-                    work_dir: &ctx.working_dir,
-                    message: &convo,
-                    model: config.default_model.as_deref(),
-                    model_effort: None,
-                    fast_mode: false,
-                    agent: config.opencode_agent.as_deref(),
-                    mission_id: mid,
-                    events_tx: events_tx.clone(),
-                    cancel,
                     app_working_dir: &config.working_dir,
                     session_id: session_id.as_deref(),
                     is_continuation: false,
@@ -37816,6 +37741,14 @@ And the report:
     }
 
     #[test]
+    fn retired_gemini_board_task_is_rejected_at_registration() {
+        let mut tasks = vec![board_task_with_backend_and_model("gemini", "old-model")];
+        let (status, error) = validate_and_normalize_board_tasks(&mut tasks).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("agy models"));
+    }
+
+    #[test]
     fn board_upsert_normalizes_matching_native_model_backend_prefix() {
         let mut tasks = vec![board_task_with_backend_and_model(
             "codex",
@@ -37854,7 +37787,7 @@ And the report:
         assert_eq!(native_backend_agent("codex"), Some("codex"));
         assert_eq!(native_backend_agent(" Codex "), Some("codex"));
         assert_eq!(native_backend_agent("claudecode"), Some("claudecode"));
-        assert_eq!(native_backend_agent("gemini"), Some("gemini"));
+        assert_eq!(native_backend_agent("antigravity"), Some("antigravity"));
         assert_eq!(native_backend_agent("grok"), Some("grok"));
         assert_eq!(native_backend_agent("build"), None);
         assert_eq!(native_backend_agent("plan"), None);
@@ -37886,11 +37819,11 @@ And the report:
 
     #[test]
     fn native_backend_agent_selector_rejects_conflicting_backend() {
-        let mut agent = Some("gemini".to_string());
+        let mut agent = Some("antigravity".to_string());
         let mut backend = Some("codex".to_string());
         let error = apply_native_backend_agent_selector(&mut agent, &mut backend).unwrap_err();
-        assert!(error.contains("selects backend 'gemini'"));
-        assert_eq!(agent.as_deref(), Some("gemini"));
+        assert!(error.contains("selects backend 'antigravity'"));
+        assert_eq!(agent.as_deref(), Some("antigravity"));
     }
 
     #[test]
@@ -39207,6 +39140,18 @@ Investigate <service/> failures.
             no_prompt.starts_with("REMOTE_PROMPT_REQUIRED: "),
             "{no_prompt}"
         );
+    }
+
+    #[test]
+    fn retired_gemini_remote_launch_is_rejected_without_fallback() {
+        let error = plan_remote_harness(None, "gemini", Some("gemini-old"), Some("hello"))
+            .expect_err("retired harness must not run");
+        assert!(error.starts_with(REMOTE_HARNESS_UNSUPPORTED));
+        assert!(!REMOTE_NODE_HARNESSES.contains(&"gemini"));
+        assert!(matches!(
+            plan_remote_harness(None, "antigravity", Some("gemini-account"), Some("hello")),
+            Ok(RemoteHarnessPlan::Antigravity { .. })
+        ));
     }
 
     #[test]

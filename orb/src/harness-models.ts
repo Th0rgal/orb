@@ -6,7 +6,7 @@ export function destinationHarnessChoices(
   _machine: string,
   accountModels: [string, string][],
 ): HarnessChoice[] {
-  const choices = core.filter(choice => choice.backend.id !== "antigravity");
+  const choices = core.filter(choice => choice.backend.id !== "antigravity" && choice.backend.id !== "gemini");
   if (accountModels.length) choices.push({
     backend: { id: "antigravity", name: "Antigravity CLI" },
     models: accountModels.map(([value, label]) => ({ value, label })),

@@ -345,7 +345,7 @@ pub async fn ensure_openai_api_key_for_codex(working_dir: &Path) -> Result<(), S
     Ok(())
 }
 
-/// Google/Gemini OAuth constants (from opencode-gemini-auth plugin / Gemini CLI)
+/// Google OAuth constants for the OpenCode Google provider
 const GOOGLE_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
 const GOOGLE_CLIENT_SECRET: &str = "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";
@@ -2440,7 +2440,7 @@ pub fn default_backends_for_provider(provider_type: ProviderType) -> Vec<String>
     match provider_type {
         ProviderType::Anthropic => vec!["opencode".to_string(), "claudecode".to_string()],
         ProviderType::OpenAI => vec!["opencode".to_string(), "codex".to_string()],
-        ProviderType::Google => vec!["opencode".to_string(), "gemini".to_string()],
+        ProviderType::Google => vec!["opencode".to_string()],
         ProviderType::Xai => vec!["opencode".to_string(), "grok".to_string()],
         _ => vec!["opencode".to_string()],
     }

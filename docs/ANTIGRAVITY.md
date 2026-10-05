@@ -1,8 +1,9 @@
 # Google Antigravity
 
 Sandboxed.sh and Orb run Google's native `agy` CLI with backend ID
-`antigravity`. This is separate from the `gemini` backend and does not route
-through an API-key proxy. Install the official CLI from
+`antigravity`. It replaces the retired Gemini CLI harness and does not route
+through an API-key proxy. Historical Gemini CLI session IDs cannot be resumed
+with Antigravity. Install the official CLI from
 https://antigravity.google/docs/cli/install/ and sign in by running `agy`
 as the account that executes missions.
 
@@ -117,3 +118,13 @@ defaulting to the host workspace). Discovery uses a separate request so a slow
 or stale login cannot block other harnesses in the shared catalog. Container account models are never inferred
 from the API process login. Antigravity transfer history is always archived in
 the checkpoint and referenced by a short prompt, including medium conversations.
+
+Fresh backend configuration enables Antigravity even when `agy` is installed
+only inside a workspace. Existing saved enable/disable settings are preserved;
+if an older host-only probe disabled it, enable Antigravity in backend settings.
+The selected workspace must still pass native model discovery and launch preflight.
+
+Legacy assistant/Telegram channels configured for Gemini, or linked to a Gemini
+mission, are deactivated before webhook registration. Configure Antigravity and
+a workspace-native model, migrate linked missions without reusing Gemini native
+session IDs, then reactivate the channel. Historical mission records are retained.

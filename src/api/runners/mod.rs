@@ -11,7 +11,6 @@ pub(crate) mod chatgpt_ui_jobs;
 pub(crate) mod claudecode;
 pub(crate) mod codex;
 pub(crate) mod errors;
-pub(crate) mod gemini;
 pub(crate) mod grok;
 pub(crate) mod live_session;
 pub(crate) mod midturn;
@@ -161,7 +160,6 @@ pub(crate) struct ClaudeCodeRunner;
 pub(crate) struct OpenCodeRunner;
 pub(crate) struct CodexRunner;
 pub(crate) struct GrokRunner;
-pub(crate) struct GeminiRunner;
 pub(crate) struct AntigravityRunner;
 impl HarnessRunner for AntigravityRunner {
     fn name(&self) -> &'static str {
@@ -338,29 +336,6 @@ impl HarnessRunner for GrokRunner {
     }
 }
 
-impl HarnessRunner for GeminiRunner {
-    fn name(&self) -> &'static str {
-        "gemini"
-    }
-    fn run_turn<'a>(
-        &'a self,
-        ctx: TurnContext<'a>,
-    ) -> Pin<Box<dyn Future<Output = AgentResult> + Send + 'a>> {
-        Box::pin(gemini::run_gemini_turn(
-            ctx.workspace,
-            ctx.work_dir,
-            ctx.message,
-            ctx.model,
-            ctx.agent,
-            ctx.mission_id,
-            ctx.events_tx,
-            ctx.cancel,
-            ctx.app_working_dir,
-            ctx.session_id,
-        ))
-    }
-}
-
 impl HarnessRunner for ChatGptUiRunner {
     fn name(&self) -> &'static str {
         "chatgpt_ui"
@@ -389,7 +364,6 @@ pub(crate) fn runner_for(backend_id: &str) -> Option<&'static dyn HarnessRunner>
         "opencode" => Some(&OpenCodeRunner),
         "codex" => Some(&CodexRunner),
         "grok" => Some(&GrokRunner),
-        "gemini" => Some(&GeminiRunner),
         "antigravity" => Some(&AntigravityRunner),
         "chatgpt_ui" => Some(&ChatGptUiRunner),
         _ => None,
@@ -622,13 +596,14 @@ mod tests {
             "opencode",
             "codex",
             "grok",
-            "gemini",
+            "antigravity",
             "chatgpt_ui",
         ] {
             let runner = runner_for(backend).expect("runner exists");
             assert_eq!(runner.name(), backend);
         }
         assert!(runner_for("unknown").is_none());
+        assert!(runner_for("gemini").is_none());
         assert!(runner_for("").is_none());
 
         assert_eq!(
@@ -639,7 +614,7 @@ mod tests {
             runner_for("codex").unwrap().mid_turn_kind(),
             MidTurnKind::CodexAppServer
         );
-        for backend in ["opencode", "grok", "gemini", "chatgpt_ui"] {
+        for backend in ["opencode", "grok", "chatgpt_ui"] {
             assert_eq!(
                 runner_for(backend).unwrap().mid_turn_kind(),
                 MidTurnKind::None

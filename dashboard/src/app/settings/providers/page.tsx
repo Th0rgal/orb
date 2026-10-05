@@ -822,7 +822,7 @@ export default function ProvidersPage() {
               <div className="min-w-0">
                 <h2 className="text-sm font-medium text-white">Configured Providers</h2>
                 <p className="text-xs text-white/40 truncate">
-                  Inference providers for OpenCode, Claude Code, Gemini, and Codex
+                  Inference providers for OpenCode, Claude Code, and Codex
                 </p>
               </div>
             </div>
@@ -1018,7 +1018,7 @@ export default function ProvidersPage() {
 
                           {provider.use_for_backends && provider.use_for_backends.length > 0 && (
                             <div className="flex items-center gap-1">
-                              {provider.use_for_backends.map((backend) => (
+                              {provider.use_for_backends.filter((backend) => backend !== 'gemini').map((backend) => (
                                 <span
                                   key={backend}
                                   className="px-1.5 py-0.5 text-[10px] rounded bg-white/[0.06] text-white/50"
@@ -1029,8 +1029,6 @@ export default function ProvidersPage() {
                                     ? 'OC'
                                     : backend === 'codex'
                                     ? 'Codex'
-                                    : backend === 'gemini'
-                                    ? 'Gemini'
                                     : backend === 'grok'
                                     ? 'Grok'
                                     : backend}
