@@ -7170,6 +7170,11 @@ fn get_provider_config_entry(
 pub(crate) fn provider_explicitly_disabled(working_dir: &Path, provider: ProviderType) -> bool {
     let config = read_opencode_config(&get_opencode_config_path(working_dir)).unwrap_or_default();
     get_provider_config_entry(&config, provider).and_then(|entry| entry.enabled) == Some(false)
+        || (provider == ProviderType::Google
+            && config
+                .pointer("/provider/gemini/enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false))
 }
 
 fn set_provider_config_entry(

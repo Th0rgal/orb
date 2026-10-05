@@ -12464,15 +12464,20 @@ mod tests {
         )
         .unwrap();
         assert!(super::detect_opencode_provider_auth(Some(temp.path())).has_google);
-        fs::write(
-            temp.path().join("opencode.json"),
-            r#"{"provider":{"google":{"enabled":false}}}"#,
-        )
-        .unwrap();
-        let auth = super::detect_opencode_provider_auth(Some(temp.path()));
-        assert!(!auth.has_google);
-        assert!(!auth.configured_providers.contains("google"));
-        assert!(!auth.configured_providers.contains("gemini"));
+        for alias in ["google", "gemini"] {
+            fs::write(
+                temp.path().join("opencode.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "provider": {alias: {"enabled": false}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let auth = super::detect_opencode_provider_auth(Some(temp.path()));
+            assert!(!auth.has_google, "disabled alias {alias}");
+            assert!(!auth.configured_providers.contains("google"));
+            assert!(!auth.configured_providers.contains("gemini"));
+        }
     }
 
     #[test]
