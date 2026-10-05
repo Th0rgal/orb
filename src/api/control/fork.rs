@@ -32,6 +32,15 @@ pub async fn fork_mission(
             "Side questions require an idempotency key".into(),
         ));
     }
+    let fingerprint = req.side_question.as_deref().map(|question| {
+        side_payload_fingerprint(
+            &req.backend,
+            &req.model_override,
+            req.model_effort.as_deref(),
+            question,
+            req.side_context_mode.as_deref(),
+        )
+    });
     let control = control_for_user(&state, &user).await;
     if req.side_question.is_some() {
         let rows = control
@@ -61,6 +70,9 @@ pub async fn fork_mission(
                 continue;
             };
             if receipt.key == side_request_key(id, &req.idempotency_key) {
+                if Some(receipt.fingerprint.as_str()) != fingerprint.as_deref() {
+                    return Err((StatusCode::CONFLICT, "This side request key was already used for different launch content; the new question was not sent.".into()));
+                }
                 if !receipt.accepted {
                     return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
                         "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
@@ -215,6 +227,7 @@ pub async fn fork_mission(
         Extension(user),
         Some(Json(create)),
         req.side_question.is_some(),
+        fingerprint.as_deref(),
     )
     .await?;
     if req.side_question.is_some() {
@@ -223,6 +236,18 @@ pub async fn fork_mission(
         accept_side_launch(&state.config.working_dir, child_id).map_err(internal_error)?;
     }
     Ok(response)
+}
+
+pub(super) fn side_payload_fingerprint(
+    backend: &str,
+    model: &str,
+    effort: Option<&str>,
+    question: &str,
+    context: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = serde_json::json!([backend, model, effort, question, context]);
+    format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
 }
 
 fn side_request_key(parent: Uuid, key: &str) -> String {
@@ -545,6 +570,7 @@ fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct SideLaunchReceipt {
     key: String,
+    fingerprint: String,
     accepted: bool,
 }
 
@@ -565,12 +591,14 @@ pub(super) fn record_side_launch(
     root: &std::path::Path,
     id: Uuid,
     key: &str,
+    fingerprint: &str,
 ) -> Result<(), String> {
     write_side_launch(
         root,
         id,
         &SideLaunchReceipt {
             key: key.trim().into(),
+            fingerprint: fingerprint.into(),
             accepted: false,
         },
     )

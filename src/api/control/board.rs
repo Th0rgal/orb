@@ -1828,6 +1828,7 @@ async fn schedule_external_worker(
                 super::Extension(user.clone()),
                 Some(super::Json(request)),
                 true,
+                None,
             )
             .await
             .map_err(|(_, error)| error),

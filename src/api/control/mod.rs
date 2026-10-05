@@ -11096,7 +11096,7 @@ pub async fn create_mission(
                 .await;
         }
     }
-    create_mission_inner(State(state), Extension(user), body, false).await
+    create_mission_inner(State(state), Extension(user), body, false, None).await
 }
 
 pub(super) async fn create_mission_inner(
@@ -11104,6 +11104,7 @@ pub(super) async fn create_mission_inner(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
     shared_side_workspace: bool,
+    side_launch_fingerprint: Option<&str>,
 ) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
@@ -11312,7 +11313,8 @@ pub(super) async fn create_mission_inner(
                     // rejected remote submission) is not the work the retry
                     // asks for; only live or finished attempts coalesce.
                     if existing.status != MissionStatus::Failed
-                        && !(shared_side_workspace && existing.status == MissionStatus::Interrupted)
+                        && !(side_launch_fingerprint.is_some()
+                            && existing.status == MissionStatus::Interrupted)
                     {
                         verify_coalesced_attachments(&state.config, &req, &existing)?;
                         tracing::info!(
@@ -11340,7 +11342,7 @@ pub(super) async fn create_mission_inner(
     // so the caller can tell a coalesced answer from a fresh create; a client
     // that genuinely wants a parallel duplicate retitles it.
     if let Some(title) = req.title.as_deref().filter(|t| {
-        !shared_side_workspace && !t.trim().is_empty() && req.parent_mission_id.is_none()
+        side_launch_fingerprint.is_none() && !t.trim().is_empty() && req.parent_mission_id.is_none()
     }) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = find_recent_identical_mission(
@@ -12134,11 +12136,12 @@ pub(super) async fn create_mission_inner(
         }
     }
 
-    if shared_side_workspace {
+    if let Some(fingerprint) = side_launch_fingerprint {
         if let Err(error) = fork::record_side_launch(
             &state.config.working_dir,
             mission.id,
             req.idempotency_key.as_deref().unwrap_or_default(),
+            fingerprint,
         ) {
             interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
             return Err(internal_error(error));

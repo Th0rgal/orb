@@ -7303,6 +7303,11 @@ async fn native_grok_auto_track_continuation(
         )
         .await;
     assert_eq!(held.status(), StatusCode::OK);
+    // Accepted follow-ups may be delivered by the asynchronous queue pump.
+    wait_until("hold generation submitted before stop", 10, || async {
+        fixture.submissions.lock().unwrap().len() == 7
+    })
+    .await;
     assert_eq!(fixture.submissions.lock().unwrap().len(), 7);
     let stopped_message = Uuid::new_v4();
     let reply = h
@@ -11233,6 +11238,13 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         &h.state.config.working_dir,
         child.id,
         &format!("btw:{}:btw-original", parent.id),
+        &super::fork::side_payload_fingerprint(
+            "opencode",
+            "builtin/smart",
+            None,
+            "Original question",
+            Some("incremental"),
+        ),
     )
     .unwrap();
     let result = super::fork::btw_agent(
@@ -11289,6 +11301,23 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .await
     .unwrap();
     assert_eq!(retry.0["id"], child.id.to_string());
+    let changed = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "btw-original".into(),
+            side_question: Some("A different question".into()),
+            side_context_mode: Some("incremental".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(changed.0, StatusCode::CONFLICT);
+    assert!(changed.1.contains("different launch content"));
 
     // Unaccepted attempts must reach new-launch validation, not return receipts.
     for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
@@ -11350,6 +11379,7 @@ async fn btw_creation_never_coalesces_an_unrelated_matching_title() {
         Extension(h.user.clone()),
         Some(Json(request)),
         true,
+        Some("title-test"),
     )
     .await
     .unwrap_err();
