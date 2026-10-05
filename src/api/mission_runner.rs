@@ -8044,18 +8044,15 @@ pub(crate) async fn check_opencode_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
     auth: &OpenCodeAuthState,
-    google_proxy_url: Option<&str>,
+    host_proxy_url: Option<&str>,
 ) -> Result<(), String> {
     let has_openai = auth.has_openai;
     let has_anthropic = auth.has_anthropic;
     let has_google = auth.has_google;
     let has_zai = auth.has_zai;
     let has_minimax = auth.configured_providers.contains("minimax");
-    if has_google {
-        if let Some(url) = google_proxy_url {
-            return check_api_reachability(workspace_exec, cwd, "Sandboxed Google proxy", url)
-                .await;
-        }
+    if let Some(url) = host_proxy_url {
+        return check_api_reachability(workspace_exec, cwd, "Sandboxed model proxy", url).await;
     }
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
