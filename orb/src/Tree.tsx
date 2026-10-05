@@ -29,14 +29,13 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
         const rect = row.getBoundingClientRect();
         return viewport && rect.bottom > viewport.top && rect.top < viewport.bottom;
       })
-      .map(row => ({ id: row.dataset.treeId, offset: row.getBoundingClientRect().top }));
+      .map(row => ({ row, offset: row.getBoundingClientRect().top }));
     setRows(reconcile(next, { key: "id" }));
     queueMicrotask(() => {
       if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
-      const current = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? []);
       for (const anchor of anchors) {
-        const row = current.find(row => row.dataset.treeId === anchor.id);
-        if (row) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
+        const row = anchor.row;
+        if (row.isConnected && scroller.contains(row)) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
       }
     });
   });

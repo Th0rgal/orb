@@ -76,3 +76,15 @@ test('project updates above the viewport preserve visible archived rows', async 
   await page.waitForTimeout(100);
   expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
 });
+
+
+test('moving the visible anchor to another tree preserves its neighbors', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=600;});
+  const row=page.getByRole('button',{name:'project19',exact:true});
+  const before=await row.evaluate(el=>el.getBoundingClientRect().top);
+  await page.getByRole('button',{name:'Archive visible project',exact:true}).click();
+  await expect(page.getByRole('tree',{name:'Archived',exact:true}).getByRole('button',{name:'project18',exact:true})).toHaveCount(1);
+  await page.waitForTimeout(100);
+  expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
+});
