@@ -2869,8 +2869,12 @@ mod tests {
         );
     }
 
+    // These tests read and temporarily replace the same process-wide auth directory.
+    static CLI_PROXY_AUTH_DIR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn resolve_chain_never_treats_xai_oauth_as_api_key() {
+        let _auth_dir_guard = CLI_PROXY_AUTH_DIR_TEST_LOCK.lock().await;
         let mut xai = AIProvider::new(ProviderType::Xai, "xAI Grok OAuth".to_string());
         xai.oauth = Some(OAuthCredentials {
             access_token: "grok-oauth-token".to_string(),
@@ -2914,6 +2918,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_chain_keeps_expired_xai_oauth_when_cli_proxy_is_refreshable() {
+        let _auth_dir_guard = CLI_PROXY_AUTH_DIR_TEST_LOCK.lock().await;
         let auth_dir = TempDir::new().unwrap();
         std::fs::write(
             auth_dir.path().join("xai-thomas.json"),
