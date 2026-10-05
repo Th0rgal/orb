@@ -203,3 +203,22 @@ it('replays the exact payload after a lost response despite fresh context paths'
  expect(vi.mocked(api).mock.calls.at(-1)![1]!.body).toBe(original);
  expect(btwSession('retry-parent')?.conversationCursor).toEqual({sequence:1,visibleHash:'first'});
 });
+
+it('waits for local completion synchronization before admitting a queued follow-up',async()=>{
+ const {setClientMissionStatus}=await import('../src/api');
+ const {getMissionEvents}=await import('../src/stream');
+ let synced=false;let release!:()=>void;
+ const pending=new Promise<void>(resolve=>{release=()=>{synced=true;resolve();};});
+ vi.mocked(setClientMissionStatus).mockImplementationOnce(()=>pending);
+ vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
+ vi.mocked(getMissionEvents).mockResolvedValue([]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sync-parent'?'active':synced?'awaiting_user':'pending',history:[],tags:id==='sync-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'sync-child'});
+ await askBtwAgent('sync-parent','First','context',[],new AbortController().signal,()=>{});
+ const starts=vi.mocked(startLocal).mock.calls.length;
+ const next=askBtwAgent('sync-parent','Next','context',[],new AbortController().signal,()=>{});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(startLocal).toHaveBeenCalledTimes(starts);
+ release();await next;
+ expect(startLocal).toHaveBeenCalledTimes(starts+1);
+});

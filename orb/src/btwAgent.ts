@@ -123,6 +123,9 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
  try{
   let s=btwSession(parent);
   if(s){
+   // Native completion can precede its transcript/status update to Core.
+   // A queued local follow-up must observe that update before the status guard.
+   if(s.local&&!s.active)await finishing.get(s.id);
    try {
     const current=await getMission(s.id);
     if(['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
