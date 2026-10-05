@@ -277,6 +277,7 @@ mod tests {
                 disk_available_bytes: 0,
                 active_jobs: 0,
                 queued_jobs: 0,
+                side_jobs: 0,
                 cached_toolchains: vec![],
                 source_bundle_capacity: Some(crate::node::lean::source_bundle_capacity()),
                 lean_runtime_ready: Some(true),
@@ -325,6 +326,7 @@ mod tests {
             mission_id: Uuid::new_v4(),
             lease_token: "unused".to_string(),
             payload: crate::remote_node::protocol::JobPayload::RawCommand {
+                side_question: false,
                 long_running: false,
                 command: "true".to_string(),
                 timeout_secs: None,

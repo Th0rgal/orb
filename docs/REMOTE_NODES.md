@@ -962,3 +962,30 @@ produced native iterations 1 and 2, then explicit `complete`. The affected
 mission resumed at 16:04:27 UTC on old-agent with unchanged native thread and
 goal ID; Core observed native active status and new tool events. Guarded deployment
 waited for other live work to finish and did not use the force override.
+
+### Side-question capacity
+
+Core records a private launch receipt for `/btw` before dispatch and uses it
+to set `RawCommand.side_question = true`. Freeform mission tags do not grant
+side capacity. The receipt also recovers projectless retries without track leases.
+It is marked accepted only after initialization and initial delivery succeed.
+An incomplete receipt returns an explicit error with the side mission ID; it
+never masquerades as a successful launch. Both the file and directory entries
+are synced before returning from each receipt write.
+Each updated node reserves one additional execution permit for these jobs,
+separate from `SANDBOXED_NODE_CAPACITY` (including synchronous execution).
+Side questions serialize with each other; ordinary jobs retain their existing
+capacity limit. The normal queue bound, cancellation, process containment,
+external slot-provider admission, and node timeout ceiling still apply. A
+side question cannot request an unlimited native-goal lifetime.
+
+Deploy both Core and `sandboxed-node` for this behavior. Older nodes ignore
+the optional field and use ordinary capacity; Orb still displays the remote
+`queued` state as waiting for capacity. Jobs accepted before deployment keep
+their original payload, so deployment does not move them into the new lane.
+Drain or explicitly cancel/retry those jobs through the control API.
+
+Core prevents a second live side session for the same parent, even when
+another device has lost its local session pointer. Retrying the same dispatch
+key recovers its existing mission; a new key receives a conflict identifying
+the existing side mission rather than silently accepting another job.

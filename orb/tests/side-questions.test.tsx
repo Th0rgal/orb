@@ -152,3 +152,25 @@ it('keeps the same side-turn DOM node while streaming and committing the answer'
  expect(screen.getAllByText('A stable question')).toHaveLength(1);
  expect(screen.queryByText('Side agent is working…')).toBeNull();
 });
+
+it('shows the remote capacity wait while a side question is pending',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream({start(controller){
+  controller.enqueue(new TextEncoder().encode('event: btw\ndata: {"type":"start","model":"opencode · builtin/smart"}\n\nevent: btw\ndata: {"type":"status","text":"Waiting for capacity on old-agent…"}\n\n'));
+ }}))));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="capacity-wait" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Inspect the running mission');
+ await waitFor(()=>expect(screen.getByText('Waiting for capacity on old-agent…')).toBeTruthy());
+ expect(screen.getByPlaceholderText('Queue a side question…')).toBeTruthy();
+});
+
+it('offers a reconnect path for a live side session after its local attempt is lost',async()=>{
+ const id='12345678-1234-1234-1234-123456789abc';
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'error',message:`A side agent is already queued or running for this conversation (${id}). Reconnect to or stop that side session before starting another; this question was not sent.`}])));
+ const open=vi.fn();let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="lost-attempt" items={[]} ref={h=>handle=h} onTransfer={()=>{}} onOpenSession={open}/>);
+ await handle.ask('Unsent question');
+ fireEvent.click(await screen.findByText('Open existing side agent'));
+ expect(open).toHaveBeenCalledWith(id);
+ expect(screen.getByText('Unsent question')).toBeTruthy();
+});
