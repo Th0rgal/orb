@@ -278,6 +278,27 @@ struct OrbConversation: View {
             .overlay(RoundedRectangle(cornerRadius: 22).stroke(OrbStyle.border)).padding(.bottom, 8)
             .accessibilityElement(children: .contain).accessibilityIdentifier("mode-picker")
     }
+    private var canSend: Bool {
+        !busy && !cloudBlocked && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var sendButton: some View {
+        Button { Task { await send() } } label: {
+            ZStack {
+                if busy {
+                    ProgressView().controlSize(.small).tint(.white.opacity(0.85))
+                } else {
+                    Image(systemName: "arrow.up").font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(canSend ? OrbStyle.background : Color.white.opacity(0.25))
+                }
+            }
+            .frame(width: 44, height: 44)
+            .background(canSend ? Color.white : Color.white.opacity(busy ? 0.12 : 0.05), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend)
+        .accessibilityLabel(busy ? "Sending message" : "Send message")
+        .accessibilityValue(busy ? "Sending" : canSend ? "Ready" : "Unavailable")
+    }
     private var composer: some View {
         VStack(spacing: 0) {
             if modeQuery != nil { modePicker }
@@ -300,7 +321,7 @@ struct OrbConversation: View {
                 }
                 Button { composerFocused = false; showSelection = true } label: { HStack(spacing: 6) { Image(systemName: selection.cloud ? "cloud" : "terminal"); Text(selection.model.isEmpty ? selection.label : selection.model); Image(systemName: "chevron.down").font(.caption2) }.font(.subheadline).foregroundStyle(.secondary).lineLimit(1).frame(minHeight: 44) }.accessibilityLabel("Agent and model: \(selection.label)").accessibilityIdentifier("agent-selection")
                 Spacer()
-                Button { Task { await send() } } label: { Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44).background(.white.opacity(0.15), in: Circle()) }.disabled(busy || cloudBlocked || modeQuery != nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message")
+                sendButton
             }
         }.padding(.horizontal, 12).padding(.vertical, 8).background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 24)).overlay(RoundedRectangle(cornerRadius: 24).stroke(OrbStyle.border)).accessibilityElement(children: .contain).accessibilityIdentifier("conversation-composer")
     }
