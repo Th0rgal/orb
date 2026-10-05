@@ -546,6 +546,7 @@ pub fn select_node_auto_with_source_and_resource_reservations(
         let load = heartbeat
             .active_jobs
             .saturating_add(heartbeat.queued_jobs)
+            .saturating_sub(heartbeat.side_jobs)
             .saturating_add(heartbeat.active_leases)
             .saturating_add(reservations.get(&node.id).copied().unwrap_or(0));
         if load >= heartbeat.capacity_total.saturating_mul(2) {
@@ -1063,6 +1064,29 @@ mod tests {
     }
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn side_jobs_do_not_hide_free_ordinary_placement_capacity() {
+        let mut status = cached_online("side-busy", &["lean"], 100, 32, 1, 1, 1);
+        let hb = status.last_heartbeat.as_mut().unwrap();
+        hb.capacity_available = 1;
+        hb.side_jobs = 2;
+        let mut statuses = HashMap::from([("side-busy".into(), status)]);
+        let nodes = [node_config("side-busy")];
+        assert_eq!(
+            select_node_auto(&nodes, &statuses, &[], 20 * GIB, 8 * GIB).unwrap(),
+            "side-busy"
+        );
+        // The same total load from ordinary work still excludes the node.
+        statuses
+            .get_mut("side-busy")
+            .unwrap()
+            .last_heartbeat
+            .as_mut()
+            .unwrap()
+            .side_jobs = 0;
+        assert!(select_node_auto(&nodes, &statuses, &[], 20 * GIB, 8 * GIB).is_err());
+    }
 
     #[test]
     fn cordoned_node_is_excluded_from_auto_placement_with_a_reason() {

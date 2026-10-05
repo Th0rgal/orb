@@ -8,7 +8,7 @@
 //! cgroup when systemd scopes are available, with process-group cleanup as a
 //! fallback, so daemonized children cannot escape queue accounting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -75,6 +75,7 @@ pub struct JobRunner {
     tx: mpsc::UnboundedSender<QueuedJob>,
     max_queued: u32,
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
+    side_jobs: Mutex<HashSet<Uuid>>,
     queued: AtomicU32,
     active: AtomicU32,
     /// External slot provider (`SANDBOXED_NODE_SLOT_PROVIDER`); `None` means
@@ -145,6 +146,7 @@ impl JobRunner {
             tx,
             max_queued: u32::try_from(max_queued).unwrap_or(u32::MAX),
             cancels: Mutex::new(HashMap::new()),
+            side_jobs: Mutex::new(HashSet::new()),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
             slot_provider: match super::slot::SlotProvider::from_env() {
@@ -211,6 +213,13 @@ impl JobRunner {
         self.queued.load(Ordering::Acquire)
     }
 
+    pub fn side_job_count(&self) -> u32 {
+        self.side_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len() as u32
+    }
+
     pub fn active_count(&self) -> u32 {
         self.active.load(Ordering::Acquire)
     }
@@ -255,6 +264,18 @@ impl JobRunner {
             self.queued.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
+        if matches!(
+            &payload,
+            JobPayload::RawCommand {
+                side_question: true,
+                ..
+            }
+        ) {
+            self.side_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(job_id);
+        }
         self.cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -298,6 +319,10 @@ impl JobRunner {
         token.cancel();
         if self.store.cancel_if_queued(job_id).await? {
             self.queued.fetch_sub(1, Ordering::AcqRel);
+            self.side_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&job_id);
         }
         Ok(true)
     }
@@ -312,6 +337,10 @@ impl JobRunner {
     }
 
     fn drop_cancel_token(&self, job_id: Uuid) {
+        self.side_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job_id);
         self.cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1592,6 +1621,26 @@ mod tests {
             store.get(second).await.unwrap().unwrap().state,
             JobState::Queued
         );
+        assert_eq!(runner.side_job_count(), 2);
+        let cancelled_queued = Uuid::new_v4();
+        runner
+            .submit(
+                cancelled_queued,
+                Uuid::new_v4(),
+                JobPayload::RawCommand {
+                    command: "true".into(),
+                    side_question: true,
+                    long_running: false,
+                    timeout_secs: None,
+                    env: None,
+                    managed_auth: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.side_job_count(), 3);
+        assert!(runner.cancel(cancelled_queued).await.unwrap());
+        assert_eq!(runner.side_job_count(), 2);
         assert!(runner.cancel(first).await.unwrap());
         assert_eq!(
             wait_for_terminal(&store, first).await.state,
@@ -1605,6 +1654,7 @@ mod tests {
             store.get(normal).await.unwrap().unwrap().state,
             JobState::Queued
         );
+        assert_eq!(runner.side_job_count(), 0);
         drop(main_permit);
         assert_eq!(
             wait_for_terminal(&store, normal).await.state,

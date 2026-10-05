@@ -73,6 +73,9 @@ pub struct NodeHeartbeat {
     /// Async jobs queued behind the capacity semaphore.
     #[serde(default)]
     pub queued_jobs: u32,
+    /// Subset of active/queued jobs using the independent side-question lane.
+    #[serde(default)]
+    pub side_jobs: u32,
     /// Prewarmed toolchains cached on the node (empty until S3).
     #[serde(default)]
     pub cached_toolchains: Vec<String>,
@@ -832,6 +835,7 @@ mod tests {
             disk_available_bytes: 100 << 30,
             active_jobs: 1,
             queued_jobs: 2,
+            side_jobs: 0,
             cached_toolchains: vec![],
             source_bundle_capacity: None,
             lean_runtime_ready: Some(true),
