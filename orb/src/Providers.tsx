@@ -498,6 +498,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
           }
         })
         .catch((e: Error) => {
+          if (disposed || generation !== pollGeneration) return;
           stopPolling();
           setError(e.message);
           setPhase("failed");
