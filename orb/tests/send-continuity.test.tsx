@@ -99,6 +99,7 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  complete=true;
  await poll!();
  await waitFor(()=>expect(screen.getByText('I am Gemini inside Antigravity.')).toBeDefined());
+ expect(screen.queryByText('I am', {exact:true})).toBeNull();
  pollSpy.mockRestore();
  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
 });
