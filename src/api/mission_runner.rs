@@ -6146,6 +6146,21 @@ fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
             );
         }
     }
+    if super::oauth_owner::management_enabled() {
+        // Kimi uses the host adapter for payload normalization; API auth keeps
+        // OpenCode from renewing a copied subscription token independently.
+        if let Ok(key) = std::env::var("SANDBOXED_PROXY_SECRET") {
+            map.insert("kimi".into(), serde_json::json!({"type":"api","key":key}));
+        }
+        if let Some(endpoint) =
+            super::oauth_owner::harness_via_cli_proxy(crate::ai_providers::ProviderType::Xai)
+        {
+            map.insert(
+                "xai".into(),
+                serde_json::json!({"type":"api","key":endpoint.api_key}),
+            );
+        }
+    }
     if map.is_empty() {
         None
     } else {
@@ -6309,6 +6324,14 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 model_id: model_entry.clone()
             }
         })),
+        "xai" if super::oauth_owner::management_enabled() => {
+            cli_proxy_opencode_provider_definition(
+                crate::ai_providers::ProviderType::Xai,
+                "@ai-sdk/openai-compatible",
+                "xAI",
+                model_id,
+            )
+        }
         "xai" => Some(serde_json::json!({
             "npm": "@ai-sdk/xai",
             "name": "xAI",
@@ -6413,7 +6436,8 @@ pub(crate) fn ensure_opencode_provider_for_model(
     };
 
     let cli_proxy_owned_provider =
-        matches!(provider_id, "anthropic" | "claude" | "openai" | "codex");
+        matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
+            || (provider_id == "xai" && super::oauth_owner::management_enabled());
     if provider_id == "builtin" || provider_id == "kimi" || cli_proxy_owned_provider {
         // Always overwrite proxy-backed providers — the proxy secret
         // (options.apiKey) changes on every server restart, Kimi must not

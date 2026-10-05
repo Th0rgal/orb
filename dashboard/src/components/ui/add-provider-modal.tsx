@@ -8,6 +8,10 @@ import {
   createAIProvider,
   oauthAuthorize,
   oauthCallback,
+  startCliProxyLogin,
+  cancelCliProxyLogin,
+  getCliProxyLogin,
+  submitCliProxyLoginCallback,
   AIProviderType,
   AIProviderTypeInfo,
   AIProviderAuthMethod,
@@ -105,6 +109,36 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   const [accountLabel, setAccountLabel] = useState('');
   const [oauthResponse, setOauthResponse] = useState<OAuthAuthorizeResponse | null>(null);
   const [oauthCode, setOauthCode] = useState('');
+  const [proxySession, setProxySession] = useState<string | null>(null);
+  const startOAuth = async (provider: string, index: number): Promise<OAuthAuthorizeResponse> => {
+    if (index === 0 && ['anthropic', 'openai', 'xai', 'kimi'].includes(provider)) {
+      const login = await startCliProxyLogin(provider);
+      setProxySession(login.session_id);
+      return { url: login.auth_url, instructions: login.instructions ?? 'Complete sign-in in your browser.', method: login.flow === 'device' ? 'auto' : 'code' };
+    }
+    setProxySession(null);
+    return oauthAuthorize(provider as AIProviderType, index);
+  };
+  useEffect(() => {
+    if (!open || !proxySession) return;
+    return () => { void cancelCliProxyLogin(proxySession).catch(() => {}); };
+  }, [open, proxySession]);
+  useEffect(() => {
+    if (!open) setProxySession(null);
+  }, [open]);
+  useEffect(() => {
+    if (!open || !proxySession) return;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const state = await getCliProxyLogin(proxySession);
+        if (cancelled) return;
+        if (state.status === 'completed') { clearInterval(timer); toast.success('Provider connected'); onSuccess(); onClose(); }
+        else if (state.status === 'failed') { clearInterval(timer); toast.error(state.message ?? 'Sign-in failed'); }
+      } catch { /* Keep checking during temporary connection failures. */ }
+    }, 2000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [open, proxySession, onSuccess, onClose]);
   const [loading, setLoading] = useState(false);
   // Backend selection for providers that can target multiple harness backends.
   const [selectedBackends, setSelectedBackends] = useState<string[]>(['opencode']);
@@ -161,7 +195,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   // clicking Connect: the backend returns "not connected yet" until the
   // browser authorization completes, at which point this resolves.
   useEffect(() => {
-    if (step !== 'oauth-callback') return;
+    if (proxySession || step !== 'oauth-callback') return;
     if (oauthResponse?.method !== 'auto') return;
     if (selectedProvider !== 'kimi' || selectedMethodIndex === null) return;
     let cancelled = false;
@@ -182,7 +216,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       cancelled = true;
       clearInterval(interval);
     };
-  }, [step, oauthResponse, selectedProvider, selectedMethodIndex, loading, onSuccess, onClose]);
+  }, [step, proxySession, oauthResponse, selectedProvider, selectedMethodIndex, loading, onSuccess, onClose]);
 
   // Handle click outside
   useEffect(() => {
@@ -270,7 +304,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       // Start OAuth flow
       setLoading(true);
       try {
-        const response = await oauthAuthorize(selectedProvider!, methodIndex);
+        const response = await startOAuth(selectedProvider!, methodIndex);
         setOauthResponse(response);
         setStep('oauth-callback');
         window.open(response.url, '_blank');
@@ -302,7 +336,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       // Start OAuth flow
       setLoading(true);
       try {
-        const response = await oauthAuthorize(selectedProvider!, selectedMethodIndex!);
+        const response = await startOAuth(selectedProvider!, selectedMethodIndex!);
         setOauthResponse(response);
         setStep('oauth-callback');
         window.open(response.url, '_blank');
@@ -352,6 +386,10 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
 
     setLoading(true);
     try {
+      if (proxySession) {
+        await submitCliProxyLoginCallback(proxySession, oauthCode);
+        return;
+      }
       await oauthCallback(
         selectedProvider,
         selectedMethodIndex,

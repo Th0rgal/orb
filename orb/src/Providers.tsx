@@ -24,6 +24,7 @@ import {
   setProviderEnabled,
   openExternalUrl,
   startCliProxyLogin,
+  cancelCliProxyLogin,
   submitCliProxyLoginCallback,
   type AIProvider,
   type ProviderUsage,
@@ -125,8 +126,8 @@ type Account = {
 function ownerFor(type: string, auth: AuthKind): Owner {
   if (auth === "api") return "sandboxed";
   if (type === "google") return "gemini";
-  if (type === "kimi" || type === "github-copilot") return "sandboxed";
-  if (type === "anthropic" || type === "openai" || type === "xai") return "cliproxy";
+  if (type === "github-copilot") return "sandboxed";
+  if (type === "anthropic" || type === "openai" || type === "xai" || type === "kimi") return "cliproxy";
   return "sandboxed";
 }
 
@@ -458,7 +459,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };
-  onCleanup(() => { disposed = true; stopPolling(); });
+  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (proxy && s) void cancelCliProxyLogin(s.id).catch(() => {}); });
 
   const startPolling = (id: string) => {
     stopPolling();
@@ -485,7 +486,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
 
   onMount(() => {
     const start = proxy
-      ? startCliProxyLogin(p.provider.provider_type).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: undefined as string | undefined }))
+      ? startCliProxyLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
@@ -565,10 +566,10 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
           </div>
         </div>
         <Show when={session()?.flow !== "device"}>
-          <Field label={proxy ? "Redirect URL (http://localhost:…)" : "Authorization code or redirect URL"}>
+          <Field label={proxy && session()?.flow !== "code" ? "Redirect URL (http://localhost:…)" : "Authorization code or redirect URL"}>
             <input
               type="text"
-              placeholder={proxy ? "http://localhost:54545/callback?code=…&state=…" : "Paste the code or full redirect URL"}
+              placeholder={proxy && session()?.flow !== "code" ? "http://localhost:54545/callback?code=…&state=…" : "Paste the code or full redirect URL"}
               value={paste()}
               onInput={(e) => setPaste(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && submitPaste()}

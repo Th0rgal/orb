@@ -2311,7 +2311,7 @@ pub(crate) fn openai_cli_proxy_account_available() -> bool {
         return false;
     }
 
-    has_fresh_cli_proxy_codex_account()
+    super::oauth_owner::management_enabled() || has_fresh_cli_proxy_codex_account()
 }
 
 /// True when CLI Proxy API has an xAI OAuth credential it can use or refresh.
@@ -2324,7 +2324,8 @@ pub(crate) fn xai_cli_proxy_account_available() -> bool {
         return false;
     }
 
-    has_refreshable_cli_proxy_account_of_type("xai-", "xai")
+    super::oauth_owner::management_enabled()
+        || has_refreshable_cli_proxy_account_of_type("xai-", "xai")
 }
 
 fn has_refreshable_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
@@ -4964,9 +4965,15 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
             .as_ref()
             .is_some_and(|oauth| oauth_refresh_token_is_dead(provider.id, &oauth.refresh_token));
     let _ = oauth_expired;
-    let status = if has_oauth && !has_api_key && oauth_refresh_rejected {
+    let proxy_needs_reconnect = has_oauth
+        && super::oauth_owner::management_enabled()
+        && super::oauth_owner::cli_proxy_owns(pt)
+        && super::cli_proxy_accounts::needs_reconnect(provider);
+    let status = if has_oauth && !has_api_key && (oauth_refresh_rejected || proxy_needs_reconnect) {
         ProviderStatusResponse::NeedsReauth {
-            reason: if pt == ProviderType::Xai {
+            reason: if proxy_needs_reconnect {
+                "CLIProxyAPI login is missing or unavailable; reconnect this account".into()
+            } else if pt == ProviderType::Xai {
                 xai_supergrok_reconnect_reason(true)
             } else {
                 format!(
@@ -7789,6 +7796,9 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
 pub async fn reconcile_xai_store_from_grok_cli(
     ai_providers: &crate::ai_providers::AIProviderStore,
 ) {
+    if super::oauth_owner::management_enabled() {
+        return;
+    }
     let Some(entry) = read_grok_auth_entry() else {
         return;
     };
@@ -7996,6 +8006,7 @@ async fn maybe_reconcile_xai_store_from_grok_cli(
 async fn list_providers(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Result<Json<Vec<ProviderResponse>>, (StatusCode, String)> {
+    super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
     // Migrate any standard providers from opencode.json to the store on first call
     migrate_opencode_providers_to_store(&state.ai_providers, &state.config.working_dir).await;
 
@@ -8377,6 +8388,7 @@ async fn get_provider_usage(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
     maybe_reconcile_xai_store_from_grok_cli(&state.ai_providers).await;
     reconcile_openai_store_from_codex_homes(&state.ai_providers).await;
     collapse_duplicate_xai_oauth_accounts(&state.ai_providers).await;
@@ -10031,6 +10043,10 @@ async fn update_provider(
         }
     }
 
+    if existing.enabled != updated.enabled {
+        super::cli_proxy_accounts::set_enabled(&existing, updated.enabled).await?;
+    }
+
     let result = state
         .ai_providers
         .update(uuid, updated)
@@ -10105,6 +10121,8 @@ async fn delete_provider(
         // in-flight probe and discard its account-specific snapshot first.
         crate::api::providers::invalidate_kimi_model_cache(&provider).await;
     }
+
+    super::cli_proxy_accounts::delete(&provider).await?;
 
     // Delete from AIProviderStore
     if !state.ai_providers.delete(uuid).await {
@@ -10754,6 +10772,16 @@ async fn oauth_authorize(
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?
     };
 
+    if req.method_index == 0
+        && super::oauth_owner::management_enabled()
+        && super::oauth_owner::cli_proxy_owns(provider_type)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Use the subscription Connect/Reconnect flow; CLIProxyAPI owns this login.".into(),
+        ));
+    }
+
     let auth_methods = provider_type.auth_methods();
     let method = auth_methods
         .get(req.method_index)
@@ -11149,6 +11177,13 @@ async fn oauth_callback_inner(
             )
         })?
     };
+
+    if req.method_index == 0
+        && super::oauth_owner::management_enabled()
+        && super::oauth_owner::cli_proxy_owns(provider_type)
+    {
+        return Err((StatusCode::CONFLICT, "Start a new subscription Connect/Reconnect flow; legacy login cannot replace a CLIProxyAPI credential.".into()));
+    }
 
     if provider_type == ProviderType::Xai {
         let entry = wait_for_grok_auth_entry().await.ok_or_else(|| {
@@ -11917,6 +11952,9 @@ pub async fn refresh_oauth_token_internal(
     provider_type: &ProviderType,
     refresh_token: &str,
 ) -> Result<(String, String, i64), OAuthRefreshError> {
+    if super::oauth_owner::skip_refresh_if_owned(*provider_type, "refresh_oauth_token_internal") {
+        return Err(OAuthRefreshError::OwnedByCliProxy);
+    }
     let client = reqwest::Client::new();
 
     match provider_type {
@@ -12403,6 +12441,9 @@ fn newer_matching_openai_tier_credentials(
 pub async fn reconcile_anthropic_store_from_tiers(
     ai_providers: &crate::ai_providers::AIProviderStore,
 ) -> u32 {
+    if super::oauth_owner::management_enabled() {
+        return 0;
+    }
     let accounts: Vec<_> = ai_providers
         .get_all_by_type(ProviderType::Anthropic)
         .await

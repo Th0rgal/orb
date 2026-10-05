@@ -345,6 +345,10 @@ pub struct AIProvider {
     /// OAuth credentials (if using OAuth auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthCredentials>,
+    /// Authoritative CLIProxyAPI auth file. `oauth` is a read-only snapshot for
+    /// quota probes; only CLIProxyAPI may rotate the corresponding login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_proxy_auth_file: Option<String>,
     /// Custom base URL (for self-hosted or proxy endpoints)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -417,6 +421,7 @@ impl AIProvider {
             google_project_id: None,
             api_key: None,
             oauth: None,
+            cli_proxy_auth_file: None,
             base_url: None,
             custom_models: None,
             custom_env_var: None,

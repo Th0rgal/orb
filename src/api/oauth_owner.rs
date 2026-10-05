@@ -51,19 +51,28 @@ pub fn owner_mode() -> OAuthOwnerMode {
 pub(crate) fn provider_is_cli_proxy_capable(provider: ProviderType) -> bool {
     matches!(
         provider,
-        ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Xai
+        ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Xai | ProviderType::Kimi
     )
 }
 
-/// Whether CLIProxyAPI currently holds a *live* credential for `provider`.
-///
-/// Live means: not disabled, access + refresh token present, and not expired
-/// for longer than `ai_providers::CLI_PROXY_OWNERSHIP_GRACE`. A momentarily
-/// expired file is still the proxy's to refresh; a file the proxy has failed
-/// to refresh for a day (dead refresh token) must not take ownership away
-/// from sandboxed.sh's own working credentials, otherwise every request for
-/// that provider would be sent to a proxy that can only answer 503.
+/// Server-only key for the loopback management API.
+pub(crate) fn management_key() -> Option<String> {
+    std::env::var("CLI_PROXY_MANAGEMENT_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+pub(crate) fn management_enabled() -> bool {
+    management_key().is_some() && owner_mode() == OAuthOwnerMode::CliProxy
+}
+
 fn cli_proxy_holds_credential(provider: ProviderType) -> bool {
+    // Explicit management integration selects one owner even before the first
+    // login and after a credential expires. Never resume a competing refresher.
+    if management_enabled() && provider_is_cli_proxy_capable(provider) {
+        return true;
+    }
+
     if crate::util::env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
         return false;
     }
@@ -208,8 +217,10 @@ mod tests {
             CliProxy,
             false
         ));
-        // Providers the proxy cannot own are always sandboxed.sh's.
-        assert!(should_refresh_provider(ProviderType::Kimi, CliProxy, true));
+        // Kimi is managed too; unsupported Google credentials remain local.
+        assert!(!should_refresh_provider(ProviderType::Kimi, CliProxy, true));
+        assert!(should_refresh_provider(ProviderType::Kimi, CliProxy, false));
+        assert!(should_refresh_provider(ProviderType::Kimi, Legacy, true));
         assert!(should_refresh_provider(
             ProviderType::Google,
             CliProxy,
