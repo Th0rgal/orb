@@ -4,6 +4,7 @@ use crate::ai_providers::{AIProvider, AIProviderStore, OAuthCredentials, Provide
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub(crate) struct ProxyAccount {
     pub file: String,
     pub original_id: Option<uuid::Uuid>,
@@ -136,15 +137,41 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
     let _guard = GATE.lock().await;
     for a in accounts_in(dir) {
         let rows = store.list().await;
-        let old = rows.into_iter().find(|p| {
-            p.provider_type == a.provider
-                && ((p.id == a.original_id.unwrap_or(uuid::Uuid::nil())
-                    && p.cli_proxy_auth_file.is_none())
-                    || p.cli_proxy_auth_file.as_deref() == Some(a.file.as_str())
-                    || p.account_email
-                        .as_deref()
-                        .is_some_and(|email| email.eq_ignore_ascii_case(&a.identity)))
-        });
+        let old = rows
+            .iter()
+            .find(|p| {
+                p.provider_type == a.provider
+                    && ((p.id == a.original_id.unwrap_or(uuid::Uuid::nil())
+                        && p.cli_proxy_auth_file.is_none())
+                        || p.cli_proxy_auth_file.as_deref() == Some(a.file.as_str())
+                        || (p.cli_proxy_auth_file.is_none()
+                            && p.account_email
+                                .as_deref()
+                                .is_some_and(|email| email.eq_ignore_ascii_case(&a.identity))))
+            })
+            .cloned();
+        // A completed UI reconnect can replace the proxy filename. Do not
+        // resurrect retired imports or rebind a row from an older duplicate.
+        if old.is_none()
+            && rows.iter().any(|p| {
+                p.provider_type == a.provider
+                    && (a.original_id == Some(p.id)
+                        || p.account_email
+                            .as_deref()
+                            .is_some_and(|email| email.eq_ignore_ascii_case(&a.identity)))
+            })
+        {
+            continue;
+        }
+        // Identityless device files need a UI session or migration row ID to
+        // establish their binding, rather than creating a duplicate mid-login.
+        if old.is_none()
+            && a.provider == ProviderType::Kimi
+            && a.identity == a.file
+            && a.original_id.is_none()
+        {
+            continue;
+        }
         let unusable = a.disabled
             || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
                 < chrono::Utc::now().timestamp_millis();
@@ -168,8 +195,8 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
         if !changed {
             continue;
         }
+        p.account_email = (a.identity != a.file).then_some(a.identity);
         p.cli_proxy_auth_file = Some(a.file);
-        p.account_email = Some(a.identity);
         p.oauth = Some(a.oauth);
         p.rejected_oauth_refresh_fingerprint = None;
         if p.use_for_backends.is_none() {
@@ -182,6 +209,40 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
         } else {
             store.add(p).await;
         }
+    }
+}
+
+/// Attach the credential selected by a completed login before general scans.
+pub(crate) async fn bind_login(
+    store: &AIProviderStore,
+    target: Option<uuid::Uuid>,
+    account: ProxyAccount,
+) -> Option<uuid::Uuid> {
+    let mut p = if let Some(id) = target {
+        let p = store.get(id).await?;
+        if p.provider_type != account.provider {
+            return None;
+        }
+        p
+    } else {
+        AIProvider::new(
+            account.provider,
+            format!("{} ({})", account.provider.display_name(), account.identity),
+        )
+    };
+    p.account_email = (account.identity != account.file).then_some(account.identity);
+    p.cli_proxy_auth_file = Some(account.file);
+    p.oauth = Some(account.oauth);
+    p.rejected_oauth_refresh_fingerprint = None;
+    if p.use_for_backends.is_none() {
+        p.use_for_backends = Some(super::ai_providers::default_backends_for_provider(
+            p.provider_type,
+        ));
+    }
+    if let Some(id) = target {
+        store.update(id, p).await.map(|p| p.id)
+    } else {
+        Some(store.add(p).await)
     }
 }
 
@@ -299,6 +360,55 @@ mod tests {
         let row = store.get(id).await.unwrap();
         assert_eq!(row.oauth.unwrap().refresh_token, "usable-refresh");
         assert!(row.cli_proxy_auth_file.is_none());
+    }
+
+    #[tokio::test]
+    async fn replacement_login_keeps_settings_and_retired_files_cannot_rebind() {
+        for provider in [ProviderType::Kimi, ProviderType::Anthropic] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = AIProviderStore::new(dir.path().join("providers.json")).await;
+            let mut row = AIProvider::new(provider, "Personal".into());
+            row.cli_proxy_auth_file = Some("old.json".into());
+            row.account_email = Some(
+                if provider == ProviderType::Kimi {
+                    "old.json"
+                } else {
+                    "user@example.com"
+                }
+                .into(),
+            );
+            row.priority = 9;
+            row.enabled = false;
+            let id = store.add(row).await;
+            let kind = if provider == ProviderType::Kimi {
+                "kimi"
+            } else {
+                "claude"
+            };
+            let mut old = serde_json::json!({"type":kind,"sandboxed_provider_id":id,"access_token":"old","refresh_token":"r","expired":"2099-01-01T00:00:00Z"});
+            if provider == ProviderType::Anthropic {
+                old["email"] = serde_json::json!("user@example.com");
+            }
+            std::fs::write(dir.path().join("old.json"), old.to_string()).unwrap();
+            let mut new = old.clone();
+            new.as_object_mut().unwrap().remove("sandboxed_provider_id");
+            new["access_token"] = serde_json::json!("fresh");
+            std::fs::write(dir.path().join("new.json"), new.to_string()).unwrap();
+            bind_login(&store, Some(id), parse_account("new.json", &new).unwrap())
+                .await
+                .unwrap();
+            reconcile_from(&store, dir.path()).await;
+            reconcile_from(&store, dir.path()).await;
+            assert_eq!(store.list().await.len(), 1);
+            let row = store.get(id).await.unwrap();
+            assert_eq!(row.cli_proxy_auth_file.as_deref(), Some("new.json"));
+            assert_eq!(row.priority, 9);
+            assert!(!row.enabled);
+            assert_eq!(row.oauth.unwrap().access_token, "fresh");
+            if provider == ProviderType::Kimi {
+                assert!(row.account_email.is_none());
+            }
+        }
     }
 
     #[test]

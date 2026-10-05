@@ -30,7 +30,6 @@ enum LoginStatus {
 struct LoginSession {
     provider: ProviderType,
     target: Option<uuid::Uuid>,
-    previous_access_token: Option<String>,
     previous_accounts: HashMap<String, String>,
     state: String,
     auth_url: String,
@@ -234,16 +233,6 @@ async fn start_login(
             "CLIProxyAPI subscription ownership is not enabled.".into(),
         ));
     }
-    let previous_access_token = if let Some(id) = req.provider_id {
-        state
-            .ai_providers
-            .get(id)
-            .await
-            .and_then(|p| super::cli_proxy_accounts::account_for(&p))
-            .map(|a| a.oauth.access_token)
-    } else {
-        None
-    };
     let previous_accounts = super::cli_proxy_accounts::auth_dir()
         .map(|dir| {
             super::cli_proxy_accounts::accounts_in(&dir)
@@ -290,7 +279,6 @@ async fn start_login(
         Arc::new(Mutex::new(LoginSession {
             provider,
             target: req.provider_id,
-            previous_access_token,
             previous_accounts,
             state: oauth_state,
             auth_url: auth_url.clone(),
@@ -335,6 +323,41 @@ fn response(s: &LoginSession) -> Json<StatusResponse> {
         message: s.message.clone(),
     })
 }
+fn select_login_account(
+    accounts: Vec<super::cli_proxy_accounts::ProxyAccount>,
+    provider: ProviderType,
+    previous: &HashMap<String, String>,
+) -> Option<super::cli_proxy_accounts::ProxyAccount> {
+    let changed: Vec<_> = accounts
+        .into_iter()
+        .filter(|a| {
+            a.provider == provider
+                && !a.disabled
+                && a.oauth.expires_at > chrono::Utc::now().timestamp_millis()
+                && previous.get(&a.file) != Some(&a.oauth.access_token)
+        })
+        .collect();
+    let new: Vec<_> = changed
+        .iter()
+        .filter(|a| !previous.contains_key(&a.file))
+        .collect();
+    match new.as_slice() {
+        [account] => Some((*account).clone()),
+        [] if changed.len() == 1 => changed.into_iter().next(),
+        _ => None,
+    }
+}
+
+fn identity_matches(
+    p: &crate::ai_providers::AIProvider,
+    a: &super::cli_proxy_accounts::ProxyAccount,
+) -> bool {
+    p.account_email
+        .as_deref()
+        .filter(|email| Some(*email) != p.cli_proxy_auth_file.as_deref())
+        .is_none_or(|email| a.identity != a.file && email.eq_ignore_ascii_case(&a.identity))
+}
+
 async fn login_status(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -352,44 +375,35 @@ async fn login_status(
     let result = ManagementClient::configured()?.status(&s.state).await?;
     match result.get("status").and_then(Value::as_str) {
         Some("ok") => {
-            if let Some(target) = s.target {
-                let mut p = state
-                    .ai_providers
-                    .get(target)
-                    .await
-                    .ok_or((StatusCode::NOT_FOUND, "Account no longer exists.".into()))?;
-                // Device logins may not expose email. Bind only a single newly
-                // written credential, never an arbitrary existing proxy file.
-                if p.account_email.is_none() && p.cli_proxy_auth_file.is_none() {
-                    let changed: Vec<_> = super::cli_proxy_accounts::auth_dir()
-                        .map(|dir| super::cli_proxy_accounts::accounts_in(&dir))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|a| {
-                            a.provider == s.provider
-                                && !a.disabled
-                                && s.previous_accounts.get(&a.file) != Some(&a.oauth.access_token)
-                        })
-                        .collect();
-                    if let [account] = changed.as_slice() {
-                        p.cli_proxy_auth_file = Some(account.file.clone());
-                        p.account_email = Some(account.identity.clone());
-                        state.ai_providers.update(target, p).await;
-                    }
-                }
-            }
-            super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
-            if let Some(target) = s.target {
-                let p = state
-                    .ai_providers
-                    .get(target)
-                    .await
-                    .ok_or((StatusCode::NOT_FOUND, "Account no longer exists.".into()))?;
-                if super::cli_proxy_accounts::account_for(&p).is_none_or(|a| {
-                    a.disabled
-                        || a.oauth.expires_at <= chrono::Utc::now().timestamp_millis()
-                        || s.previous_access_token.as_deref() == Some(a.oauth.access_token.as_str())
-                }) {
+            let accounts = super::cli_proxy_accounts::auth_dir()
+                .map(|dir| super::cli_proxy_accounts::accounts_in(&dir))
+                .unwrap_or_default();
+            let Some(account) = select_login_account(accounts, s.provider, &s.previous_accounts)
+            else {
+                s.status = LoginStatus::Failed;
+                s.message = Some(
+                    "Could not identify the completed login safely. Try reconnecting again.".into(),
+                );
+                return Ok(response(&s));
+            };
+            let rows = state.ai_providers.list().await;
+            let target = if let Some(id) = s.target {
+                Some(
+                    rows.iter()
+                        .find(|p| p.id == id)
+                        .ok_or((StatusCode::NOT_FOUND, "Account no longer exists.".into()))?,
+                )
+            } else {
+                rows.iter().find(|p| {
+                    p.provider_type == s.provider
+                        && account.identity != account.file
+                        && p.account_email
+                            .as_deref()
+                            .is_some_and(|email| email.eq_ignore_ascii_case(&account.identity))
+                })
+            };
+            if let Some(p) = target {
+                if !identity_matches(p, &account) {
                     s.status = LoginStatus::Failed;
                     s.message = Some(format!(
                         "Sign-in succeeded for another account. Reconnect using {}.",
@@ -397,12 +411,24 @@ async fn login_status(
                     ));
                     return Ok(response(&s));
                 }
-            }
-            if let Some(target) = s.target {
-                if let Some(p) = state.ai_providers.get(target).await {
-                    super::cli_proxy_accounts::set_enabled(&p, p.enabled).await?;
+                if p.cli_proxy_auth_file
+                    .as_deref()
+                    .is_some_and(|file| file != account.file)
+                {
+                    super::cli_proxy_accounts::set_enabled(p, false).await?;
                 }
             }
+            let id = super::cli_proxy_accounts::bind_login(
+                &state.ai_providers,
+                target.map(|p| p.id),
+                account,
+            )
+            .await
+            .ok_or((StatusCode::NOT_FOUND, "Account no longer exists.".into()))?;
+            if let Some(p) = state.ai_providers.get(id).await {
+                super::cli_proxy_accounts::set_enabled(&p, p.enabled).await?;
+            }
+            super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
             s.status = LoginStatus::Completed;
             s.message = Some("Connected. The subscription login will renew automatically.".into());
         }
@@ -521,6 +547,42 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completed_login_prefers_new_file_and_rejects_ambiguity_or_wrong_identity() {
+        let account = |file: &str, token: &str| {
+            super::super::cli_proxy_accounts::parse_account(file, &json!({"type":"kimi","access_token":token,"refresh_token":"r","expired":"2099-01-01T00:00:00Z"})).unwrap()
+        };
+        let previous = HashMap::from([("old.json".into(), "old-token".into())]);
+        let chosen = select_login_account(
+            vec![account("old.json", "renewed"), account("new.json", "fresh")],
+            ProviderType::Kimi,
+            &previous,
+        )
+        .unwrap();
+        assert_eq!(chosen.file, "new.json");
+        assert!(select_login_account(
+            vec![
+                account("new.json", "fresh"),
+                account("other.json", "fresh2")
+            ],
+            ProviderType::Kimi,
+            &previous
+        )
+        .is_none());
+        assert!(select_login_account(
+            vec![account("old.json", "old-token")],
+            ProviderType::Kimi,
+            &previous
+        )
+        .is_none());
+        let mut row = crate::ai_providers::AIProvider::new(ProviderType::Kimi, "Kimi".into());
+        row.cli_proxy_auth_file = Some("old.json".into());
+        row.account_email = Some("old.json".into());
+        assert!(identity_matches(&row, &chosen));
+        row.account_email = Some("user@example.com".into());
+        assert!(!identity_matches(&row, &chosen));
+    }
+
     #[test]
     fn callbacks_bind_state_without_fetching_arbitrary_urls() {
         let p = callback_payload(ProviderType::Anthropic, "code#our-state", "our-state").unwrap();
