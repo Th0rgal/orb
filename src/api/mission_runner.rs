@@ -6492,12 +6492,13 @@ pub(crate) fn ensure_opencode_provider_for_model(
     };
 
     if matches!(provider_id, "google" | "gemini")
-        && providers_map
-            .get("google")
-            .or_else(|| providers_map.get("gemini"))
-            .and_then(|provider| provider.get("enabled"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
+        && ["google", "gemini"].iter().any(|alias| {
+            providers_map
+                .get(*alias)
+                .and_then(|provider| provider.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        })
     {
         return;
     }
@@ -12227,25 +12228,32 @@ mod tests {
         let app_dir = temp.path().join("app");
         fs::create_dir_all(&config_dir).unwrap();
         fs::create_dir_all(&app_dir).unwrap();
-        fs::write(
-            config_dir.join("opencode.json"),
-            r#"{"provider":{"google":{"enabled":false}}}"#,
-        )
-        .unwrap();
-
-        ensure_opencode_provider_for_model(
-            &config_dir,
-            &app_dir,
-            "google/gemini-4-argon-eap",
-            "10.88.0.1",
-            None,
-        );
-
-        let config: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+        for aliases in [
+            serde_json::json!({"google":{"enabled":false}}),
+            serde_json::json!({"google":{},"gemini":{"enabled":false}}),
+            serde_json::json!({"google":{"enabled":false},"gemini":{}}),
+        ] {
+            for prefix in ["google", "gemini"] {
+                let original = serde_json::json!({"provider":aliases});
+                fs::write(
+                    config_dir.join("opencode.json"),
+                    serde_json::to_vec(&original).unwrap(),
+                )
                 .unwrap();
-        assert_eq!(config["provider"]["google"]["enabled"], false);
-        assert!(config["provider"]["google"].get("options").is_none());
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    &app_dir,
+                    &format!("{prefix}/gemini-4-argon-eap"),
+                    "10.88.0.1",
+                    None,
+                );
+                let config: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(config, original);
+            }
+        }
     }
 
     #[test]
