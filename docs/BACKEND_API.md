@@ -62,9 +62,10 @@ GET /api/backends/:id/config
 ```
 
 For `claudecode`, `settings` includes `api_key_configured` and optional fields
-like `default_model`. Grok settings include an optional `cli_path`. Codex and
-Antigravity currently use empty settings unless configured by future backend-specific
-fields.
+like `default_model`. Grok and Antigravity settings include an optional `cli_path`
+to select their native CLI binary. Antigravity uses this override for both model
+discovery and mission execution; the path must exist in the target execution
+environment.
 
 ## Update Backend Config
 
@@ -85,7 +86,8 @@ PUT /api/backends/:id/config
 ```
 
 Claude Code accepts `api_key` in `settings` to store it securely in the secrets
-vault. Grok accepts `cli_path` to override the CLI binary path.
+vault. Grok and Antigravity accept `cli_path` to override the CLI binary path
+(for example, `{"cli_path": "/opt/antigravity/bin/agy"}` for Antigravity).
 
 **Response**:
 ```json

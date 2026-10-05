@@ -287,7 +287,7 @@ Configure your mission:
 3. **Model Override (optional)** - Force a specific model for this mission:
    - **Claude Code**: use a raw model ID (e.g., `claude-opus-5`)
    - **Codex**: use a raw model ID (e.g., `gpt-5.5` or `gpt-5.3-codex`)
-   - **Gemini**: use a raw model ID (e.g., `gemini-3.1-pro-preview`)
+   - **Antigravity**: select an exact model ID discovered by `agy models` as the execution user in the target workspace
    - **Grok**: use the canonical raw CLI model ID `grok-4.5`; availability is
      account- and region-dependent (including in the EU), so confirm with
      `grok models` if the CLI rejects it
