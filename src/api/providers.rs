@@ -1738,7 +1738,12 @@ async fn apply_cli_proxy_catalog(providers: &mut [Provider], store: &[AIProvider
     let Some(endpoint) = super::oauth_owner::cli_proxy_endpoint() else {
         return;
     };
-    let url = format!("{}/models", endpoint.openai_v1_url());
+    let base = endpoint.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
     type Cache = Option<(String, Instant, serde_json::Value)>;
     static CACHE: OnceLock<tokio::sync::Mutex<Cache>> = OnceLock::new();
     let mut cache = CACHE
