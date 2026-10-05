@@ -1,8 +1,9 @@
 # Google Antigravity
 
 Sandboxed.sh and Orb run Google's native `agy` CLI with backend ID
-`antigravity`. This is separate from the `gemini` backend and does not route
-through an API-key proxy. Install the official CLI from
+`antigravity`. It replaces the retired Gemini CLI harness and does not route
+through an API-key proxy. Historical Gemini CLI session IDs cannot be resumed
+with Antigravity. Install the official CLI from
 https://antigravity.google/docs/cli/install/ and sign in by running `agy`
 as the account that executes missions.
 

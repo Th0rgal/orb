@@ -5318,7 +5318,7 @@ const HARNESS_VERSION_LINE_PREFIX: &str = "sandboxed-harness-version:";
 /// line per installed harness CLI. Missing CLIs print nothing.
 const HARNESS_VERSION_PROBE_SCRIPT: &str = r#"
 export PATH="/root/.bun/bin:/root/.cache/.bun/bin:/usr/local/bin:$PATH"
-for cli in claude codex opencode grok; do
+for cli in claude codex opencode grok agy; do
   if command -v "$cli" >/dev/null 2>&1; then
     v="$(timeout --signal=KILL 10s "$cli" --version 2>/dev/null | head -n1 | tr -d '\r')"
     printf 'sandboxed-harness-version:%s=%s\n' "$cli" "$v"
@@ -6065,6 +6065,7 @@ mod tests {
 noise line\n\
 sandboxed-harness-version:claude=2.1.139 (Claude Code)\n\
 sandboxed-harness-version:codex=codex-cli 0.48.0\n\
+sandboxed-harness-version:agy=1.2.16\n\
 sandboxed-harness-version:grok=\n";
         let versions = parse_harness_version_output(stdout);
         assert_eq!(
@@ -6075,6 +6076,8 @@ sandboxed-harness-version:grok=\n";
             versions.get("codex").map(String::as_str),
             Some("codex-cli 0.48.0")
         );
+        assert_eq!(versions.get("agy").map(String::as_str), Some("1.2.16"));
+        assert!(HARNESS_VERSION_PROBE_SCRIPT.contains("grok agy; do"));
         // Empty version (CLI present but --version failed) is omitted.
         assert!(!versions.contains_key("grok"));
         assert!(!versions.contains_key("noise"));
