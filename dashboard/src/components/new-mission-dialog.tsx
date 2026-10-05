@@ -6,12 +6,12 @@ import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Plus, X, ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import useSWR from 'swr';
-import { getVisibleAgents, getSandboxedConfig, listBackends, listBackendAgents, getClaudeCodeConfig, listBackendModelOptions, listProviders, type Backend, type BackendAgent, type BackendModelOption, type ModelEffort, type Provider } from '@/lib/api';
+import { getVisibleAgents, getSandboxedConfig, listBackends, listBackendAgents, getClaudeCodeConfig, listBackendModelOptions, listAntigravityModels, listProviders, type Backend, type BackendAgent, type BackendModelOption, type ModelEffort, type Provider } from '@/lib/api';
 import type { Workspace } from '@/lib/api';
 import { isBackendAvailable, useBackendConfigs } from '@/lib/use-backend-configs';
 import { toast } from '@/components/toast';
 
-const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'chatgpt_ui'] as const;
+const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'] as const;
 const CHATGPT_UI_BACKEND_ID = 'chatgpt_ui';
 
 const CHATGPT_UI_CANONICAL_MODEL = 'gpt-5.6-pro';
@@ -155,6 +155,7 @@ export function NewMissionDialog({
       { id: 'claudecode', name: 'Claude Code' },
       { id: 'codex', name: 'Codex' },
       { id: 'grok', name: 'Grok Build' },
+      { id: 'antigravity', name: 'Antigravity CLI' },
       { id: 'chatgpt_ui', name: 'ChatGPT UI (experimental)' },
     ],
     }
@@ -271,6 +272,8 @@ export function NewMissionDialog({
           { id: 'build', name: 'Build' },
           { id: 'plan', name: 'Plan' },
         ];
+      } else if (backend.id === 'antigravity') {
+        agents = [{ id: 'build', name: 'Build' }];
       } else if (backend.id === CHATGPT_UI_BACKEND_ID) {
         // ChatGPT UI has one web harness, not a selectable agent family. Use
         // the empty agent ID so mission creation sends only the backend.
@@ -336,6 +339,14 @@ export function NewMissionDialog({
   const selectedBackend = useMemo(() => {
     return parseSelectedValue(selectedAgentValue)?.backend || 'claudecode';
   }, [selectedAgentValue]);
+  const isAntigravity = selectedBackend === 'antigravity';
+  const { data: antigravityModels, error: antigravityError, isLoading: antigravityLoading, mutate: refreshAntigravityModels } = useSWR(
+    open && isAntigravity ? ['antigravity-models', newMissionWorkspace] : null,
+    () => listAntigravityModels(newMissionWorkspace || undefined),
+    { revalidateOnFocus: true, keepPreviousData: false },
+  );
+  const antigravityReady = !antigravityError && !antigravityLoading && !!antigravityModels?.length
+    && (!modelOverride || antigravityModels.some(([id]) => id === modelOverride));
   const isChatGptUi = selectedBackend === CHATGPT_UI_BACKEND_ID;
   const chatGptUiModel = useMemo(() => {
     const configuredModel = backendConfigs[CHATGPT_UI_BACKEND_ID]?.settings?.model;
@@ -352,6 +363,7 @@ export function NewMissionDialog({
   }, [selectedBackend]);
 
   const modelOptions = useMemo(() => {
+    if (isAntigravity) return (antigravityModels ?? []).map(([value, label]) => ({ value, label }));
     if (selectedBackend === CHATGPT_UI_BACKEND_ID) {
       return [{
         value: chatGptUiModel,
@@ -380,7 +392,7 @@ export function NewMissionDialog({
       }
     }
     return options;
-  }, [backendModelOptions, providersResponse, providerAllowlist, selectedBackend, chatGptUiModel]);
+  }, [backendModelOptions, providersResponse, providerAllowlist, selectedBackend, chatGptUiModel, isAntigravity, antigravityModels]);
 
   // The server orders the newest available Opus first. Preserve explicit
   // choices and edits; a fresh Claude mission starts with that catalog choice.
@@ -550,7 +562,7 @@ export function NewMissionDialog({
       return;
     }
 
-    for (const backendId of ['grok', 'codex']) {
+    for (const backendId of ['grok', 'codex', 'antigravity']) {
       const agent = allAgents.find(a => a.backend === backendId);
       if (agent) {
         setSelectedAgentValue(agent.value);
@@ -614,13 +626,14 @@ export function NewMissionDialog({
       mutateGrokAgents?.(),
       mutateAgentsPayload?.(),
       mutateConfig?.(),
+      refreshAntigravityModels(),
     ]);
   };
 
   const getCreateOptions = (): NewMissionDialogOptions => {
     const parsed = parseSelectedValue(selectedAgentValue);
     const agentValue =
-      (selectedBackend === 'grok' && parsed?.agent === 'build')
+      (['grok', 'antigravity'].includes(selectedBackend) && parsed?.agent === 'build')
         ? undefined
         : parsed?.agent || undefined;
     const trimmedModel = modelOverride.trim();
@@ -657,7 +670,7 @@ export function NewMissionDialog({
   };
 
   const handleCreate = async (openInNewTab: boolean) => {
-    if (disabled || submitting) return;
+    if (disabled || submitting || (isAntigravity && !antigravityReady)) return;
     if (!isChatGptUi && newMissionWorkspace) {
       const ws = workspaces.find(w => w.id === newMissionWorkspace);
       if (ws && ws.status !== 'ready') {
@@ -715,14 +728,14 @@ export function NewMissionDialog({
     }
   };
 
-  const isBusy = disabled || submitting;
+  const isBusy = disabled || submitting || (isAntigravity && !antigravityReady);
 
   return (
     <div className="relative" ref={dialogRef}>
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        disabled={isBusy}
+        disabled={disabled || submitting}
         className={isEditMode
           ? "flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2 text-sm text-white/70 hover:bg-white/[0.04] transition-colors disabled:opacity-50"
           : "flex items-center gap-1.5 rounded-lg bg-indigo-500/20 px-2.5 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/30 transition-colors disabled:opacity-50"}
@@ -767,7 +780,7 @@ export function NewMissionDialog({
               <label className="block text-xs text-white/50 mb-1.5">Workspace</label>
               <select
                 value={newMissionWorkspace}
-                onChange={(e) => setNewMissionWorkspace(e.target.value)}
+                onChange={(e) => { setNewMissionWorkspace(e.target.value); if (isAntigravity) setModelOverride(''); }}
                 disabled={lockWorkspace || isChatGptUi}
                 className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
                 style={{
@@ -904,7 +917,7 @@ export function NewMissionDialog({
                       : 'No override (use default)'}
                   </option>
                   {(() => {
-                    if (modelOptionsLoading || providersLoading) {
+                    if (isAntigravity ? antigravityLoading : modelOptionsLoading || providersLoading) {
                       return (
                         <option value="" disabled>
                           Loading model options…
@@ -951,13 +964,20 @@ export function NewMissionDialog({
                   })()}
                 </select>
                 <p className="text-xs text-white/30 mt-1.5">
-                  {selectedBackend === 'opencode'
+                  {isAntigravity
+                    ? 'Models discovered from the selected workspace’s Antigravity account.'
+                    : selectedBackend === 'opencode'
                     ? 'Use provider/model format (e.g., openai/gpt-5.6-sol).'
                     : 'Use the raw model ID (e.g., gpt-6-astra or claude-opus-5).'}
                 </p>
               </div>
             )}
 
+            {isAntigravity && !antigravityLoading && (antigravityError || !antigravityModels?.length) && (
+              <p role="alert" className="text-xs text-amber-300">
+                {antigravityError ? 'Antigravity model discovery failed.' : 'No Antigravity models are available in this workspace.'} Sign in with agy in the selected workspace, then refresh.
+              </p>
+            )}
             {(selectedBackend === 'codex' || selectedBackend === 'claudecode') && (
               <div>
                 <label className="block text-xs text-white/50 mb-1.5">Model effort (optional)</label>

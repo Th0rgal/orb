@@ -9,6 +9,7 @@ import {
   getVisibleAgents,
   listBackendAgents,
   listBackendModelOptions,
+  listAntigravityModels,
   listBackends,
   listProviders,
 } from '@/lib/api';
@@ -33,6 +34,7 @@ vi.mock('@/lib/api', () => ({
     default_model: null,
     default_agent: null,
   }),
+  listAntigravityModels: vi.fn().mockResolvedValue([]),
   listBackendModelOptions: vi.fn().mockResolvedValue({ backends: {} }),
   listProviders: vi.fn().mockResolvedValue({ providers: [] }),
 }));
@@ -71,11 +73,65 @@ describe('NewMissionDialog', () => {
     });
     vi.mocked(listBackendModelOptions).mockResolvedValue({ backends: {} });
     vi.mocked(listProviders).mockResolvedValue({ providers: [] });
+    vi.mocked(listAntigravityModels).mockResolvedValue([]);
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it('creates Antigravity missions using only the selected workspace account models', async () => {
+    vi.mocked(listBackends).mockResolvedValue([
+      { id: 'antigravity', name: 'Antigravity CLI' },
+      { id: 'gemini', name: 'Gemini CLI' },
+    ]);
+    vi.mocked(listBackendModelOptions).mockResolvedValue({ backends: {
+      antigravity: [{value: 'wrong-core-model', label: 'Wrong Core model'}],
+    } });
+    let resolveWorkspace!: (models: [string, string][]) => void;
+    vi.mocked(listAntigravityModels).mockImplementation(workspace => workspace
+      ? new Promise(resolve => { resolveWorkspace = resolve; })
+      : Promise.resolve([['host-model', 'Host account model']]));
+    const onCreate = vi.fn().mockResolvedValue({ id: 'agy-mission' });
+    renderDialog(onCreate, [{id: 'workspace-b', name: 'Second account', workspace_type: 'host', status: 'ready'} as Workspace]);
+    fireEvent.click(screen.getByRole('button', { name: /new mission/i }));
+    const native = await screen.findByRole('option', {name: 'Antigravity CLI default'});
+    fireEvent.change(native.closest('select')!, {target: {value: 'antigravity:'}});
+    const hostModel = await screen.findByRole('option', { name: 'Host account model' });
+    expect(getBackendConfig).toHaveBeenCalledWith('antigravity');
+    expect(screen.queryByRole('option', { name: /Gemini CLI/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Wrong Core model' })).not.toBeInTheDocument();
+    fireEvent.change(hostModel.closest('select')!, {target: {value: 'host-model'}});
+    const workspaceOption = screen.getByRole('option', {name: /Second account/});
+    fireEvent.change(workspaceOption.closest('select')!, {target: {value: 'workspace-b'}});
+    await waitFor(() => expect(listAntigravityModels).toHaveBeenCalledWith('workspace-b'));
+    expect(screen.queryByRole('option', {name: 'Host account model'})).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Create here'})).toBeDisabled();
+    resolveWorkspace([['workspace-model', 'Workspace account model']]);
+    const workspaceModel = await screen.findByRole('option', {name: 'Workspace account model'});
+    fireEvent.change(workspaceModel.closest('select')!, {target: {value: 'workspace-model'}});
+    fireEvent.click(screen.getByRole('button', {name: 'Create here'}));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      backend: 'antigravity', workspaceId: 'workspace-b', modelOverride: 'workspace-model', agent: undefined,
+    })));
+  });
+
+  it.each(['empty', 'failed'])('does not substitute API catalog models when native discovery is %s', async outcome => {
+    vi.mocked(listBackends).mockResolvedValue([{id: 'antigravity', name: 'Antigravity CLI'}]);
+    vi.mocked(listBackendModelOptions).mockResolvedValue({backends: {
+      antigravity: [{value: 'api-only', label: 'API-only model'}],
+    }});
+    if (outcome === 'failed') vi.mocked(listAntigravityModels).mockRejectedValue(new Error('native discovery failed'));
+    const onCreate = vi.fn();
+    renderDialog(onCreate);
+    fireEvent.click(screen.getByRole('button', {name: /new mission/i}));
+    const native = await screen.findByRole('option', {name: 'Antigravity CLI default'});
+    fireEvent.change(native.closest('select')!, {target: {value: 'antigravity:'}});
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('option', {name: 'API-only model'})).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Create here'})).toBeDisabled();
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it('reserves a new tab synchronously before async mission creation finishes', async () => {
