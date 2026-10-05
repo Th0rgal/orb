@@ -14828,11 +14828,14 @@ mod tests {
     fn a_limit_reported_after_the_reply_parks_the_account() {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::account_limits::account_key(uuid::Uuid::new_v4());
-        let reply =
-            super::AgentResult::success("Done.", 0).with_data(super::late_usage_limit_data(
-                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
-             purchase more credits or try again at Oct 5th, 2026 2:09 PM.",
-            ));
+        let reset = chrono::Utc::now() + chrono::Duration::days(2);
+        let message = format!(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
+             purchase more credits or try again at {} (UTC).",
+            reset.format("%b %-d, %Y %-I:%M %p")
+        );
+        let reply = super::AgentResult::success("Done.", 0)
+            .with_data(super::late_usage_limit_data(&message));
         super::note_turn_for_limits(dir.path(), &key, "openai", "Codex", &reply);
         assert!(crate::account_limits::shared().is_cooling(&key));
         // A later served turn without a limit releases it.
