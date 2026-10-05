@@ -2571,7 +2571,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       const wasMoving = missionPhase(mission(), activity()).moving;
       await refresh();
       // Reconcile through completion even if the live stream misses output.
-      if (wasMoving || missionPhase(mission(), activity()).moving) await resync(true);
+      const waitingForReply = ["awaiting_user", "waiting_user", "completed", "done"].includes(mission()?.status ?? "")
+        && !activity() && viewItems().some(item => item.kind === "user" && !item.queued);
+      if (wasMoving || missionPhase(mission(), activity()).moving || waitingForReply) await resync(true);
       // Queue failures are recoverable independently of the mission stream.
       // A healthy stream must not leave a transient startup warning forever.
       if (queueError()) await resync(true);

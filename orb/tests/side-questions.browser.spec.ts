@@ -104,7 +104,7 @@ async function mockAgent(page:import('@playwright/test').Page,answer:string){
  return requests;
 }
 
-test('editing a long side question preserves wrapping, typography and bubble size',async({page})=>{
+test('editing a long side question preserves text geometry and contains its toolbar',async({page})=>{
  await mockAgent(page,'Answer.');
  await page.goto('/tests/side-questions.html');
  const question='Voici un long message avec des détails et plusieurs lignes pour vérifier la stabilité du champ. '.repeat(28);
@@ -118,7 +118,10 @@ test('editing a long side question preserves wrapping, typography and bubble siz
  const editor=page.getByRole('textbox',{name:'Edit prompt text'});
  await expect(editor).toHaveValue(question.trim());
  const after=await bubble.evaluate(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el.querySelector('textarea')!);return {height:r.height,width:r.width,font:s.fontSize,line:s.lineHeight,padding:getComputedStyle(el).paddingRight};});
- expect(Math.abs(after.height-before.height)).toBeLessThanOrEqual(2);
+ const toolbar=await bubble.locator('.prompt-editor-actions').evaluate(el=>({height:el.getBoundingClientRect().height,margin:parseFloat(getComputedStyle(el).marginTop),bottom:el.getBoundingClientRect().bottom}));
+ expect(Math.abs(after.height-before.height-toolbar.height-toolbar.margin)).toBeLessThanOrEqual(2);
+ const bounds=(await bubble.boundingBox())!;
+ expect(toolbar.bottom).toBeLessThanOrEqual(bounds.y+bounds.height);
  expect(after.width).toBe(before.width);expect(after.font).toBe(before.font);expect(after.line).toBe(before.line);expect(after.padding).toBe(before.padding);
  await editor.press('Escape');
  expect(Math.abs((await bubble.boundingBox())!.height-before.height)).toBeLessThanOrEqual(2);
