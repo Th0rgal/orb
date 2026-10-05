@@ -897,10 +897,12 @@ async fn get_model(
         );
     }
     let data = collect_proxy_models(&state).await;
-    match data
-        .into_iter()
-        .find(|m| m.id == id || (is_known_kimi_model_id(&id) && m.id == format!("kimi/{id}")))
-    {
+    match data.into_iter().find(|m| {
+        m.id == id
+            || (is_known_kimi_model_id(&id) && m.id == format!("kimi/{id}"))
+            || (is_known_google_model_id(&id)
+                && m.id == format!("google/{}", canonical_google_model_id(&id)))
+    }) {
         Some(mut model) => {
             // OpenCode probes the stripped id (`k3-256k`) after listing
             // `kimi/k3-256k`. Echo the requested id so the adapter keeps it.
@@ -914,6 +916,13 @@ async fn get_model(
             object: "model",
             created: 0,
             owned_by: "kimi",
+        })
+        .into_response(),
+        None if parse_google_bare_model_entry(&id).is_some() => Json(ModelObject {
+            id,
+            object: "model",
+            created: 0,
+            owned_by: "google",
         })
         .into_response(),
         None => error_response(
@@ -1103,10 +1112,18 @@ fn parse_direct_model_entry(model: &str) -> Option<crate::provider_health::Chain
         return None;
     }
     // Only treat as passthrough when the prefix is a real provider type.
-    crate::ai_providers::ProviderType::from_id(provider)?;
+    let provider_type = match provider {
+        "gemini" => crate::ai_providers::ProviderType::Google,
+        other => crate::ai_providers::ProviderType::from_id(other)?,
+    };
+    let model_id = if provider_type == crate::ai_providers::ProviderType::Google {
+        canonical_google_model_id(rest).to_string()
+    } else {
+        rest.to_string()
+    };
     Some(crate::provider_health::ChainEntry {
-        provider_id: provider.to_string(),
-        model_id: rest.to_string(),
+        provider_id: provider_type.id().to_string(),
+        model_id,
     })
 }
 
@@ -1443,7 +1460,8 @@ async fn native_protocol_proxy(
             .await;
         (id, configured, resolved)
     } else if let Some(direct) = parse_native_model_entry(&requested_model, protocol)
-        .or(parse_kimi_bare_model_entry(&requested_model))
+        .or_else(|| parse_kimi_bare_model_entry(&requested_model))
+        .or_else(|| parse_google_bare_model_entry(&requested_model))
         .or(parse_custom_direct_model_entry(&state, &requested_model).await)
     {
         let resolved = state
@@ -2043,12 +2061,13 @@ pub(crate) async fn chat_completions_inner(
             .await;
         (id, chain_entries, entries)
     } else if let Some(direct) = parse_direct_model_entry(&requested_model)
-        .or(parse_kimi_bare_model_entry(&requested_model))
+        .or_else(|| parse_kimi_bare_model_entry(&requested_model))
+        .or_else(|| parse_google_bare_model_entry(&requested_model))
         .or(parse_custom_direct_model_entry(&state, &requested_model).await)
     {
         // Direct provider/model passthrough (single synthetic entry) — either a
-        // built-in provider prefix, a bare Kimi catalog id (OpenCode strips
-        // `kimi/`), or a custom provider's sanitized name.
+        // built-in provider prefix, a bare Kimi/Google catalog id (OpenCode strips
+        // `kimi/` or `google/`), or a custom provider's sanitized name.
         let chain_entries = vec![direct.clone()];
         let entries = state
             .chain_store
@@ -2110,6 +2129,7 @@ pub(crate) async fn chat_completions_inner(
     // 4. Try each entry in order (waterfall)
     let mut rate_limit_count: u32 = 0;
     let mut client_error_count: u32 = 0;
+    let mut transport_validation_errors = Vec::new();
     let mut server_error_count: u32 = 0;
     let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
 
@@ -2181,7 +2201,17 @@ pub(crate) async fn chat_completions_inner(
         let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
             && entry.has_oauth
             && super::oauth_owner::management_enabled();
-        let use_google_oauth_adapter = provider_type == ProviderType::Google && entry.has_oauth;
+        let use_google_api_adapter = provider_type == ProviderType::Google
+            && !entry.has_oauth
+            && entry.api_key.is_some()
+            && uses_native_google_api(entry.base_url.as_deref());
+        let use_google_oauth_cli_proxy_adapter = provider_type == ProviderType::Google
+            && entry.has_oauth
+            && entry.api_key.is_none()
+            && crate::api::ai_providers::google_cli_proxy_account_available();
+        let use_google_oauth_adapter = provider_type == ProviderType::Google
+            && entry.has_oauth
+            && !use_google_oauth_cli_proxy_adapter;
         let (url, upstream_body, extra_headers) = if use_anthropic_oauth_cli_proxy_adapter {
             let upstream_body = match rewrite_model_for_anthropic_cli_proxy(&body, &entry.model_id)
             {
@@ -2227,10 +2257,11 @@ pub(crate) async fn chat_completions_inner(
                 build_cli_proxy_headers(),
             )
         } else if use_kimi_oauth_cli_proxy_adapter {
-            let model = if entry.model_id.starts_with("kimi-") {
-                entry.model_id.clone()
-            } else {
-                format!("kimi-{}", entry.model_id)
+            let model = match entry.model_id.as_str() {
+                "kimi-for-coding" => "kimi-k3".to_string(),
+                "kimi-for-coding-highspeed" => "kimi-k2.7-code-highspeed".to_string(),
+                id if id.starts_with("kimi-") => id.to_string(),
+                id => format!("kimi-{id}"),
             };
             let upstream_body = match rewrite_model_for_kimi(&body, &model) {
                 Ok(body) => body,
@@ -2261,6 +2292,49 @@ pub(crate) async fn chat_completions_inner(
                 upstream_body,
                 build_cli_proxy_headers(),
             )
+        } else if use_google_oauth_cli_proxy_adapter {
+            let upstream_model = canonical_google_model_id(&entry.model_id);
+            let upstream_body = match rewrite_model(&body, upstream_model) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("Failed to rewrite model in request body: {}", e);
+                    server_error_count += 1;
+                    continue;
+                }
+            };
+            (
+                cli_proxy_chat_completions_url(),
+                upstream_body,
+                build_cli_proxy_headers(),
+            )
+        } else if use_google_api_adapter {
+            let api_key = match entry.api_key.as_deref() {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => {
+                    tracing::warn!(
+                        provider = %entry.provider_id,
+                        account_id = %entry.account_id,
+                        "Google API routing entry missing credential"
+                    );
+                    client_error_count += 1;
+                    continue;
+                }
+            };
+            let (google_url, google_body) = match build_google_api_upstream_request(
+                &body,
+                &entry.model_id,
+                entry.base_url.as_deref(),
+                is_stream,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    transport_validation_errors.push(e);
+                    client_error_count += 1;
+                    continue;
+                }
+            };
+            let headers = build_google_api_proxy_headers(api_key, is_stream);
+            (google_url, google_body, headers)
         } else if use_anthropic_adapter {
             let credential = match entry.api_key.as_deref() {
                 Some(value) if !value.trim().is_empty() => value,
@@ -2392,6 +2466,8 @@ pub(crate) async fn chat_completions_inner(
             .header("Content-Type", "application/json")
             .body(upstream_body);
         if !use_google_oauth_adapter
+            && !use_google_api_adapter
+            && !use_google_oauth_cli_proxy_adapter
             && !use_anthropic_adapter
             && !use_anthropic_oauth_cli_proxy_adapter
             && !use_openai_oauth_cli_proxy_adapter
@@ -2810,7 +2886,7 @@ pub(crate) async fn chat_completions_inner(
                 });
         }
 
-        if use_google_oauth_adapter {
+        if use_google_oauth_adapter || use_google_api_adapter {
             if is_stream && status.is_success() {
                 let mut response_headers = HeaderMap::new();
                 response_headers.insert(
@@ -2986,6 +3062,24 @@ pub(crate) async fn chat_completions_inner(
             }
 
             if status.is_client_error() {
+                let elapsed_ms = request_start.elapsed().as_millis() as u64;
+                let cooldown = state
+                    .health_tracker
+                    .record_entry_failure(entry, CooldownReason::ClientError, None)
+                    .await;
+                pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                    timestamp: chrono::Utc::now(),
+                    chain_id: chain_id.clone(),
+                    from_provider: entry.provider_id.clone(),
+                    from_model: entry.model_id.clone(),
+                    from_account_id: entry.account_id,
+                    reason: CooldownReason::ClientError,
+                    cooldown_secs: Some(cooldown.as_secs_f64()),
+                    to_provider: None,
+                    latency_ms: Some(elapsed_ms),
+                    attempt_number: (entry_idx + 1) as u32,
+                    chain_length,
+                });
                 client_error_count += 1;
                 continue;
             }
@@ -3613,6 +3707,13 @@ pub(crate) async fn chat_completions_inner(
 
     let attempted = rate_limit_count + client_error_count + server_error_count;
 
+    if attempted > 0 && attempted as usize == transport_validation_errors.len() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            transport_validation_errors.remove(0),
+            "invalid_request_error",
+        );
+    }
     if attempted == 0 {
         // No upstream requests were made — every entry was skipped due to
         // missing credentials, unknown provider type, or incompatible API.
@@ -3708,9 +3809,42 @@ async fn enqueue_deferred_request(
 fn canonical_upstream_model(provider: ProviderType, model: &str) -> &str {
     if provider == ProviderType::Zai && model == "glm-5.3[1m]" {
         "glm-5.3"
+    } else if provider == ProviderType::Google {
+        canonical_google_model_id(model)
     } else {
         model
     }
+}
+
+/// Normalize Gemini 4 Argon aliases (`gemini-4-argon`, `agy-demo`) to the
+/// canonical Google API model identifier (`gemini-4-argon-eap`).
+fn canonical_google_model_id(model_id: &str) -> &str {
+    match model_id.trim() {
+        "gemini-4-argon" | "agy-demo" => "gemini-4-argon-eap",
+        other => other,
+    }
+}
+
+/// Bare model ids the `@ai-sdk/openai-compatible` adapter sends after it
+/// strips the `google/` provider prefix (`google/gemini-4-argon-eap` arrives as
+/// `gemini-4-argon-eap`).
+fn parse_google_bare_model_entry(model: &str) -> Option<crate::provider_health::ChainEntry> {
+    let model = model.trim();
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    if !is_known_google_model_id(model) {
+        return None;
+    }
+    Some(crate::provider_health::ChainEntry {
+        provider_id: "google".to_string(),
+        model_id: canonical_google_model_id(model).to_string(),
+    })
+}
+
+fn is_known_google_model_id(model: &str) -> bool {
+    matches!(model, "gemini-4-argon-eap" | "gemini-4-argon" | "agy-demo")
+        || model.starts_with("gemini-")
 }
 
 /// Rewrite the `model` field in the JSON request body.
@@ -6042,6 +6176,17 @@ fn build_google_proxy_headers(access_token: &str, is_stream: bool) -> HeaderMap 
     headers
 }
 
+fn build_google_api_proxy_headers(api_key: &str, is_stream: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(api_key) {
+        headers.insert("x-goog-api-key", v);
+    }
+    if is_stream {
+        headers.insert(header::ACCEPT, HeaderValue::from_static(TEXT_EVENT_STREAM));
+    }
+    headers
+}
+
 async fn get_google_access_token() -> Result<String, String> {
     super::ai_providers::ensure_google_oauth_token_valid().await?;
     super::ai_providers::read_google_oauth_access_token()
@@ -6067,7 +6212,7 @@ async fn get_google_project_id(
 
     let load_body = serde_json::json!({
         "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
+            "ideType": "ANTIGRAVITY",
             "platform": "PLATFORM_UNSPECIFIED",
             "pluginType": "GEMINI",
         }
@@ -6122,12 +6267,10 @@ async fn get_google_project_id(
     Ok(project)
 }
 
-fn build_google_upstream_request(
+fn build_google_request_object(
     openai_body: &[u8],
-    model_id: &str,
-    project_id: &str,
-    is_stream: bool,
-) -> Result<(String, bytes::Bytes), String> {
+    use_json_schema_parameters: bool,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut value: serde_json::Value =
         serde_json::from_slice(openai_body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let req = value
@@ -6136,6 +6279,7 @@ fn build_google_upstream_request(
 
     let mut contents: Vec<serde_json::Value> = Vec::new();
     let mut system_text_parts: Vec<String> = Vec::new();
+    let mut tool_call_names: HashMap<String, String> = HashMap::new();
 
     for message in req
         .get("messages")
@@ -6148,7 +6292,7 @@ fn build_google_upstream_request(
             .and_then(|v| v.as_str())
             .unwrap_or("user")
             .to_string();
-        if role == "system" {
+        if role == "system" || role == "developer" {
             let text = extract_openai_message_text(message.get("content"));
             if !text.is_empty() {
                 system_text_parts.push(text);
@@ -6163,7 +6307,7 @@ fn build_google_upstream_request(
         let mut parts: Vec<serde_json::Value> = if role == "tool" {
             Vec::new()
         } else {
-            extract_openai_parts(message.get("content"))
+            extract_openai_parts(message.get("content"))?
         };
 
         if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
@@ -6173,6 +6317,9 @@ fn build_google_upstream_request(
                     .and_then(|f| f.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool");
+                if let Some(tc_id) = tc.get("id").and_then(|v| v.as_str()) {
+                    tool_call_names.insert(tc_id.to_string(), name.to_string());
+                }
                 let args_value = function
                     .and_then(|f| f.get("arguments"))
                     .and_then(|v| v.as_str())
@@ -6192,6 +6339,13 @@ fn build_google_upstream_request(
             let name = message
                 .get("name")
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    message
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|id| tool_call_names.get(id).map(String::as_str))
+                })
                 .unwrap_or("tool");
             let content = extract_openai_message_text(message.get("content"));
             parts.push(serde_json::json!({
@@ -6204,6 +6358,24 @@ fn build_google_upstream_request(
 
         if parts.is_empty() {
             continue;
+        }
+        if role == "tool" {
+            if let Some(last) = contents.last_mut() {
+                let last_is_tool_turn = last.get("role").and_then(|v| v.as_str()) == Some("user")
+                    && last
+                        .get("parts")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|arr| {
+                            !arr.is_empty()
+                                && arr.iter().all(|p| p.get("functionResponse").is_some())
+                        });
+                if last_is_tool_turn {
+                    if let Some(last_parts) = last.get_mut("parts").and_then(|v| v.as_array_mut()) {
+                        last_parts.extend(parts);
+                        continue;
+                    }
+                }
+            }
         }
         contents.push(serde_json::json!({
             "role": gemini_role,
@@ -6233,7 +6405,11 @@ fn build_google_upstream_request(
     if let Some(v) = req.get("top_p").and_then(|v| v.as_f64()) {
         generation_config.insert("topP".to_string(), serde_json::json!(v));
     }
-    if let Some(v) = req.get("max_tokens").and_then(|v| v.as_u64()) {
+    if let Some(v) = req
+        .get("max_tokens")
+        .or_else(|| req.get("max_completion_tokens"))
+        .and_then(|v| v.as_u64())
+    {
         generation_config.insert("maxOutputTokens".to_string(), serde_json::json!(v));
     }
     if let Some(v) = req.get("stop") {
@@ -6258,6 +6434,11 @@ fn build_google_upstream_request(
 
     if let Some(tools) = req.get("tools").and_then(|v| v.as_array()) {
         let mut function_decls = Vec::new();
+        let params_key = if use_json_schema_parameters {
+            "parametersJsonSchema"
+        } else {
+            "parameters"
+        };
         for tool in tools {
             if tool.get("type").and_then(|v| v.as_str()) != Some("function") {
                 continue;
@@ -6274,7 +6455,7 @@ fn build_google_upstream_request(
                 decl.insert("description".to_string(), serde_json::json!(desc));
             }
             if let Some(params) = func.get("parameters") {
-                decl.insert("parameters".to_string(), params.clone());
+                decl.insert(params_key.to_string(), params.clone());
             }
             function_decls.push(serde_json::Value::Object(decl));
         }
@@ -6314,9 +6495,20 @@ fn build_google_upstream_request(
         }
     }
 
+    Ok(request)
+}
+
+fn build_google_upstream_request(
+    openai_body: &[u8],
+    model_id: &str,
+    project_id: &str,
+    is_stream: bool,
+) -> Result<(String, bytes::Bytes), String> {
+    let request = build_google_request_object(openai_body, false)?;
+    let canonical_model = canonical_google_model_id(model_id);
     let payload = serde_json::json!({
         "project": project_id,
-        "model": model_id,
+        "model": canonical_model,
         "request": serde_json::Value::Object(request),
     });
     let body = serde_json::to_vec(&payload)
@@ -6333,18 +6525,66 @@ fn build_google_upstream_request(
     ))
 }
 
-fn extract_openai_parts(content: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+// Explicit compatible gateways retain their chat-completions transport.
+fn uses_native_google_api(base_url: Option<&str>) -> bool {
+    let Some(base) = base_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    url::Url::parse(base).is_ok_and(|url| {
+        url.host_str() == Some("generativelanguage.googleapis.com")
+            && !url.path().trim_end_matches('/').ends_with("/openai")
+    })
+}
+
+fn build_google_api_upstream_request(
+    openai_body: &[u8],
+    model_id: &str,
+    base_url: Option<&str>,
+    is_stream: bool,
+) -> Result<(String, bytes::Bytes), String> {
+    let request = build_google_request_object(openai_body, true)?;
+    let body = serde_json::to_vec(&serde_json::Value::Object(request))
+        .map(bytes::Bytes::from)
+        .map_err(|e| format!("Failed to serialize Google API request body: {}", e))?;
+    let action = if is_stream {
+        "streamGenerateContent?alt=sse"
+    } else {
+        "generateContent"
+    };
+    let canonical_model = canonical_google_model_id(model_id);
+    let base = base_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let trimmed = s.trim_end_matches('/');
+            let without_openai = trimmed.strip_suffix("/openai").unwrap_or(trimmed);
+            if without_openai.ends_with("/v1beta") || without_openai.ends_with("/v1") {
+                without_openai.to_string()
+            } else {
+                format!("{}/v1beta", without_openai)
+            }
+        })
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+    Ok((
+        format!("{}/models/{}:{}", base, canonical_model, action),
+        body,
+    ))
+}
+
+fn extract_openai_parts(
+    content: Option<&serde_json::Value>,
+) -> Result<Vec<serde_json::Value>, String> {
     let Some(content) = content else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if let Some(s) = content.as_str() {
         if s.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        return vec![serde_json::json!({ "text": s })];
+        return Ok(vec![serde_json::json!({ "text": s })]);
     }
     let Some(arr) = content.as_array() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for part in arr {
@@ -6361,13 +6601,27 @@ fn extract_openai_parts(content: Option<&serde_json::Value>) -> Vec<serde_json::
                     .and_then(|v| v.get("url"))
                     .and_then(|v| v.as_str())
                 {
-                    out.push(serde_json::json!({ "text": format!("[image:{}]", url) }));
+                    if let Some(data) = url.strip_prefix("data:") {
+                        let (mime, encoded) = data.split_once(";base64,").filter(|(mime, encoded)| mime.starts_with("image/") && !encoded.is_empty())
+                            .ok_or_else(|| "Invalid Gemini image data URI: expected image MIME type and base64 data".to_string())?;
+                        out.push(
+                            serde_json::json!({"inlineData":{"mimeType":mime,"data":encoded}}),
+                        );
+                    } else if url::Url::parse(url).is_ok_and(|u| {
+                        u.scheme() == "https"
+                            && u.host_str() == Some("generativelanguage.googleapis.com")
+                            && u.path().starts_with("/v1beta/files/")
+                    }) {
+                        out.push(serde_json::json!({"fileData":{"fileUri":url}}));
+                    } else {
+                        return Err("Native Gemini images require a base64 data URI or a Gemini Files API URI. Upload external images as base64 data URIs.".into());
+                    }
                 }
             }
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 fn extract_openai_message_text(content: Option<&serde_json::Value>) -> String {
@@ -6454,8 +6708,18 @@ fn translate_google_json_to_openai(
         .unwrap_or(0);
     let completion_tokens = response
         .get("usageMetadata")
-        .and_then(|u| u.get("candidatesTokenCount"))
-        .and_then(|v| v.as_u64())
+        .map(|usage| {
+            usage
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .saturating_add(
+                    usage
+                        .get("thoughtsTokenCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                )
+        })
         .unwrap_or(0);
     let total_tokens = response
         .get("usageMetadata")
@@ -8764,5 +9028,173 @@ mod tests {
             response.headers()["anthropic-ratelimit-unified-reset"],
             until.timestamp().to_string().as_str()
         );
+    }
+
+    #[test]
+    fn google_json_usage_includes_thought_tokens() {
+        for wrapped in [false, true] {
+            let response = serde_json::json!({
+                "candidates": [{"content": {"parts": [{"text": "Done"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2, "thoughtsTokenCount": 30}
+            });
+            let body = if wrapped {
+                serde_json::json!({"response": response})
+            } else {
+                response
+            };
+            let (translated, usage) = translate_google_json_to_openai(
+                &serde_json::to_vec(&body).unwrap(),
+                "gemini-4-argon-eap",
+                0,
+            )
+            .unwrap();
+            assert_eq!(usage, Some((10, 32)));
+            let translated: serde_json::Value = serde_json::from_slice(&translated).unwrap();
+            assert_eq!(translated["usage"]["completion_tokens"], 32);
+            assert_eq!(translated["usage"]["total_tokens"], 42);
+        }
+    }
+
+    #[test]
+    fn google_bare_and_direct_model_entries_canonicalize_argon_aliases() {
+        let entry = parse_google_bare_model_entry("gemini-4-argon").unwrap();
+        assert_eq!(entry.provider_id, "google");
+        assert_eq!(entry.model_id, "gemini-4-argon-eap");
+
+        let entry2 = parse_google_bare_model_entry("agy-demo").unwrap();
+        assert_eq!(entry2.provider_id, "google");
+        assert_eq!(entry2.model_id, "gemini-4-argon-eap");
+
+        let direct = parse_direct_model_entry("google/gemini-4-argon").unwrap();
+        assert_eq!(direct.provider_id, "google");
+        assert_eq!(direct.model_id, "gemini-4-argon-eap");
+
+        let direct_gemini = parse_direct_model_entry("gemini/gemini-4-argon-eap").unwrap();
+        assert_eq!(direct_gemini.provider_id, "google");
+        assert_eq!(direct_gemini.model_id, "gemini-4-argon-eap");
+    }
+
+    #[test]
+    fn google_native_request_preserves_image_parts() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"Describe"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}},
+            {"type":"image_url","image_url":{"url":"https://generativelanguage.googleapis.com/v1beta/files/image123"}}
+        ]}]});
+        let (_, bytes) = build_google_api_upstream_request(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-pro",
+            None,
+            false,
+        )
+        .unwrap();
+        let native: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let parts = &native["contents"][0]["parts"];
+        assert_eq!(parts[0]["text"], "Describe");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "aGVsbG8=");
+        assert_eq!(
+            parts[2]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/image123"
+        );
+    }
+
+    #[test]
+    fn google_native_request_rejects_external_image_urls() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+        ]}]});
+        assert!(build_google_api_upstream_request(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-pro",
+            None,
+            false
+        )
+        .unwrap_err()
+        .contains("base64 data URI"));
+    }
+
+    #[test]
+    fn google_custom_gateways_keep_compatible_transport() {
+        assert!(uses_native_google_api(None));
+        assert!(uses_native_google_api(Some(
+            "https://generativelanguage.googleapis.com/v1beta"
+        )));
+        for base in [
+            "https://gateway.example/v1",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ] {
+            assert!(!uses_native_google_api(Some(base)));
+            assert_eq!(
+                completions_url(ProviderType::Google, Some(base)),
+                Some(format!("{base}/chat/completions"))
+            );
+        }
+        assert_eq!(ProviderType::from_id("gemini"), Some(ProviderType::Google));
+    }
+
+    #[test]
+    fn build_google_api_request_uses_parameters_json_schema_and_resolves_tool_call_id() {
+        let body = serde_json::json!({
+            "model": "google/gemini-4-argon-eap",
+            "messages": [
+                { "role": "user", "content": "Run ping" },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "ping_tool",
+                            "arguments": "{\"target\":\"localhost\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": "pong"
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "ping_tool",
+                    "description": "Ping a host",
+                    "parameters": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "type": "object",
+                        "properties": { "target": { "type": "string" } },
+                        "additionalProperties": false
+                    }
+                }
+            }]
+        });
+
+        let (url, payload_bytes) = build_google_api_upstream_request(
+            serde_json::to_vec(&body).unwrap().as_slice(),
+            "gemini-4-argon",
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon-eap:generateContent"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(payload_bytes.as_ref()).unwrap();
+        assert_eq!(
+            payload["contents"][1]["parts"][0]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
+        assert_eq!(
+            payload["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "ping_tool"
+        );
+        assert!(payload["tools"][0]["functionDeclarations"][0]
+            .get("parametersJsonSchema")
+            .is_some());
     }
 }

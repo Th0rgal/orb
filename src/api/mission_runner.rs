@@ -5730,6 +5730,16 @@ pub(crate) fn detect_opencode_provider_auth(
             configured_providers.insert("google".to_string());
         }
     }
+    if let Ok(value) = std::env::var("GEMINI_API_KEY") {
+        if !value.trim().is_empty() {
+            has_google = true;
+            configured_providers.insert("google".to_string());
+        }
+    }
+    if crate::api::ai_providers::google_cli_proxy_account_available() {
+        has_google = true;
+        configured_providers.insert("google".to_string());
+    }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
@@ -5782,6 +5792,18 @@ pub(crate) fn detect_opencode_provider_auth(
                 }
             }
         }
+    }
+
+    // Explicit provider configuration wins over every credential source.
+    if app_working_dir.is_some_and(|working_dir| {
+        crate::api::ai_providers::provider_explicitly_disabled(
+            working_dir,
+            crate::ai_providers::ProviderType::Google,
+        )
+    }) {
+        has_google = false;
+        configured_providers.remove("google");
+        configured_providers.remove("gemini");
     }
 
     OpenCodeAuthState {
@@ -6134,6 +6156,18 @@ fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
             );
         }
     }
+    if let Ok(key) = std::env::var("SANDBOXED_PROXY_SECRET") {
+        if !key.trim().is_empty() {
+            map.insert(
+                "google".into(),
+                serde_json::json!({"type":"api","key":&key}),
+            );
+            map.insert(
+                "gemini".into(),
+                serde_json::json!({"type":"api","key":&key}),
+            );
+        }
+    }
     if super::oauth_owner::management_enabled() {
         // Kimi uses the host adapter for payload normalization; API auth keeps
         // OpenCode from renewing a copied subscription token independently.
@@ -6404,6 +6438,36 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 "options": options
             }))
         }
+        "google" | "gemini" => {
+            // Route Google/Gemini models (including `gemini-4-argon-eap`) through
+            // the host proxy so the router uses the Gemini API key first and falls
+            // back to CLIProxyAPI automatically.
+            let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+            let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    tracing::error!("SANDBOXED_PROXY_SECRET not set; google proxy auth will fail");
+                    String::new()
+                });
+            let mut options = serde_json::json!({
+                "baseURL": format!("http://{}:{}/v1", host_ip, port),
+                "apiKey": proxy_key
+            });
+            if let Some(mid) = mission_id {
+                options["headers"] = serde_json::json!({
+                    crate::api::proxy_liveness::MISSION_ID_HEADER: mid
+                });
+            }
+            Some(serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Google",
+                "models": {
+                    model_id: { "name": model_id }
+                },
+                "options": options
+            }))
+        }
         _ => custom_opencode_provider_definition(app_working_dir, provider_id),
     };
 
@@ -6427,17 +6491,56 @@ pub(crate) fn ensure_opencode_provider_for_model(
         None => return,
     };
 
+    if matches!(provider_id, "google" | "gemini")
+        && ["google", "gemini"].iter().any(|alias| {
+            providers_map
+                .get(*alias)
+                .and_then(|provider| provider.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        })
+    {
+        return;
+    }
+
+    // A mission may register its explicit override and then its agent default.
+    // Refresh the Google transport while retaining both model definitions.
+    let mut provider_def = provider_def;
+    if matches!(provider_id, "google" | "gemini") {
+        if let Some(existing) = providers_map.get(provider_id).and_then(|v| v.as_object()) {
+            let mut merged = existing.clone();
+            let mut models = existing
+                .get("models")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            if let Some(definition) = provider_def.as_object() {
+                merged.extend(definition.clone());
+                if let Some(new_models) = definition.get("models").and_then(|v| v.as_object()) {
+                    for (id, definition) in new_models {
+                        models
+                            .entry(id.clone())
+                            .or_insert_with(|| definition.clone());
+                    }
+                }
+            }
+            merged.insert("models".to_string(), serde_json::Value::Object(models));
+            provider_def = serde_json::Value::Object(merged);
+        }
+    }
+
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
     if provider_id == "builtin"
         || provider_id == "kimi"
         || provider_id == "antigravity"
+        || matches!(provider_id, "google" | "gemini")
         || cli_proxy_owned_provider
     {
         // Always overwrite proxy-backed providers — the proxy secret
-        // (options.apiKey) changes on every server restart, Kimi must not
-        // keep a stale api.kimi.com block from workspace config, and a
+        // (options.apiKey) changes on every server restart, Kimi/Google must not
+        // keep a stale upstream block from workspace config, and a
         // CLIProxyAPI-owned Anthropic/OpenAI block must track the proxy URL.
         providers_map.insert(provider_id.to_string(), provider_def);
     } else if let Some(existing) = providers_map.get_mut(provider_id) {
@@ -7917,15 +8020,21 @@ pub(crate) async fn check_claudecode_connectivity(
 
 /// Proactive API connectivity check for OpenCode.
 /// Tests basic internet, then checks the appropriate API based on configured providers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn check_opencode_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
-    has_openai: bool,
-    has_anthropic: bool,
-    has_google: bool,
-    has_zai: bool,
-    has_minimax: bool,
+    auth: &OpenCodeAuthState,
+    host_proxy_url: Option<&str>,
 ) -> Result<(), String> {
+    let has_openai = auth.has_openai;
+    let has_anthropic = auth.has_anthropic;
+    let has_google = auth.has_google;
+    let has_zai = auth.has_zai;
+    let has_minimax = auth.configured_providers.contains("minimax");
+    if let Some(url) = host_proxy_url {
+        return check_api_reachability(workspace_exec, cwd, "Sandboxed model proxy", url).await;
+    }
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
@@ -12048,6 +12157,103 @@ mod tests {
             provider["models"]["k3-256k"]["capabilities"]["interleaved"]["field"],
             "reasoning_content"
         );
+    }
+
+    #[test]
+    fn ensure_opencode_google_preserves_override_when_registering_agent_model() {
+        let temp = tempfile::tempdir().unwrap();
+        for provider in ["google", "gemini"] {
+            let config_dir = temp.path().join(provider);
+            fs::create_dir_all(&config_dir).unwrap();
+            for model in ["gemini-4-argon-eap", "gemini-3.1-pro-preview"] {
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    temp.path(),
+                    &format!("{provider}/{model}"),
+                    "10.88.0.1",
+                    None,
+                );
+            }
+            let config: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+            )
+            .unwrap();
+            let definition = &config["provider"][provider];
+            assert!(definition["models"]["gemini-4-argon-eap"].is_object());
+            assert!(definition["models"]["gemini-3.1-pro-preview"].is_object());
+            assert_eq!(definition["npm"], "@ai-sdk/openai-compatible");
+            assert!(definition["options"]["baseURL"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://10.88.0.1:"));
+        }
+    }
+
+    #[test]
+    fn detect_opencode_google_disablement_wins_over_managed_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_dir = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store_dir).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Google,
+            "Google".into(),
+        );
+        provider.api_key = Some("test-google-key".into());
+        fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(super::detect_opencode_provider_auth(Some(temp.path())).has_google);
+        for alias in ["google", "gemini"] {
+            fs::write(
+                temp.path().join("opencode.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "provider": {alias: {"enabled": false}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let auth = super::detect_opencode_provider_auth(Some(temp.path()));
+            assert!(!auth.has_google, "disabled alias {alias}");
+            assert!(!auth.configured_providers.contains("google"));
+            assert!(!auth.configured_providers.contains("gemini"));
+        }
+    }
+
+    #[test]
+    fn ensure_opencode_provider_preserves_disabled_google() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        for aliases in [
+            serde_json::json!({"google":{"enabled":false}}),
+            serde_json::json!({"google":{},"gemini":{"enabled":false}}),
+            serde_json::json!({"google":{"enabled":false},"gemini":{}}),
+        ] {
+            for prefix in ["google", "gemini"] {
+                let original = serde_json::json!({"provider":aliases});
+                fs::write(
+                    config_dir.join("opencode.json"),
+                    serde_json::to_vec(&original).unwrap(),
+                )
+                .unwrap();
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    &app_dir,
+                    &format!("{prefix}/gemini-4-argon-eap"),
+                    "10.88.0.1",
+                    None,
+                );
+                let config: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(config, original);
+            }
+        }
     }
 
     #[test]

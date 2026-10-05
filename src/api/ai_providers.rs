@@ -1825,9 +1825,16 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
 /// These are used by chain resolution to include standard providers alongside
 /// custom providers from `AIProviderStore`.
 pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health::StandardAccount> {
+    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
+    read_standard_accounts_with_auth(working_dir, &auth)
+}
+
+fn read_standard_accounts_with_auth(
+    working_dir: &Path,
+    auth: &serde_json::Value,
+) -> Vec<crate::provider_health::StandardAccount> {
     let config_path = get_opencode_config_path(working_dir);
     let opencode_config = read_opencode_config(&config_path).unwrap_or_default();
-    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
     let auth_obj = auth.as_object();
 
     let mut accounts = Vec::new();
@@ -1941,6 +1948,51 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         }
     }
 
+    // The Gemini CLI already treats GEMINI_API_KEY as the most explicit Google
+    // credential, but proxy routing is resolved from StandardAccount entries.
+    // Materialize the process-level key here as well so OpenCode's host-proxy
+    // route can actually use it. Keep it distinct from the auth.json account:
+    // a direct API key and Google OAuth/CLIProxyAPI are intentionally separate
+    // attempts in the same failover chain.
+    let google_disabled = get_provider_config_entry(&opencode_config, ProviderType::Google)
+        .and_then(|e| e.enabled)
+        == Some(false);
+    if !google_disabled {
+        let env_api_key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GOOGLE_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| {
+                std::env::var("GOOGLE_GENERATIVE_AI_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            });
+        if let Some(api_key) = env_api_key.filter(|api_key| {
+            !accounts.iter().any(|account| {
+                account.provider_type == ProviderType::Google
+                    && account.api_key.as_deref() == Some(api_key.as_str())
+            })
+        }) {
+            let base_url = get_provider_config_entry(&opencode_config, ProviderType::Google)
+                .and_then(|entry| entry.base_url);
+            accounts.insert(
+                0,
+                crate::provider_health::StandardAccount {
+                    account_id: crate::provider_health::stable_provider_uuid("google-env-api-key"),
+                    provider_type: ProviderType::Google,
+                    api_key: Some(api_key),
+                    has_oauth: false,
+                    base_url,
+                    oauth_expires_at: None,
+                },
+            );
+        }
+    }
+
     // Anthropic subscription routing is served by CLI Proxy API, which exposes
     // an Anthropic/OpenAI-compatible local endpoint backed by Claude accounts.
     // Those credentials do not live in OpenCode auth.json, so synthesize a
@@ -2022,7 +2074,52 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         });
     }
 
+    if !seen_types.contains(&ProviderType::Google)
+        && !google_disabled
+        && google_cli_proxy_account_available()
+    {
+        accounts.push(crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("google-cli-proxy"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(i64::MAX),
+        });
+    }
+
     accounts
+}
+
+#[cfg(test)]
+mod google_standard_account_tests {
+    use super::*;
+    #[test]
+    fn google_auth_accepts_gemini_alias_and_its_gateway() {
+        assert_eq!(
+            opencode_auth_keys(ProviderType::Google),
+            vec!["google", "gemini"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("opencode.json"),
+            r#"{"provider":{"gemini":{"baseURL":"https://gateway.example/v1"}}}"#,
+        )
+        .unwrap();
+        let accounts = read_standard_accounts_with_auth(
+            dir.path(),
+            &serde_json::json!({"gemini":{"type":"api","key":"test-gemini-alias"}}),
+        );
+        let account = accounts
+            .iter()
+            .find(|a| a.api_key.as_deref() == Some("test-gemini-alias"))
+            .unwrap();
+        assert_eq!(account.provider_type, ProviderType::Google);
+        assert_eq!(
+            account.base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
+    }
 }
 
 pub(crate) fn anthropic_cli_proxy_account_available() -> bool {
@@ -2326,6 +2423,42 @@ pub(crate) fn xai_cli_proxy_account_available() -> bool {
 
     super::oauth_owner::management_enabled()
         || has_refreshable_cli_proxy_account_of_type("xai-", "xai")
+}
+
+/// True when CLIProxyAPI has a Google / Antigravity / Gemini credential it can
+/// serve as a fallback route.
+pub(crate) fn google_cli_proxy_account_available() -> bool {
+    if env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
+        return false;
+    }
+
+    env_var_bool("CLI_PROXY_GEMINI_ENABLED", false)
+        || has_refreshable_cli_proxy_account_of_type("antigravity-", "antigravity")
+        || has_refreshable_cli_proxy_account_of_type("gemini-", "gemini")
+        || !cli_proxy_config_gemini_keys().is_empty()
+}
+
+pub(crate) fn cli_proxy_config_gemini_keys() -> Vec<String> {
+    let path = match std::env::var("CLI_PROXY_CONFIG_PATH") {
+        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
+        _ if cfg!(test) => return vec![],
+        _ => std::path::PathBuf::from("/etc/cli-proxy-api/config.yaml"),
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_json::Value>(&contents) else {
+        return vec![];
+    };
+    value
+        .get("gemini-api-key")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("api-key").and_then(|k| k.as_str()))
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn has_refreshable_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
@@ -6982,6 +7115,7 @@ fn opencode_auth_keys(provider_type: ProviderType) -> Vec<&'static str> {
     match provider_type {
         ProviderType::Custom => Vec::new(),
         ProviderType::OpenAI => vec!["openai", "codex"],
+        ProviderType::Google => vec!["google", "gemini"],
         _ => vec![provider_type.id()],
     }
 }
@@ -7040,7 +7174,14 @@ fn get_provider_config_entry(
     provider: ProviderType,
 ) -> Option<ProviderConfigEntry> {
     let providers = config.get("provider")?.as_object()?;
-    let entry = providers.get(provider.id())?.as_object()?;
+    let entry = providers
+        .get(provider.id())
+        .or_else(|| {
+            (provider == ProviderType::Google)
+                .then(|| providers.get("gemini"))
+                .flatten()
+        })?
+        .as_object()?;
     let name = entry
         .get("name")
         .and_then(|v| v.as_str())
@@ -7069,6 +7210,16 @@ fn get_provider_config_entry(
         enabled,
         google_project_id,
     })
+}
+
+pub(crate) fn provider_explicitly_disabled(working_dir: &Path, provider: ProviderType) -> bool {
+    let config = read_opencode_config(&get_opencode_config_path(working_dir)).unwrap_or_default();
+    get_provider_config_entry(&config, provider).and_then(|entry| entry.enabled) == Some(false)
+        || (provider == ProviderType::Google
+            && config
+                .pointer("/provider/gemini/enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false))
 }
 
 fn set_provider_config_entry(
