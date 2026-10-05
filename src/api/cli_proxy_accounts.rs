@@ -145,7 +145,12 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
                         .as_deref()
                         .is_some_and(|email| email.eq_ignore_ascii_case(&a.identity)))
         });
-        if a.disabled && old.is_none() {
+        let unusable = a.disabled
+            || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
+                < chrono::Utc::now().timestamp_millis();
+        // Preserve healthy legacy sources until the one-time migration replaces
+        // a stale/disabled proxy login. Never erase the import source at startup.
+        if unusable && old.as_ref().is_none_or(|p| p.cli_proxy_auth_file.is_none()) {
             continue;
         }
         let mut p = old.clone().unwrap_or_else(|| {
@@ -273,6 +278,27 @@ mod tests {
             store.get(id).await.unwrap().cli_proxy_auth_file.as_deref(),
             Some("kimi-import.json")
         );
+    }
+
+    #[tokio::test]
+    async fn stale_disabled_proxy_does_not_erase_healthy_migration_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AIProviderStore::new(dir.path().join("providers.json")).await;
+        let mut row = AIProvider::new(ProviderType::Anthropic, "Current login".into());
+        row.account_email = Some("user@example.com".into());
+        row.oauth = Some(OAuthCredentials {
+            access_token: "usable-access".into(),
+            refresh_token: "usable-refresh".into(),
+            expires_at: 4070908800000,
+        });
+        let id = store.add(row).await;
+        std::fs::write(dir.path().join("claude-old.json"), serde_json::json!({
+            "type":"claude","email":"user@example.com","disabled":true,"access_token":"old-access","refresh_token":"old-refresh","expired":"2000-01-01T00:00:00Z"
+        }).to_string()).unwrap();
+        reconcile_from(&store, dir.path()).await;
+        let row = store.get(id).await.unwrap();
+        assert_eq!(row.oauth.unwrap().refresh_token, "usable-refresh");
+        assert!(row.cli_proxy_auth_file.is_none());
     }
 
     #[test]
