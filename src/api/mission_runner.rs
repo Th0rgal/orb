@@ -6521,6 +6521,32 @@ pub(crate) fn ensure_opencode_provider_for_model(
         return;
     }
 
+    // A mission may register its explicit override and then its agent default.
+    // Refresh the Google transport while retaining both model definitions.
+    let mut provider_def = provider_def;
+    if matches!(provider_id, "google" | "gemini") {
+        if let Some(existing) = providers_map.get(provider_id).and_then(|v| v.as_object()) {
+            let mut merged = existing.clone();
+            let mut models = existing
+                .get("models")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            if let Some(definition) = provider_def.as_object() {
+                merged.extend(definition.clone());
+                if let Some(new_models) = definition.get("models").and_then(|v| v.as_object()) {
+                    for (id, definition) in new_models {
+                        models
+                            .entry(id.clone())
+                            .or_insert_with(|| definition.clone());
+                    }
+                }
+            }
+            merged.insert("models".to_string(), serde_json::Value::Object(models));
+            provider_def = serde_json::Value::Object(merged);
+        }
+    }
+
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
@@ -8015,13 +8041,14 @@ pub(crate) async fn check_claudecode_connectivity(
 pub(crate) async fn check_opencode_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
-    has_openai: bool,
-    has_anthropic: bool,
-    has_google: bool,
-    has_zai: bool,
-    has_minimax: bool,
+    auth: &OpenCodeAuthState,
     google_proxy_url: Option<&str>,
 ) -> Result<(), String> {
+    let has_openai = auth.has_openai;
+    let has_anthropic = auth.has_anthropic;
+    let has_google = auth.has_google;
+    let has_zai = auth.has_zai;
+    let has_minimax = auth.configured_providers.contains("minimax");
     if has_google {
         if let Some(url) = google_proxy_url {
             return check_api_reachability(workspace_exec, cwd, "Sandboxed Google proxy", url)
@@ -12390,6 +12417,36 @@ mod tests {
             provider["models"]["k3-256k"]["capabilities"]["interleaved"]["field"],
             "reasoning_content"
         );
+    }
+
+    #[test]
+    fn ensure_opencode_google_preserves_override_when_registering_agent_model() {
+        let temp = tempfile::tempdir().unwrap();
+        for provider in ["google", "gemini"] {
+            let config_dir = temp.path().join(provider);
+            fs::create_dir_all(&config_dir).unwrap();
+            for model in ["gemini-4-argon-eap", "gemini-3.1-pro-preview"] {
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    temp.path(),
+                    &format!("{provider}/{model}"),
+                    "10.88.0.1",
+                    None,
+                );
+            }
+            let config: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+            )
+            .unwrap();
+            let definition = &config["provider"][provider];
+            assert!(definition["models"]["gemini-4-argon-eap"].is_object());
+            assert!(definition["models"]["gemini-3.1-pro-preview"].is_object());
+            assert_eq!(definition["npm"], "@ai-sdk/openai-compatible");
+            assert!(definition["options"]["baseURL"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://10.88.0.1:"));
+        }
     }
 
     #[test]

@@ -6670,8 +6670,18 @@ fn translate_google_json_to_openai(
         .unwrap_or(0);
     let completion_tokens = response
         .get("usageMetadata")
-        .and_then(|u| u.get("candidatesTokenCount"))
-        .and_then(|v| v.as_u64())
+        .map(|usage| {
+            usage
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .saturating_add(
+                    usage
+                        .get("thoughtsTokenCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                )
+        })
         .unwrap_or(0);
     let total_tokens = response
         .get("usageMetadata")
@@ -8980,6 +8990,31 @@ mod tests {
             response.headers()["anthropic-ratelimit-unified-reset"],
             until.timestamp().to_string().as_str()
         );
+    }
+
+    #[test]
+    fn google_json_usage_includes_thought_tokens() {
+        for wrapped in [false, true] {
+            let response = serde_json::json!({
+                "candidates": [{"content": {"parts": [{"text": "Done"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2, "thoughtsTokenCount": 30}
+            });
+            let body = if wrapped {
+                serde_json::json!({"response": response})
+            } else {
+                response
+            };
+            let (translated, usage) = translate_google_json_to_openai(
+                &serde_json::to_vec(&body).unwrap(),
+                "gemini-4-argon-eap",
+                0,
+            )
+            .unwrap();
+            assert_eq!(usage, Some((10, 32)));
+            let translated: serde_json::Value = serde_json::from_slice(&translated).unwrap();
+            assert_eq!(translated["usage"]["completion_tokens"], 32);
+            assert_eq!(translated["usage"]["total_tokens"], 42);
+        }
     }
 
     #[test]

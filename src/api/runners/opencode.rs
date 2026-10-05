@@ -288,11 +288,7 @@ pub async fn run_opencode_turn(
     if let Err(err_msg) = check_opencode_connectivity(
         &workspace_exec,
         work_dir,
-        has_openai,
-        has_anthropic,
-        has_google,
-        auth_state.has_zai,
-        auth_state.configured_providers.contains("minimax"),
+        &auth_state,
         google_via_proxy.then_some(google_proxy_url.as_str()),
     )
     .await
