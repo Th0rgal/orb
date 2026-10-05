@@ -4200,6 +4200,18 @@ fn partition_restored_control_messages(
 
 /// Serialize the control session queue to a stable JSON snapshot for
 /// persistence across restarts (see `MissionStore::save_control_queue`).
+fn prune_empty_provisional_runners(
+    runners: &mut HashMap<Uuid, super::mission_runner::MissionRunner>,
+) {
+    runners.retain(|_, runner| {
+        runner.state != super::mission_runner::MissionRunState::Queued
+            || runner.durable_run.is_some()
+            || runner.inflight_message().is_some()
+            || !runner.queue.is_empty()
+            || runner.cancellation_requested()
+    });
+}
+
 fn serialize_queue_snapshot(
     queue: &VecDeque<ControlQueueEntry>,
     parallel_runners: &std::collections::HashMap<Uuid, super::mission_runner::MissionRunner>,
@@ -23900,6 +23912,7 @@ async fn control_actor_loop(
                                 ).await {
                                     queue.retain(|entry| entry.0 != id);
                                     if let Some(runner) = parallel_runners.get_mut(&mid) { runner.remove_from_queue(id); }
+                                    prune_empty_provisional_runners(&mut parallel_runners);
                                     let _ = respond.send(UserMessageAck::Rejected(format!("failed to persist queued delivery: {error}")));
                                     continue;
                                 }
@@ -26929,6 +26942,7 @@ async fn control_actor_loop(
                             }
                         }
 
+                        prune_empty_provisional_runners(&mut parallel_runners);
                         let _ = respond.send(removed);
                     }
                     ControlCommand::ClearQueue { mission_id, respond } => {
@@ -27039,6 +27053,7 @@ async fn control_actor_loop(
                                 tracing::info!("Cleared {} total queued messages (main + parallel)", cleared);
                             }
                         }
+                        prune_empty_provisional_runners(&mut parallel_runners);
                         let _ = respond.send(cleared);
                     }
                 }
@@ -38600,6 +38615,45 @@ Investigate <service/> failures.
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn cancelling_provisional_parallel_queues_releases_cached_runner_settings() {
+        for clear_all in [false, true] {
+            let id = Uuid::new_v4();
+            let mut runner = crate::api::mission_runner::MissionRunner::new(
+                id,
+                Uuid::new_v4(),
+                None,
+                Some("old-backend".into()),
+                None,
+                None,
+                Some("old-model".into()),
+                None,
+                false,
+            );
+            let message = Uuid::new_v4();
+            runner.queue_message(
+                message,
+                "pending".into(),
+                None,
+                Some("host-queue:api:test".into()),
+            );
+            let mut runners = HashMap::from([(id, runner)]);
+            prune_empty_provisional_runners(&mut runners);
+            assert!(runners.contains_key(&id));
+            let runner = runners.get_mut(&id).unwrap();
+            if clear_all {
+                runner.clear_queue();
+            } else {
+                assert!(runner.remove_from_queue(message));
+            }
+            prune_empty_provisional_runners(&mut runners);
+            assert!(
+                !runners.contains_key(&id),
+                "later dispatch must reload current mission settings"
+            );
+        }
     }
 
     #[test]
