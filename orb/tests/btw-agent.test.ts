@@ -168,3 +168,22 @@ it('replaces a deleted saved side mission without hiding other lookup errors',as
  expect(btwSession('deleted-parent')?.id).toBe('replacement-child');
  expect(sendMissionMessage).not.toHaveBeenCalled();
 });
+
+it('rotates rejected content keys but retains uncertain launch keys',async()=>{
+ const {ApiError}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'conflict-parent',status:'active',history:[],tags:[],title:null,created_at:'',updated_at:''});
+ const ask=()=>askBtwAgent('conflict-parent','Q','context',[],new AbortController().signal,()=>{});
+ const attempt=()=>JSON.parse(vi.mocked(api).mock.calls.at(-1)![1]!.body as string).idempotency_key;
+ vi.mocked(api).mockRejectedValueOnce(new Error('network lost'));
+ await expect(ask()).rejects.toThrow('network lost');
+ const original=attempt();
+ vi.mocked(api).mockRejectedValueOnce(new ApiError(409,'This side request key was already used for different launch content; the new question was not sent.'));
+ await expect(ask()).rejects.toThrow('different launch content');
+ expect(attempt()).toBe(original);
+ vi.mocked(api).mockRejectedValueOnce(new Error('network lost again'));
+ await expect(ask()).rejects.toThrow('network lost again');
+ const fresh=attempt();expect(fresh).not.toBe(original);
+ vi.mocked(api).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
+ await expect(ask()).rejects.toThrow('Unavailable');
+ expect(attempt()).toBe(fresh);
+});

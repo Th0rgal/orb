@@ -151,7 +151,10 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
    const attempt=localStorage.getItem(attemptKey)||crypto.randomUUID();localStorage.setItem(attemptKey,attempt);
-   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})});
+   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
+    if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===attempt)localStorage.removeItem(attemptKey);
+    throw error;
+   });
    s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);
   };
   if(!reuse)await createSide();
