@@ -53,3 +53,14 @@ test('folder rename retains expanded descendants', async ({page}) => {
   await expect(page.getByRole('button',{name:'nested',exact:true})).toHaveAttribute('aria-expanded','true');
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
 });
+
+
+test('off-screen archived rows do not move the project viewport', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=600;});
+  const before=await page.locator('.sb-scroll').evaluate(el=>el.scrollTop);
+  await page.getByRole('button',{name:'Remove archived row',exact:true}).click();
+  await expect(page.getByRole('button',{name:'archive0',exact:true})).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(await page.locator('.sb-scroll').evaluate(el=>el.scrollTop)).toBe(before);
+});
