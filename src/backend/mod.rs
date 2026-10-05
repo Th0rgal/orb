@@ -3,7 +3,6 @@ pub mod chatgpt_ui;
 pub mod claudecode;
 pub mod codex;
 pub mod events;
-pub mod gemini;
 pub mod grok;
 pub mod native_loops;
 pub mod opencode;

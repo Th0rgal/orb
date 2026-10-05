@@ -31,7 +31,7 @@ struct CreateWorkerParams {
     idempotency_key: Option<String>,
     #[serde(default)]
     agent: Option<String>,
-    /// Backend to use: "claudecode", "codex", "gemini", "opencode"
+    /// Backend to use: "claudecode", "codex", "opencode"
     #[serde(default)]
     backend: Option<String>,
     #[serde(default)]
@@ -458,7 +458,7 @@ impl OrchestratorMcp {
                     "properties": {
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"],
                             "description": "Optional single backend to inspect. If omitted, returns all common backends."
                         }
                     }
@@ -613,7 +613,7 @@ impl OrchestratorMcp {
             },
             ToolDefinition {
                 name: "create_worker_mission".to_string(),
-                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, gemini, grok, opencode). If omitted, inherits the parent harness.".to_string(),
+                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, antigravity, grok, opencode). If omitted, inherits the parent harness.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
@@ -627,12 +627,12 @@ impl OrchestratorMcp {
                         },
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"],
-                            "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, gemini for Gemini models, grok for Grok models, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
+                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"],
+                            "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, antigravity for account-supported Google models, grok for Grok models, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
                         },
                         "model_override": {
                             "type": "string",
-                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Gemini models for gemini, Grok models for grok, 'provider/model' format for opencode. Never invent variants such as 'gpt-5.5-sol'."
+                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode. Never invent variants such as 'gpt-5.5-sol'."
                         },
                         "model_effort": {
                             "type": "string",
@@ -683,7 +683,7 @@ impl OrchestratorMcp {
                                 "required": ["title", "prompt"],
                                 "properties": {
                                     "title": { "type": "string" },
-                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "grok", "antigravity", "chatgpt_ui"] },
+                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"] },
                                     "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort; gpt-5.5-sol is unsupported." },
                                     "model_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
                                     "agent": { "type": "string" },
@@ -1572,7 +1572,6 @@ impl OrchestratorMcp {
                 vec![
                     "claudecode".to_string(),
                     "codex".to_string(),
-                    "gemini".to_string(),
                     "opencode".to_string(),
                     "grok".to_string(),
                     "antigravity".to_string(),
@@ -1587,7 +1586,6 @@ impl OrchestratorMcp {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| data_dir.clone());
-        let auth_json_path = opencode_auth_json_path();
 
         let statuses: Vec<Value> = backends
             .into_iter()
@@ -1623,19 +1621,6 @@ impl OrchestratorMcp {
                         })),
                     )
                 }
-                "gemini" => backend_auth_entry(
-                    "gemini",
-                    ProviderType::Google,
-                    &workspace_root,
-                    provider_targets_backend(&workspace_root, ProviderType::Google, "gemini"),
-                    read_oauth_token_entry(ProviderType::Google).is_some()
-                        || opencode_auth_has_provider(&auth_json_path, "google")
-                        || opencode_auth_has_provider(&auth_json_path, "gemini"),
-                    false,
-                    Some(json!({
-                        "default_backends": default_backends_for_provider(ProviderType::Google),
-                    })),
-                ),
                 "opencode" => json!({
                     "backend": "opencode",
                     "ready": true,
@@ -3131,16 +3116,6 @@ fn openagent_data_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("/root/.sandboxed-sh"))
 }
 
-fn opencode_auth_json_path() -> std::path::PathBuf {
-    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
-        return std::path::PathBuf::from(data_home)
-            .join("opencode")
-            .join("auth.json");
-    }
-
-    std::path::PathBuf::from("/var/lib/opencode/.local/share/opencode/auth.json")
-}
-
 fn codex_auth_json_path() -> std::path::PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         let candidate = std::path::PathBuf::from(&home)
@@ -3265,14 +3240,6 @@ fn codex_auth_json_mode(value: &serde_json::Value) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn opencode_auth_has_provider(path: &std::path::Path, provider: &str) -> bool {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
-        .and_then(|value| value.get(provider).cloned())
-        .is_some()
 }
 
 fn backend_auth_entry(

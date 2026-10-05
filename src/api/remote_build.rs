@@ -2498,6 +2498,7 @@ printf '%s' "$REMOTE_BUILD_TEST_HTTP_STATUS"
             mission_id: Uuid::nil(),
             lease_token: String::new(),
             payload: JobPayload::RawCommand {
+                side_question: false,
                 long_running: false,
                 command: "true".into(),
                 timeout_secs: None,

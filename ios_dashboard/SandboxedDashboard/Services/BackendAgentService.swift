@@ -122,7 +122,7 @@ enum BackendAgentService {
         case "claudecode": return "brain"
         case "amp": return "bolt.fill"
         case "codex": return "chevron.left.forwardslash.chevron.right"
-        case "gemini": return "sparkles"
+        case "antigravity": return "sparkles"
         case "grok": return "xmark.circle"
         default: return "cpu"
         }
@@ -135,7 +135,7 @@ enum BackendAgentService {
         case "claudecode": return Theme.accent
         case "amp": return .orange
         case "codex": return .cyan
-        case "gemini": return .blue
+        case "antigravity": return .blue
         case "grok": return Color(white: 0.85)
         default: return Theme.textSecondary
         }

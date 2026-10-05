@@ -40,8 +40,6 @@ pub struct HarnessVersionPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gemini: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode: Option<String>,
 }
 

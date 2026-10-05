@@ -2,7 +2,7 @@ vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:s
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
-vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
+vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
@@ -129,4 +129,133 @@ it('reconciles a restored local side run before subscribing',async()=>{
  await askBtwAgent('recovery-parent','Check progress','context',[],new AbortController().signal,()=>{});
  expect(reconcileLocalRun).toHaveBeenCalledWith('recovery-child');
  expect(vi.mocked(reconcileLocalRun).mock.invocationCallOrder.at(-1)).toBeLessThan(vi.mocked(followLocal).mock.invocationCallOrder.at(-1)!);
+});
+
+it('reports remote capacity waits instead of pretending the side agent is answering', async()=>{
+ const {btwQueueStatus}=await import('../src/btwAgent');
+ expect(btwQueueStatus({status:'active',remote_job:{node_id:'old-agent',node_state:'queued'}} as any)).toBe('Waiting for capacity on old-agent…');
+ expect(btwQueueStatus({status:'active',remote_job:{node_id:'old-agent',node_state:'running'}} as any)).toBe('');
+ expect(btwQueueStatus({status:'pending'} as any)).toBe('Waiting to start…');
+ expect(btwQueueStatus({status:'paused'} as any)).toBe('Side agent paused');
+});
+
+it.each(['pending','waiting_background','paused'])('does not create another side agent when a stale local flag hides a %s session',async(status)=>{
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='stale-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'First answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(api).mockResolvedValue({id:'stale-child'});
+ await askBtwAgent('stale-parent','First','',[],new AbortController().signal,()=>{});
+ expect(btwSession('stale-parent')?.active).toBe(false);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status,history:[],tags:[],created_at:'',updated_at:''}));
+ vi.mocked(api).mockClear();
+ await expect(askBtwAgent('stale-parent','Second','',[],new AbortController().signal,()=>{})).rejects.toThrow('still running');
+ expect(api).not.toHaveBeenCalled();
+});
+
+it('replaces a deleted saved side mission without hiding other lookup errors',async()=>{
+ const {ApiError}=await import('../src/api');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='deleted-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'deleted-child'});
+ await askBtwAgent('deleted-parent','First','',[],new AbortController().signal,()=>{});
+ vi.mocked(getMission).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
+ await expect(askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{})).rejects.toThrow('503');
+ expect(btwSession('deleted-parent')?.id).toBe('deleted-child');
+ vi.mocked(getMission).mockRejectedValueOnce(new ApiError(404,'Not found'));
+ vi.mocked(api).mockResolvedValue({id:'replacement-child'});
+ await askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{});
+ expect(btwSession('deleted-parent')?.id).toBe('replacement-child');
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+});
+
+it('rotates rejected content keys but retains uncertain launch keys',async()=>{
+ const {ApiError}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'conflict-parent',status:'active',history:[],tags:[],title:null,created_at:'',updated_at:''});
+ const ask=()=>askBtwAgent('conflict-parent','Q','context',[],new AbortController().signal,()=>{});
+ const attempt=()=>JSON.parse(vi.mocked(api).mock.calls.at(-1)![1]!.body as string).idempotency_key;
+ vi.mocked(api).mockRejectedValueOnce(new Error('network lost'));
+ await expect(ask()).rejects.toThrow('network lost');
+ const original=attempt();
+ vi.mocked(api).mockRejectedValueOnce(new ApiError(409,'This side request key was already used for different launch content; the new question was not sent.'));
+ await expect(ask()).rejects.toThrow('different launch content');
+ expect(attempt()).toBe(original);
+ vi.mocked(api).mockRejectedValueOnce(new Error('network lost again'));
+ await expect(ask()).rejects.toThrow('network lost again');
+ const fresh=attempt();expect(fresh).not.toBe(original);
+ vi.mocked(api).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
+ await expect(ask()).rejects.toThrow('Unavailable');
+ expect(attempt()).toBe(fresh);
+});
+
+it('replays the exact payload after a lost response despite fresh context paths',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='retry-parent'?'active':'awaiting_user',history:[],tags:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Recovered answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'manifest /first',cursor:{sequence:1,visibleHash:'first'}});
+ vi.mocked(api).mockRejectedValueOnce(new Error('lost response'));
+ await expect(askBtwAgent('retry-parent','Q','context',[],new AbortController().signal,()=>{})).rejects.toThrow('lost response');
+ const original=vi.mocked(api).mock.calls.at(-1)![1]!.body;
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'manifest /second',cursor:{sequence:2,visibleHash:'second'}});
+ vi.mocked(api).mockResolvedValueOnce({id:'recovered-child'});
+ await askBtwAgent('retry-parent','Q','new context',[],new AbortController().signal,()=>{});
+ expect(vi.mocked(api).mock.calls.at(-1)![1]!.body).toBe(original);
+ expect(btwSession('retry-parent')?.conversationCursor).toEqual({sequence:1,visibleHash:'first'});
+});
+
+it('waits for local completion synchronization before admitting a queued follow-up',async()=>{
+ const {setClientMissionStatus}=await import('../src/api');
+ const {getMissionEvents}=await import('../src/stream');
+ let synced=false;let release!:()=>void;
+ const pending=new Promise<void>(resolve=>{release=()=>{synced=true;resolve();};});
+ vi.mocked(setClientMissionStatus).mockImplementationOnce(()=>pending);
+ vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
+ vi.mocked(getMissionEvents).mockResolvedValue([]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sync-parent'?'active':synced?'awaiting_user':'pending',history:[],tags:id==='sync-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'sync-child'});
+ await askBtwAgent('sync-parent','First','context',[],new AbortController().signal,()=>{});
+ const starts=vi.mocked(startLocal).mock.calls.length;
+ const next=askBtwAgent('sync-parent','Next','context',[],new AbortController().signal,()=>{});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(startLocal).toHaveBeenCalledTimes(starts);
+ release();await next;
+ expect(startLocal).toHaveBeenCalledTimes(starts+1);
+});
+
+it('installs completion synchronization before announcing a restored local run as done',async()=>{
+ const {watchBtw}=await import('../src/btwAgent');
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {setClientMissionStatus}=await import('../src/api');
+ localStorage.setItem('agent:'+sideQuestionKey('restored-parent'),JSON.stringify({id:'restored-child',question:'First',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0}));
+ let release!:()=>void;
+ vi.mocked(getMission).mockImplementationOnce(()=>new Promise(resolve=>{release=()=>resolve({id:'restored-child',status:'pending',history:[],tags:['placement:client'],title:null,created_at:'',updated_at:''});}));
+ const events:any[]=[];
+ const watching=watchBtw('restored-parent',new AbortController().signal,event=>events.push(event));
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(events.some(event=>event.type==='done')).toBe(false);
+ release();await watching;
+ expect(setClientMissionStatus).toHaveBeenCalledWith('restored-child','awaiting_user',undefined);
+ expect(events.at(-1).type).toBe('done');
+});
+
+it('recovers a failed native launch before retrying its pending Core mission',async()=>{
+ const {recoverLocalLaunch}=await import('../src/localAgents');
+ const {setClientMissionStatus}=await import('../src/api');
+ let settled=false;
+ vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='failed-launch-parent'?'active':settled?'interrupted':'pending',history:[],tags:id==='failed-launch-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child'}).mockResolvedValueOnce({id:'retry-launch-child'});
+ vi.mocked(startLocal).mockRejectedValueOnce(new Error('native launch failed'));
+ const ask=()=>askBtwAgent('failed-launch-parent','Q','context',[],new AbortController().signal,()=>{});
+ await expect(ask()).rejects.toThrow('native launch failed');
+ expect(btwSession('failed-launch-parent')?.launchPending).toBe(true);
+ vi.mocked(recoverLocalLaunch).mockRejectedValueOnce(new Error('process still running'));
+ await expect(ask()).rejects.toThrow('process still running');
+ expect(setClientMissionStatus).not.toHaveBeenCalled();
+ vi.mocked(setClientMissionStatus).mockImplementationOnce(async()=>{settled=true;});
+ await ask();
+ expect(recoverLocalLaunch).toHaveBeenCalledWith('failed-launch-child');
+ expect(setClientMissionStatus).toHaveBeenCalledWith('failed-launch-child','interrupted');
+ expect(btwSession('failed-launch-parent')?.id).toBe('retry-launch-child');
 });

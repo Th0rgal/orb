@@ -36,7 +36,7 @@ export interface Workspace {
 /** Harness CLI versions detected inside a container workspace after build. */
 export interface WorkspaceHarnessVersions {
   probed_at: string;
-  /** CLI name (`claude`, `codex`, `opencode`, `gemini`, `grok`) → version. */
+  /** CLI name (`claude`, `codex`, `opencode`, `grok`, `agy`) → version. */
   versions: Record<string, string>;
 }
 

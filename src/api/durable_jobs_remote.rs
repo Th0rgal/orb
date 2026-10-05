@@ -200,6 +200,7 @@ pub(super) async fn start(
         mission_id: placement.workspace_mission_id,
         lease_token,
         payload: JobPayload::RawCommand {
+            side_question: false,
             long_running: false,
             command: format!(
                 "exec python3 -c {} {}",

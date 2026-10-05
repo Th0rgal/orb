@@ -73,6 +73,9 @@ pub struct NodeHeartbeat {
     /// Async jobs queued behind the capacity semaphore.
     #[serde(default)]
     pub queued_jobs: u32,
+    /// Subset of active/queued jobs using the independent side-question lane.
+    #[serde(default)]
+    pub side_jobs: u32,
     /// Prewarmed toolchains cached on the node (empty until S3).
     #[serde(default)]
     pub cached_toolchains: Vec<String>,
@@ -276,6 +279,9 @@ pub enum JobPayload {
     /// same semantics as the synchronous `/execute` path.
     RawCommand {
         command: String,
+        /// Core-authorized side agent; uses the bounded side-question lane.
+        #[serde(default, skip_serializing_if = "is_false")]
+        side_question: bool,
         /// Native goal owns its lifetime; cancellation and containment still apply.
         /// Requires protocol 5. Ordinary jobs remain bounded by the node ceiling.
         #[serde(default)]
@@ -331,6 +337,10 @@ pub enum JobPayload {
         #[serde(default)]
         env: std::collections::HashMap<String, String>,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Body of `POST /jobs` on the node.
@@ -643,6 +653,7 @@ mod tests {
     #[test]
     fn job_payload_round_trips_with_kind_tag() {
         let payload = JobPayload::RawCommand {
+            side_question: false,
             long_running: false,
             managed_auth: Vec::new(),
             command: "cargo test".to_string(),
@@ -656,6 +667,7 @@ mod tests {
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["kind"], "raw_command");
         assert_eq!(json["command"], "cargo test");
+        assert!(json.get("side_question").is_none());
         let parsed: JobPayload = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, payload);
 
@@ -668,6 +680,7 @@ mod tests {
         assert_eq!(
             minimal,
             JobPayload::RawCommand {
+                side_question: false,
                 long_running: false,
                 managed_auth: Vec::new(),
                 command: "true".to_string(),
@@ -822,6 +835,7 @@ mod tests {
             disk_available_bytes: 100 << 30,
             active_jobs: 1,
             queued_jobs: 2,
+            side_jobs: 0,
             cached_toolchains: vec![],
             source_bundle_capacity: None,
             lean_runtime_ready: Some(true),

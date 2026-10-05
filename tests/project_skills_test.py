@@ -368,14 +368,21 @@ class ProjectSkillsTest(unittest.TestCase):
         with patch.object(skills.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='{"skills": [{"name": "orb-marker"}]}')):
             self.assertEqual(skills.prepare(str(self.source), str(self.cwd), 'grok')['skills'], 1)
 
-    def test_gemini_requires_enabled_native_discovery_and_preserves_trust_settings(self):
-        self.skill()
-        with patch.object(skills.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='Built-in skills only')):
-            with self.assertRaisesRegex(ValueError, 'Trust this working directory in Gemini'):
-                skills.prepare(str(self.source), str(self.cwd), 'gemini')
-        with patch.object(skills.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='orb-marker [Enabled] [Project]')):
-            self.assertEqual(skills.prepare(str(self.source), str(self.cwd), 'gemini')['skills'], 1)
-        self.assertFalse((self.cwd / '.gemini/settings.json').exists())
+    def test_retired_gemini_manifest_is_cleaned_when_switching_to_antigravity(self):
+        target = self.skill()
+        legacy = self.cwd / '.gemini/skills/orb-marker'
+        legacy.parent.mkdir(parents=True)
+        legacy.symlink_to(target)
+        (self.cwd / skills.MANIFEST).write_text(json.dumps({
+            'version': 1, 'source': str(self.source),
+            'entries': {'.gemini/skills/orb-marker': str(target)}, 'copies': {},
+        }))
+        self.assertEqual(skills.prepare(str(self.source), str(self.cwd), 'antigravity')['skills'], 1)
+        self.assertFalse(legacy.exists())
+        self.assertTrue((self.cwd / '.agents/skills/orb-marker').exists())
+        self.assertTrue(target.exists())
+        with self.assertRaisesRegex(ValueError, 'no supported project skill discovery'):
+            skills.prepare(str(self.source), str(self.cwd), 'gemini')
 
     def test_shell_wrapper_allows_skill_free_projects_without_python(self):
         program = Path(__file__).parents[1] / 'shared/prepare_project_skills.sh'
@@ -390,9 +397,9 @@ class ProjectSkillsTest(unittest.TestCase):
         self.skill()
         for harness, binary, expected in [
             ('grok', '/custom/grok', ['/custom/grok']),
-            ('gemini', 'bun /custom/gemini.js', ['bun', '/custom/gemini.js']),
+            ('grok', 'bun /custom/grok.js', ['bun', '/custom/grok.js']),
         ]:
-            stdout = json.dumps({'skills': [{'name': 'orb-marker', 'enabled': True}]}) if harness == 'grok' else 'orb-marker [Enabled]'
+            stdout = json.dumps({'skills': [{'name': 'orb-marker', 'enabled': True}]})
             with patch.dict('os.environ', {'ORB_PROJECT_SKILLS_HARNESS_BIN': binary}), patch.object(skills.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=stdout)) as run:
                 skills.prepare(str(self.source), str(self.cwd), harness)
             self.assertEqual(run.call_args.args[0][:len(expected)], expected)

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Native metadata probes, NOT Orb mission or instruction-following validation.
 
-Creates only a disposable filesystem fixture. Gemini may be supplied through
---gemini-bin. No model task is sent; native metadata listings are inspected.
-Grok/Gemini trust settings are private to the generated fixture.
+Creates only a disposable filesystem fixture. No model task is sent; installed
+CLI metadata listings are inspected. Grok trust settings are private to the fixture.
 """
 import argparse
 import importlib.util
@@ -11,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import re
 import shutil
 import subprocess
 import tempfile
@@ -67,7 +65,6 @@ def native_list(harness, binary, cwd, environment):
     arguments = {
         'opencode': ['debug', 'skill'],
         'grok': ['--trust', 'inspect', '--json'],
-        'gemini': ['skills', 'list', '--all'],
         'claudecode': ['-p', '/skills', '--output-format', 'stream-json', '--verbose', '--no-session-persistence'],
     }[harness]
     completed = subprocess.run([binary, *arguments], cwd=cwd, env=environment, capture_output=True, text=True, timeout=30)
@@ -77,8 +74,6 @@ def native_list(harness, binary, cwd, environment):
         return {skill['name'] for skill in json.loads(completed.stdout)}
     if harness == 'grok':
         return {skill['name'] for skill in json.loads(completed.stdout)['skills']}
-    if harness == 'gemini':
-        return set(re.findall(r'^([a-z0-9-]+) \[Enabled\]', completed.stdout, re.M))
     for line in completed.stdout.splitlines():
         try:
             event = json.loads(line)
@@ -91,7 +86,6 @@ def native_list(harness, binary, cwd, environment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--gemini-bin', default=shutil.which('gemini'))
     parser.add_argument('--output', type=Path)
     arguments = parser.parse_args()
     fixture = Path(tempfile.mkdtemp(prefix='orb-project-skills-discovery-'))
@@ -100,22 +94,19 @@ def main():
     (folder / 'references').mkdir(parents=True)
     (folder / 'SKILL.md').write_text('---\nname: orb-marker # synchronized project skill\ndescription: Perform the turquoise lantern check using the supporting reference.\n---\nRead references/marker.md. Report its marker and say turquoise lantern verified.\n')
     (folder / 'references/marker.md').write_text('ORB-PROJECT-SKILLS-7E981\n')
-    private_gemini = fixture / 'gemini-private-user/.gemini'
-    private_gemini.mkdir(parents=True)
-    (private_gemini / 'settings.json').write_text(json.dumps({'security': {'folderTrust': {'enabled': False}}}))
     private_grok = fixture / 'grok-test-config.toml'
     private_grok.write_text('')
     result = {'machine': os.uname().nodename, 'platform': 'Linux' if os.uname().sysname == 'Linux' else os.uname().sysname,
               'fixture': str(fixture), 'orb_project_ids': [], 'orb_mission_ids': [], 'model_task_executed': False, 'harnesses': {}}
-    for harness in preparer.NATIVE:
-        binary = arguments.gemini_bin if harness == 'gemini' else shutil.which('claude' if harness == 'claudecode' else harness)
+    for harness in ('codex', 'claudecode', 'opencode', 'grok'):
+        binary = shutil.which('claude' if harness == 'claudecode' else harness)
         if not binary:
             result['harnesses'][harness] = {'unavailable': 'CLI not installed'}
             continue
         cwd = fixture / harness
         cwd.mkdir()
         environment = os.environ.copy()
-        environment.update(GEMINI_CLI_HOME=str(private_gemini.parent), GROK_CONFIG_PATH=str(private_grok))
+        environment.update(GROK_CONFIG_PATH=str(private_grok))
         try:
             # Filesystem preparation is separate from the real native scanner
             # below. The probe handles trust only for its own disposable fixture.

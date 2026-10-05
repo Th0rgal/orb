@@ -31,8 +31,8 @@ struct NodeState {
     labels: Vec<String>,
     work_root: PathBuf,
     capacity_total: u32,
-    /// Shared permits for every process the node starts, whether it came from
-    /// synchronous `/execute` or the async job API.
+    /// Shared permits for ordinary jobs and synchronous `/execute` calls.
+    /// The async runner owns one additional bounded side-question permit.
     admission: Arc<Semaphore>,
     active_leases: AtomicU32,
     jobs: JobStore,
@@ -301,6 +301,7 @@ async fn heartbeat(
         disk_available_bytes: resources.disk_available_bytes,
         active_jobs: state.runner.active_count(),
         queued_jobs: state.runner.queued_count(),
+        side_jobs: state.runner.side_job_count(),
         cached_toolchains: sandboxed_sh::node::cached_toolchains(&state.work_root),
         source_bundle_capacity: Some(sandboxed_sh::node::lean::source_bundle_capacity()),
         lean_runtime_ready: Some(lean_runtime_ready),
@@ -909,6 +910,7 @@ mod tests {
                 lease_token: create_lease_token(&job_claims, &state.shared_token)
                     .expect("lease token"),
                 payload: sandboxed_sh::remote_node::JobPayload::RawCommand {
+                    side_question: false,
                     long_running: false,
                     command: "while [ ! -e release ]; do sleep 0.01; done".to_string(),
                     timeout_secs: Some(30),
@@ -976,6 +978,7 @@ mod tests {
         let mission_id = Uuid::new_v4();
         let job_id = Uuid::new_v4();
         let payload = sandboxed_sh::remote_node::JobPayload::RawCommand {
+            side_question: false,
             long_running: false,
             command: "echo job-ok".to_string(),
             timeout_secs: Some(30),

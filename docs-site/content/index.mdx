@@ -29,7 +29,7 @@ sandboxed.sh is a cloud orchestrator that runs on your server. You connect to it
 
 Your code stays on your machine. You define how the agent behaves through a git repo of skills, commands, and rules. Each project gets its own isolated container.
 
-Under the hood, it runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), Codex, Gemini, or Grok for the actual agent work. sandboxed.sh handles everything around it: starting tasks, streaming progress, managing environments, syncing configuration.
+Under the hood, it runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), Codex, Antigravity (agy), or Grok for the actual agent work. sandboxed.sh handles everything around it: starting tasks, streaming progress, managing environments, syncing configuration.
 
 ## When To Use This
 
@@ -68,7 +68,7 @@ Container workspaces isolate everything. Your Node project doesn't see your Pyth
 │  └──────────────────────┬──────────────────────────┘    │
 │                         │                                │
 │  ┌──────────────────────▼──────────────────────────┐    │
-│  │   Claude Code / OpenCode / Codex / Gemini / Grok │    │
+│  │   Claude Code / OpenCode / Codex / agy / Grok    │    │
 │  │  • Runs the actual agent logic                   │    │
 │  │  • Executes tools, writes code                   │    │
 │  │  • Talks to Claude/GPT/local models              │    │

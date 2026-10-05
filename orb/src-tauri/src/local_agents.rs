@@ -24,7 +24,6 @@ const HARNESSES: &[(&str, &str)] = &[
     ("codex", "codex"),
     ("grok", "grok"),
     ("opencode", "opencode"),
-    ("gemini", "gemini"),
     ("antigravity", "agy"),
 ];
 
@@ -562,15 +561,6 @@ fn spawn_harness(
             session_id,
             env,
         ),
-        "gemini" => spawn_piped(
-            request,
-            gemini_args(request),
-            text,
-            error,
-            true,
-            session_id,
-            env,
-        ),
         other => Err(format!("unknown local harness {other}")),
     }
 }
@@ -657,22 +647,6 @@ fn spawn_antigravity(
         }
     });
     Ok(child)
-}
-
-fn gemini_args(request: &StartRequest) -> Vec<String> {
-    let mut args = vec![
-        "--output-format".into(),
-        "stream-json".into(),
-        "--yolo".into(),
-    ];
-    if let Some(model) = request.model.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--model".into(), model.into()]);
-    }
-    if let Some(session) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--resume".into(), session.into()]);
-    }
-    args.extend(["--prompt".into(), request.prompt.clone()]);
-    args
 }
 
 fn grok_args(request: &StartRequest) -> Vec<String> {
@@ -2180,9 +2154,6 @@ fn extract_text(line: &str) -> Option<String> {
                 .pointer("/part/text")
                 .or_else(|| value.get("data"))?
                 .as_str(), // OpenCode or Grok
-            "message" if value["role"] == "assistant" && value["delta"] == true => {
-                value["content"].as_str()
-            } // Gemini streaming output
             _ => None,
         }
     }?;
@@ -2327,6 +2298,28 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn retired_gemini_cannot_be_launched_from_saved_requests() {
+        assert!(!HARNESSES.iter().any(|(id, _)| *id == "gemini"));
+        let request = StartRequest {
+            cyber_revision: None,
+            cyber_access: None,
+            id: "retired-harness".into(),
+            harness: "gemini".into(),
+            bin: "/not-executed".into(),
+            cwd: "/".into(),
+            prompt: "hello".into(),
+            model: None,
+            session_id: Some("old-native-session".into()),
+            image_paths: vec![],
+        };
+        let error = spawn_harness(
+            &request, &Arc::new(Output::default()), &Arc::new(Mutex::new(None)),
+            &Arc::new(Mutex::new(None)), &Arc::new(AtomicBool::new(false)), &[],
+        ).unwrap_err();
+        assert_eq!(error, "unknown local harness gemini");
+    }
+
+    #[test]
     fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
         let root = tempfile::tempdir().unwrap();
         let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None).unwrap().unwrap();
@@ -2374,54 +2367,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn gemini_stream_preserves_session_and_only_emits_assistant_deltas() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("gemini-fixture");
-        std::fs::write(&bin, r#"#!/bin/sh
-printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message","role":"user","content":"private input"}' '{"type":"message","role":"assistant","delta":true,"content":"Ready"}' '{"type":"result","status":"success"}'
-"#).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let request = StartRequest {
-            cyber_revision: None,
-            cyber_access: None,
-            id: "gemini-fixture".into(),
-            harness: "gemini".into(),
-            bin: bin.to_string_lossy().into_owned(),
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: "hello".into(),
-            model: Some("selected-model".into()),
-            session_id: Some("previous-session".into()),
-            image_paths: vec![],
-        };
-        let args = gemini_args(&request);
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--resume", "previous-session"]));
-        assert!(args.windows(2).any(|w| w == ["--model", "selected-model"]));
-        let output = Arc::new(Output::default());
-        let session = Arc::new(Mutex::new(None));
-        let error = Arc::new(Mutex::new(None));
-        let mut child = spawn_harness(
-            &request,
-            &output,
-            &session,
-            &error,
-            &Arc::new(AtomicBool::new(false)),
-            &[],
-        )
-        .unwrap();
-        assert!(child.wait().unwrap().success());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while output.snapshot() != "Ready" && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(output.snapshot(), "Ready");
-        assert_eq!(session.lock().unwrap().as_deref(), Some("gemini-session"));
-        assert!(error.lock().unwrap().is_none());
-    }
     #[cfg(unix)]
     #[test]
     fn unavailable_version_does_not_hide_installed_harness() {
@@ -3570,7 +3515,7 @@ mod directory_tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let bin = root.path().join("gemini-fixture");
+        let bin = root.path().join("grok-fixture");
         std::fs::write(
             &bin,
             "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 30\n",
@@ -3582,7 +3527,7 @@ mod directory_tests {
             cyber_revision: None,
             cyber_access: None,
             id: first.clone(),
-            harness: "gemini".into(),
+            harness: "grok".into(),
             bin: bin.to_string_lossy().into(),
             cwd: root.path().to_string_lossy().into(),
             prompt: "test".into(),

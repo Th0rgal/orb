@@ -2,12 +2,12 @@
 //  Backend.swift
 //  SandboxedDashboard
 //
-//  Backend data models for OpenCode, Claude Code, Amp, Codex, Gemini, and Grok
+//  Backend data models for OpenCode, Claude Code, Amp, Codex, and Grok
 //
 
 import Foundation
 
-/// Represents an available backend (OpenCode, Claude Code, Amp, Codex, Gemini, Grok)
+/// Represents an available backend (OpenCode, Claude Code, Amp, Codex, Grok)
 struct Backend: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -16,11 +16,10 @@ struct Backend: Codable, Identifiable, Hashable {
     static let claudecode = Backend(id: "claudecode", name: "Claude Code")
     static let amp = Backend(id: "amp", name: "Amp")
     static let codex = Backend(id: "codex", name: "Codex")
-    static let gemini = Backend(id: "gemini", name: "Gemini CLI")
     static let grok = Backend(id: "grok", name: "Grok Build")
 
     /// Default backends when API is unavailable
-    static let defaults: [Backend] = [.opencode, .claudecode, .amp, .codex, .gemini, .grok]
+    static let defaults: [Backend] = [.opencode, .claudecode, .amp, .codex, .grok]
 }
 
 /// Represents an agent within a backend

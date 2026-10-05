@@ -11,8 +11,7 @@ pub enum ExecutionEvent {
     /// transitions between distinct thoughts within a single turn — codex
     /// emits multiple reasoning items per turn and they must not be merged
     /// into one buffer. `None` means the backend doesn't expose item IDs
-    /// (Claude Code CLI handles its own block-index finalization upstream;
-    /// Gemini emits a single thought stream per turn).
+    /// (Claude Code CLI handles its own block-index finalization upstream).
     Thinking {
         content: String,
         item_id: Option<String>,
