@@ -73,7 +73,7 @@ pub async fn fork_mission(
                 if Some(receipt.fingerprint.as_str()) != fingerprint.as_deref() {
                     return Err((StatusCode::CONFLICT, "This side request key was already used for different launch content; the new question was not sent.".into()));
                 }
-                if !receipt.accepted {
+                if !receipt.accepted && !reconcile_side_launch(&state, &control, existing).await? {
                     return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
                         "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
                     )));
@@ -233,9 +233,85 @@ pub async fn fork_mission(
     if req.side_question.is_some() {
         let child_id: Uuid =
             serde_json::from_value(response.0["id"].clone()).map_err(internal_error)?;
-        accept_side_launch(&state.config.working_dir, child_id).map_err(internal_error)?;
+        // Dispatch is already accepted. Do not turn an acknowledgment-write
+        // failure into an API failure; retries reconcile the durable work record.
+        if let Err(error) = accept_side_launch(&state.config.working_dir, child_id) {
+            tracing::warn!(%child_id, %error, "side launch accepted; receipt promotion pending reconciliation");
+        }
     }
     Ok(response)
+}
+
+async fn reconcile_side_launch(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+) -> Result<bool, (StatusCode, String)> {
+    let store = &control.mission_store;
+    let mut accepted = store
+        .get_deferred_goal(mission.id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    if let Some(run) = store
+        .get_latest_mission_run(mission.id)
+        .await
+        .map_err(internal_error)?
+    {
+        accepted |= !is_remote_mission_job_owner(&run.owner_actor_id);
+    }
+    if !accepted
+        && mission
+            .project
+            .tags
+            .iter()
+            .any(|tag| tag == "placement:client")
+    {
+        let events = store
+            .get_events(mission.id, Some(&["user_message"]), Some(1), None)
+            .await
+            .map_err(internal_error)?;
+        if let Some(prompt) = events.first() {
+            // Initialization persists the client prompt before publishing its
+            // delivery. Replay the original delivery id, never a second turn.
+            if worker_location::client_owner(mission).is_some()
+                && mission.status == MissionStatus::Pending
+            {
+                worker_location::enqueue(
+                    store,
+                    mission.id,
+                    worker_location::initial_delivery_id(mission.id),
+                    prompt.content.clone(),
+                )
+                .await
+                .map_err(internal_error)?;
+            }
+            accepted = true;
+        }
+    }
+    if !accepted {
+        let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
+            .await
+            .map_err(internal_error)?;
+        accepted = handles
+            .iter()
+            .any(|handle| handle.mission_id == mission.id && handle.accepted_at.is_some());
+        if !accepted {
+            accepted = !crate::remote_node::job_ledger::terminal_receipts_for_mission(
+                &state.config.working_dir,
+                mission.id,
+            )
+            .await
+            .map_err(internal_error)?
+            .is_empty();
+        }
+    }
+    if accepted {
+        if let Err(error) = accept_side_launch(&state.config.working_dir, mission.id) {
+            tracing::warn!(mission_id = %mission.id, %error, "recovered accepted side launch; receipt repair pending");
+        }
+    }
+    Ok(accepted)
 }
 
 pub(super) fn side_payload_fingerprint(

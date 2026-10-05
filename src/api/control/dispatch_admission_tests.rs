@@ -11284,7 +11284,13 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .unwrap_err();
     assert_eq!(incomplete.0, StatusCode::SERVICE_UNAVAILABLE);
     assert!(incomplete.1.contains("incomplete initialization"));
-    super::fork::accept_side_launch(&h.state.config.working_dir, child.id).unwrap();
+    // Simulate dispatch accepted but the final receipt promotion being lost.
+    // The durable scheduler ticket is authoritative, even with accepted=false.
+    h.control
+        .mission_store
+        .set_deferred_goal(child.id, Some("Original question".into()))
+        .await
+        .unwrap();
     let retry = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),
