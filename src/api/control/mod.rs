@@ -14354,8 +14354,7 @@ async fn submit_leased_remote_job(
 ) -> Result<Mission, String> {
     let mut resolved_plan = plan.clone();
     let cyber_selection = if matches!(plan, RemoteHarnessPlan::Codex { .. }) {
-        let saved = cyber::read(&state.config.working_dir, mission.id)?;
-        cyber::write(&state.config.working_dir, mission.id, saved.mode)?
+        cyber::promote(&state.config.working_dir, mission.id)?
     } else {
         cyber::Selection::default()
     };

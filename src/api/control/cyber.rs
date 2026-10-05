@@ -48,7 +48,34 @@ pub fn read_execution(root: &FsPath, id: Uuid) -> Result<Selection, String> {
         Err(_) => Err("The mission cyber setting could not be read.".into()),
     }
 }
+// Remote initial submission does not retain DISPATCH_ADMISSION. Serialize
+// file promotion with PATCH here as well, without holding an async admission
+// lock across network dispatch or requiring callers to know lock ownership.
+static SELECTION_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn promote(root: &FsPath, id: Uuid) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    let selected = read(root, id)?;
+    write_committed(root, id, selected.mode)
+}
+
+fn write_next(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    write_to(path(root, id).with_extension("next.json"), mode)
+}
+
 pub fn write(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    write_committed(root, id, mode)
+}
+
+fn write_committed(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
     let selection = write_to(path(root, id), mode)?;
     match std::fs::remove_file(path(root, id).with_extension("next.json")) {
         Ok(()) => {}
@@ -139,16 +166,29 @@ pub async fn update(
     program_for_model(change.mode, mission.model_override.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(response(
-        write_to(
-            path(&state.config.working_dir, id).with_extension("next.json"),
-            change.mode,
-        )
-        .map_err(internal_error)?,
+        write_next(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
     )))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn promotion_consumes_only_the_choice_before_the_launch_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        write(dir.path(), id, Mode::Automatic).unwrap();
+        write_next(dir.path(), id, Mode::Standard).unwrap();
+        let running = promote(dir.path(), id).unwrap();
+        assert_eq!(running.mode, Mode::Standard);
+        let next = write_next(dir.path(), id, Mode::Daybreak).unwrap();
+        assert_eq!(
+            read_execution(dir.path(), id).unwrap().revision,
+            running.revision
+        );
+        assert_eq!(read(dir.path(), id).unwrap().revision, next.revision);
+        assert_eq!(promote(dir.path(), id).unwrap().mode, Mode::Daybreak);
+    }
+
     #[test]
     fn access_is_separate_from_the_model() {
         assert_eq!(
