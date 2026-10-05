@@ -105,6 +105,8 @@ describe('NewMissionDialog', () => {
     fireEvent.change(native.closest('select')!, {target: {value: 'antigravity:'}});
     const hostModel = await screen.findByRole('option', { name: 'Host account model' });
     expect(getBackendConfig).toHaveBeenCalledWith('antigravity');
+    expect(screen.getByRole('button', {name: 'Create here'})).toBeDisabled();
+    expect(screen.getByRole('option', {name: 'Select a workspace-native model'})).toBeDisabled();
     expect(screen.queryByRole('option', { name: /Gemini CLI/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Wrong Core model' })).not.toBeInTheDocument();
     fireEvent.change(hostModel.closest('select')!, {target: {value: 'host-model'}});

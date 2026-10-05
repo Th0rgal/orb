@@ -351,7 +351,7 @@ export function NewMissionDialog({
     { revalidateOnFocus: true, keepPreviousData: false },
   );
   const antigravityReady = !antigravityError && !antigravityLoading && !!antigravityModels?.length
-    && (!modelOverride || antigravityModels.some(([id]) => id === modelOverride));
+    && !!modelOverride && antigravityModels.some(([id]) => id === modelOverride);
   const isChatGptUi = selectedBackend === CHATGPT_UI_BACKEND_ID;
   const chatGptUiModel = useMemo(() => {
     const configuredModel = backendConfigs[CHATGPT_UI_BACKEND_ID]?.settings?.model;
@@ -928,8 +928,8 @@ export function NewMissionDialog({
                   onChange={(e) => setModelOverride(e.target.value)}
                   className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60 [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
                 >
-                  <option value="">
-                    {selectedBackend === 'claudecode'
+                  <option value="" disabled={isAntigravity}>
+                    {isAntigravity ? 'Select a workspace-native model' : selectedBackend === 'claudecode'
                       ? 'No override (configured default)'
                       : 'No override (use default)'}
                   </option>
