@@ -529,13 +529,21 @@ async fn discover_antigravity(
 }
 
 fn antigravity_models(value: &Value) -> Result<Vec<ProviderModel>, String> {
+    let mut seen = std::collections::HashSet::new();
     let models = value
         .get("models")
         .and_then(Value::as_array)
         .ok_or("invalid_catalog")?
         .iter()
         .filter_map(|m| {
-            let id = m.get("id")?.as_str()?.strip_prefix("antigravity/")?;
+            // This catalog is already scoped to the bound auth file. Proxy
+            // versions may return raw IDs or namespaced aliases; inference
+            // always restores the explicit routing namespace.
+            let raw = m.get("id")?.as_str()?.trim();
+            let id = raw.strip_prefix("antigravity/").unwrap_or(raw);
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                return None;
+            }
             Some(ProviderModel {
                 id: id.into(),
                 name: m
@@ -554,10 +562,12 @@ fn antigravity_models(value: &Value) -> Result<Vec<ProviderModel>, String> {
 mod antigravity_tests {
     use super::*;
     #[test]
-    fn only_namespaced_account_models_are_advertised() {
-        let models = antigravity_models(&serde_json::json!({"models":[{"id":"claude-sonnet"},{"id":"antigravity/claude-sonnet","display_name":"Claude on Google"},{"id":"other/model"}]})).unwrap();
-        assert_eq!(models.len(), 1);
+    fn account_catalog_accepts_raw_and_prefixed_models_without_duplicates() {
+        let models = antigravity_models(&serde_json::json!({"models":[{"id":"claude-sonnet","display_name":"Claude on Google"},{"id":"antigravity/claude-sonnet"},{"id":"gemini-pro"},{"id":""}]})).unwrap();
+        assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "claude-sonnet");
+        assert_eq!(models[0].name, "Claude on Google");
+        assert_eq!(models[1].id, "gemini-pro");
         assert!(antigravity_models(&serde_json::json!({})).is_err());
     }
     #[test]
