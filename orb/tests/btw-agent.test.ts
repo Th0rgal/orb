@@ -150,3 +150,20 @@ it.each(['pending','waiting_background'])('does not create another side agent wh
  await expect(askBtwAgent('stale-parent','Second','',[],new AbortController().signal,()=>{})).rejects.toThrow('still running');
  expect(api).not.toHaveBeenCalled();
 });
+
+it('replaces a deleted saved side mission without hiding other lookup errors',async()=>{
+ const {ApiError}=await import('../src/api');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='deleted-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'deleted-child'});
+ await askBtwAgent('deleted-parent','First','',[],new AbortController().signal,()=>{});
+ vi.mocked(getMission).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
+ await expect(askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{})).rejects.toThrow('503');
+ expect(btwSession('deleted-parent')?.id).toBe('deleted-child');
+ vi.mocked(getMission).mockRejectedValueOnce(new ApiError(404,'Not found'));
+ vi.mocked(api).mockResolvedValue({id:'replacement-child'});
+ await askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{});
+ expect(btwSession('deleted-parent')?.id).toBe('replacement-child');
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+});

@@ -120,7 +120,17 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');locks.add(key);
  try{
-  let s=btwSession(parent);if(s){const current=await getMission(s.id);if(['active','running','pending','queued','starting','resuming','waiting_background'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');s={...s,active:false};save(parent,s);}
+  let s=btwSession(parent);
+  if(s){
+   try {
+    const current=await getMission(s.id);
+    if(['active','running','pending','queued','starting','resuming','waiting_background'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
+    s={...s,active:false};save(parent,s);
+   } catch(error) {
+    if(!(error instanceof ApiError)||error.status!==404)throw error;
+    localStorage.removeItem(key);s=undefined;
+   }
+  }
   const source=await getMission(parent),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   const local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;

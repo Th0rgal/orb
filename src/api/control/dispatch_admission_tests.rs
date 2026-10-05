@@ -11249,4 +11249,28 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .await
     .unwrap();
     assert_eq!(retry.0["id"], child.id.to_string());
+
+    // A failed attempt must reach new-launch validation, not return its receipt.
+    h.control
+        .mission_store
+        .update_mission_status(child.id, MissionStatus::Failed)
+        .await
+        .unwrap();
+    let failed_retry = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "btw-original".into(),
+            side_question: Some("Retry failed work".into()),
+            side_context_mode: Some("invalid-new-launch-mode".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failed_retry.0, StatusCode::BAD_REQUEST);
+    assert_eq!(failed_retry.1, "Unsupported side context mode");
 }

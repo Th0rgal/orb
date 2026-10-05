@@ -48,7 +48,10 @@ pub async fn fork_mission(
             .map_err(internal_error)?;
         // Launch receipts exist even when the parent has no project/track.
         // Recover completed attempts too: losing the response must not rerun it.
-        for existing in &rows {
+        for existing in rows
+            .iter()
+            .filter(|mission| mission.status != MissionStatus::Failed)
+        {
             if side_launch_key(&state.config.working_dir, existing.id)
                 .map_err(internal_error)?
                 .is_some_and(|key| key == req.idempotency_key.trim())
