@@ -22,21 +22,25 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   createEffect(() => {
     const next = visible();
     const scroller = element?.closest<HTMLElement>(".sb-scroll");
-    const top = scroller?.getBoundingClientRect().top ?? 0;
+    const viewport = scroller?.getBoundingClientRect();
     const scroll = scroller?.scrollTop ?? 0;
-    const anchors = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
-      .filter(row => row.getBoundingClientRect().bottom > top)
-      .map(row => ({ id: row.dataset.treeId, offset: row.getBoundingClientRect().top }));
+    const anchors = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
+      .filter(row => {
+        const rect = row.getBoundingClientRect();
+        return viewport && rect.bottom > viewport.top && rect.top < viewport.bottom;
+      })
+      .map(row => ({ row, offset: row.getBoundingClientRect().top }));
     setRows(reconcile(next, { key: "id" }));
     queueMicrotask(() => {
       if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
-      const current = Array.from(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? []);
       for (const anchor of anchors) {
-        const row = current.find(row => row.dataset.treeId === anchor.id);
-        if (row) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
+        const row = anchor.row;
+        if (row.isConnected && scroller.contains(row)) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
       }
     });
   });
+  // Selection changes own reveal; collapsing/reopening a subtree preserves the
+  // operator's viewport instead of jumping back to the open conversation.
   let revealed: string | null = null;
   createEffect(on(() => p.selected, () => { revealed = null; }));
   const visibleCurrent = createMemo(() => rows.some(row => row.id === p.selected) ? p.selected : null);

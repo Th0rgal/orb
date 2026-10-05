@@ -53,3 +53,38 @@ test('folder rename retains expanded descendants', async ({page}) => {
   await expect(page.getByRole('button',{name:'nested',exact:true})).toHaveAttribute('aria-expanded','true');
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
 });
+
+
+test('off-screen archived rows do not move the project viewport', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=600;});
+  const before=await page.locator('.sb-scroll').evaluate(el=>el.scrollTop);
+  await page.getByRole('button',{name:'Remove archived row',exact:true}).click();
+  await expect(page.getByRole('button',{name:'archive0',exact:true})).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(await page.locator('.sb-scroll').evaluate(el=>el.scrollTop)).toBe(before);
+});
+
+
+test('project updates above the viewport preserve visible archived rows', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=2100;});
+  const row=page.getByRole('button',{name:'archive8',exact:true});
+  const before=await row.evaluate(el=>el.getBoundingClientRect().top);
+  await page.getByRole('button',{name:'Remove project row',exact:true}).click();
+  await expect(page.getByRole('button',{name:'project0',exact:true})).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
+});
+
+
+test('moving the visible anchor to another tree preserves its neighbors', async ({page}) => {
+  await page.goto('/tests/sidebar-viewport.html');
+  await page.locator('.sb-scroll').evaluate(el=>{el.scrollTop=600;});
+  const row=page.getByRole('button',{name:'project19',exact:true});
+  const before=await row.evaluate(el=>el.getBoundingClientRect().top);
+  await page.getByRole('button',{name:'Archive visible project',exact:true}).click();
+  await expect(page.getByRole('tree',{name:'Archived',exact:true}).getByRole('button',{name:'project18',exact:true})).toHaveCount(1);
+  await page.waitForTimeout(100);
+  expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
+});
