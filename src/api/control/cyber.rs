@@ -30,6 +30,16 @@ fn path(root: &FsPath, id: Uuid) -> PathBuf {
     root.join("mission-cyber").join(format!("{id}.json"))
 }
 pub fn read(root: &FsPath, id: Uuid) -> Result<Selection, String> {
+    let pending = path(root, id).with_extension("next.json");
+    match std::fs::read(&pending) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| "The next-turn cyber setting is unreadable.".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => read_execution(root, id),
+        Err(_) => Err("The next-turn cyber setting could not be read.".into()),
+    }
+}
+/// The running execution keeps its selection until the next launch commits it.
+pub fn read_execution(root: &FsPath, id: Uuid) -> Result<Selection, String> {
     match std::fs::read(path(root, id)) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
             "The mission cyber setting is unreadable; refusing to guess a program.".into()
@@ -38,12 +48,47 @@ pub fn read(root: &FsPath, id: Uuid) -> Result<Selection, String> {
         Err(_) => Err("The mission cyber setting could not be read.".into()),
     }
 }
+// Remote initial submission does not retain DISPATCH_ADMISSION. Serialize
+// file promotion with PATCH here as well, without holding an async admission
+// lock across network dispatch or requiring callers to know lock ownership.
+static SELECTION_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn promote(root: &FsPath, id: Uuid) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    let selected = read(root, id)?;
+    write_committed(root, id, selected.mode)
+}
+
+fn write_next(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    write_to(path(root, id).with_extension("next.json"), mode)
+}
+
 pub fn write(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let _guard = SELECTION_WRITE
+        .lock()
+        .map_err(|_| "Cyber selection lock unavailable")?;
+    write_committed(root, id, mode)
+}
+
+fn write_committed(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
+    let selection = write_to(path(root, id), mode)?;
+    match std::fs::remove_file(path(root, id).with_extension("next.json")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    Ok(selection)
+}
+fn write_to(dest: PathBuf, mode: Mode) -> Result<Selection, String> {
     let selection = Selection {
         mode,
         revision: Uuid::new_v4(),
     };
-    let dest = path(root, id);
     std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
     let temp = dest.with_extension(format!("{}.tmp", selection.revision));
     let result = (|| {
@@ -112,17 +157,6 @@ pub async fn update(
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".into()))?;
-    if !matches!(
-        mission.status,
-        MissionStatus::AwaitingUser
-            | MissionStatus::Acknowledged
-            | MissionStatus::Interrupted
-            | MissionStatus::Failed
-            | MissionStatus::Paused
-            | MissionStatus::Blocked
-    ) {
-        return Err((StatusCode::CONFLICT,"Stop the current turn before changing its cyber program. Your selection has not changed.".into()));
-    }
     if mission.backend != "codex" {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -132,12 +166,29 @@ pub async fn update(
     program_for_model(change.mode, mission.model_override.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(response(
-        write(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
+        write_next(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
     )))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn promotion_consumes_only_the_choice_before_the_launch_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        write(dir.path(), id, Mode::Automatic).unwrap();
+        write_next(dir.path(), id, Mode::Standard).unwrap();
+        let running = promote(dir.path(), id).unwrap();
+        assert_eq!(running.mode, Mode::Standard);
+        let next = write_next(dir.path(), id, Mode::Daybreak).unwrap();
+        assert_eq!(
+            read_execution(dir.path(), id).unwrap().revision,
+            running.revision
+        );
+        assert_eq!(read(dir.path(), id).unwrap().revision, next.revision);
+        assert_eq!(promote(dir.path(), id).unwrap().mode, Mode::Daybreak);
+    }
+
     #[test]
     fn access_is_separate_from_the_model() {
         assert_eq!(
@@ -164,6 +215,28 @@ mod tests {
         assert!(proxy_selection(root.path(), id, Uuid::new_v4()).is_none());
         write(root.path(), id, Mode::Daybreak).unwrap();
         assert!(proxy_selection(root.path(), id, key).is_none());
+    }
+    #[test]
+    fn next_turn_selection_preserves_running_proxy_and_promotes_on_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let key = Uuid::new_v4();
+        let current = write(root.path(), id, Mode::Standard).unwrap();
+        bind_proxy(root.path(), id, current.revision, key, "gpt-6.1-sol").unwrap();
+        write_to(
+            path(root.path(), id).with_extension("next.json"),
+            Mode::Daybreak,
+        )
+        .unwrap();
+        assert_eq!(read(root.path(), id).unwrap().mode, Mode::Daybreak);
+        let running = proxy_selection(root.path(), id, key).unwrap().0;
+        assert_eq!(running.mode, Mode::Standard);
+        assert_eq!(running.revision, current.revision);
+        let next = write(root.path(), id, read(root.path(), id).unwrap().mode).unwrap();
+        assert_eq!(next.mode, Mode::Daybreak);
+        assert!(proxy_selection(root.path(), id, key).is_none());
+        assert_eq!(read(root.path(), id).unwrap().revision, next.revision);
+        assert!(!path(root.path(), id).with_extension("next.json").exists());
     }
     #[test]
     fn legacy_and_persistence() {
@@ -307,7 +380,7 @@ pub fn bind_proxy(
     result
 }
 pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<(Selection, String)> {
-    let selection = read(root, id).ok()?;
+    let selection = read_execution(root, id).ok()?;
     let binding: (Uuid, Uuid, String) =
         serde_json::from_slice(&std::fs::read(path(root, id).with_extension("binding.json")).ok()?)
             .ok()?;

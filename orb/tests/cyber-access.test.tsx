@@ -17,11 +17,12 @@ describe('cyber selection',()=>{
   expect(selected).toBe('daybreak');
  });
  it('opens locked settings for inspection without allowing changes',async()=>{
-  render(()=><CyberPicker value="standard" model="gpt-6.1-sol" disabled note="Stop the current turn to change its cyber program." onChange={()=>{}}/>);
+  render(()=><CyberPicker value="standard" model="gpt-6.1-sol" disabled note="Saving selection…" onChange={()=>{}}/>);
   await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
   expect(screen.getByRole('menu',{name:'Cyber program'})).toBeTruthy();
   expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(true);
-  expect(screen.getByText('Stop the current turn to change its cyber program.')).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Cyber program: Standard'}).title).toContain('Saving selection');
+  expect(screen.getByRole('menu').querySelector('small, p')).toBeNull();
  });
  it('disables incompatible choices and explains why',()=>{
   expect(cyberCompatibility('daybreak','unknown-model')).toContain('not been established');

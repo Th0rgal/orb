@@ -1358,7 +1358,7 @@ async fn native_protocol_proxy(
     });
     if let Some(id) = mission_key_id {
         // Pre-feature live keys have no selection. Preserve their existing automatic transport.
-        let legacy = super::control::cyber::read(&state.config.working_dir, id)
+        let legacy = super::control::cyber::read_execution(&state.config.working_dir, id)
             .is_ok_and(|s| s.revision.is_nil());
         if bound.is_none() && !legacy {
             return error_response(

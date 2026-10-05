@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 test('cyber menu saves per mission, preserves failures, and separates requested from confirmed',async({page})=>{
  const id='fa47049a-53a1-4ad5-b003-155c6b61b167';
- const mission={id,title:'Cyber settings check',project:'test',status:'awaiting_user',backend:'codex',model_override:'gpt-6.1-sol',history:[],remote_node_id:'old-agent',created_at:'',updated_at:''};
+ const mission={id,title:'Cyber settings check',project:'test',status:'active',backend:'codex',model_override:'gpt-6.1-sol',history:[],remote_node_id:'old-agent',created_at:'',updated_at:''};
  let mode='standard';let fail=false;let patches=0;
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','fixture');localStorage.setItem('orb-theme','dark');localStorage.setItem('orb.harnessPick',JSON.stringify({backend:'codex',model:'gpt-6.1-sol'}));});
  await page.route('**/api/**',async route=>{
@@ -30,7 +30,14 @@ test('cyber menu saves per mission, preserves failures, and separates requested 
  await page.getByRole('button',{name:'Test',exact:true}).click();
  await page.getByRole('button',{name:/Cyber settings check/}).click();
  const picker=page.getByRole('button',{name:'Cyber program: Standard'});
- await expect(picker).toBeVisible();await picker.click();
+ await expect(picker).toBeVisible();
+ await expect(picker).toHaveAttribute('title',/next turn/);
+ const effort=page.getByRole('button',{name:'Reasoning effort: Default'});
+ await expect(effort).toBeVisible();
+ expect(await effort.evaluate((el)=>!!(el.compareDocumentPosition(document.querySelector('.cyber-pill')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+ await picker.click();
+ await expect(page.getByRole('menu',{name:'Cyber program'}).locator('small, p')).toHaveCount(0);
+ await expect(page.getByRole('menu',{name:'Cyber program'})).toHaveCSS('min-width','180px');
  await page.screenshot({path:'/tmp/orb-cyber-menu.png',animations:'disabled'});
  await page.getByRole('menuitemradio',{name:/Daybreak/}).click();
  await expect(page.getByRole('button',{name:'Cyber program: Daybreak'})).toHaveAttribute('title',/requested/);

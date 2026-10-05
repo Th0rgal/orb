@@ -77,7 +77,7 @@ it("a rejected receipt preserves the follow-up draft and attachments", async () 
   vi.stubGlobal("fetch", fetcher);
   const attachments = [{kind: "file" as const, path: "notes/test.md"}];
   await expect(sendMissionMessage("mission", "same text", attachments)).rejects.toThrow("not accepted");
-  expect(JSON.parse(fetcher.mock.calls[1][1]!.body as string)).toEqual({mission_id: "mission", content: "same text", attachments, client_message_id: expect.any(String)});
+  expect(JSON.parse(fetcher.mock.calls[1][1]!.body as string)).toEqual({mission_id: "mission", content: "same text", queue_followup: true, attachments, client_message_id: expect.any(String)});
   expect(attachments).toHaveLength(1);
 });
 
@@ -90,7 +90,7 @@ it("replies with the current writer identity without retagging PR references", a
   vi.stubGlobal("fetch", fetcher);
   await sendMissionMessage("mission", "Et la PR #2441 ?", undefined, "reply");
   expect(JSON.parse(fetcher.mock.calls[1][1]!.body as string)).toEqual({
-    mission_id: "mission", content: "Et la PR #2441 ?", client_message_id: "reply", continue_identity: identity,
+    mission_id: "mission", content: "Et la PR #2441 ?", queue_followup: true, client_message_id: "reply", continue_identity: identity,
   });
 });
 

@@ -743,3 +743,50 @@ pub(super) async fn admit_dispatch_with_lifetime(
         _ => unreachable!(),
     }
 }
+
+/// Queue acceptance validates identity but never acquires execution resources.
+pub(super) async fn validate_followup(
+    admission: &DispatchAdmission,
+    id: Uuid,
+) -> Result<(), String> {
+    recover_dispatch(&admission.state, &admission.store, id).await?;
+    let mission = admission
+        .store
+        .get_mission(id)
+        .await?
+        .ok_or("Mission not found")?;
+    machine_transfer::guard(&admission.store, id).await?;
+    remote_grok::reject_local_followup(&admission.state.config.working_dir, &admission.store, id)
+        .await?;
+    writer_reuse_or_conflict(&mission, &admission.patch).map_err(|(_, error)| error)?;
+    Ok(())
+}
+
+/// The queue retains the assignment; resource claims are acquired at delivery.
+pub(super) async fn admit_followup(
+    hub: &ControlHub,
+    store: &Arc<dyn MissionStore>,
+    id: Uuid,
+    content: &str,
+) -> Result<(), String> {
+    let state = hub
+        .admission_state
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or("Admission state unavailable")?;
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    let receipt = prepare(
+        DispatchAdmission {
+            state,
+            store: store.clone(),
+            internal_work_hint: Some(content.into()),
+            patch: Default::default(),
+        },
+        id,
+        false,
+        true,
+        None,
+    )
+    .await?;
+    receipt.finish(true).await
+}

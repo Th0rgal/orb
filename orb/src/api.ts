@@ -893,7 +893,7 @@ export async function sendMissionMessage(
   receipt = await api<MessageReceipt>("/api/control/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: text, mission_id: id, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(attachments?.length ? { attachments } : {}) }),
+    body: JSON.stringify({ content: text, mission_id: id, queue_followup: true, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(attachments?.length ? { attachments } : {}) }),
   });
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;

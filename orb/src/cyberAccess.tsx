@@ -1,6 +1,5 @@
 import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api, connectionVersion, type Mission } from "./api";
-import { missionSettingsIdle } from "./missionLaunch";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";
 export interface CyberSelection { mode: CyberMode; status: "requested" | "confirmed"; confirmed_program?: string | null; confirmed_model?: string | null; revision: string }
@@ -31,11 +30,10 @@ export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;no
   <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>setOpen(!open())}>
    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 4 6v6c0 4 5 8 8 9 3-1 8-5 8-9V6z"/></svg>
   </button>
-  <Show when={open()}><div class="menu cyber-menu" role="menu" aria-label="Cyber program">
-   <p>Cyber: {cyberLabels[p.value]}<Show when={p.value==='daybreak'}> — {p.confirmed?'active':'requested'}</Show></p>
-   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={p.disabled||!!cyberCompatibility(mode,p.model)} title={cyberCompatibility(mode,p.model)} onClick={()=>{p.onChange(mode);setOpen(false);}}>
-    <span><span class="pick-name">{cyberLabels[mode]}</span><small>{cyberCompatibility(mode,p.model)??({standard:'Use standard safeguards.',daybreak:'Request the approved access for this model. Account authorization is checked at launch.',automatic:'Let the provider choose from this account’s approved access.'}[mode])}</small></span><span class="pick-check">{p.value===mode?'✓':''}</span>
-   </button>}</For><p>{p.note??'Applies to the next launch. Does not grant account access or change system permissions.'}</p>
+  <Show when={open()}><div class="menu under-model-menu cyber-menu" role="menu" aria-label="Cyber program">
+   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={p.disabled||!!cyberCompatibility(mode,p.model)} title={cyberCompatibility(mode,p.model)??({standard:"Standard safeguards",daybreak:"Requires approved account access",automatic:"Use the account’s default access"}[mode])} onClick={()=>{p.onChange(mode);setOpen(false);}}>
+    <span class="pick-name">{cyberLabels[mode]}</span><span class="pick-check">{p.value===mode?'✓':''}</span>
+   </button>}</For>
   </div></Show>
  </div>;
 }
@@ -49,7 +47,7 @@ export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}
   catch(e){p.onError?.(cyberError(e));}finally{setSaving(false);}
  };
  return <><span class="under-sep">·</span><Show when={!selection.error} fallback={<span class="under-model" title="The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option.">Cyber: unavailable</span>}>
-  <CyberPicker value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()||!missionSettingsIdle(p.mission.status)} note={!missionSettingsIdle(p.mission.status)?'Stop the current turn to change its cyber program.':(selection()?.status==='confirmed'?`Provider confirmed ${selection()?.confirmed_program} on ${selection()?.confirmed_model ?? 'the selected model'} for the latest observed request.`:'Saved per mission. Activation has not been confirmed by the provider.')} confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
+  <CyberPicker value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
  </Show></>;
 }
 

@@ -37,3 +37,15 @@ it('reconciles delivery or cancellation from another client without reopening', 
   await waitFor(()=>expect(rows).toHaveBeenLastCalledWith([]),{timeout:4000});
   expect(screen.queryByText('Queued')).toBeNull();
 });
+
+it('shows host follow-ups with the blocking writer and cancellation', async () => {
+  backend.list.mockResolvedValue([{id:'host',content:'Follow up',source:'host-queue:api:u',queue_error:'Waiting for PR writer blocker'}, {id:'done',content:'Consumed',source:'host-queue:api:u',inflight:true}]);
+  backend.api.mockResolvedValue({ok:true});
+  const cancel=vi.fn();
+  render(()=><RemoteQueue mission="host" onRows={()=>{}} onCancel={cancel}/>);
+  await screen.findByText('1 Queued');
+  expect(screen.getByText(/Waiting for PR writer blocker/)).toBeTruthy();
+  expect(screen.queryByText('Consumed')).toBeNull();
+  await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+  await waitFor(()=>expect(cancel).toHaveBeenCalledWith('host'));
+});

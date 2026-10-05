@@ -69,11 +69,21 @@ impl Harness {
         nodes: Vec<crate::remote_node::RemoteNodeConfig>,
         enabled: bool,
     ) -> Self {
+        Self::with_capacity(dir, nodes, enabled, 1).await
+    }
+
+    async fn with_capacity(
+        dir: FixtureDir,
+        nodes: Vec<crate::remote_node::RemoteNodeConfig>,
+        enabled: bool,
+        max_parallel: usize,
+    ) -> Self {
         let path = dir.path();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::new(path.to_path_buf());
         config.port = listener.local_addr().unwrap().port();
         config.automations_enabled = enabled;
+        config.max_parallel_missions = max_parallel;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
@@ -2963,9 +2973,9 @@ async fn remote_ownership_survives_terminal_presentation_sweep_and_recovery() {
                 find_existing_pr_writer_global(&h.state.control, "repo#244", None)
                     .await
                     .unwrap()
-                    .unwrap()
-                    .id,
-                m.id
+                    .map(|owner| owner.id),
+                pr.map(|_| m.id),
+                "explicitly absent PR ownership must not reserve unrelated PRs"
             );
             assert!(
                 find_existing_pr_writer_global(&h.state.control, "repo#244", Some(m.id))
@@ -5488,7 +5498,7 @@ async fn interrupted_remote_launch_settles_its_own_lease_and_never_runs_locally(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_known() {
+async fn remote_build_without_assigned_pr_never_claims_another_pr() {
     use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind, RemoteJobIdentity};
     let identity = |repository: &str| RemoteJobIdentity {
         version: job_ledger::IDENTITY_VERSION,
@@ -5520,13 +5530,12 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
         wake_on_terminal: true,
     };
     let target = "https://github.com/lfglabs-dev/verity/pull/2406";
-    let cases: Vec<(&str, Vec<Option<&str>>, bool)> = vec![
+    let cases: Vec<(&str, Vec<Option<&str>>)> = vec![
         (
             "different repository",
             vec![Some(
                 "https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure",
             )],
-            false,
         ),
         (
             "different repository, several handles",
@@ -5534,23 +5543,19 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
                 Some("https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure.git"),
                 Some("git@github.com:lfglabs-dev/pareto-credit-vault-proof-closure.git"),
             ],
-            false,
         ),
         (
             "same repository",
             vec![Some("https://github.com/lfglabs-dev/verity.git")],
-            true,
         ),
         (
             "same repository, scp form and case",
             vec![Some("git@github.com:LFGLabs-dev/Verity.git")],
-            true,
         ),
-        ("unknown repository (raw handle)", vec![None], true),
+        ("unknown repository (raw handle)", vec![None]),
         (
             "unknown repository (not a GitHub identity)",
             vec![Some("https://example.invalid/lfglabs-dev/other.git")],
-            true,
         ),
         (
             "disjoint plus unknown",
@@ -5558,10 +5563,9 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
                 Some("https://github.com/lfglabs-dev/pareto-credit-vault-proof-closure"),
                 None,
             ],
-            true,
         ),
     ];
-    for (case, repositories, expect_conflict) in cases {
+    for (case, repositories) in cases {
         let h = Harness::new().await;
         let store = h.control.mission_store.clone();
         // The Pareto shape: writer intent, no github_pr, parked on a remote
@@ -5592,11 +5596,7 @@ async fn remote_build_ledger_repository_proves_a_disjoint_pr_writer_only_when_kn
             .await
             .unwrap()
             .map(|lease| lease.id);
-        assert_eq!(
-            found,
-            expect_conflict.then_some(m.id),
-            "{case}: {repositories:?}"
-        );
+        assert_eq!(found, None, "{case}: {repositories:?}");
         // Self-exclusion and an explicit same-PR assignment are unchanged.
         assert!(
             find_existing_pr_writer_global(&h.state.control, target, Some(m.id))
@@ -10266,7 +10266,7 @@ async fn cyber_selection_without_override_uses_codex_default_without_resuming() 
         .unwrap();
     h.control
         .mission_store
-        .update_mission_status(mission.id, MissionStatus::Paused)
+        .update_mission_status(mission.id, MissionStatus::Active)
         .await
         .unwrap();
     let Json(saved) = cyber::update(
@@ -10287,7 +10287,7 @@ async fn cyber_selection_without_override_uses_codex_default_without_resuming() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.status, MissionStatus::Paused);
+    assert_eq!(after.status, MissionStatus::Active);
     assert_eq!(after.model_override, None);
 }
 
@@ -10589,5 +10589,584 @@ async fn cyber_client_storage_failure_preserves_idle_status_without_a_run() {
             .unwrap()
             .revision,
         saved.revision
+    );
+}
+
+#[tokio::test]
+async fn host_followup_queue_persists_fifo_deduplicates_and_cancels_under_pr_conflict() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("org/repo#42")).await;
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            blocker.id,
+            MissionProjectPatch {
+                github_pr: Some(Some("org/repo#42".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for id in [first, second, first] {
+        let response = h.request(false, target.id, json!({"content":"Continue the same work", "queue_followup":true, "client_message_id":id, "continue_identity":Harness::assertion(&target)})).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        let receipt: Value = response.json().await.unwrap();
+        assert_eq!(receipt["queued"], true);
+        assert_eq!(receipt["message_accepted"], true);
+    }
+    let reopened = SqliteMissionStore::new(h._dir.path().join("missions"), &h.user.id)
+        .await
+        .unwrap();
+    let snapshot: Vec<QueuedMessage> =
+        serde_json::from_str(&reopened.load_control_queue(&h.user.id).await.unwrap()).unwrap();
+    let ids: Vec<_> = snapshot
+        .iter()
+        .filter(|m| m.mission_id == Some(target.id))
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, vec![first, second]);
+    let Json(queue) = get_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Query(QueueQuery {
+            mission_id: Some(target.id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(queue.iter().all(|row| row
+        .queue_error
+        .as_deref()
+        .is_some_and(|e| e.contains(&blocker.id.to_string()))));
+    // A read-only follow-up sharing this PR must not inherit a writer blocker.
+    h.control
+        .mission_store
+        .update_mission_project(
+            target.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-readonly".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Json(readonly_queue) = get_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Query(QueueQuery {
+            mission_id: Some(target.id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(readonly_queue.len(), 2);
+    assert!(readonly_queue.iter().all(|row| row.queue_error.is_none()));
+    h.control
+        .mission_store
+        .update_mission_project(
+            target.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let _ = remove_from_queue(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(first),
+    )
+    .await
+    .unwrap();
+    let snapshot: Vec<QueuedMessage> = serde_json::from_str(
+        &h.control
+            .mission_store
+            .load_control_queue(&h.user.id)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!snapshot.iter().any(|m| m.id == first));
+    assert!(snapshot.iter().any(|m| m.id == second));
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(target.id)
+        .await
+        .unwrap()
+        .is_none());
+    // Release the actual owner and unpause: idle queues must retry without a new send.
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(target.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    wait_until(
+        "queued follow-up dispatched after lease release",
+        10,
+        || async {
+            h.control
+                .mission_store
+                .get_latest_mission_run(target.id)
+                .await
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn host_followup_queue_rejects_stale_identity_without_persisting() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("org/repo#1")).await;
+    let mut assertion = Harness::assertion(&target);
+    assertion["github_pr"] = json!("org/repo#2");
+    let id = Uuid::new_v4();
+    let response=h.request(false,target.id,json!({"content":"Continue", "queue_followup":true,"client_message_id":id,"continue_identity":assertion})).await;
+    assert!(!response.status().is_success());
+    assert!(!h
+        .control
+        .mission_store
+        .load_control_queue(&h.user.id)
+        .await
+        .unwrap()
+        .contains(&id.to_string()));
+}
+
+#[test]
+fn host_followup_parking_preserves_fifo_without_blocking_other_missions() {
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let entry = |target, content: &str| {
+        (
+            Uuid::new_v4(),
+            content.to_string(),
+            None,
+            Some(target),
+            Some("host-queue:api:test".into()),
+        )
+    };
+    let first = entry(a, "a1");
+    let mut queue = VecDeque::from([entry(a, "a2"), entry(b, "b1"), entry(a, "a3")]);
+    park_followup(&mut queue, first);
+    assert_eq!(
+        queue.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(),
+        vec!["b1", "a1", "a2", "a3"]
+    );
+}
+
+#[tokio::test]
+async fn host_parallel_followup_preserves_cooldown_and_cancellable_rollback() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Pending, None).await;
+    let store = &h.control.mission_store;
+    store
+        .set_mission_scheduling(
+            m.id,
+            &crate::api::mission_store::MissionScheduling {
+                not_before: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_deferred_goal(m.id, Some("Resume after cooldown".into()))
+        .await
+        .unwrap();
+    let previous = store.get_mission(m.id).await.unwrap().unwrap();
+    let mut runner = crate::api::mission_runner::MissionRunner::new(
+        m.id,
+        m.workspace_id,
+        None,
+        Some(m.backend.clone()),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    runner.queue_message(
+        first,
+        "Continue".into(),
+        None,
+        Some("host-queue:api:test".into()),
+    );
+    runner.queue_message(
+        second,
+        "Then report".into(),
+        None,
+        Some("host-queue:api:test".into()),
+    );
+    let (events_tx, _) = broadcast::channel(8);
+    assert!(prepare_host_parallel_followup(
+        &h.state.control,
+        store,
+        &events_tx,
+        &mut runner,
+        "test"
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let parked = store.get_mission(m.id).await.unwrap().unwrap();
+    assert_eq!(parked.status, MissionStatus::Pending);
+    assert_eq!(
+        store.get_deferred_goal(m.id).await.unwrap().as_deref(),
+        Some("Resume after cooldown")
+    );
+    assert!(store.get_active_mission_run(m.id).await.unwrap().is_none());
+    assert!(runner.inflight_message().is_none());
+    assert_eq!(runner.queue.len(), 2);
+
+    // Exercise the same rollback used for rejected run acquisition and failed
+    // consumed-snapshot persistence after optimistic activation.
+    store
+        .update_mission_status(m.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    store.set_deferred_goal(m.id, None).await.unwrap();
+    runner.take_next_message_for_start().unwrap();
+    rollback_host_parallel_followup(
+        store,
+        &events_tx,
+        &mut runner,
+        &previous,
+        Some("Resume after cooldown".into()),
+    )
+    .await
+    .unwrap();
+    let restored = store.get_mission(m.id).await.unwrap().unwrap();
+    assert_eq!(restored.status, MissionStatus::Pending);
+    assert_eq!(
+        store.get_deferred_goal(m.id).await.unwrap().as_deref(),
+        Some("Resume after cooldown")
+    );
+    assert!(runner.inflight_message().is_none());
+    assert_eq!(
+        runner
+            .queue
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert!(
+        runner.remove_from_queue(first),
+        "rejected delivery remains cancellable"
+    );
+}
+
+#[tokio::test]
+async fn host_followup_dispatches_in_parallel_with_unrelated_main_turn() {
+    for max_parallel in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::with_capacity(
+            FixtureDir {
+                path: dir.path().to_path_buf(),
+                _cleanup: Some(dir),
+            },
+            Vec::new(),
+            true,
+            max_parallel,
+        )
+        .await;
+        let main = h
+            .control
+            .mission_store
+            .create_mission(
+                Some("held main"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .unwrap();
+        let main_dir = install_native_fixture(&h, main.id, "before").await;
+        assert!(h
+            .request(false, main.id, json!({"content":"/goal hold main"}))
+            .await
+            .status()
+            .is_success());
+        wait_native_file(&main_dir.join("started")).await;
+        let target = h.writer(MissionStatus::AwaitingUser, None).await;
+        let target_dir = install_native_fixture(&h, target.id, "after").await;
+        let response = h.request(false, target.id, json!({"content":"Continue independently", "queue_followup":true, "continue_identity":Harness::assertion(&target)})).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        if max_parallel == 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(
+                !target_dir.join("requests.jsonl").exists(),
+                "follow-up must respect occupied capacity"
+            );
+            std::fs::write(main_dir.join("release"), "").unwrap();
+            wait_native_status(&h, main.id, MissionStatus::Blocked).await;
+        }
+        wait_native_file(&target_dir.join("requests.jsonl")).await;
+        wait_native_status(&h, target.id, MissionStatus::AwaitingUser).await;
+        if max_parallel == 2 {
+            assert!(
+                !main_dir.join("release").exists(),
+                "target must run before the unrelated main turn is released"
+            );
+            assert!(h
+                .control
+                .mission_store
+                .get_active_mission_run(main.id)
+                .await
+                .unwrap()
+                .is_some());
+            std::fs::write(main_dir.join("release"), "").unwrap();
+            wait_native_status(&h, main.id, MissionStatus::Blocked).await;
+        }
+        NATIVE_FIXTURES.lock().unwrap().remove(&main.id);
+        NATIVE_FIXTURES.lock().unwrap().remove(&target.id);
+    }
+}
+
+#[tokio::test]
+async fn host_followup_delivery_preserves_validated_continuation_semantics() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Paused, Some("repo#244")).await;
+    let content = "Continue RESERVE-1; compare against PR #999 and P-OTHER-2, without changing the assignment";
+    let reply = h.request(false, target.id, json!({"content":content,"queue_followup":true,"continue_identity":Harness::assertion(&target)})).await;
+    assert!(
+        reply.status().is_success(),
+        "{}",
+        reply.text().await.unwrap()
+    );
+    dispatch_admission::admit_followup(
+        &h.state.control,
+        &h.control.mission_store,
+        target.id,
+        content,
+    )
+    .await
+    .unwrap();
+    let after = h
+        .control
+        .mission_store
+        .get_mission(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.github_pr, target.project.github_pr);
+    assert_eq!(after.project.track, target.project.track);
+}
+
+#[tokio::test]
+async fn host_followup_restart_retains_paused_delivery_until_it_can_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteMissionStore::new(dir.path().join("missions"), "admission-test")
+        .await
+        .unwrap();
+    let mission = store
+        .create_mission(
+            Some("paused before restart"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let message = QueuedMessage {
+        id,
+        content: "Restored follow-up".into(),
+        agent: None,
+        mission_id: Some(mission.id),
+        source: Some("host-queue:api:admission-test".into()),
+        inflight: false,
+        queue_error: None,
+    };
+    store
+        .save_control_queue(
+            "admission-test",
+            &serde_json::to_string(&vec![message]).unwrap(),
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let h = Harness::with_directory(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        Vec::new(),
+    )
+    .await;
+    let fixture = install_native_fixture(&h, mission.id, "after").await;
+    // Exercise startup persistence and an idle retry, not merely deserialize.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let snapshot: Vec<QueuedMessage> = serde_json::from_str(
+        &h.control
+            .mission_store
+            .load_control_queue(&h.user.id)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.iter().map(|m| m.id).collect::<Vec<_>>(), vec![id]);
+    assert!(!fixture.join("requests.jsonl").exists());
+    let response = h
+        .request(
+            false,
+            mission.id,
+            json!({"content":"Restored follow-up", "queue_followup":true,"client_message_id":id}),
+        )
+        .await;
+    assert!(response.status().is_success());
+    h.control
+        .mission_store
+        .update_mission_status(mission.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+    wait_native_file(&fixture.join("requests.jsonl")).await;
+    wait_native_status(&h, mission.id, MissionStatus::AwaitingUser).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("requests.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    NATIVE_FIXTURES.lock().unwrap().remove(&mission.id);
+}
+
+#[tokio::test]
+async fn host_followup_during_cooldown_persists_before_writer_admission() {
+    let h = Harness::new().await;
+    let target = h.writer(MissionStatus::Pending, Some("org/repo#42")).await;
+    h.control
+        .mission_store
+        .set_mission_scheduling(
+            target.id,
+            &crate::api::mission_store::MissionScheduling {
+                not_before: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_deferred_goal(target.id, Some("Original scheduled prompt".into()))
+        .await
+        .unwrap();
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            blocker.id,
+            MissionProjectPatch {
+                github_pr: Some(Some("org/repo#42".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let ids = [Uuid::new_v4(), Uuid::new_v4()];
+    for id in [ids[0], ids[1], ids[0]] {
+        let response = h.request(false, target.id, json!({"content":"Continue after cooldown", "queue_followup":true, "client_message_id":id, "continue_identity":Harness::assertion(&target)})).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(response.json::<Value>().await.unwrap()["queued"], true);
+    }
+    let reopened = SqliteMissionStore::new(h._dir.path().join("missions"), &h.user.id)
+        .await
+        .unwrap();
+    let prompt = reopened
+        .get_deferred_goal(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(prompt.starts_with("Original scheduled prompt"));
+    assert_eq!(
+        deferred_messages::decode(&prompt)
+            .1
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(
+        reopened
+            .get_mission(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Pending
     );
 }
