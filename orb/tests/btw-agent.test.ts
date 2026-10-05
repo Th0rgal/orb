@@ -222,3 +222,19 @@ it('waits for local completion synchronization before admitting a queued follow-
  release();await next;
  expect(startLocal).toHaveBeenCalledTimes(starts+1);
 });
+
+it('installs completion synchronization before announcing a restored local run as done',async()=>{
+ const {watchBtw}=await import('../src/btwAgent');
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {setClientMissionStatus}=await import('../src/api');
+ localStorage.setItem('agent:'+sideQuestionKey('restored-parent'),JSON.stringify({id:'restored-child',question:'First',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0}));
+ let release!:()=>void;
+ vi.mocked(getMission).mockImplementationOnce(()=>new Promise(resolve=>{release=()=>resolve({id:'restored-child',status:'pending',history:[],tags:['placement:client'],title:null,created_at:'',updated_at:''});}));
+ const events:any[]=[];
+ const watching=watchBtw('restored-parent',new AbortController().signal,event=>events.push(event));
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(events.some(event=>event.type==='done')).toBe(false);
+ release();await watching;
+ expect(setClientMissionStatus).toHaveBeenCalledWith('restored-child','awaiting_user',undefined);
+ expect(events.at(-1).type).toBe('done');
+});
