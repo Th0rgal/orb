@@ -369,7 +369,7 @@ pub async fn local_origin_launch(
     // remains idempotent; different drafts cannot reserve the same directory.
     static LAUNCH: OnceLock<Mutex<()>> = OnceLock::new();
     let _launch = LAUNCH.get_or_init(|| Mutex::new(())).lock().await;
-    if local_agents::workspace_busy(Path::new(&request.cwd))? {
+    if local_agents::launch_blocked(Path::new(&request.cwd), false)? {
         return Err("This directory already has a running local mission. Choose a separate directory or worktree.".into());
     }
 

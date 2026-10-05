@@ -2,8 +2,8 @@ vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:s
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
-vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
-import {api,getMission,sendMissionMessage,cancelMission} from '../src/api';
+vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),localRunActive:()=>false,localLiveText:()=> 'Read fixture'}));
+import {api,getMission,sendMissionMessage,cancelMission,setClientMissionStatus} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
 afterEach(()=>{localStorage.clear();vi.clearAllMocks();});
@@ -32,7 +32,7 @@ it('launches locally in the parent folder with a fresh session identity',async()
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',history:[],tags:id==='local-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'local-child'});
  await askBtwAgent('local-parent','Read this folder','context',[],new AbortController().signal,()=>{});
- expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined}));
+ expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined,sharedDirectory:true}));
 });
 
 it('does not turn an empty successful exit into a fabricated answer',async()=>{
@@ -167,4 +167,37 @@ it('replaces a deleted saved side mission without hiding other lookup errors',as
  await askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{});
  expect(btwSession('deleted-parent')?.id).toBe('replacement-child');
  expect(sendMissionMessage).not.toHaveBeenCalled();
+});
+
+it('follows a recovered side mission instead of reporting the superseded one empty',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ localStorage.setItem('agent:'+sideQuestionKey('rp'),JSON.stringify({id:'old-side',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async(id)=>({id,status:'awaiting_user',history:[],tags:id==='old-side'?['superseded','superseded_by:new-side']:[],title:null,created_at:'',updated_at:''}));
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockImplementation(async(id)=>id==='new-side'?[{event_type:'assistant_message',content:'Recovered answer',sequence:1,id:1,timestamp:''}]:[]);
+ const events:any[]=[];
+ const {watchBtw}=await import('../src/btwAgent');
+ await watchBtw('rp',new AbortController().signal,e=>events.push(e));
+ expect(btwSession('rp')?.id).toBe('new-side');
+ expect(events.at(-1)).toEqual({type:'done',answer:'Recovered answer'});
+});
+
+it('releases a local side mission whose launch was refused before it began',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ vi.mocked(localBinding).mockImplementation(id=>id==='lp'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude'}:undefined);
+ localStorage.setItem('agent:'+sideQuestionKey('lp'),JSON.stringify({id:'stuck',question:'Q',harness:'opencode',model:'builtin/smart',local:true,active:false,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='lp'?'active':id==='stuck'?'pending':'awaiting_user',history:[],tags:id==='lp'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'fresh'});
+ await askBtwAgent('lp','Again','context',[],new AbortController().signal,()=>{});
+ expect(setClientMissionStatus).toHaveBeenCalledWith('stuck','failed');
+ expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({sharedDirectory:true}));
+});
+
+it('marks Core failed when the native guard refuses a local side launch',async()=>{
+ vi.mocked(localBinding).mockImplementation(id=>id==='bp'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude'}:undefined);
+ vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='bp'?'active':'awaiting_user',history:[],tags:id==='bp'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValue({id:'busy-side'});
+ vi.mocked(startLocal).mockRejectedValueOnce(new Error('Local launch deferred: directory busy'));
+ await expect(askBtwAgent('bp','Q','context',[],new AbortController().signal,()=>{})).rejects.toThrow('directory busy');
+ expect(setClientMissionStatus).toHaveBeenCalledWith('busy-side','failed');
 });

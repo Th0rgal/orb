@@ -408,6 +408,8 @@ export interface StartLocal {
   prompt: string;
   model?: string;
   sessionId?: string;
+  /** /btw side runs read the parent's folder while the parent works. */
+  sharedDirectory?: boolean;
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
@@ -437,7 +439,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     }
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
-      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
+      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [], shared_directory: req.sharedDirectory ?? false },
     });
     pendingLaunches.set(req.id,launch);
     const receipt = await launch as ClientRunReceipt;

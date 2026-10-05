@@ -90,6 +90,10 @@ pub struct StartRequest {
     pub prompt: String,
     pub model: Option<String>,
     pub session_id: Option<String>,
+    /// A /btw side run reads the parent's folder while the parent works.
+    /// It neither waits for nor blocks ordinary runs in that directory.
+    #[serde(default)]
+    pub shared_directory: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -108,6 +112,7 @@ pub struct PollState {
 #[derive(Clone)]
 struct Run {
     mcp_wrapped: bool,
+    shared_directory: bool,
     generation: String,
     cwd: PathBuf,
     child: Arc<Mutex<Child>>,
@@ -310,8 +315,9 @@ pub(crate) fn start_with_env_fenced(
         }
     }
     let canonical_cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
-    if map.iter().any(|(id, run)| {
+    if !request.shared_directory && map.iter().any(|(id, run)| {
         id != &request.id
+            && !run.shared_directory
             && !run.done.load(Ordering::SeqCst)
             && run.cwd.canonicalize().ok().as_ref() == Some(&canonical_cwd)
     }) {
@@ -344,6 +350,7 @@ pub(crate) fn start_with_env_fenced(
     let child = Arc::new(Mutex::new(child));
     let run = Run {
         mcp_wrapped: env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER"),
+        shared_directory: request.shared_directory,
         generation: uuid::Uuid::new_v4().to_string(),
         cwd,
         child,
@@ -2356,6 +2363,7 @@ mod tests {
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let request = StartRequest {
+                shared_directory: false,
                 cyber_revision: None, cyber_access: None, image_paths: vec![],
                 id: "antigravity-fixture".into(), harness: "antigravity".into(),
                 bin: bin.to_string_lossy().into_owned(), cwd: dir.path().to_string_lossy().into_owned(),
@@ -2385,6 +2393,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let request = StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: "gemini-fixture".into(),
@@ -2544,6 +2553,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
         let fresh = StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -2899,6 +2909,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
         let request = StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: "stdin-test".into(),
@@ -2954,6 +2965,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
         local_agents_start(StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3099,6 +3111,7 @@ printf '%s\n' '{"type":"result"}'
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
         local_agents_start(StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3174,6 +3187,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
         local_agents_start(StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3248,6 +3262,7 @@ printf '%s\n' '{"type":"result"}'
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
         let request = StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -3284,6 +3299,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
         local_agents_start(StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3317,6 +3333,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
             local_agents_start(StartRequest {
+                shared_directory: false,
                 cyber_revision: None,
                 cyber_access: None,
                 id: id.clone(),
@@ -3378,6 +3395,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
         local_agents_start(StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3423,7 +3441,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("zero-turn-{}", uuid_like());
-            local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,
+            local_agents_start(StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,
                 id: id.clone(),
                 harness: "claudecode".into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -3479,7 +3497,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest { cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
+        local_agents_start(StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -3535,6 +3553,24 @@ mod plan_smoke {
     }
 }
 
+/// Whether a new launch in `root` must wait. Side runs never wait, and only
+/// ordinary runs hold the directory against other launches.
+pub fn launch_blocked(root: &std::path::Path, shared_directory: bool) -> Result<bool, String> {
+    if shared_directory {
+        return Ok(false);
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    Ok(runs()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .any(|run| {
+            !run.shared_directory
+                && !run.done.load(Ordering::SeqCst)
+                && run.cwd.canonicalize().ok().as_ref() == Some(&root)
+        }))
+}
+
 pub fn workspace_busy(root: &std::path::Path) -> Result<bool, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     Ok(runs()
@@ -3579,6 +3615,7 @@ mod directory_tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
         let request = StartRequest {
+            shared_directory: false,
             cyber_revision: None,
             cyber_access: None,
             id: first.clone(),
@@ -3620,6 +3657,54 @@ mod directory_tests {
         assert!(second
             .unwrap_err()
             .contains("directory already has a running local mission"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn side_runs_share_the_parent_directory() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("gemini-fixture");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let request = StartRequest {
+            shared_directory: false,
+            cyber_revision: None,
+            cyber_access: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            harness: "gemini".into(),
+            bin: bin.to_string_lossy().into(),
+            cwd: root.path().to_string_lossy().into(),
+            prompt: "test".into(),
+            model: None,
+            session_id: None,
+            image_paths: vec![],
+        };
+        let parent = request.id.clone();
+        start_with_env(request.clone(), &[]).unwrap();
+        let side = uuid::Uuid::new_v4().to_string();
+        let side_start = start_with_env(
+            StartRequest {
+                id: side.clone(),
+                shared_directory: true,
+                ..request.clone()
+            },
+            &[],
+        );
+        let side_blocked = launch_blocked(root.path(), true);
+        local_agents_stop(parent.clone()).unwrap();
+        runs().lock().unwrap().remove(&parent);
+        // With only the side run left, an ordinary launch may proceed.
+        let parent_blocked = launch_blocked(root.path(), false);
+        let _ = local_agents_stop(side.clone());
+        runs().lock().unwrap().remove(&side);
+        side_start.unwrap();
+        assert!(!side_blocked.unwrap());
+        assert!(!parent_blocked.unwrap());
     }
     #[test]
     fn plain_directory_is_valid_without_git() {
