@@ -21,9 +21,8 @@ pub async fn fork_mission(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Serialize side-session discovery and creation, including retries from
     // another Orb window whose local storage has no session pointer.
-    static SIDE_CREATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _side_creation = if req.side_question.is_some() {
-        Some(SIDE_CREATION.lock().await)
+        Some(side_creation_lock(&user.id, id).lock_owned().await)
     } else {
         None
     };
@@ -208,10 +207,17 @@ pub async fn fork_mission(
     Ok(response)
 }
 
+fn side_creation_lock(user: &str, parent: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    worker_location::dispatch_lock(&format!("btw:{user}:{parent}"))
+}
+
 fn side_session_live(status: MissionStatus) -> bool {
     matches!(
         status,
-        MissionStatus::Active | MissionStatus::Pending | MissionStatus::Paused
+        MissionStatus::Active
+            | MissionStatus::Pending
+            | MissionStatus::Paused
+            | MissionStatus::WaitingBackground
     )
 }
 
@@ -402,6 +408,24 @@ fn workspace_command(source_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn btw_creation_lock_only_blocks_the_same_conversation() {
+        let parent = Uuid::new_v4();
+        let held = side_creation_lock("one", parent).lock_owned().await;
+        assert!(side_creation_lock("one", parent).try_lock_owned().is_err());
+        assert!(side_creation_lock("two", parent).try_lock_owned().is_ok());
+        assert!(side_creation_lock("one", Uuid::new_v4())
+            .try_lock_owned()
+            .is_ok());
+        drop(held);
+        assert!(side_creation_lock("one", parent).try_lock_owned().is_ok());
+    }
+
+    #[test]
+    fn btw_background_work_keeps_the_session_live() {
+        assert!(side_session_live(MissionStatus::WaitingBackground));
+    }
     #[test]
     fn antigravity_forks_bound_history_and_preserve_current_instructions() {
         let history = vec![

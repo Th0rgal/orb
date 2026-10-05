@@ -138,14 +138,14 @@ it('reports remote capacity waits instead of pretending the side agent is answer
  expect(btwQueueStatus({status:'pending'} as any)).toBe('Waiting to start…');
 });
 
-it('does not create another side agent when a stale local flag says the queued session is inactive',async()=>{
+it.each(['pending','waiting_background'])('does not create another side agent when a stale local flag hides a %s session',async(status)=>{
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='stale-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
  const {getMissionEvents}=await import('../src/stream');
  vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'First answer',sequence:1,id:1,timestamp:''}]);
  vi.mocked(api).mockResolvedValue({id:'stale-child'});
  await askBtwAgent('stale-parent','First','',[],new AbortController().signal,()=>{});
  expect(btwSession('stale-parent')?.active).toBe(false);
- vi.mocked(getMission).mockImplementation(async id=>({id,status:'pending',history:[],tags:[],created_at:'',updated_at:''}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status,history:[],tags:[],created_at:'',updated_at:''}));
  vi.mocked(api).mockClear();
  await expect(askBtwAgent('stale-parent','Second','',[],new AbortController().signal,()=>{})).rejects.toThrow('still running');
  expect(api).not.toHaveBeenCalled();

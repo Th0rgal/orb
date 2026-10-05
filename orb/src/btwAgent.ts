@@ -39,6 +39,7 @@ export function btwTurnEvents(events:StoredEvent[],session:Pick<BtwSession,'base
 export function btwQueueStatus(mission: Mission): string {
  const node = mission.remote_job?.node_id ?? mission.remote_node_id;
  if (mission.remote_job?.node_state === 'queued') return `Waiting for capacity${node ? ` on ${node}` : ''}…`;
+ if (mission.status === 'waiting_background') return 'Waiting for background work…';
  if (['pending','queued','starting','resuming'].includes(mission.status)) return 'Waiting to start…';
  return '';
 }
@@ -65,7 +66,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   await restoreLocalBindings();
   await reconcileLocalRun(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
-  void getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming'].includes(m.status))follow(s.id);}).catch(()=>{});
+  void getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background'].includes(m.status))follow(s.id);}).catch(()=>{});
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
@@ -101,7 +102,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   setAgentItems(all=>({...all,[s.id]:reducer.items}));
   setRemoteActivities(all=>({...all,[s.id]:reducer.items.filter(i=>i.kind==='tool').map(i=>i.kind==='tool'?{id:i.callId,label:i.name,done:i.done,failed:false,detail:JSON.stringify({args:i.args,result:i.result})}:{id:'',label:'',done:true,failed:false})}));
   const recorded=reducer.items.filter(i=>i.kind==='text'&&!!i.text.replace(/[.\s…]/g,'')).map(i=>i.kind==='text'?i.text:'').join('\n\n');
-  const active=['active','running','pending','queued','starting','resuming'].includes(mission.status);
+  const active=['active','running','pending','queued','starting','resuming','waiting_background'].includes(mission.status);
   text=recorded||text;
   // A terminal persisted response is authoritative, even if shorter than a streamed draft.
   if((active||!text)&&streamedText.length>text.length)text=streamedText;
@@ -119,7 +120,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');locks.add(key);
  try{
-  let s=btwSession(parent);if(s){const current=await getMission(s.id);if(['active','running','pending','queued','starting','resuming'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');s={...s,active:false};save(parent,s);}
+  let s=btwSession(parent);if(s){const current=await getMission(s.id);if(['active','running','pending','queued','starting','resuming','waiting_background'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');s={...s,active:false};save(parent,s);}
   const source=await getMission(parent),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   const local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
