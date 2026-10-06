@@ -122,6 +122,17 @@ it('does not save replacement identities after cancellation',async()=>{
  expect(btwSession('cancel-parent')).toEqual(saved);
 });
 
+it('does not save replacement identities after the backend connection changes',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {bumpConnectionVersion}=await import('../src/api');
+ const {watchBtw}=await import('../src/btwAgent');
+ const saved={id:'connection-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
+ localStorage.setItem('agent:'+sideQuestionKey('connection-parent'),JSON.stringify(saved));
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='connection-new')bumpConnectionVersion(version=>version+1);return {id,status:'completed',history:[],tags:id==='connection-old'?['superseded_by:connection-new']:[],title:null,created_at:'',updated_at:''};});
+ await expect(watchBtw('connection-parent',new AbortController().signal,()=>{})).rejects.toThrow('Connection changed');
+ expect(btwSession('connection-parent')).toEqual(saved);
+});
+
 it('stops the recovered side agent instead of its superseded predecessor',async()=>{
  const {sideQuestionKey}=await import('../src/sideQuestionStorage');
  localStorage.setItem('agent:'+sideQuestionKey('stop-parent'),JSON.stringify({id:'stop-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));

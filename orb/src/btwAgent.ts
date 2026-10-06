@@ -47,9 +47,10 @@ export function btwQueueStatus(mission: Mission): string {
 const ACTIVE=['active','running','pending','queued','starting','resuming','waiting_background','paused'];
 // Event sequences belong to one mission. Resolve the entire replacement chain
 // before changing the saved session, and never carry its predecessor's boundary.
-async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal):Promise<Mission>{
- const version=connectionVersion(),seen=new Set<string>();
+async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,version=connectionVersion()):Promise<Mission>{
+ const seen=new Set<string>();
  const check=()=>{if(version!==connectionVersion())throw new Error('Connection changed.');if(signal?.aborted)throw new Error('Side question cancelled.');};
+ check();
  let mission=await getMission(s.id);check();
  for(let hop=0;hop<16;hop++){
   seen.add(mission.id);
@@ -124,7 +125,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
-  const mission=await currentSide(parent,s,signal);attach();
+  const mission=await currentSide(parent,s,signal,version);attach();
   const events=await getMissionEvents(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
@@ -166,7 +167,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     s={...s,launchPending:false,active:false};save(parent,s);
    }
    try {
-    const current=await currentSide(parent,s,signal);
+    const current=await currentSide(parent,s,signal,version);
     if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
     s={...s,active:false};save(parent,s);
    } catch(error) {
