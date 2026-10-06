@@ -103,6 +103,85 @@ import { fireEvent, waitFor } from "@solidjs/testing-library";
 import { vi } from "vitest";
 import { FileReferenceContext } from "../src/fileReferenceContext";
 
+it("renders code-formatted file link labels and opens only the destination", async () => {
+  const path = '/Users/thomas/.orb/project-context/server/account/verity-core/files/Context/Verity.md';
+  const ref = {source: 'workspace', path, name: 'Verity.md'};
+  const open = vi.fn(), resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open, search: () => {}}}>
+    <MdView text={`- [\`Context/Verity.md\`](file://${path}): Covers Verity.`}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'Context/Verity.md'})).toBeTruthy());
+  expect(container.textContent).toBe('Context/Verity.md: Covers Verity.');
+  expect(container.querySelector('button code')?.textContent).toBe('Context/Verity.md');
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+  fireEvent.click(getByRole('button', {name: 'Context/Verity.md'}));
+  expect(open).toHaveBeenCalledWith([ref]);
+});
+
+it("does not resolve a plain file label inside an already resolved link", async () => {
+  const path = 'audit/IMPLEMENTATION-BRIEF.md';
+  const ref = {source: 'workspace', path, name: 'IMPLEMENTATION-BRIEF.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[IMPLEMENTATION-BRIEF.md](audit/IMPLEMENTATION-BRIEF.md)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'IMPLEMENTATION-BRIEF.md'})).toBeTruthy());
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
+it("resolves Windows file URLs without the URL-only leading slash", async () => {
+  const path = 'C:/Users/Jane/project/readme.md';
+  const ref = {source: 'workspace', path, name: 'readme.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`readme.md`](file:///C:/Users/Jane/project/readme.md)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'readme.md'})).toBeTruthy());
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
+it("keeps brackets inside code-formatted file link labels", async () => {
+  const path = '/tmp/array.ts';
+  const ref = {source: 'workspace', path, name: 'array.ts'};
+  const resolve = vi.fn(async () => [ref]);
+  const {container, getByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`array[i].ts`](file:///tmp/array.ts)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'array[i].ts'})).toBeTruthy());
+  expect(container.querySelector('button code')?.textContent).toBe('array[i].ts');
+  expect(container.textContent).toBe('array[i].ts');
+  expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
+});
+
+it("renders formatted link labels even without a file resolver", () => {
+  const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
+  expect(container.textContent).toBe('files/Context/ notes docs');
+  expect(container.querySelectorAll('code')).toHaveLength(2);
+  expect(container.querySelector('strong')?.textContent).toBe('notes');
+  expect(container.querySelector('a code')?.textContent).toBe('docs');
+});
+
+it("decodes local file URLs while keeping unsupported URLs out of the resolver", async () => {
+  const ref = {source: 'workspace', path: '/tmp/My notes.md', name: 'My notes.md'};
+  const resolve = vi.fn(async () => [ref]);
+  const {getByRole, container} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'[`notes`](file://localhost/tmp/My%20notes.md#L12) [`remote`](file://other-host/tmp/notes.md) [`unsafe`](javascript:alert)'} />
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getByRole('button', {name: 'notes'})).toBeTruthy());
+  expect(resolve).toHaveBeenCalledExactlyOnceWith('/tmp/My notes.md#L12');
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(container.querySelector('a')).toBeNull();
+});
+
+it("keeps a complete Markdown file link inside a code span literal", () => {
+  const text = '`[notes](file:///tmp/notes.md)`';
+  const {container} = render(() => <MdView text={text}/>);
+  expect(container.querySelector('code')?.textContent).toBe('[notes](file:///tmp/notes.md)');
+  expect(container.querySelector('a, button')).toBeNull();
+});
+
 it("renders Codex output citations through the file resolver and opens the original path", async () => {
   const path='/Users/thomas/.orb/local-workspaces/default/output/pdf/index-32.pdf';
   const ref={source:'workspace',path,name:'index-32.pdf'};
@@ -124,6 +203,22 @@ it("keeps citation examples inside code literal and handles spaces and markdown 
 });
 
 describe("emphasis around code spans", () => {
+  it("keeps asterisks in link destinations opaque to surrounding emphasis", () => {
+    const {container} = render(() => <MdView text={'*[docs](https://example.com/search?q=*)* *[file](file:///tmp/a*b.md)* **[`docs`](https://example.com/search?q=**)**'}/>);
+    expect([...container.querySelectorAll('em')].map(node => node.textContent)).toEqual(['docs', 'file']);
+    expect(container.querySelector('strong')?.textContent).toBe('docs');
+    expect([...container.querySelectorAll('a')].map(node => node.getAttribute('href'))).toEqual(['https://example.com/search?q=*', 'https://example.com/search?q=**']);
+    expect(container.textContent).toBe('docs file docs');
+  });
+  it("preserves emphasis around links with plain and code-formatted labels", () => {
+    const {container} = render(() => <MdView text={'**[docs](https://example.com)** *[notes](file:///tmp/notes.md)* **[`code docs`](https://example.com/code)** *[`code notes`](file:///tmp/notes.md)*'}/>);
+    expect([...container.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['docs', 'code docs']);
+    expect([...container.querySelectorAll('em')].map(node => node.textContent)).toEqual(['notes', 'code notes']);
+    expect(container.querySelectorAll('strong a')).toHaveLength(2);
+    expect(container.querySelector('strong a code')?.textContent).toBe('code docs');
+    expect(container.querySelector('em code')?.textContent).toBe('code notes');
+    expect(container.textContent).toBe('docs notes code docs code notes');
+  });
   it("renders bold that ends with a code span", () => {
     const { container } = render(() => <MdView text={"- **La mission `be655506`** continue de travailler sur `final/*`.\n- **La PR #1 est mergée dans `main`** avec un commit (`12c18b46`)."} />);
     const strong = [...container.querySelectorAll("strong")].map(node => node.textContent);

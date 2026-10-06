@@ -469,6 +469,7 @@ fn apply_text_ops(buffer: &mut String, ops: &[TextOp]) {
                 chars.splice(start..end, text.chars());
                 *buffer = chars.into_iter().collect();
             }
+            TextOp::Snapshot { text, .. } => *buffer = text.clone(),
             TextOp::Finalize => {}
         }
     }
@@ -5543,6 +5544,12 @@ impl MissionStore for SqliteMissionStore {
             return tokio::task::spawn_blocking(move || {
                 let conn = conn.blocking_lock();
 
+                // A finalized native step is immutable. A log reset may replay
+                // it; do not create duplicate canonical rows or reopen the step.
+                if bubble_id.starts_with("antigravity:") && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_type='assistant_message_canonical' AND event_id=?2)",
+                    params![&mid, &bubble_id], |row| row.get::<_, bool>(0)
+                ).unwrap_or(false) { return Ok(()); }
                 if has_finalize {
                     let mut stmt = conn
                         .prepare(
@@ -5611,7 +5618,8 @@ impl MissionStore for SqliteMissionStore {
                             content_file,
                             serde_json::json!({
                                 "bubble_id": bubble_id,
-                                "canonical_from": "text_op"
+                                "canonical_from": "text_op",
+                                "revision": ops.iter().filter_map(|op| if let TextOp::Snapshot { revision, .. } = op { Some(*revision) } else { None }).max()
                             })
                             .to_string(),
                         ],
@@ -14961,6 +14969,67 @@ mod tests {
             "persisted metadata should contain the attribution source, got {}",
             user_event.metadata
         );
+    }
+
+    #[tokio::test]
+    async fn antigravity_snapshots_remain_durable_and_finalized_steps_cannot_reopen() {
+        use crate::api::control::events::TextOp;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .unwrap();
+        let mission = store
+            .create_mission(Some("native bubbles"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let bubble = "antigravity:session:turn:1";
+        let snapshot = |revision, text: &str, done| AgentEvent::TextOp {
+            mission_id: mission.id,
+            bubble_id: bubble.into(),
+            ops: if done {
+                vec![
+                    TextOp::Snapshot {
+                        text: text.into(),
+                        revision,
+                    },
+                    TextOp::Finalize,
+                ]
+            } else {
+                vec![TextOp::Snapshot {
+                    text: text.into(),
+                    revision,
+                }]
+            },
+        };
+        store
+            .log_event(mission.id, &snapshot(1, "First 🦀", false))
+            .await
+            .unwrap();
+        let active = store
+            .get_events(mission.id, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(active[0].event_type, "text_op");
+        store
+            .log_event(mission.id, &snapshot(2, "First 🦀 complete", true))
+            .await
+            .unwrap();
+        store
+            .log_event(mission.id, &snapshot(1, "First 🦀", false))
+            .await
+            .unwrap();
+        store
+            .log_event(mission.id, &snapshot(2, "First 🦀 complete", true))
+            .await
+            .unwrap();
+        let events = store
+            .get_events(mission.id, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "assistant_message_canonical");
+        assert_eq!(events[0].content, "First 🦀 complete");
+        assert_eq!(events[0].metadata["revision"], 2);
     }
 
     #[tokio::test]

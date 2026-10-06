@@ -235,6 +235,9 @@ class ApiService(
     suspend fun listProviders(includeAll: Boolean = false): sh.sandboxed.dashboard.data.ProvidersResponse =
         getJson("/api/providers", mapOf("include_all" to includeAll.toString()))
 
+    suspend fun listAntigravityModels(workspaceId: String?): List<List<String>> =
+        getList("/api/providers/antigravity-models", mapOf("workspace_id" to workspaceId))
+
     suspend fun listBuiltinCommands(): sh.sandboxed.dashboard.data.BuiltinCommandsResponse =
         getJson("/api/library/builtin-commands")
 

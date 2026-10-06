@@ -30,7 +30,7 @@ it("reconnects a revoked sandboxed-owned Anthropic account using its existing id
   fireEvent.click(screen.getByRole("button", { name: "Submit callback" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await screen.findByText("Connected");
-  expect(fetch.mock.calls.some(([url]) => url.includes("cli-proxy-login"))).toBe(false);
+  expect(fetch.mock.calls.some(([url, options]) => url.includes("cli-proxy-login") && options?.method === "POST")).toBe(false);
 });
 it("exposes API key editing and keeps real error details", async () => {
   setConnection("http://core.test", "test-token");
@@ -52,6 +52,7 @@ it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconn
   vi.spyOn(window, "open").mockReturnValue(null);
   const fetch = vi.fn(async (url: string, options?: RequestInit) => {
     if (url.endsWith("/cli-proxy-login")) {
+      if (options?.method !== "POST") return new Response(JSON.stringify({available:true,providers:[]}));
       expect(JSON.parse(options!.body as string)).toEqual({ provider: "anthropic", provider_id: id });
       return new Response(JSON.stringify({ session_id: "proxy-session", auth_url: "https://claude.ai/oauth/authorize", flow: "code", instructions: "Paste the Claude authorization code." }));
     }
@@ -71,4 +72,49 @@ it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconn
   fireEvent.click(screen.getByRole("button", { name: "Submit callback" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(fetch.mock.calls.some(([url]) => url.includes("/oauth/"))).toBe(false);
+});
+
+it("adds a second subscription through the backend capability list without a reconnect target", async () => {
+  setConnection("http://core.test", "test-token");
+  vi.spyOn(window, "open").mockReturnValue(null);
+  const requests: RequestInit[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/cli-proxy-login")) {
+      if (options?.method === "POST") {
+        requests.push(options);
+        return new Response(JSON.stringify({session_id:"new-session",auth_url:"https://example.test/login",flow:"code",instructions:"Approve the new account."}));
+      }
+      return new Response(JSON.stringify({available:true,providers:[{id:"anthropic",name:"Claude Pro/Max"}]}));
+    }
+    if (url.endsWith("/callback")) return new Response(JSON.stringify({status:"completed"}));
+    return new Response(JSON.stringify(url.endsWith("/providers") || url.endsWith("/cloud/accounts") ? [] : {}));
+  }));
+  render(() => <Providers />);
+  const add = await screen.findByRole("button", {name:"Add subscription account"});
+  await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(add);
+  fireEvent.click(screen.getByRole("button", {name:"Continue in browser"}));
+  const input = await screen.findByLabelText("Authorization code or redirect URL");
+  expect(JSON.parse(requests[0].body as string)).toEqual({provider:"anthropic"});
+  fireEvent.input(input,{target:{value:"approved-code"}});
+  fireEvent.click(screen.getByRole("button",{name:"Submit callback"}));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it("warns that removing a combined provider also deletes its independent API key", async () => {
+  setConnection("http://core.test", "test-token");
+  let deleted = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (options?.method === "DELETE") { deleted = true; return new Response(JSON.stringify({status:"ok"})); }
+    const data = url.endsWith("/providers") ? [{id:"combined",name:"Combined account",provider_type:"anthropic",uses_oauth:true,has_api_key:true,credential_owner:"cli_proxy",status:{type:"connected"}}] : url.endsWith("/cloud/accounts") ? [] : {};
+    return new Response(JSON.stringify(data));
+  }));
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", {name:"Actions for Combined account",exact:true}));
+  fireEvent.click(screen.getByRole("menuitem", {name:"Remove provider…",exact:true}));
+  expect(screen.getByText(/any independent API key saved on this provider/)).toBeTruthy();
+  expect(deleted).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name:"Remove provider and credentials",exact:true}));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(deleted).toBe(true);
 });

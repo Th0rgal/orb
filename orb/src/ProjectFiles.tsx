@@ -68,7 +68,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionTreeRows, archiveOnlyRows, type NestedMission } from "./missionTree";
 
 /** Sidebar section listing the core backend's projects with their missions
  * and hosted files. Replaces the demo projects when connected. */
@@ -254,11 +254,12 @@ export function LiveProjectsSection(p: {
   const RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
-    const rows = (missions[slug] ?? []).filter(m => !isArchived(m));
+    const rows = missions[slug] ?? [];
     const current = currentMission();
     // A paginated project list may not contain an older open conversation.
-    return current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
+    const withCurrent = current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
       ? [current, ...rows] : rows;
+    return missionTreeRows(withCurrent, m => !isArchived(m));
   };
   // Missions per project slug; file listings per `${slug}:${dirPath}`.
   const [missions, setMissions] = createStore<Record<string, Mission[]>>({});
@@ -339,9 +340,9 @@ export function LiveProjectsSection(p: {
         try {
           const mission = await api<Mission>(`/api/control/missions/${id}`);
           if (version !== connectionVersion()) break;
-          // Awaiting user is a parked conversation, not proof of a live runner.
-          // DELETE still checks running agents and descendants on the server.
-          if (!["completed", "failed", "interrupted", "acknowledged", "cancelled", "awaiting_user"].includes(mission.status))
+          // Preserve live and explicitly paused agents. DELETE also checks
+          // all descendants against the current server runner registry.
+          if (["active", "waiting_background", "paused"].includes(mission.status))
             throw new Error("Stop or finish this agent before deleting it.");
           const result = await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
           if (version !== connectionVersion()) break;
@@ -398,7 +399,19 @@ export function LiveProjectsSection(p: {
   };
   const folderMoved = async (slug: string, path: string, destination: string, project = slug) => {
     setFolderLabel(slug, path, fileBaseName(path));
-    if (expanded[`${slug}:${path}`]) setExpanded(`${project}:${destination}`, true);
+    batch(() => {
+      const oldPrefix = `${slug}:${path}`, newPrefix = `${project}:${destination}`;
+      for (const key of Object.keys(expanded)) {
+        if (key === oldPrefix || key.startsWith(`${oldPrefix}/`)) {
+          setExpanded(newPrefix + key.slice(oldPrefix.length), expanded[key]);
+        }
+      }
+      for (const key of Object.keys(dirs)) {
+        if (key === oldPrefix || key.startsWith(`${oldPrefix}/`)) {
+          setDirs(newPrefix + key.slice(oldPrefix.length), reconcile([...dirs[key]]));
+        }
+      }
+    });
     const selected = p.selected(), prefix = `pf:${slug}:${path}`;
     if (selected === prefix || selected?.startsWith(`${prefix}/`)) p.open(`pf:${project}:${destination}${selected.slice(prefix.length)}`);
     try { if (project === slug) await moveFolderWork(slug, path, destination); }
@@ -414,8 +427,8 @@ export function LiveProjectsSection(p: {
         await transferProjectFile(target.slug, target.path, destination);
         if (target.directory) {
           setFileAction(null);
-          await refreshFileParents(target.slug, target.path, destination);
-          await folderMoved(target.slug, target.path, destination);
+          try { await folderMoved(target.slug, target.path, destination); }
+          finally { await refreshFileParents(target.slug, target.path, destination); }
           return;
         }
       } else {
@@ -754,8 +767,9 @@ export function LiveProjectsSection(p: {
         }
       } else {
         await updateProject({ slug: target.slug, title });
+        setProjects(list => list.map(project => project.slug === target.slug ? {...project, title} : project));
+        bumpProjects();
       }
-      bumpProjects();
       setRename(null);
     } catch (e) {
       setRenameError(e instanceof Error ? e.message : String(e));
@@ -824,7 +838,7 @@ export function LiveProjectsSection(p: {
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
   };
   const changeArchiveState = async (mission: Mission, restore: boolean) => {
-    if (archiving.has(mission.id)) return;
+    if (archiving.has(mission.id)) return false;
     const id = mission.id, previousStatus = mission.status, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
     archiving.set(id, status); missionRevision++;
@@ -853,18 +867,37 @@ export function LiveProjectsSection(p: {
           }
         }
       }
+      return true;
     } catch (e) {
       if (currentConnection(version)) {
         updateStatus(previousStatus);
         setActionError(e instanceof Error ? e.message : String(e));
       }
+      return false;
     } finally { archiving.delete(id); missionRevision++; }
   };
   const archiveConversation = (mission: Mission) => changeArchiveState(mission, false);
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
+  const archiveSelection = async (id: string) => {
+    if (batchBusy()) return;
+    const ids = [...selectedFor(id)], version = connectionVersion();
+    const failures:string[]=[];
+    setBatchBusy(true);
+    try {
+      for (const selected of ids) {
+        if (!currentConnection(version)) break;
+        const row = Object.values(missions).flat().find(m => m.id === selected) ?? archivedMissions().find(m => m.id === selected);
+        if (!row || isArchived(row)) continue;
+        if (RUNNING.has(row.status)) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); continue; }
+        if (!await archiveConversation(row)) failures.push(`${selected.slice(0,8)}: ${actionError() ?? "archive failed"}`);
+      }
+      if (currentConnection(version) && failures.length) setActionError(failures.join("; "));
+    } finally { setBatchBusy(false); }
+  };
   /** Fork the clicked mission without changing the currently open conversation. */
   const missionMenuItems = (mission: Mission, x: number, y: number): MenuEntry[] => selectedFor(mission.id).length > 1 ? [
     {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
+    {kind: "item", label: `Archive ${selectedFor(mission.id).length} conversations`, icon: Ic.ArchiveIcon, onClick: () => void archiveSelection(mission.id)},
     {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
@@ -1039,7 +1072,7 @@ export function LiveProjectsSection(p: {
   const rootMissions = (slug: string) => nestMissions(visibleMissions(slug));
   // A mission the project's controller created (a Hermes session, no parent
   // mission) is listed under the controller, like a child under its parent.
-  const controllerLaunched = (mission: Mission) => !mission.parent_mission_id && mission.origin === "hermes" && !!mission.origin_session_id;
+  const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
   const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
@@ -1077,7 +1110,9 @@ export function LiveProjectsSection(p: {
   const archiveNodes = (): Node[] => {
     const rows = new Map<string, Mission>();
     for (const mission of archivedMissions()) rows.set(mission.id, mission);
-    const nodes = [...rows.values()].filter(isArchived).sort((a,b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
+    // Archived ancestors already shown around visible children have one row.
+    const inMain = Object.keys(missions).flatMap(slug => visibleMissions(slug));
+    const nodes = archiveOnlyRows([...rows.values()], inMain).sort((a,b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
       .map(m => missionNode(m.project ?? "", { mission: m, children: [] }));
     for (const project of projects()) {
       const job = controllers[project.slug]?.job;
@@ -1174,12 +1209,12 @@ export function LiveProjectsSection(p: {
     if (!mission?.project || isArchived(mission)) return "";
     const parents: string[] = [], seen = new Set([mission.id]);
     const rows = missions[mission.project] ?? [];
-    let root = mission, parent = mission.parent_mission_id;
+    let root = mission, parent = missionParent(mission);
     while (parent && !seen.has(parent)) {
       seen.add(parent); parents.push(`m:${parent}`);
       const ancestor = rows.find(m => m.id === parent);
       if (ancestor) root = ancestor;
-      parent = ancestor?.parent_mission_id;
+      parent = ancestor ? missionParent(ancestor) : undefined;
     }
     if (controllerRow(mission.project) && controllerLaunched(root)) parents.push(`c:${mission.project}`);
     return JSON.stringify([mission.id, parents]);

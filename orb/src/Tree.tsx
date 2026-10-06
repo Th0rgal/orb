@@ -16,13 +16,39 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   const [pointerFocus, setPointerFocus] = createSignal(false);
   const visible = createMemo(() => visibleTree(p.nodes));
   const [rows, setRows] = createStore<TreeRow<T>[]>([]);
-  createEffect(() => setRows(reconcile(visible(), { key: "id" })));
   let element: HTMLDivElement | undefined;
+  // Preserve the visible content when rows above it are inserted or removed.
+  // Keep several candidates so deleting the first visible row has a fallback.
+  createEffect(() => {
+    const next = visible();
+    const scroller = element?.closest<HTMLElement>(".sb-scroll");
+    const viewport = scroller?.getBoundingClientRect();
+    const scroll = scroller?.scrollTop ?? 0;
+    const anchors = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
+      .filter(row => {
+        const rect = row.getBoundingClientRect();
+        return viewport && rect.bottom > viewport.top && rect.top < viewport.bottom;
+      })
+      .map(row => ({ row, offset: row.getBoundingClientRect().top }));
+    setRows(reconcile(next, { key: "id" }));
+    queueMicrotask(() => {
+      if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
+      for (const anchor of anchors) {
+        const row = anchor.row;
+        if (row.isConnected && scroller.contains(row)) { scroller.scrollTop += row.getBoundingClientRect().top - anchor.offset; break; }
+      }
+    });
+  });
+  // Selection changes own reveal; collapsing/reopening a subtree preserves the
+  // operator's viewport instead of jumping back to the open conversation.
+  let revealed: string | null = null;
+  createEffect(on(() => p.selected, () => { revealed = null; }));
   const visibleCurrent = createMemo(() => rows.some(row => row.id === p.selected) ? p.selected : null);
   createEffect(on(visibleCurrent, id => {
-    if (!id) return;
+    if (!id || revealed === id) return;
     const frame = requestAnimationFrame(() => {
       const row = [...(element?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])].find(row => row.dataset.treeId === id);
+      if (row) revealed = id;
       row?.scrollIntoView({ block: "nearest", inline: "nearest" });
     });
     onCleanup(() => cancelAnimationFrame(frame));

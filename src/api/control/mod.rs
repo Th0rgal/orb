@@ -8,6 +8,7 @@
 //! - supports persistent missions (goal-oriented sessions)
 
 pub(crate) mod btw_context;
+mod callback_parent;
 pub(crate) mod client_placement;
 pub(crate) mod continuations;
 pub mod cyber;
@@ -4004,13 +4005,6 @@ pub(crate) fn resolve_codex_default_model() -> String {
     "gpt-6.1-sol".to_string()
 }
 
-/// Return the default model for Gemini CLI when no override is specified.
-pub(crate) fn resolve_gemini_default_model() -> String {
-    // Keep aligned with Google AI's model docs:
-    // https://ai.google.dev/gemini-api/docs/models
-    "gemini-3.1-pro-preview".to_string()
-}
-
 /// Return the default model for Grok Build when no override is specified.
 ///
 /// Mirrors the dashboard's `KNOWN_BACKEND_DEFAULT_MODELS` entry for grok and
@@ -5740,6 +5734,12 @@ fn validate_and_normalize_board_tasks(
                 "every task needs a non-empty task_key and prompt".to_string(),
             ));
         }
+        if t.backend.trim().eq_ignore_ascii_case("gemini") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("task `{}`: {}", t.task_key, board::RETIRED_GEMINI_TASK),
+            ));
+        }
         // Same operator policy as the orchestrator MCP: worker missions never
         // burn Claude tokens. Enforced here too so the API can't be used to
         // bypass the MCP-level check.
@@ -6976,6 +6976,7 @@ pub async fn list_missions(
     };
 
     populate_activity(&control, &mut missions).await;
+    let callback_parents = callback_parent::links(&missions, &control.mission_store).await;
     let active_runs: HashMap<Uuid, MissionRun> = control
         .mission_store
         .list_active_mission_runs()
@@ -7017,6 +7018,9 @@ pub async fn list_missions(
         .collect();
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            if let Some(parent) = callback_parents.get(&id) {
+                value["callback_parent_mission_id"] = serde_json::json!(parent);
+            }
             continuations::attach_capabilities(
                 value,
                 state.config.automations_enabled && control.mission_store.is_persistent(),
@@ -8032,6 +8036,9 @@ pub async fn get_mission(
             let mut one = [mission];
             populate_activity(&control, &mut one).await;
             let [mission] = one;
+            let callback_parents =
+                callback_parent::links(std::slice::from_ref(&mission), &control.mission_store)
+                    .await;
 
             // Serialize then attach the computed spark_offload block so Paloma
             // can route heavy builds without probing the host each time.
@@ -8050,6 +8057,9 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
+            if let Some(parent) = callback_parents.get(&id) {
+                value["callback_parent_mission_id"] = serde_json::json!(parent);
+            }
             continuations::attach_capabilities(
                 &mut value,
                 state.config.automations_enabled && control.mission_store.is_persistent(),
@@ -8851,6 +8861,7 @@ fn normalize_model_effort(raw: &str) -> Option<String> {
 fn normalize_model_effort_for_backend(backend: Option<&str>, raw: &str) -> Option<String> {
     let normalized = normalize_model_effort(raw)?;
     match (backend, normalized.as_str()) {
+        (Some("antigravity"), "low" | "medium" | "high") => Some(normalized),
         (Some("claudecode"), "low" | "medium" | "high" | "xhigh" | "max") => Some(normalized),
         // Codex app-server accepts the GPT reasoning-effort values and passes
         // them through as `reasoningEffort`.
@@ -8861,6 +8872,7 @@ fn normalize_model_effort_for_backend(backend: Option<&str>, raw: &str) -> Optio
 
 fn supported_model_efforts_for_backend(backend: Option<&str>) -> &'static str {
     match backend {
+        Some("antigravity") => "low, medium, high",
         Some("claudecode") => "low, medium, high, xhigh, max",
         Some("codex") => "low, medium, high, xhigh, max, ultra",
         _ => "none",
@@ -8942,7 +8954,7 @@ fn native_backend_prefix(raw_model: &str) -> Option<&str> {
         return None;
     }
     match prefix {
-        "codex" | "claudecode" | "gemini" | "grok" | "antigravity" => Some(prefix),
+        "codex" | "claudecode" | "grok" | "antigravity" => Some(prefix),
         _ => None,
     }
 }
@@ -8951,7 +8963,6 @@ fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
     match raw_agent.trim().to_ascii_lowercase().as_str() {
         "codex" => Some("codex"),
         "claudecode" => Some("claudecode"),
-        "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
         "grok" => Some("grok"),
         _ => None,
@@ -11096,7 +11107,7 @@ pub async fn create_mission(
                 .await;
         }
     }
-    create_mission_inner(State(state), Extension(user), body, false).await
+    create_mission_inner(State(state), Extension(user), body, false, None).await
 }
 
 pub(super) async fn create_mission_inner(
@@ -11104,6 +11115,7 @@ pub(super) async fn create_mission_inner(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
     shared_side_workspace: bool,
+    side_launch_fingerprint: Option<&str>,
 ) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
@@ -11300,7 +11312,7 @@ pub(super) async fn create_mission_inner(
         .idempotency_key
         .as_deref()
         .map(str::trim)
-        .filter(|key| !key.is_empty())
+        .filter(|key| side_launch_fingerprint.is_none() && !key.is_empty())
     {
         if let Ok(Some(lease)) = state.projects.lease_by_key(&format!("lease:{key}")) {
             if let Ok(mission_id) = Uuid::parse_str(&lease.attempt_id) {
@@ -11311,9 +11323,7 @@ pub(super) async fn create_mission_inner(
                     // A dispatch that already failed closed (for example a
                     // rejected remote submission) is not the work the retry
                     // asks for; only live or finished attempts coalesce.
-                    if existing.status != MissionStatus::Failed
-                        && !(shared_side_workspace && existing.status == MissionStatus::Interrupted)
-                    {
+                    if existing.status != MissionStatus::Failed {
                         verify_coalesced_attachments(&state.config, &req, &existing)?;
                         tracing::info!(
                             mission_id = %existing.id,
@@ -11339,11 +11349,9 @@ pub(super) async fn create_mission_inner(
     // mission instead of running the work twice. The response carries a header
     // so the caller can tell a coalesced answer from a fresh create; a client
     // that genuinely wants a parallel duplicate retitles it.
-    if let Some(title) = req
-        .title
-        .as_deref()
-        .filter(|t| !t.trim().is_empty() && req.parent_mission_id.is_none())
-    {
+    if let Some(title) = req.title.as_deref().filter(|t| {
+        side_launch_fingerprint.is_none() && !t.trim().is_empty() && req.parent_mission_id.is_none()
+    }) {
         let control_state = control_for_user(&state, &user).await;
         if let Some(existing) = find_recent_identical_mission(
             &control_state.mission_store,
@@ -11648,7 +11656,10 @@ pub(super) async fn create_mission_inner(
     }
 
     // Model effort is supported for Codex and Claude Code missions.
-    if !matches!(backend.as_deref(), Some("codex") | Some("claudecode")) {
+    if !matches!(
+        backend.as_deref(),
+        Some("codex") | Some("claudecode") | Some("antigravity")
+    ) {
         model_effort = None;
     } else if let Some(value) = model_effort.as_ref() {
         model_effort = normalize_model_effort_for_backend(backend.as_deref(), value);
@@ -11687,12 +11698,12 @@ pub(super) async fn create_mission_inner(
     };
 
     // Validate agent exists before creating mission (fail fast with clear error)
-    // Skip validation for Claude Code, Codex, Gemini, and Grok - they have their own built-in agents
+    // Skip validation for Claude Code, Codex, Antigravity, and Grok - they have their own built-in agents
     if let Some(ref agent_name) = agent {
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui")
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -11797,15 +11808,9 @@ pub(super) async fn create_mission_inner(
     }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
-        if matches!(
-            backend_id,
-            "codex" | "claudecode" | "gemini" | "grok" | "antigravity"
-        ) {
+        if matches!(backend_id, "codex" | "claudecode" | "grok" | "antigravity") {
             if let Some(workspace) = state.workspaces.get(ws_id).await {
-                let cli_path = if matches!(
-                    backend_id,
-                    "claudecode" | "codex" | "gemini" | "antigravity"
-                ) {
+                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "antigravity") {
                     state
                         .backend_configs
                         .get(backend_id)
@@ -11964,6 +11969,9 @@ pub(super) async fn create_mission_inner(
     {
         *effort = model_effort.clone();
         *fast_mode = req.fast_mode;
+    }
+    if let Some(RemoteHarnessPlan::Antigravity { effort, .. }) = remote_plan.as_mut() {
+        *effort = model_effort.clone();
     }
     if let Some(node_id) = remote_node_id.as_deref() {
         if remote_dispatch_is_scheduled_for_future(
@@ -12136,11 +12144,12 @@ pub(super) async fn create_mission_inner(
         }
     }
 
-    if shared_side_workspace {
+    if let Some(fingerprint) = side_launch_fingerprint {
         if let Err(error) = fork::record_side_launch(
             &state.config.working_dir,
             mission.id,
             req.idempotency_key.as_deref().unwrap_or_default(),
+            fingerprint,
         ) {
             interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
             return Err(internal_error(error));
@@ -12799,14 +12808,8 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &[
-    "claudecode",
-    "opencode",
-    "grok",
-    "codex",
-    "gemini",
-    "antigravity",
-];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
+    &["claudecode", "opencode", "grok", "codex", "antigravity"];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -12843,13 +12846,10 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
     Antigravity {
+        effort: Option<String>,
         model: Option<String>,
         prompt: String,
         resume_session_id: Option<String>,
-    },
-    Gemini {
-        model: Option<String>,
-        prompt: String,
     },
     Codex {
         effort: Option<String>,
@@ -12896,10 +12896,6 @@ impl RemoteHarnessPlan {
             RemoteHarnessPlan::Antigravity { model, .. } => format!(
                 "antigravity/{}",
                 model.as_deref().unwrap_or("account default")
-            ),
-            RemoteHarnessPlan::Gemini { model, .. } => format!(
-                "gemini/{}",
-                model.as_deref().unwrap_or("node default model")
             ),
             RemoteHarnessPlan::Codex { model, .. } => format!("codex/{model}"),
             RemoteHarnessPlan::Raw { .. } => "raw command".to_string(),
@@ -12954,8 +12950,7 @@ pub(crate) fn plan_remote_harness(
             resume_session_id: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
-        "gemini" => Ok(RemoteHarnessPlan::Gemini { model, prompt }),
-        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { model, prompt, resume_session_id: None }),
+        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { effort: None, model, prompt, resume_session_id: None }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
             // Claude Code expects bare model ids.
@@ -13189,12 +13184,17 @@ pub(crate) fn remote_execution_for_plan(
             label,
         ),
         RemoteHarnessPlan::Antigravity {
+            effort,
             model,
             prompt,
             resume_session_id,
         } => {
-            let args =
-                crate::antigravity::args(model.as_deref(), resume_session_id.as_deref(), prompt);
+            let args = crate::antigravity::args_with_effort(
+                model.as_deref(),
+                effort.as_deref(),
+                resume_session_id.as_deref(),
+                prompt,
+            );
             RemoteExecution {
                 managed_auth: vec!["antigravity".into()],
                 command: format!(
@@ -13204,21 +13204,6 @@ pub(crate) fn remote_execution_for_plan(
                         .collect::<Vec<_>>()
                         .join(" ")
                 ),
-                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
-                label,
-            }
-        }
-        RemoteHarnessPlan::Gemini { model, prompt } => {
-            let mut command = String::from("command -v gemini >/dev/null 2>&1 || { echo 'gemini is not installed on this node' >&2; exit 127; }; gemini --yolo");
-            if let Some(model) = model {
-                command.push_str(" --model ");
-                command.push_str(&shell_single_quote(model));
-            }
-            command.push_str(" --prompt ");
-            command.push_str(&shell_single_quote(prompt));
-            RemoteExecution {
-                managed_auth: vec!["gemini".into()],
-                command,
                 env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
                 label,
             }
@@ -14377,7 +14362,6 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
-        | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
     };
@@ -14426,7 +14410,6 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
-        | RemoteHarnessPlan::Gemini { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
         _ => "",
     };
@@ -14597,7 +14580,6 @@ async fn submit_leased_remote_job(
             RemoteHarnessPlan::ClaudeCode { .. } => "claudecode",
             RemoteHarnessPlan::OpenCode { .. } => "opencode",
             RemoteHarnessPlan::Grok { .. } => "grok",
-            RemoteHarnessPlan::Gemini { .. } => "gemini",
             RemoteHarnessPlan::Antigravity { .. } => "antigravity",
             RemoteHarnessPlan::Raw { .. } => unreachable!(),
         };
@@ -14620,11 +14602,6 @@ async fn submit_leased_remote_job(
             "opencode" => execution.command.replacen(
                 "opencode run ",
                 "/usr/local/bin/sandboxed-mcp launch --harness opencode -- opencode run ",
-                1,
-            ),
-            "gemini" => execution.command.replacen(
-                "gemini --yolo",
-                "/usr/local/bin/sandboxed-mcp launch --harness gemini -- gemini --yolo",
                 1,
             ),
             "antigravity" => execution.command.replacen(
@@ -16548,7 +16525,10 @@ pub async fn update_mission_settings(
     if backend_changed && fast_mode.is_none() {
         fast_mode = Some(false);
     }
-    if !matches!(effective_backend.as_str(), "codex" | "claudecode") {
+    if !matches!(
+        effective_backend.as_str(),
+        "codex" | "claudecode" | "antigravity"
+    ) {
         model_effort = Some(None);
     }
 
@@ -16574,7 +16554,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "gemini" | "grok" | "antigravity" | "chatgpt_ui"
+            "claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui"
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -18900,6 +18880,53 @@ async fn delete_mission_with_children(
     Ok(ids_to_delete)
 }
 
+/// Renamed deletion directories are the durable cleanup queue. Scan only known
+/// workspace parents and the exact reserved UUID format; never follow symlinks.
+pub(crate) fn start_deleted_workspace_cleanup(workspaces: workspace::SharedWorkspaceStore) {
+    tokio::spawn(async move {
+        loop {
+            let mut parents = HashSet::new();
+            for ws in workspaces.list().await {
+                for root in workspace::mission_workspace_roots_for_workspace(&ws) {
+                    parents.insert(workspace::workspaces_root_for(&root));
+                }
+            }
+            for parent in parents {
+                let Ok(mut entries) = tokio::fs::read_dir(&parent).await else {
+                    continue;
+                };
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name();
+                    let Some(ids) = name
+                        .to_str()
+                        .and_then(|name| name.strip_prefix(".deleted-mission-"))
+                    else {
+                        continue;
+                    };
+                    if !ids.is_ascii()
+                        || ids.len() != 73
+                        || ids.as_bytes()[36] != b'-'
+                        || Uuid::parse_str(&ids[..36]).is_err()
+                        || Uuid::parse_str(&ids[37..]).is_err()
+                    {
+                        continue;
+                    }
+                    if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                        continue;
+                    }
+                    if let Err(error) = tokio::fs::remove_dir_all(entry.path()).await {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(path = %entry.path().display(), %error,
+                                "quarantined workspace cleanup will retry");
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
+}
+
 async fn cleanup_mission_workspace_dirs_for_delete(
     mission_store: &Arc<dyn MissionStore>,
     workspaces: &workspace::SharedWorkspaceStore,
@@ -18944,6 +18971,22 @@ async fn cleanup_mission_workspace_dirs_for_delete(
         }
     }
 
+    // Check every descendant before touching any directory; paused children
+    // must retain their workspace even when the parent is terminal.
+    if let Some(mission) = missions.iter().find(|m| {
+        matches!(
+            m.status,
+            MissionStatus::Paused | MissionStatus::Active | MissionStatus::WaitingBackground
+        )
+    }) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Cannot delete mission {} while it is {:?}. Cancel it first.",
+                mission.id, mission.status
+            ),
+        ));
+    }
     let mut deleted_dirs = Vec::new();
     for mission in missions {
         let Some(ws) = workspaces.get(mission.workspace_id).await else {
@@ -18976,7 +19019,14 @@ async fn cleanup_mission_workspace_dirs_for_delete(
         if !dir.exists() {
             continue;
         }
-        match tokio::fs::remove_dir_all(&dir).await {
+        // Quarantine on the same filesystem before removing the record. Recursive
+        // cleanup can take minutes for build trees and must not hold the request.
+        let trash = dir.with_file_name(format!(
+            ".deleted-mission-{}-{}",
+            mission.id,
+            Uuid::new_v4()
+        ));
+        match tokio::fs::rename(&dir, &trash).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
@@ -18994,7 +19044,7 @@ async fn cleanup_mission_workspace_dirs_for_delete(
             mission_id = %mission.id,
             workspace_id = %mission.workspace_id,
             path = %dir.display(),
-            "removed mission workspace directory during explicit delete",
+            "quarantined mission workspace directory during explicit delete",
         );
         deleted_dirs.push(dir.to_string_lossy().to_string());
     }
@@ -29606,8 +29656,6 @@ async fn run_single_control_turn(
             && requested_model.is_none())
     {
         config.default_model = None;
-    } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
-        config.default_model = Some(resolve_gemini_default_model());
     } else if backend_id.as_deref() == Some("chatgpt_ui") && requested_model.is_none() {
         // Web model labels are account-specific. Never invent or inherit a
         // CLI/API model slug for the browser harness.
@@ -29891,33 +29939,6 @@ async fn run_single_control_turn(
                     mission_id: mid,
                     events_tx: events_tx.clone(),
                     cancel: cancel.clone(),
-                    app_working_dir: &config.working_dir,
-                    session_id: session_id.as_deref(),
-                    is_continuation: false,
-                    extras: crate::api::runners::TurnExtras::None,
-                }),
-            )
-            .await
-        }
-        Some("gemini") => {
-            let mid = match require_mission_id(mission_id, "Gemini CLI", &events_tx) {
-                Ok(id) => id,
-                Err(r) => return r,
-            };
-            use crate::api::runners::HarnessRunner as _;
-            Box::pin(
-                crate::api::runners::GeminiRunner.run_turn(crate::api::runners::TurnContext {
-                    mission_store: Some(mission_store.clone()),
-                    workspace: exec_workspace,
-                    work_dir: &ctx.working_dir,
-                    message: &convo,
-                    model: config.default_model.as_deref(),
-                    model_effort: None,
-                    fast_mode: false,
-                    agent: config.opencode_agent.as_deref(),
-                    mission_id: mid,
-                    events_tx: events_tx.clone(),
-                    cancel,
                     app_working_dir: &config.working_dir,
                     session_id: session_id.as_deref(),
                     is_continuation: false,
@@ -35115,6 +35136,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_workspace_cleanup_recovers_quarantined_directories_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
+        let parent = workspace::workspaces_root_for(temp.path());
+        let trash = parent.join(format!(
+            ".deleted-mission-{}-{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ));
+        let unrelated = parent.join(".deleted-mission-user-files");
+        tokio::fs::create_dir_all(&trash).await.unwrap();
+        tokio::fs::write(trash.join("artifact"), b"old build")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&unrelated).await.unwrap();
+        start_deleted_workspace_cleanup(workspaces);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while trash.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(unrelated.exists());
+    }
+
+    #[tokio::test]
     async fn cleanup_mission_workspace_dirs_for_delete_removes_worker_dirs() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
@@ -35147,6 +35195,21 @@ mod tests {
         tokio::fs::create_dir_all(&worker_dir)
             .await
             .expect("worker workspace dir should be created");
+
+        store
+            .update_mission_status(worker.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        let refused = cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, boss.id, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert!(boss_dir.exists());
+        assert!(worker_dir.exists());
+        store
+            .update_mission_status(worker.id, MissionStatus::Completed)
+            .await
+            .unwrap();
 
         let deleted_dirs =
             cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, boss.id, &[])
@@ -37831,6 +37894,14 @@ And the report:
     }
 
     #[test]
+    fn retired_gemini_board_task_is_rejected_at_registration() {
+        let mut tasks = vec![board_task_with_backend_and_model("gemini", "old-model")];
+        let (status, error) = validate_and_normalize_board_tasks(&mut tasks).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("agy models"));
+    }
+
+    #[test]
     fn board_upsert_normalizes_matching_native_model_backend_prefix() {
         let mut tasks = vec![board_task_with_backend_and_model(
             "codex",
@@ -37869,7 +37940,7 @@ And the report:
         assert_eq!(native_backend_agent("codex"), Some("codex"));
         assert_eq!(native_backend_agent(" Codex "), Some("codex"));
         assert_eq!(native_backend_agent("claudecode"), Some("claudecode"));
-        assert_eq!(native_backend_agent("gemini"), Some("gemini"));
+        assert_eq!(native_backend_agent("antigravity"), Some("antigravity"));
         assert_eq!(native_backend_agent("grok"), Some("grok"));
         assert_eq!(native_backend_agent("build"), None);
         assert_eq!(native_backend_agent("plan"), None);
@@ -37901,11 +37972,11 @@ And the report:
 
     #[test]
     fn native_backend_agent_selector_rejects_conflicting_backend() {
-        let mut agent = Some("gemini".to_string());
+        let mut agent = Some("antigravity".to_string());
         let mut backend = Some("codex".to_string());
         let error = apply_native_backend_agent_selector(&mut agent, &mut backend).unwrap_err();
-        assert!(error.contains("selects backend 'gemini'"));
-        assert_eq!(agent.as_deref(), Some("gemini"));
+        assert!(error.contains("selects backend 'antigravity'"));
+        assert_eq!(agent.as_deref(), Some("antigravity"));
     }
 
     #[test]
@@ -39222,6 +39293,18 @@ Investigate <service/> failures.
             no_prompt.starts_with("REMOTE_PROMPT_REQUIRED: "),
             "{no_prompt}"
         );
+    }
+
+    #[test]
+    fn retired_gemini_remote_launch_is_rejected_without_fallback() {
+        let error = plan_remote_harness(None, "gemini", Some("gemini-old"), Some("hello"))
+            .expect_err("retired harness must not run");
+        assert!(error.starts_with(REMOTE_HARNESS_UNSUPPORTED));
+        assert!(!REMOTE_NODE_HARNESSES.contains(&"gemini"));
+        assert!(matches!(
+            plan_remote_harness(None, "antigravity", Some("gemini-account"), Some("hello")),
+            Ok(RemoteHarnessPlan::Antigravity { .. })
+        ));
     }
 
     #[test]

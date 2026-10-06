@@ -44,6 +44,8 @@ describe("file references", () => {
 
 it("resolves document links without escaping the source", () => {
   expect(relativeFilePath("audit/notes.md", "../README.md")).toBe("README.md");
+  expect(relativeFilePath("docs/notes.md", "C:/Users/Jane/readme.md")).toBe("C:/Users/Jane/readme.md");
+  expect(relativeFilePath("docs/notes.md", "C:\\Users\\Jane\\readme.md")).toBe("C:\\Users\\Jane\\readme.md");
   expect(relativeFilePath("notes.md", "../secret.md")).toBeNull();
   expect(relativeFilePath("audit/notes.md", "/workspace/README.md")).toBe(
     "/workspace/README.md",

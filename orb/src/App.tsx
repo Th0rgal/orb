@@ -1,3 +1,4 @@
+import { missionParent } from "./missionTree";
 import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
@@ -57,7 +58,7 @@ import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
 import { latestChecklist } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
-import { DEFAULT_EFFORT_LABEL, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
+import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
@@ -839,23 +840,23 @@ export function Composer(p: {
               <button
                 class={`model ${which() === "effort" ? "on" : ""}`}
                 title="Reasoning effort"
-                aria-label={`Reasoning effort: ${effortLabel(pick()?.effort)}`}
+                aria-label={`Reasoning effort: ${effortLabel(pick()?.effort,pick()?.backend,pick()?.model)}`}
                 onClick={() => setWhich(which() === "effort" ? null : "effort")}
               >
-                {effortLabel(pick()?.effort)} <Ic.ChevronDown size={12} />
+                {effortLabel(pick()?.effort,pick()?.backend,pick()?.model)} <Ic.ChevronDown size={12} />
               </button>
               <Show when={which() === "effort"}>
                 <div class="menu">
                   <button
                     class={`menu-item ${!pick()?.effort ? "on" : ""}`}
-                    title="Let the harness choose — no model_effort is sent"
+                    title={pick()?.backend === "antigravity" && pick()?.model === "agy-demo" ? "Use High, the default for agy-demo" : "Let the harness choose"}
                     onClick={() => {
                       const cur = pick()!;
                       setHarnessPick({ backend: cur.backend, model: cur.model });
                       setWhich(null);
                     }}
                   >
-                    <span class="pick-name">{DEFAULT_EFFORT_LABEL}</span>
+                    <span class="pick-name">{defaultEffortLabel(pick()?.backend,pick()?.model)}</span>
                     <span class="pick-check">{!pick()?.effort ? "✓" : ""}</span>
                   </button>
                   <For each={supportedEfforts(pick()?.backend)}>
@@ -1308,8 +1309,8 @@ export default function App() {
     return { id, title: displayTitle(mission?.title) || "Mission", local,
       destination: local ? "This computer" : missionDestination(mission ?? null, recalledLaunch(id)),
       directory: binding?.cwd || mission?.working_directory,
-      parent: mission?.parent_mission_id ? missions().find(m => m.id === mission.parent_mission_id)?.title || mission.parent_mission_id : undefined,
-      children: missions().filter(m => m.parent_mission_id === id).length,
+      parent: mission && missionParent(mission) ? missions().find(m => m.id === missionParent(mission))?.title || missionParent(mission) : undefined,
+      children: missions().filter(m => missionParent(m) === id).length,
       project: liveProjects().find(p => p.slug === mission?.project)?.title || mission?.project,
       harness: choice?.backend.name || backend,
       model: modelLabel ? shortModelLabel(modelLabel) : model || undefined,
@@ -1443,7 +1444,7 @@ export default function App() {
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("standard");
     setAttachChips([]);
@@ -2196,9 +2197,10 @@ function MissionDock(p: {
   const [modelOpen, setModelOpen] = createSignal(false);
   const [effortOpen, setEffortOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
-  const choice = () => harnessChoices(p.mission?.remote_node_id ?? "core").find((c) => c.backend.id === p.mission?.backend);
+  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : p.mission?.remote_node_id ?? "core";
+  const choice = () => harnessChoices(catalogMachine()).find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
-  const modelId = () => p.mission?.model_override || "";
+  const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
   const modelLabel = () => {
     const id = modelId();
     const m = choice()?.models.find((x) => x.value === id);
@@ -2251,6 +2253,7 @@ function MissionDock(p: {
   // Warm the machine list once the conversation is idle so the menu opens filled.
   createEffect(on(() => p.mission?.id, id => {
     if (!id) return;
+    if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine());
     const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
     onCleanup(() => clearTimeout(timer));
   }));
@@ -2266,7 +2269,7 @@ function MissionDock(p: {
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
-        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(m().remote_node_id ?? "core")} onOpen={() => void refreshNodeAntigravityModels(m().remote_node_id ?? "core")} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
+        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
           <Show
@@ -2307,23 +2310,23 @@ function MissionDock(p: {
             <Show
               when={canChangeEffort()}
               fallback={
-                <span class="under-model" title={`Effort: ${effortLabel(effort())}`}>
-                  {effortLabel(effort())}
+                <span class="under-model" title={`Effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}>
+                  {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}
                 </span>
               }
             >
               <button
                 class={`under-model ${effortOpen() ? "on" : ""}`}
                 title={idle() ? "Reasoning effort for the next turn" : p.mission?.backend === "claudecode" ? "Reasoning effort · applies to the running session" : "Reasoning effort · applies from the next turn"}
-                aria-label={`Reasoning effort: ${effortLabel(effort())}`}
+                aria-label={`Reasoning effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}
                 onClick={() => setEffortOpen(!effortOpen())}
               >
-                {effortLabel(effort())} <Ic.ChevronDown size={10} />
+                {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)} <Ic.ChevronDown size={10} />
               </button>
               <Show when={effortOpen()}>
                 <div class="menu under-model-menu">
                   <button class={`menu-item ${!effort() ? "on" : ""}`} onClick={() => void pickEffort("")}>
-                    <span class="pick-name">{DEFAULT_EFFORT_LABEL}</span>
+                    <span class="pick-name">{defaultEffortLabel(p.mission?.backend,p.mission?.model_override)}</span>
                     <span class="pick-check">{!effort() ? "✓" : ""}</span>
                   </button>
                   <For each={efforts()}>
@@ -2420,7 +2423,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
 
   const scrollIfPinned = () => {
-    if (nearBottom && !scroller?.dataset.panelResizing) scroller?.scrollTo({ top: scroller.scrollHeight });
+    if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
   };
   // Resize notifications run after streaming Markdown has changed layout.
   onMount(() => {
@@ -2650,7 +2653,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const phase = missionPhase(mission(), activity());
     return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
-  const phaseLabel = () => "Working";
+  const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt);
@@ -2717,7 +2720,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
@@ -2853,14 +2856,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       </div>
       <div class="dock" ref={floatingDock}>
         <div class="col">
-          <Show when={items().some(i => i.kind === "user" && i.queued && !remoteQueuedIds().includes(i.messageId ?? ""))}>
+          <Show when={items().some(i => i.kind === "user" && i.queued && clientPlaced() && !remoteQueuedIds().includes(i.messageId ?? ""))}>
             <section class="queued-messages" aria-label="Queued messages" aria-live="polite">
               <div class="queued-label">Queued messages</div>
-              <ol><For each={items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && i.queued === true && !remoteQueuedIds().includes(i.messageId ?? ""))}>{item => <li data-message-id={item.messageId}><UserTurn text={item.text} attached={item.attached} /></li>}</For></ol>
+              <ol><For each={items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && i.queued === true && clientPlaced() && !remoteQueuedIds().includes(i.messageId ?? ""))}>{item => <li data-message-id={item.messageId}><UserTurn text={item.text} attached={item.attached} /></li>}</For></ol>
             </section>
           </Show>
-          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
-          <RemoteQueue mission={p.id} onRows={reconcileRemoteQueue} onCancel={id=>{
+          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})} onOpenSession={p.onFork?async id=>p.onFork?.(await getMission(id)):undefined}/></Show>
+          <RemoteQueue mission={p.id}
+            pending={!clientPlaced() && optimistic()?.waiting && !sendError() ? {id:optimistic()!.id,content:optimistic()!.text} : undefined}
+            confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
+            onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>

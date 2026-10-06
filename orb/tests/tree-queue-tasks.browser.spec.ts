@@ -113,14 +113,14 @@ test("combined queue and checklist survives failure, identical sends, reload and
   await expect(page.getByRole("button",{name:"Plan",exact:true})).toHaveCount(0);
   await field.fill("@README");await page.getByRole("option",{name:"README.md",exact:true}).click();
   state.setReject(true);await field.fill("retry this @README.md");await field.press("Escape");await field.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("not accepted");await expect(page.locator(".scroll .user").filter({hasText:"retry this @README.md"})).toHaveCount(1);await expect(page.locator('.queued-messages')).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText("not accepted");await expect(page.locator(".scroll .user").filter({hasText:"retry this @README.md"})).toHaveCount(1);await expect(page.locator('.followup-queue')).toHaveCount(0);
   await expect(field).toHaveValue("");
   state.setReject(false);
   for(let i=0;i<2;i++){await field.fill("same text @README.md");await field.press("Escape");await field.press("Enter");await expect(field).toHaveValue("");}
-  await expect(page.locator('.queued-messages li')).toHaveCount(2);
+  await expect(page.locator('.followup-queue .queue-row')).toHaveCount(2);
   expect(state.posts[1].attachments).toEqual([{kind:"path",path:"README.md"}]);
-  await expect(page.locator('.queued-messages')).toContainText("Attached context");
-  await expect(page.locator('.queued-messages')).not.toContainText(".paloma");
+  await expect(page.locator('.followup-queue')).toContainText("Attached context");
+  await expect(page.locator('.followup-queue')).not.toContainText(".paloma");
   expect(state.posts.slice(-2).map(p=>p.client_message_id)[0]).not.toBe(state.posts.at(-1)!.client_message_id);
   await expect(page.locator('.st-text.live')).toHaveCount(1);
   await page.screenshot({path:"test-results/orb-queue-tasks-dark.png"});
@@ -128,12 +128,12 @@ test("combined queue and checklist survives failure, identical sends, reload and
   await page.reload();await expect(page.getByRole("button",{name:"test",exact:true})).toBeVisible();
   if(await page.getByRole("button",{name:"test",exact:true}).getAttribute("aria-expanded")!=="true")await page.getByRole("button",{name:"test",exact:true}).click();
   await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
-  await expect(page.locator('.queued-messages li')).toHaveCount(2);
+  await expect(page.locator('.followup-queue .queue-row')).toHaveCount(2);
   state.setStatus("completed"); // Status alone never confirms delivery.
-  await page.waitForTimeout(2200);await expect(page.locator('.queued-messages li')).toHaveCount(2);
-  state.deliver();await expect(page.locator('.queued-messages li')).toHaveCount(1,{timeout:8000});
+  await page.waitForTimeout(2200);await expect(page.locator('.followup-queue .queue-row')).toHaveCount(2);
+  state.deliver();await expect(page.locator('.followup-queue .queue-row')).toHaveCount(1,{timeout:8000});
   await expect(page.locator('.scroll .user').filter({hasText:"same text"})).toHaveCount(1);
-  state.deliver();await expect(page.locator('.queued-messages')).toHaveCount(0,{timeout:8000});
+  state.deliver();await expect(page.locator('.followup-queue')).toHaveCount(0,{timeout:8000});
   await expect(page.locator('.scroll .user').filter({hasText:"same text"})).toHaveCount(2);
   await page.evaluate(()=>document.documentElement.dataset.theme="light");await page.screenshot({path:"test-results/orb-queue-tasks-light.png"});
 });
@@ -147,7 +147,7 @@ test("retry after a lost HTTP receipt reuses the accepted message ID",async({pag
   await expect(page.getByRole("alert")).toBeVisible();await expect(page.locator(".scroll .user").filter({hasText:"accepted but reply lost"})).toHaveCount(1);
   await page.getByRole("button",{name:"Retry",exact:true}).click();await expect(field).toHaveValue("");
   await expect.poll(() => state.posts.length).toBe(2);expect(state.posts[0].client_message_id).toBe(state.posts[1].client_message_id);
-  expect(state.pending).toHaveLength(1);await expect(page.locator('.queued-messages li')).toHaveCount(1);
+  expect(state.pending).toHaveLength(1);await expect(page.locator('.followup-queue .queue-row')).toHaveCount(1);
 });
 
 
@@ -161,5 +161,26 @@ test("reserved attachment reference rejection keeps the follow-up draft and atta
   await field.fill(prose);await field.press("Enter");
   await expect(page.getByRole("alert")).toContainText("reserved attachment reference");
   await expect(page.locator(".scroll .user").filter({hasText:prose})).toHaveCount(1);await expect(field).toHaveValue("");
-  await expect(page.locator('.queued-messages')).toHaveCount(0);
+  await expect(page.locator('.followup-queue')).toHaveCount(0);
+});
+
+
+test("remote queue appears while the message request is still pending",async({page})=>{
+  const state=await setup(page,true);state.releaseSlow();
+  let release!:()=>void;
+  const receipt=new Promise<void>(resolve=>release=resolve);
+  await page.route("**/api/control/message",async route=>{await receipt;await route.fallback();});
+  await page.getByRole("button",{name:"Queue and task review",exact:true}).click();
+  const field=page.getByPlaceholder("Send follow-up");
+  await field.fill("Continue overnight despite a slow connection");await field.press("Enter");
+  const queue=page.getByRole("region",{name:"Queued messages",exact:true});
+  await expect(queue).toContainText("Continue overnight despite a slow connection");
+  await expect(queue).toContainText("Sending…");
+  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toHaveCount(0);
+  expect(state.posts).toHaveLength(0);
+  release();
+  await expect(queue).toContainText("1 Queued");
+  await expect(queue.locator(".queue-row")).toHaveCount(1);
+  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toBeVisible();
+  expect(state.posts).toHaveLength(1);
 });

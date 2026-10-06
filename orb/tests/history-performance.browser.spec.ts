@@ -39,7 +39,7 @@ test('older history preserves scroll and remains accessible in WebKit',async({pa
  await expect(target).toBeVisible();const before=(await target.boundingBox())!.y;
  release();await page.waitForTimeout(500);
  const after=(await target.boundingBox())!.y;expect(Math.abs(after-before)).toBeLessThan(12);
- expect(limits.every(limit=>limit===1000)).toBe(true);
+ expect(limits.every(limit=>limit===200)).toBe(true);
  await scroller.evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
  await expect(page.getByText(/^Message 1\./).first()).toBeInViewport();
  await info.attach('history-metrics.json',{body:JSON.stringify({limits,anchorShift:after-before,deferred:await page.locator('.st-deferred').count()}),contentType:'application/json'});

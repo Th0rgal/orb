@@ -17,7 +17,7 @@ missions. Sandboxed.sh currently supports:
 | **OpenCode** | OpenCode CLI executed inside each workspace | Per-workspace (`opencode.json`, `.opencode/`) |
 | **Claude Code** | Claude CLI executed inside each workspace | Per-workspace (`CLAUDE.md`, `.claude/settings.local.json`) |
 | **Codex** | Codex CLI/app-server driver executed inside each workspace | Per-workspace (`.codex/config.toml`, `.codex/skills/`) |
-| **Gemini** | Gemini CLI executed inside each workspace | Per-workspace OpenCode-style MCP/tool config |
+| **Antigravity** | Native `agy` CLI inside each workspace | Native account login and per-launch MCP config |
 | **Grok Build** | Grok CLI executed inside each workspace | Per-workspace OpenCode-style MCP/tool config |
 
 ## Architecture (per-workspace)
@@ -38,7 +38,7 @@ missions. Sandboxed.sh currently supports:
                │                               │
                ▼                               ▼
 ┌──────────────────────────┐    ┌──────────────────────────────────┐
-│     OpenCode CLI          │    │  Claude/Codex/Gemini/Grok CLIs │
+│     OpenCode CLI          │    │  Claude/Codex/agy/Grok CLIs      │
 │  (opencode)               │    │  - native streaming protocols  │
 │  - per-workspace config   │    │  - per-workspace config        │
 └──────────────────────────┘    └──────────────────────────────────┘
@@ -121,15 +121,15 @@ when the mission is created instead of failing after dispatch. Use
 `gpt-5.6-terra` with `model_effort=medium` when the Terra lane is intended;
 Sandboxed.sh does not silently substitute a different model.
 
-## Gemini and Grok harnesses
+## Antigravity and Grok harnesses
 
-Gemini and Grok Build run through their native CLIs inside the workspace:
+Antigravity and Grok Build run through their native CLIs inside the workspace:
 
-- Gemini defaults to the configured Google/Gemini model when no override is
-  supplied.
+- Antigravity uses the execution user's native login and exact model IDs from
+  `agy models`. Gemini CLI is retired; its sessions cannot be resumed in `agy`.
 - Grok Build uses `GROK_CODE_XAI_API_KEY`, `XAI_API_KEY`, xAI provider entries,
   or the Grok CLI's own login cache.
-- Both reuse the OpenCode-style workspace config generation for MCP/tool wiring.
+- MCP wiring is generated for each harness at launch.
 
 ### Harness bootstrap (auto-install)
 
@@ -181,7 +181,7 @@ Default per-workspace tool settings:
 
 - **OpenCode**: built-in `bash` enabled; `workspace_*` disabled by default.
 - **Claude Code**: built-in `Bash` enabled via permissions.
-- **Codex/Gemini/Grok**: native CLI tools run in the selected workspace and use
+- **Codex/Antigravity/Grok**: native CLI tools run in the selected workspace and use
   the generated MCP/tool configuration for that backend.
 
 MCP tools (desktop/playwright/workspace) can be enabled when needed.
@@ -239,7 +239,7 @@ let result = match backend_id.as_str() {
     "opencode" => run_opencode_turn(...).await,
     "claudecode" => run_claudecode_turn(...).await,
     "codex" => run_codex_turn(...).await,
-    "gemini" => run_gemini_turn(...).await,
+    "antigravity" => run_antigravity_turn(...).await,
     "grok" => run_grok_turn(...).await,
     _ => Err(anyhow!("Unknown backend")),
 };

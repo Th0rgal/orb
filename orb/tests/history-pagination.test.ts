@@ -2,7 +2,7 @@ import {beforeEach, expect, it, vi} from 'vitest';
 vi.mock('../src/api',()=>({connectionVersion:()=>0,listQueuedMessages:vi.fn(async()=>[])}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEventPage:vi.fn()}));
 import {getMissionEventPage, type StoredEvent} from '../src/stream';
-import {loadTranscript,loadOlderTranscript,putTranscript,refreshTranscript} from '../src/missionCache';
+import {loadTranscript,loadOlderTranscript,putTranscript,refreshTranscript,prefetchTranscript,forgetPrefetchPauses} from '../src/missionCache';
 import {applyStreamEvent} from '../src/transcriptModel';
 import {cacheReset} from '../src/pageCache';
 const row=(sequence:number,event_type:string,content:string,extra:Partial<StoredEvent>={}):StoredEvent=>({id:sequence,sequence,event_type,content,timestamp:'',...extra});
@@ -36,4 +36,20 @@ it('empty older pages terminate pagination without losing existing content',asyn
  const tail=await loadTranscript('empty');
  vi.mocked(getMissionEventPage).mockResolvedValueOnce({events:[],hasMore:false});
  const older=await loadOlderTranscript('empty');expect(older.hasOlder).toBe(false);expect(older.items).toEqual(tail.items);
+});
+
+it('bounds speculative reads while an opened conversation loads immediately',async()=>{
+ forgetPrefetchPauses();
+ const pending=new Map<string,(value:any)=>void>();
+ vi.mocked(getMissionEventPage).mockImplementation(id=>new Promise(done=>pending.set(id,done)));
+ for(const id of ['prefetch-a','prefetch-b','prefetch-c'])prefetchTranscript(id);
+ await vi.waitFor(()=>expect(pending.size).toBe(2));
+ const opened=loadTranscript('opened');
+ await vi.waitFor(()=>expect(pending.has('opened')).toBe(true));
+ const empty={events:[],hasMore:false,pageMax:0};
+ pending.get('opened')!(empty);await opened;
+ pending.get('prefetch-a')!(empty);
+ await vi.waitFor(()=>expect(pending.has('prefetch-c')).toBe(true));
+ pending.get('prefetch-b')!(empty);pending.get('prefetch-c')!(empty);
+ await vi.waitFor(()=>expect(getMissionEventPage).toHaveBeenCalledTimes(4));
 });

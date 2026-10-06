@@ -16,3 +16,11 @@ describe("destination account models", () => {
     expect(destinationHarnessChoices([],"old-agent",[["agy-demo","Gemini 4 Argon"]])[0].backend.id).toBe("antigravity");
   });
 });
+
+it("drops retired Gemini CLI from stale Core choices without removing Antigravity models", () => {
+  const retired = {backend: {id: "gemini", name: "Gemini CLI"}, models: [{value: "gemini-old", label: "Old model"}]};
+  const choices = destinationHarnessChoices([retired, ...core], "local", [["gemini-account", "Gemini account model"]]);
+  expect(choices.map(choice => choice.backend.id)).toEqual(["antigravity"]);
+  expect(choices[0].models[0].value).toBe("gemini-account");
+  expect(destinationHarnessChoices([retired], "local", [])).toEqual([]);
+});

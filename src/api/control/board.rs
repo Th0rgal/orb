@@ -55,6 +55,23 @@ const STUCK_PENDING_SECS: i64 = 90;
 const DIGEST_HEAD_CHARS: usize = 400;
 const DIGEST_TAIL_CHARS: usize = 1200;
 
+pub(super) const RETIRED_GEMINI_TASK: &str = "Gemini CLI is retired. Select Antigravity and an exact model from agy models in the execution workspace, then explicitly requeue this task; do not reuse Gemini native session IDs.";
+
+async fn require_supported_task_backend(
+    store: &dyn MissionStore,
+    task: &BoardTask,
+) -> Result<(), String> {
+    if task.backend.trim().eq_ignore_ascii_case("gemini") {
+        let mut blocked = task.clone();
+        blocked.status = BoardTaskStatus::Settled;
+        blocked.outcome = Some(BoardTaskOutcome::Blocked);
+        blocked.result_digest = Some(RETIRED_GEMINI_TASK.into());
+        store.save_board_task(&blocked).await?;
+        return Err(RETIRED_GEMINI_TASK.into());
+    }
+    Ok(())
+}
+
 fn role_default_model(task: &BoardTask) -> Option<&'static str> {
     if task.backend != "codex" {
         return None;
@@ -1642,6 +1659,12 @@ pub async fn scheduler_pass(
                     if available == 0 {
                         break;
                     }
+                    if let Err(error) =
+                        require_supported_task_backend(mission_store.as_ref(), &task).await
+                    {
+                        tracing::warn!(task = %task.task_key, "board: task requires migration: {error}");
+                        continue;
+                    }
                     let preflight = if task.attempts > 0 {
                         retry_preflight(&task).await
                     } else {
@@ -1828,6 +1851,7 @@ async fn schedule_external_worker(
                 super::Extension(user.clone()),
                 Some(super::Json(request)),
                 true,
+                None,
             )
             .await
             .map_err(|(_, error)| error),
@@ -1934,6 +1958,7 @@ async fn spawn_task_worker(
     workspace_id: Uuid,
     preflight: &RetryPreflight,
 ) -> Result<Uuid, String> {
+    require_supported_task_backend(mission_store.as_ref(), task).await?;
     // Board tasks bypass the public create-mission handler, so apply the same
     // backend-aware normalization here as a defensive migration for tasks that
     // were persisted before upsert started normalizing them.
@@ -2674,6 +2699,46 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn retired_gemini_board_task_is_blocked_without_spawning_or_retrying() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let boss = Uuid::new_v4();
+        store
+            .upsert_board_tasks(
+                boss,
+                vec![NewBoardTask {
+                    task_key: "legacy".into(),
+                    title: "Legacy".into(),
+                    prompt: "p".into(),
+                    backend: "gemini".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        let task = store.list_board_tasks(boss).await.unwrap()[0].clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let error = spawn_task_worker(
+            None,
+            &store,
+            &cmd_tx,
+            &Default::default(),
+            &task,
+            Uuid::new_v4(),
+            &RetryPreflight::NothingFound,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("agy models"));
+        let tasks = store.list_board_tasks(boss).await.unwrap();
+        assert_eq!(tasks[0].status, BoardTaskStatus::Settled);
+        assert_eq!(tasks[0].outcome, Some(BoardTaskOutcome::Blocked));
+        assert_eq!(tasks[0].attempts, 0);
+        assert!(tasks[0].worker_mission_id.is_none());
+        assert!(ready_tasks(&tasks).is_empty());
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[tokio::test]

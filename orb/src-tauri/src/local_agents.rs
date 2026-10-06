@@ -24,7 +24,6 @@ const HARNESSES: &[(&str, &str)] = &[
     ("codex", "codex"),
     ("grok", "grok"),
     ("opencode", "opencode"),
-    ("gemini", "gemini"),
     ("antigravity", "agy"),
 ];
 
@@ -89,11 +88,8 @@ pub struct StartRequest {
     pub cwd: String,
     pub prompt: String,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub session_id: Option<String>,
-    /// A /btw side run reads the parent's folder while the parent works.
-    /// It neither waits for nor blocks ordinary runs in that directory.
-    #[serde(default)]
-    pub shared_directory: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -112,7 +108,6 @@ pub struct PollState {
 #[derive(Clone)]
 struct Run {
     mcp_wrapped: bool,
-    shared_directory: bool,
     generation: String,
     cwd: PathBuf,
     child: Arc<Mutex<Child>>,
@@ -315,9 +310,8 @@ pub(crate) fn start_with_env_fenced(
         }
     }
     let canonical_cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
-    if !request.shared_directory && map.iter().any(|(id, run)| {
+    if map.iter().any(|(id, run)| {
         id != &request.id
-            && !run.shared_directory
             && !run.done.load(Ordering::SeqCst)
             && run.cwd.canonicalize().ok().as_ref() == Some(&canonical_cwd)
     }) {
@@ -350,7 +344,6 @@ pub(crate) fn start_with_env_fenced(
     let child = Arc::new(Mutex::new(child));
     let run = Run {
         mcp_wrapped: env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER"),
-        shared_directory: request.shared_directory,
         generation: uuid::Uuid::new_v4().to_string(),
         cwd,
         child,
@@ -569,15 +562,6 @@ fn spawn_harness(
             session_id,
             env,
         ),
-        "gemini" => spawn_piped(
-            request,
-            gemini_args(request),
-            text,
-            error,
-            true,
-            session_id,
-            env,
-        ),
         other => Err(format!("unknown local harness {other}")),
     }
 }
@@ -609,7 +593,7 @@ fn spawn_antigravity(
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    let mut claim_root = PathBuf::from(home).join(".orb/antigravity-attempts");
+    let mut claim_root = PathBuf::from(&home).join(".orb/antigravity-attempts");
     if request.session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
         let bindings = crate::local_bindings(None, None)?;
         if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
@@ -620,13 +604,28 @@ fn spawn_antigravity(
     let claim = claim_antigravity_attempt(&claim_root, &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
     let mut command = mission_command(request, env);
     let mut child = command.current_dir(&request.cwd)
-        .args(crate::antigravity::args(request.model.as_deref(), request.session_id.as_deref(), &request.prompt))
+        .args(crate::antigravity::args_with_effort(request.model.as_deref(), request.effort.as_deref(), request.session_id.as_deref(), &request.prompt))
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|e| {
             if let Some(path) = &claim { let _ = std::fs::remove_file(path); }
             format!("Cannot start Antigravity: {e}")
         })?;
     let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
+    let thoughts = Arc::new(Mutex::new(crate::antigravity::thoughts::Reader::new(std::path::Path::new(&home))));
+    let thoughts_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thought_reader = thoughts.clone();
+    let thought_stop = thoughts_done.clone();
+    let thought_output = Arc::clone(text);
+    let thought_guard = text.reader();
+    thread::spawn(move || {
+        let _guard = thought_guard;
+        loop {
+            for event in thought_reader.lock().unwrap().poll() { thought_output.antigravity_thought(&event); }
+            if thought_stop.load(std::sync::atomic::Ordering::Acquire) { break; }
+            thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+
     let output = Arc::clone(text);
     let slot = Arc::clone(session_id);
     let error = Arc::clone(error);
@@ -643,6 +642,7 @@ fn spawn_antigravity(
             let Ok(line) = line else { break; };
             let Ok(value) = serde_json::from_str(&line) else { continue; };
             for tool in stream.feed(&value) { output.native_activity(&tool); }
+            if stream.error.is_none() { thoughts.lock().unwrap().observe(&value); }
             if matches!(value["event"].as_str(), Some("init" | "step_update" | "result")) {
                 output.antigravity_progress(&stream);
             }
@@ -659,27 +659,12 @@ fn spawn_antigravity(
                 break;
             }
         }
+        thoughts_done.store(true, std::sync::atomic::Ordering::Release);
         if let Err(message) = stream.finish() {
             if let Ok(mut error) = error.lock() { *error = Some(message); }
         }
     });
     Ok(child)
-}
-
-fn gemini_args(request: &StartRequest) -> Vec<String> {
-    let mut args = vec![
-        "--output-format".into(),
-        "stream-json".into(),
-        "--yolo".into(),
-    ];
-    if let Some(model) = request.model.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--model".into(), model.into()]);
-    }
-    if let Some(session) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--resume".into(), session.into()]);
-    }
-    args.extend(["--prompt".into(), request.prompt.clone()]);
-    args
 }
 
 fn grok_args(request: &StartRequest) -> Vec<String> {
@@ -2187,9 +2172,6 @@ fn extract_text(line: &str) -> Option<String> {
                 .pointer("/part/text")
                 .or_else(|| value.get("data"))?
                 .as_str(), // OpenCode or Grok
-            "message" if value["role"] == "assistant" && value["delta"] == true => {
-                value["content"].as_str()
-            } // Gemini streaming output
             _ => None,
         }
     }?;
@@ -2334,6 +2316,28 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn retired_gemini_cannot_be_launched_from_saved_requests() {
+        assert!(!HARNESSES.iter().any(|(id, _)| *id == "gemini"));
+        let request = StartRequest { effort: None,
+            cyber_revision: None,
+            cyber_access: None,
+            id: "retired-harness".into(),
+            harness: "gemini".into(),
+            bin: "/not-executed".into(),
+            cwd: "/".into(),
+            prompt: "hello".into(),
+            model: None,
+            session_id: Some("old-native-session".into()),
+            image_paths: vec![],
+        };
+        let error = spawn_harness(
+            &request, &Arc::new(Output::default()), &Arc::new(Mutex::new(None)),
+            &Arc::new(Mutex::new(None)), &Arc::new(AtomicBool::new(false)), &[],
+        ).unwrap_err();
+        assert_eq!(error, "unknown local harness gemini");
+    }
+
+    #[test]
     fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
         let root = tempfile::tempdir().unwrap();
         let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None).unwrap().unwrap();
@@ -2362,8 +2366,7 @@ mod tests {
             }
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let request = StartRequest {
-                shared_directory: false,
+            let request = StartRequest { effort: None,
                 cyber_revision: None, cyber_access: None, image_paths: vec![],
                 id: "antigravity-fixture".into(), harness: "antigravity".into(),
                 bin: bin.to_string_lossy().into_owned(), cwd: dir.path().to_string_lossy().into_owned(),
@@ -2382,55 +2385,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn gemini_stream_preserves_session_and_only_emits_assistant_deltas() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("gemini-fixture");
-        std::fs::write(&bin, r#"#!/bin/sh
-printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message","role":"user","content":"private input"}' '{"type":"message","role":"assistant","delta":true,"content":"Ready"}' '{"type":"result","status":"success"}'
-"#).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let request = StartRequest {
-            shared_directory: false,
-            cyber_revision: None,
-            cyber_access: None,
-            id: "gemini-fixture".into(),
-            harness: "gemini".into(),
-            bin: bin.to_string_lossy().into_owned(),
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: "hello".into(),
-            model: Some("selected-model".into()),
-            session_id: Some("previous-session".into()),
-            image_paths: vec![],
-        };
-        let args = gemini_args(&request);
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--resume", "previous-session"]));
-        assert!(args.windows(2).any(|w| w == ["--model", "selected-model"]));
-        let output = Arc::new(Output::default());
-        let session = Arc::new(Mutex::new(None));
-        let error = Arc::new(Mutex::new(None));
-        let mut child = spawn_harness(
-            &request,
-            &output,
-            &session,
-            &error,
-            &Arc::new(AtomicBool::new(false)),
-            &[],
-        )
-        .unwrap();
-        assert!(child.wait().unwrap().success());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while output.snapshot() != "Ready" && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(output.snapshot(), "Ready");
-        assert_eq!(session.lock().unwrap().as_deref(), Some("gemini-session"));
-        assert!(error.lock().unwrap().is_none());
-    }
     #[cfg(unix)]
     #[test]
     fn unavailable_version_does_not_hide_installed_harness() {
@@ -2552,8 +2506,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
 
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
-        let fresh = StartRequest {
-            shared_directory: false,
+        let fresh = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -2603,14 +2556,14 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         );
-        let smart = StartRequest {
+        let smart = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             model: Some("builtin/smart".into()),
             ..fresh.clone()
         };
         assert!(opencode_args(&smart).contains(&"sandboxed-sh/builtin/smart".to_string()));
-        let resumed = StartRequest {
+        let resumed = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             session_id: Some("ses_abc".into()),
@@ -2908,8 +2861,7 @@ printf '%s\n' '{"type":"init","session_id":"gemini-session"}' '{"type":"message"
     #[cfg(unix)]
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
-        let request = StartRequest {
-            shared_directory: false,
+        let request = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: "stdin-test".into(),
@@ -2964,8 +2916,7 @@ printf '%s\n' '{"type":"result"}'
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
-        local_agents_start(StartRequest {
-            shared_directory: false,
+        local_agents_start(StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3110,8 +3061,7 @@ printf '%s\n' '{"type":"result"}'
             .unwrap()
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
-        local_agents_start(StartRequest {
-            shared_directory: false,
+        local_agents_start(StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3186,8 +3136,7 @@ printf '%s\n' '{"type":"result"}'
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
-        local_agents_start(StartRequest {
-            shared_directory: false,
+        local_agents_start(StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3261,8 +3210,7 @@ printf '%s\n' '{"type":"result"}'
     #[cfg(unix)]
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
-        let request = StartRequest {
-            shared_directory: false,
+        let request = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -3298,8 +3246,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::write(&bin, "#!/bin/sh\nsleep 10\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
-        local_agents_start(StartRequest {
-            shared_directory: false,
+        local_agents_start(StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3332,8 +3279,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, "#!/bin/sh\n[ \"$1\" = --version ] && { echo launcher 1.0.0; exit 0; }\nsleep 30 &\necho $! > child.pid\nwait\n").unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
-            local_agents_start(StartRequest {
-                shared_directory: false,
+            local_agents_start(StartRequest { effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: id.clone(),
@@ -3394,8 +3340,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\nhead -3 '{0}'\nif read -r line && read -r line && sleep 0.3 && read -r -t 1 line; then :; fi\ntail -2 '{0}'\ncat >/dev/null\n", events.display())).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
-        local_agents_start(StartRequest {
-            shared_directory: false,
+        local_agents_start(StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3441,7 +3386,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("zero-turn-{}", uuid_like());
-            local_agents_start(StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,
+            local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,
                 id: id.clone(),
                 harness: "claudecode".into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -3497,7 +3442,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
+        local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -3553,24 +3498,6 @@ mod plan_smoke {
     }
 }
 
-/// Whether a new launch in `root` must wait. Side runs never wait, and only
-/// ordinary runs hold the directory against other launches.
-pub fn launch_blocked(root: &std::path::Path, shared_directory: bool) -> Result<bool, String> {
-    if shared_directory {
-        return Ok(false);
-    }
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    Ok(runs()
-        .lock()
-        .map_err(|e| e.to_string())?
-        .values()
-        .any(|run| {
-            !run.shared_directory
-                && !run.done.load(Ordering::SeqCst)
-                && run.cwd.canonicalize().ok().as_ref() == Some(&root)
-        }))
-}
-
 pub fn workspace_busy(root: &std::path::Path) -> Result<bool, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     Ok(runs()
@@ -3606,7 +3533,7 @@ mod directory_tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let bin = root.path().join("gemini-fixture");
+        let bin = root.path().join("grok-fixture");
         std::fs::write(
             &bin,
             "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 30\n",
@@ -3614,12 +3541,11 @@ mod directory_tests {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
-        let request = StartRequest {
-            shared_directory: false,
+        let request = StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: first.clone(),
-            harness: "gemini".into(),
+            harness: "grok".into(),
             bin: bin.to_string_lossy().into(),
             cwd: root.path().to_string_lossy().into(),
             prompt: "test".into(),
@@ -3629,7 +3555,7 @@ mod directory_tests {
         };
         start_with_env(request.clone(), &[]).unwrap();
         let deferred = tauri::async_runtime::block_on(crate::run_recovery::local_run_launch(
-            StartRequest {
+            StartRequest { effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -3643,7 +3569,7 @@ mod directory_tests {
         .unwrap_err();
         assert!(deferred.starts_with("Local launch deferred: directory busy"));
         let second = start_with_env(
-            StartRequest {
+            StartRequest { effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -3657,54 +3583,6 @@ mod directory_tests {
         assert!(second
             .unwrap_err()
             .contains("directory already has a running local mission"));
-    }
-    #[cfg(unix)]
-    #[test]
-    fn side_runs_share_the_parent_directory() {
-        use super::*;
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let bin = root.path().join("gemini-fixture");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 30\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let request = StartRequest {
-            shared_directory: false,
-            cyber_revision: None,
-            cyber_access: None,
-            id: uuid::Uuid::new_v4().to_string(),
-            harness: "gemini".into(),
-            bin: bin.to_string_lossy().into(),
-            cwd: root.path().to_string_lossy().into(),
-            prompt: "test".into(),
-            model: None,
-            session_id: None,
-            image_paths: vec![],
-        };
-        let parent = request.id.clone();
-        start_with_env(request.clone(), &[]).unwrap();
-        let side = uuid::Uuid::new_v4().to_string();
-        let side_start = start_with_env(
-            StartRequest {
-                id: side.clone(),
-                shared_directory: true,
-                ..request.clone()
-            },
-            &[],
-        );
-        let side_blocked = launch_blocked(root.path(), true);
-        local_agents_stop(parent.clone()).unwrap();
-        runs().lock().unwrap().remove(&parent);
-        // With only the side run left, an ordinary launch may proceed.
-        let parent_blocked = launch_blocked(root.path(), false);
-        let _ = local_agents_stop(side.clone());
-        runs().lock().unwrap().remove(&side);
-        side_start.unwrap();
-        assert!(!side_blocked.unwrap());
-        assert!(!parent_blocked.unwrap());
     }
     #[test]
     fn plain_directory_is_valid_without_git() {

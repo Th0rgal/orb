@@ -63,7 +63,8 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
-    let args = crate::antigravity::args(ctx.model, ctx.session_id, prompt);
+    let args =
+        crate::antigravity::args_with_effort(ctx.model, ctx.model_effort, ctx.session_id, prompt);
     let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
     let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
     let claim = uuid::Uuid::new_v4();
@@ -119,12 +120,32 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stream = Stream::default();
     let mut bound = false;
+    let thought_home = match ctx.workspace.env_vars.get("HOME") {
+        Some(home)
+            if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
+                && !crate::workspace::is_container_fallback(ctx.workspace) =>
+        {
+            ctx.workspace.path.join(home.trim_start_matches('/'))
+        }
+        Some(home) => std::path::PathBuf::from(home),
+        None => crate::workspace::resolve_workspace_home_root(
+            &ctx.workspace.path,
+            ctx.workspace.workspace_type,
+            &ctx.workspace.env_vars,
+        ),
+    };
+    let mut thoughts = crate::antigravity::thoughts::Reader::new(&thought_home);
+    let mut thought_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
         let line = tokio::select! {
             _ = ctx.cancel.cancelled() => {
                 stop(&mut child).await;
                 drain.abort();
                 return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
+            }
+            _ = thought_tick.tick() => {
+                publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
+                continue;
             }
             line = lines.next_line() => line,
         };
@@ -168,11 +189,20 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
                 bound = true;
             }
         }
-        let _ = ctx.events_tx.send(AgentEvent::TextDelta {
-            content: stream.text.clone(),
-            mission_id: Some(ctx.mission_id),
-        });
+        if bound {
+            thoughts.observe(&value);
+        }
         for tool in tools {
+            if tool["type"] == "text_op" {
+                if let Ok(ops) = serde_json::from_value(tool["ops"].clone()) {
+                    let _ = ctx.events_tx.send(AgentEvent::TextOp {
+                        mission_id: ctx.mission_id,
+                        bubble_id: tool["bubble_id"].as_str().unwrap_or_default().into(),
+                        ops,
+                    });
+                }
+                continue;
+            }
             let id = tool["toolCallId"].as_str().unwrap_or_default().to_string();
             let name = tool["name"].as_str().unwrap_or("tool").to_string();
             let event = if tool["type"] == "tool_call" {
@@ -197,11 +227,11 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         _ = ctx.cancel.cancelled() => { stop(&mut child).await; drain.abort(); return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled); }
         status = child.wait() => status,
     };
+    publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
     drain.abort();
     let mut result = match stream.finish() {
-        Ok(()) if status.is_ok_and(|s| s.success()) => {
-            AgentResult::success(stream.text, 0).with_terminal_reason(TerminalReason::TurnComplete)
-        }
+        Ok(()) if status.is_ok_and(|s| s.success()) => AgentResult::success(stream.summary(), 0)
+            .with_terminal_reason(TerminalReason::TurnComplete),
         Ok(()) => AgentResult::failure("Antigravity process failed after its result", 0),
         Err(error) => AgentResult::failure(error, 0)
             .with_terminal_reason(TerminalReason::NativeContinuityRequired),
@@ -231,5 +261,19 @@ async fn stop(child: &mut tokio::process::Child) {
         .is_err()
     {
         let _ = child.kill().await;
+    }
+}
+
+fn publish_thoughts(
+    reader: &mut crate::antigravity::thoughts::Reader,
+    tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    mission: uuid::Uuid,
+) {
+    for event in reader.poll() {
+        let _ = tx.send(AgentEvent::Thinking {
+            content: event["text"].as_str().unwrap_or_default().into(),
+            done: event["done"] == true,
+            mission_id: Some(mission),
+        });
     }
 }

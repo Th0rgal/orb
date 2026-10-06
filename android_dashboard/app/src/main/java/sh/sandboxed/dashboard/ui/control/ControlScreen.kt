@@ -96,6 +96,9 @@ import coil.request.ImageRequest
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import sh.sandboxed.dashboard.data.AppContainer
 import sh.sandboxed.dashboard.data.Backend
 import sh.sandboxed.dashboard.data.BackendAgent
@@ -663,6 +666,37 @@ private fun NewMissionDialog(
     var selectedAgent by remember { mutableStateOf("") }
     var selectedModel by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
+    var nativeModels by remember { mutableStateOf<List<List<String>>>(emptyList()) }
+    var nativeWorkspace by remember { mutableStateOf<String?>(null) }
+    var nativeLoading by remember { mutableStateOf(false) }
+    var nativeError by remember { mutableStateOf<String?>(null) }
+    var nativeRefresh by remember { mutableStateOf(0) }
+    val isAntigravity = selectedBackend == "antigravity"
+    val nativeReady = !nativeLoading && nativeError == null && nativeWorkspace == selectedWorkspaceId
+        && nativeModels.any { it.first() == selectedModel }
+
+    LaunchedEffect(selectedBackend, selectedWorkspaceId, nativeRefresh) {
+        nativeModels = emptyList()
+        nativeWorkspace = null
+        nativeError = null
+        nativeLoading = false
+        if (selectedBackend != "antigravity") return@LaunchedEffect
+        selectedModel = ""
+        nativeLoading = true
+        val workspace = selectedWorkspaceId
+        try {
+            val models = container.api.listAntigravityModels(workspace)
+            currentCoroutineContext().ensureActive()
+            nativeModels = models.filter { it.size == 2 && it[0].isNotBlank() }.distinctBy { it[0] }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
+            nativeError = "Antigravity discovery failed. Sign in with agy in this workspace, then refresh."
+        }
+        nativeWorkspace = workspace
+        nativeLoading = false
+    }
 
     LaunchedEffect(Unit) {
         val settings = container.cached.value
@@ -702,7 +736,10 @@ private fun NewMissionDialog(
                             title = workspace.name,
                             subtitle = "${workspace.workspaceType} · ${workspace.path}",
                             selected = selectedWorkspaceId == workspace.id,
-                        ) { selectedWorkspaceId = workspace.id }
+                        ) {
+                            selectedWorkspaceId = workspace.id
+                            if (isAntigravity) selectedModel = ""
+                        }
                     }
 
                     item { DialogSection("Agent") }
@@ -731,23 +768,43 @@ private fun NewMissionDialog(
                     }
 
                     item { DialogSection("Model override") }
-                    item {
-                        SelectRow(
-                            title = "Default",
-                            subtitle = "Use the selected agent or server default",
-                            selected = selectedModel.isBlank(),
-                        ) { selectedModel = "" }
-                    }
-                    items(filteredProviders(providers, selectedBackend), key = { it.id }) { provider ->
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(provider.name, color = Palette.TextTertiary, style = MaterialTheme.typography.labelMedium)
-                            provider.models.take(12).forEach { model ->
-                                val value = if (selectedBackend == "opencode") "${provider.id}/${model.id}" else model.id
-                                SelectRow(
-                                    title = model.name,
-                                    subtitle = value,
-                                    selected = selectedModel == value,
-                                ) { selectedModel = value }
+                    if (isAntigravity) {
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                when {
+                                    nativeLoading -> CircularProgressIndicator(color = Palette.Accent)
+                                    nativeError != null -> Text(nativeError!!, color = Palette.TextSecondary)
+                                    nativeModels.isEmpty() -> Text("No Antigravity models available. Sign in with agy in this workspace, then refresh.", color = Palette.TextSecondary)
+                                }
+                                TextButton(onClick = { nativeRefresh += 1 }, enabled = !nativeLoading) {
+                                    Text("Refresh workspace models")
+                                }
+                            }
+                        }
+                        items(nativeModels, key = { it[0] }) { model ->
+                            SelectRow(title = model[1], subtitle = model[0], selected = selectedModel == model[0]) {
+                                selectedModel = model[0]
+                            }
+                        }
+                    } else {
+                        item {
+                            SelectRow(
+                                title = "Default",
+                                subtitle = "Use the selected agent or server default",
+                                selected = selectedModel.isBlank(),
+                            ) { selectedModel = "" }
+                        }
+                        items(filteredProviders(providers, selectedBackend), key = { it.id }) { provider ->
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(provider.name, color = Palette.TextTertiary, style = MaterialTheme.typography.labelMedium)
+                                provider.models.take(12).forEach { model ->
+                                    val value = if (selectedBackend == "opencode") "${provider.id}/${model.id}" else model.id
+                                    SelectRow(
+                                        title = model.name,
+                                        subtitle = value,
+                                        selected = selectedModel == value,
+                                    ) { selectedModel = value }
+                                }
                             }
                         }
                     }
@@ -756,7 +813,8 @@ private fun NewMissionDialog(
         },
         confirmButton = {
             Button(
-                onClick = {
+                onClick = create@{
+                    if (isAntigravity && !nativeReady) return@create
                     onCreate(
                         NewMissionOptions(
                             workspaceId = selectedWorkspaceId,
@@ -766,7 +824,7 @@ private fun NewMissionDialog(
                         )
                     )
                 },
-                enabled = !loading && selectedWorkspaceId != null && selectedBackend.isNotBlank(),
+                enabled = !loading && selectedWorkspaceId != null && selectedBackend.isNotBlank() && (!isAntigravity || nativeReady),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
                 modifier = Modifier.tag(TestTags.NEW_MISSION_CREATE),
             ) { Text("Create") }
@@ -1007,7 +1065,6 @@ private fun SelectRow(title: String, subtitle: String?, selected: Boolean, onCli
 private fun filteredProviders(providers: List<Provider>, backend: String): List<Provider> = when (backend) {
     "claudecode", "amp" -> providers.filter { it.id == "anthropic" }
     "codex" -> providers.filter { it.id == "openai" }
-    "gemini" -> providers.filter { it.id == "google" }
     else -> providers
 }
 

@@ -94,14 +94,28 @@ export function loadTranscript(id:string):Promise<TranscriptSnap>{
 // live missions every 5 s.
 const prefetchPaused=new Map<string,number>();
 const PREFETCH_PAUSE_MS=10*60_000,PREFETCH_RETRY_MS=60_000;
+// Keep speculative reads from occupying every connection when a conversation opens.
+const prefetchQueue=new Map<string,string>();
+let prefetchActive=0;
+function pumpPrefetch(){
+ while(prefetchActive<2&&prefetchQueue.size){
+  const [scope,id]=prefetchQueue.entries().next().value!;
+  prefetchQueue.delete(scope);
+  if(scope!==key(id)||peekReadyTranscript(id)||jobs.has(scope))continue;
+  prefetchActive++;
+  void loadTranscript(id).then(()=>{if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);})
+   .catch(()=>{prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);})
+   .finally(()=>{prefetchActive--;pumpPrefetch();});
+ }
+}
 export function prefetchTranscript(id:string){
  const scope=key(id);
  if(peekReadyTranscript(id)||jobs.has(scope))return;
  const until=prefetchPaused.get(scope);if(until!==undefined&&until>Date.now())return;
- void loadTranscript(id).then(()=>{if(!active.has(scope)&&cachePeek(scope)===undefined)prefetchPaused.set(scope,Date.now()+PREFETCH_PAUSE_MS);})
-  .catch(()=>{prefetchPaused.set(scope,Date.now()+PREFETCH_RETRY_MS);});
+ prefetchQueue.set(scope,id);
+ pumpPrefetch();
 }
-export function forgetPrefetchPauses(){prefetchPaused.clear();}
+export function forgetPrefetchPauses(){prefetchPaused.clear();prefetchQueue.clear();}
 export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  return transcriptJob(id,'older',async()=>{
   const previous=peekReadyTranscript(id);if(!previous)return fetchTranscript(id);

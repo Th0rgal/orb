@@ -150,7 +150,6 @@ pub(crate) async fn require_node_managed_auth(
 ) -> Result<(), String> {
     let profile = match plan {
         RemoteHarnessPlan::Grok { .. } => "grok",
-        RemoteHarnessPlan::Gemini { .. } => "gemini",
         RemoteHarnessPlan::Antigravity { .. } => "antigravity",
         _ => return Ok(()),
     };
@@ -214,6 +213,7 @@ pub(crate) enum StreamUpdate {
     Text,
     Thinking,
     TextSnapshot(String),
+    NativeText(serde_json::Value),
     ThinkingSnapshot(String),
     SessionId(String),
     End,
@@ -331,6 +331,18 @@ impl GrokStream {
             return;
         };
         if let Some(stream) = self.antigravity.as_mut() {
+            if value["event"] == "thought_update" {
+                if value["conversation_id"].as_str() != stream.session.as_deref() {
+                    return;
+                }
+                if let Some(text) = value["text"].as_str().filter(|s| s.len() <= 256 * 1024) {
+                    self.thinking = text.into();
+                    self.progress = true;
+                    updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
+                }
+                return;
+            }
+
             let tools = stream.feed(&value);
             self.progress |= !tools.is_empty() || !stream.text.is_empty();
             if stream.session != self.session_id {
@@ -340,11 +352,14 @@ impl GrokStream {
                 }
             }
             self.text = stream.text.clone();
-            updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
             self.ended = stream.success;
             self.stop_reason = stream.success.then(|| "end_turn".into());
             self.error = stream.error.clone();
             for tool in tools {
+                if tool["type"] == "text_op" {
+                    updates.push(StreamUpdate::NativeText(tool));
+                    continue;
+                }
                 let completed = tool["type"] == "tool_call_update";
                 updates.push(StreamUpdate::Tool {
                     update: tool,
@@ -729,6 +744,7 @@ impl NativeGrokObserver {
                 antigravity: (mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = mission.session_id.clone();
+                    stream.turn_id = job_id.to_string();
                     stream
                 }),
                 ..Default::default()
@@ -833,6 +849,7 @@ impl NativeGrokObserver {
                 antigravity: (self.mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = self.session_persisted.clone();
+                    stream.turn_id = self.job_id.to_string();
                     stream
                 }),
                 ..Default::default()
@@ -927,6 +944,18 @@ impl NativeGrokObserver {
                         done: false,
                         mission_id: Some(self.mission_id),
                     });
+                }
+                StreamUpdate::NativeText(value) => {
+                    self.close_thinking();
+                    if let Ok(ops) = serde_json::from_value(value["ops"].clone()) {
+                        self.owner
+                            .publish_native(AgentEvent::TextOp {
+                                mission_id: self.mission_id,
+                                bubble_id: value["bubble_id"].as_str().unwrap_or_default().into(),
+                                ops,
+                            })
+                            .await;
+                    }
                 }
                 StreamUpdate::TextSnapshot(content) => {
                     self.close_thinking();
@@ -1102,6 +1131,7 @@ impl NativeGrokObserver {
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
         if self.stream.antigravity.is_some()
+            && self.stream.error.is_none()
             && (self.stream.session_id.is_none()
                 || self.session_persisted != self.stream.session_id)
         {
@@ -1123,7 +1153,14 @@ impl NativeGrokObserver {
         if self.stream.claude && !success {
             self.forget_unstarted_claude_session(allocated).await;
         }
-        let mut content = self.stream.text.trim().to_string();
+        let mut content = self
+            .stream
+            .antigravity
+            .as_ref()
+            .map(|s| s.summary())
+            .unwrap_or_else(|| self.stream.text.clone())
+            .trim()
+            .to_string();
         if legacy_claude && success {
             content = format!(
                 "Remote job {} on node '{}' finished with state 'succeeded'",
@@ -1810,6 +1847,7 @@ async fn continue_inner(
     };
     let plan = if mission.backend == "antigravity" {
         RemoteHarnessPlan::Antigravity {
+            effort: mission.model_effort.clone(),
             model: mission.model_override.clone(),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
@@ -1923,6 +1961,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antigravity_remote_thoughts_require_matching_native_identity() {
+        let mut stream = GrokStream {
+            antigravity: Some(Default::default()),
+            ..Default::default()
+        };
+        stream.feed("{\"event\":\"init\",\"conversation_id\":\"same\"}\n");
+        assert!(stream
+            .feed(
+                "{\"event\":\"thought_update\",\"conversation_id\":\"other\",\"text\":\"wrong\"}\n"
+            )
+            .is_empty());
+        let updates = stream.feed("{\"event\":\"thought_update\",\"conversation_id\":\"same\",\"text\":\"Checking the build.\",\"done\":true}\n");
+        assert_eq!(
+            updates,
+            vec![StreamUpdate::ThinkingSnapshot("Checking the build.".into())]
+        );
+        assert!(stream.text.is_empty());
+    }
+
+    #[test]
     fn antigravity_remote_stream_records_progress_and_rejects_wrong_resume() {
         let mut stream = GrokStream {
             antigravity: Some(Default::default()),
@@ -1944,6 +2002,46 @@ mod tests {
         resumed.feed("{\"event\":\"init\",\"conversation_id\":\"wrong\"}\n");
         assert!(resumed.error.is_some());
         assert_ne!(resumed.session_id.as_deref(), Some("wrong"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_startup_error_survives_remote_verdict_without_identity() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "agy-startup")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("startup"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job_id = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job_id)
+            .await
+            .unwrap();
+        observer.streaming = LogStreaming::Supported;
+        observer.stream.feed(&format!("{}\n", serde_json::json!({"event":"result","result":{"conversation_id":"","status":"ERROR","error":"agy-demo requires --effort"}})));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission.id,"state":"failed","exit_code":1,"created_at":"2026-10-06T06:52:05Z"})).unwrap();
+        let verdict = observer.verdict(&status, "old-agent").await;
+        assert!(!verdict.success);
+        assert!(verdict.content.contains("agy-demo requires --effort"));
+        assert!(!verdict
+            .content
+            .contains("identity was not durably persisted"));
     }
 
     const SPARK_STREAM: &str =

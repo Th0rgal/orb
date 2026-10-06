@@ -18,7 +18,7 @@
 //!   This environment variable is used as the initial default when no settings file exists.
 //!   If not set, defaults to: https://github.com/Th0rgal/sandboxed-library-template.git
 //! - `DEFAULT_BACKEND` - Optional. Default backend to use.
-//!   If not set, defaults to the first available backend with priority: claudecode → opencode → grok → gemini → codex.
+//!   If not set, defaults to the first available backend with priority: claudecode → opencode → grok → codex → antigravity.
 //! - `PALOMA_WEBHOOK_FORWARD_URL` - Optional. External webhook to receive mission status changes.
 //! - `PALOMA_WEBHOOK_SECRET` - Optional. HMAC-SHA256 secret; adds `X-Hub-Signature-256` to forwarded webhooks.
 //!
@@ -616,7 +616,6 @@ impl Config {
                     "claudecode",
                     "opencode",
                     "grok",
-                    "gemini",
                     "antigravity",
                     "codex",
                     "chatgpt_ui",
@@ -624,7 +623,7 @@ impl Config {
                 .contains(&backend.as_str())
             {
                 tracing::warn!(
-                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, gemini, antigravity, codex, chatgpt_ui",
+                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, antigravity, codex, chatgpt_ui",
                     v
                 );
                 None

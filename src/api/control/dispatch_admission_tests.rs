@@ -6331,7 +6331,7 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
             false,
         )));
         registry.register(Arc::new(crate::backend::grok::GrokBackend::new()));
-        registry.register(Arc::new(crate::backend::gemini::GeminiBackend::new()));
+        registry.register(crate::backend::antigravity::registry_entry());
     }
     let store = h.control.mission_store.clone();
 
@@ -6471,7 +6471,7 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     assert!(detail.contains("managed-auth"), "{detail}");
     let caps = remote_launch_capabilities();
     assert!(caps.typed && caps.raw_command && caps.proxy_url_configured);
-    for harness in ["claudecode", "opencode", "grok", "codex", "gemini"] {
+    for harness in ["claudecode", "opencode", "grok", "codex", "antigravity"] {
         assert!(caps.harnesses.iter().any(|h| h == harness));
     }
     let refused = h
@@ -6479,8 +6479,8 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
         .http_client
         .post(format!("{}/missions", h.url))
         .json(
-            &json!({"prompt":"inspect only", "project":"lido", "backend":"gemini",
-            "remote_node_id":"typed-fixture", "idempotency_key":"gemini-without-node-auth"}),
+            &json!({"prompt":"inspect only", "project":"lido", "backend":"antigravity",
+            "remote_node_id":"typed-fixture", "idempotency_key":"antigravity-without-node-auth"}),
         )
         .send()
         .await
@@ -7303,6 +7303,11 @@ async fn native_grok_auto_track_continuation(
         )
         .await;
     assert_eq!(held.status(), StatusCode::OK);
+    // Accepted follow-ups may be delivered by the asynchronous queue pump.
+    wait_until("hold generation submitted before stop", 10, || async {
+        fixture.submissions.lock().unwrap().len() == 7
+    })
+    .await;
     assert_eq!(fixture.submissions.lock().unwrap().len(), 7);
     let stopped_message = Uuid::new_v4();
     let reply = h
@@ -11229,7 +11234,19 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .unwrap_err();
     assert_eq!(untrusted.0, StatusCode::BAD_REQUEST);
     assert_eq!(untrusted.1, "Unsupported side context mode");
-    super::fork::record_side_launch(&h.state.config.working_dir, child.id, "btw-original").unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        child.id,
+        &format!("btw:{}:btw-original", parent.id),
+        &super::fork::side_payload_fingerprint(
+            "opencode",
+            "builtin/smart",
+            None,
+            "Original question",
+            Some("incremental"),
+        ),
+    )
+    .unwrap();
     let result = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -11267,7 +11284,13 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .unwrap_err();
     assert_eq!(incomplete.0, StatusCode::SERVICE_UNAVAILABLE);
     assert!(incomplete.1.contains("incomplete initialization"));
-    super::fork::accept_side_launch(&h.state.config.working_dir, child.id).unwrap();
+    // Simulate dispatch accepted but the final receipt promotion being lost.
+    // The durable scheduler ticket is authoritative, even with accepted=false.
+    h.control
+        .mission_store
+        .set_deferred_goal(child.id, Some("Original question".into()))
+        .await
+        .unwrap();
     let retry = super::fork::btw_agent(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -11284,7 +11307,61 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
     .await
     .unwrap();
     assert_eq!(retry.0["id"], child.id.to_string());
+    let changed = super::fork::btw_agent(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Json(super::fork::ForkRequest {
+            backend: "opencode".into(),
+            model_override: "builtin/smart".into(),
+            model_effort: None,
+            idempotency_key: "btw-original".into(),
+            side_question: Some("A different question".into()),
+            side_context_mode: Some("incremental".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(changed.0, StatusCode::CONFLICT);
+    assert!(changed.1.contains("different launch content"));
 
+    // Accepted executions remain idempotent after failure or interruption.
+    for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
+        h.control
+            .mission_store
+            .update_mission_status(child.id, status)
+            .await
+            .unwrap();
+        let recovered = super::fork::btw_agent(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(parent.id),
+            Json(super::fork::ForkRequest {
+                backend: "opencode".into(),
+                model_override: "builtin/smart".into(),
+                model_effort: None,
+                idempotency_key: "btw-original".into(),
+                side_question: Some("Original question".into()),
+                side_context_mode: Some("incremental".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.0["id"], child.id.to_string());
+    }
+    // Remove all acceptance evidence to model an actual pre-dispatch failure.
+    h.control
+        .mission_store
+        .set_deferred_goal(child.id, None)
+        .await
+        .unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        child.id,
+        &format!("btw:{}:btw-original", parent.id),
+        "unaccepted-fixture",
+    )
+    .unwrap();
     // Unaccepted attempts must reach new-launch validation, not return receipts.
     for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
         h.control
@@ -11310,4 +11387,74 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         assert_eq!(failed_retry.0, StatusCode::BAD_REQUEST);
         assert_eq!(failed_retry.1, "Unsupported side context mode");
     }
+}
+
+#[tokio::test]
+async fn btw_creation_never_coalesces_an_unrelated_matching_title() {
+    let h = Harness::new().await;
+    let existing = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Same title · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(existing.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Same title · btw", "backend": "missing-side-test-backend",
+        "idempotency_key": "different-parent-request"
+    }))
+    .unwrap();
+    // New-launch validation must run, rather than returning the unrelated mission.
+    let error = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        true,
+        Some("title-test"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("Unknown backend"));
+}
+
+#[tokio::test]
+async fn btw_creation_never_coalesces_an_untrusted_project_lease() {
+    let h = Harness::new().await;
+    let existing = h.writer(MissionStatus::Active, None).await;
+    let key = format!("mission:{}:lido:trio-reserve1", existing.id);
+    assert!(h
+        .state
+        .projects
+        .lease_by_key(&format!("lease:{key}"))
+        .unwrap()
+        .is_some());
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "A different side title", "backend": "missing-side-test-backend",
+        "idempotency_key": key,
+    }))
+    .unwrap();
+    let error = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        true,
+        Some("side-test"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("Unknown backend"));
 }

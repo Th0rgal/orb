@@ -1,20 +1,9 @@
-/**
- * Reasoning effort, mirroring the core's own gate:
- * `normalize_model_effort_for_backend` in `src/api/control/mod.rs`. Only the
- * Codex and Claude Code harnesses accept an effort there, and both accept the
- * same `low..max` ladder; for every other harness `create_mission` forces
- * `model_effort` to null, so Orb shows no control at all rather than offering a
- * value the server would drop or reject.
- *
- * `tests/effort.test.ts` re-derives this table from that Rust function, so the
- * two cannot drift silently. Nothing here is guessed: `ultra` is named in the
- * core's `supported_model_efforts_for_backend` help string but is *not*
- * accepted by the gate, so it is deliberately absent.
- */
+/** Reasoning effort accepted by Core and each native harness. */
 export const EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORT_LADDER)[number];
 
 export const EFFORT_BY_HARNESS: Readonly<Record<string, readonly Effort[]>> = {
+  antigravity: ["low", "medium", "high"],
   codex: EFFORT_LADDER,
   claudecode: EFFORT_LADDER,
 };
@@ -53,7 +42,18 @@ const LABELS: Record<Effort, string> = {
 /** Menu/chip text. Unset means the backend's own default, never a guessed level. */
 export const DEFAULT_EFFORT_LABEL = "Default";
 
-export function effortLabel(effort: string | null | undefined): string {
+export function effortLabel(effort: string | null | undefined, backend?: string | null, model?: string | null): string {
   const value = (effort ?? "").trim().toLowerCase() as Effort;
-  return LABELS[value] ?? DEFAULT_EFFORT_LABEL;
+  return LABELS[value] ?? defaultEffortLabel(backend, model);
+}
+
+/** Native agy-demo requires an effort; unset uses our explicit High default. */
+export function defaultEffortLabel(backend?:string|null, model?:string|null):string {
+  const variant = backend === "antigravity" ? model?.match(/^agy-demo-(low|medium|high)$/)?.[1] : undefined;
+  return variant ? `Default (${LABELS[variant as Effort]})` : backend === "antigravity" && model === "agy-demo" ? "Default (High)" : DEFAULT_EFFORT_LABEL;
+}
+
+/** Compatibility for missions saved with the CLI's effort-specific Argon IDs. */
+export function antigravityBaseModel(model?: string | null): string | undefined {
+  return model?.replace(/^agy-demo-(low|medium|high)$/, "agy-demo") ?? undefined;
 }

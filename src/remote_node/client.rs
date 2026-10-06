@@ -64,7 +64,11 @@ impl RemoteNodeClient {
                 response.status()
             )));
         }
-        response.json().await.map_err(transport_error)
+        response
+            .json()
+            .await
+            .map(crate::antigravity::group_models)
+            .map_err(transport_error)
     }
 
     pub async fn heartbeat(

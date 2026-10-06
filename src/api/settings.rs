@@ -277,7 +277,6 @@ async fn update_settings(
                 };
                 trim(&mut policy.claude_code);
                 trim(&mut policy.codex);
-                trim(&mut policy.gemini);
                 trim(&mut policy.opencode);
                 policy
             })

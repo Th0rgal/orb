@@ -71,6 +71,16 @@ pub(crate) fn normalize_opencode_model_id(model: &str) -> Cow<'_, str> {
     }
 }
 
+/// These adapters send inference to Core rather than directly to a vendor.
+/// Connectivity must follow the selected adapter even without vendor credentials
+/// or public internet access inside the workspace.
+fn opencode_uses_host_proxy(provider: Option<&str>) -> bool {
+    matches!(
+        provider,
+        Some("builtin" | "antigravity" | "kimi" | "google" | "gemini")
+    )
+}
+
 /// Execute a turn using OpenCode CLI backend.
 ///
 /// For Host workspaces: spawns the CLI directly on the host.
@@ -212,11 +222,14 @@ pub async fn run_opencode_turn(
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::Anthropic);
     let openai_via_proxy =
         crate::api::oauth_owner::cli_proxy_owns(crate::ai_providers::ProviderType::OpenAI);
-
     let refresh_provider = provider_hint.as_deref().or(fallback_provider);
+    // Availability alone must not force a Google connectivity probe for a
+    // turn explicitly routed to another provider.
+    let google_via_proxy = matches!(refresh_provider, Some("google" | "gemini"));
     let refresh_result = match refresh_provider {
         Some("anthropic") | Some("claude") if anthropic_via_proxy => Ok(()),
         Some("openai") | Some("codex") if openai_via_proxy => Ok(()),
+        Some("google") | Some("gemini") if google_via_proxy => Ok(()),
         Some("anthropic") | Some("claude") => ensure_anthropic_oauth_token_valid().await,
         Some("openai") | Some("codex") => ensure_openai_oauth_token_valid().await,
         Some("google") | Some("gemini") => ensure_google_oauth_token_valid().await,
@@ -277,16 +290,17 @@ pub async fn run_opencode_turn(
         return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
     };
 
+    let workspace_host_ip = workspace.host_ip_from_workspace();
+    let proxy_port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let host_proxy_url = format!("http://{}:{}/v1/models", workspace_host_ip, proxy_port);
+
     // Proactive network connectivity check - fail fast if API is unreachable
     // This catches DNS/network issues immediately instead of waiting for a timeout
     if let Err(err_msg) = check_opencode_connectivity(
         &workspace_exec,
         work_dir,
-        has_openai,
-        has_anthropic,
-        has_google,
-        auth_state.has_zai,
-        auth_state.configured_providers.contains("minimax"),
+        &auth_state,
+        opencode_uses_host_proxy(refresh_provider).then_some(host_proxy_url.as_str()),
     )
     .await
     {
@@ -315,12 +329,8 @@ pub async fn run_opencode_turn(
     let mut total_cache_read_input_tokens: u64 = 0;
     let agent_model = resolve_opencode_model_from_config(&opencode_config_dir_host, agent)
         .map(|model| canonicalize_configured_opencode_model(&model, app_working_dir));
-    if resolved_model.is_none() {
-        resolved_model = agent_model.clone();
-    }
     // Inject provider definitions into opencode.json for models not in
     // OpenCode's built-in snapshot.
-    let workspace_host_ip = workspace.host_ip_from_workspace();
     if let Some(model_override) = resolved_model.as_deref() {
         ensure_opencode_provider_for_model(
             &opencode_config_dir_host,
@@ -331,7 +341,11 @@ pub async fn run_opencode_turn(
         );
     }
     if let Some(ref am) = agent_model {
-        if resolved_model.as_deref() != Some(am) {
+        if am
+            .split_once('/')
+            .is_none_or(|(provider, _)| provider_available(&provider.to_lowercase()))
+            && resolved_model.as_deref() != Some(am)
+        {
             ensure_opencode_provider_for_model(
                 &opencode_config_dir_host,
                 app_working_dir,
@@ -341,7 +355,7 @@ pub async fn run_opencode_turn(
             );
         }
     }
-    if needs_google {
+    if needs_google && !google_via_proxy {
         if let Some(project_id) = detect_google_project_id() {
             ensure_opencode_google_project_id(&opencode_config_dir_host, &project_id);
         }
@@ -2375,6 +2389,40 @@ mod path_tests {
         opencode_inactivity_should_kill, opencode_model_argument, opencode_path,
     };
     use std::time::Duration;
+
+    #[test]
+    fn host_proxy_probe_covers_google_and_other_proxy_adapters() {
+        let temp = tempfile::tempdir().unwrap();
+        for provider in ["google", "gemini", "builtin", "antigravity", "kimi"] {
+            let directory = temp.path().join(provider);
+            std::fs::create_dir_all(&directory).unwrap();
+            crate::api::mission_runner::ensure_opencode_provider_for_model(
+                &directory,
+                temp.path(),
+                &format!("{provider}/test-model"),
+                "10.88.0.1",
+                None,
+            );
+            let config: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(directory.join("opencode.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(config["provider"][provider]["options"]["baseURL"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://10.88.0.1:"));
+            assert!(super::opencode_uses_host_proxy(Some(provider)));
+        }
+        for provider in [
+            None,
+            Some("openai"),
+            Some("anthropic"),
+            Some("minimax"),
+            Some("custom"),
+        ] {
+            assert!(!super::opencode_uses_host_proxy(provider));
+        }
+    }
 
     #[test]
     fn configured_routing_chains_use_proxy_provider() {

@@ -176,10 +176,7 @@ pub async fn local_run_launch(
         .map_err(|e| e.to_string())?;
     request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let guard = lock(&request.id)?;
-    if local_agents::launch_blocked(
-        std::path::Path::new(&request.cwd),
-        request.shared_directory,
-    )? {
+    if local_agents::workspace_busy(std::path::Path::new(&request.cwd))? {
         return Err("Local launch deferred: directory busy".into());
     }
     recover(&connection, &request.id, &request.cwd).await?;
@@ -344,8 +341,7 @@ mod protocol_tests {
             ],
             Some((1, id.clone())),
         );
-        let request = local_agents::StartRequest {
-            shared_directory: false,
+        let request = local_agents::StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -380,8 +376,7 @@ mod protocol_tests {
                 format!("acknowledged mission {id} cannot acquire a non-terminal run"),
             ),
         ]);
-        let request = local_agents::StartRequest {
-            shared_directory: false,
+        let request = local_agents::StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -449,8 +444,7 @@ mod protocol_tests {
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
         ]);
-        let request = local_agents::StartRequest {
-            shared_directory: false,
+        let request = local_agents::StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -542,8 +536,7 @@ mod process_tests {
         std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        local_agents::local_agents_start(local_agents::StartRequest {
-            shared_directory: false,
+        local_agents::local_agents_start(local_agents::StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -582,8 +575,7 @@ mod btw_smoke {
             api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
-        let request = local_agents::StartRequest {
-            shared_directory: false,
+        let request = local_agents::StartRequest { effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -633,56 +625,6 @@ mod btw_smoke {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "authenticated OpenCode integration; ORB_BTW_TEST_ID/URL/TOKEN/CWD required"]
-    fn btw_runs_while_parent_holds_directory() {
-        use std::os::unix::fs::PermissionsExt;
-        let id = std::env::var("ORB_BTW_TEST_ID").unwrap();
-        let cwd = std::env::var("ORB_BTW_TEST_CWD").unwrap();
-        let connection = Connection {
-            api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
-            token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
-        };
-        let fixture = std::path::Path::new(&cwd).join(".parent-fixture");
-        std::fs::write(
-            &fixture,
-            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '1.0.0'; exit 0; }\nexec sleep 300\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let parent = uuid::Uuid::new_v4().to_string();
-        local_agents::start_with_env(local_agents::StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,id:parent.clone(),harness:"gemini".into(),bin:fixture.to_string_lossy().into(),cwd:cwd.clone(),prompt:"parent".into(),model:None,session_id:None,image_paths:vec![]}, &[]).unwrap();
-        let request=local_agents::StartRequest { shared_directory: true, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![]};
-        let launched = tauri::async_runtime::block_on(local_run_launch(request, connection.clone()));
-        let receipt = match launched {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                local_agents::local_agents_stop(parent).unwrap();
-                panic!("side launch refused while parent runs: {error}");
-            }
-        };
-        let deadline = std::time::Instant::now() + Duration::from_secs(240);
-        let state = loop {
-            let state = local_agents::local_agents_poll(id.clone()).unwrap();
-            if state.done || std::time::Instant::now() > deadline {
-                break state;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        };
-        let parent_alive = !local_agents::local_agents_poll(parent.clone()).unwrap().done;
-        local_agents::local_agents_stop(parent).unwrap();
-        if !state.done {
-            local_agents::local_agents_stop(id.clone()).unwrap();
-            panic!("side agent timed out");
-        }
-        tauri::async_runtime::block_on(settle(&connection, &id, &receipt)).unwrap();
-        assert!(parent_alive, "parent run was disturbed");
-        assert_eq!(state.exit_code, Some(0), "{:?}", state.error);
-        assert!(state.text.contains("BTW-TOOLS-7319"), "{}", state.text);
-        println!("BTW side agent answered while the parent held the directory");
-    }
-
     #[test]
     #[ignore = "authenticated OpenCode integration; ORB_BTW_TEST_ID/URL/TOKEN/CWD required"]
     fn btw_same_workspace_roundtrip() {
@@ -692,7 +634,7 @@ mod btw_smoke {
             api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
-        let request=local_agents::StartRequest { shared_directory: false, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![]};
+        let request=local_agents::StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![]};
         let receipt =
             tauri::async_runtime::block_on(local_run_launch(request, connection.clone())).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(180);

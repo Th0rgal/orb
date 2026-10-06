@@ -33,7 +33,7 @@ function effortsFromCore(): Record<string, string[]> {
 describe("effort options come from the core's own gate", () => {
   it("matches normalize_model_effort_for_backend exactly", () => {
     const core = effortsFromCore();
-    expect(Object.keys(core).sort()).toEqual(["claudecode", "codex"]);
+    expect(Object.keys(core).sort()).toEqual(["antigravity", "claudecode", "codex"]);
     for (const [backend, ladder] of Object.entries(core)) {
       expect(supportedEfforts(backend)).toEqual(ladder);
     }
@@ -77,4 +77,11 @@ describe("normalizeEffort keeps an invalid selection out of a payload", () => {
     expect(effortLabel("nonsense")).toBe(DEFAULT_EFFORT_LABEL);
     expect(effortLabel("xhigh")).toBe("XHigh");
   });
+});
+
+it("Antigravity offers only native efforts and makes the required default explicit",()=>{
+ expect(supportedEfforts("antigravity")).toEqual(["low","medium","high"]);
+ expect(normalizeEffort("xhigh","antigravity")).toBeNull();
+ expect(effortLabel(null,"antigravity","agy-demo")).toBe("Default (High)");
+ expect(effortLabel("low","antigravity","agy-demo")).toBe("Low");
 });

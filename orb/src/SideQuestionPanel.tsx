@@ -18,7 +18,7 @@ import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};
 // Local side history stays separate from mission events and the main draft.
-export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void}) {
+export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
  const side=useSidePanel();
  const [docked,setDocked]=createSignal(false);
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
@@ -167,7 +167,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <Show when={exchange.pending}><For each={btwThoughts(p.mission)}>{thought=><ThinkBlock item={thought}/>}</For></Show>
      <Show when={exchange.answer}><MdView compact text={exchange.answer}/></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
-     <Show when={exchange.error}><p role="alert" class="error">{exchange.error}</p><button onClick={retry} disabled={busy()}>Retry</button></Show>
+     <Show when={exchange.error}><p role="alert" class="error">{exchange.error}</p><button onClick={retry} disabled={busy()}>Retry</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></Show>
      <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${exchange.answer}`)}>Use in agent draft ↗</button></Show>
     </article>}</For>
     <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">

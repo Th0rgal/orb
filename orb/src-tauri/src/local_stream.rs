@@ -192,9 +192,21 @@ impl Output {
         activity.updated_at = activity_now();
         activity.thinking_tokens = stream.thinking_tokens;
         activity.label = if stream.agent_response_active { "Generating response…" } else { "Working…" }.into();
-        activity.detail = Some("Antigravity CLI does not currently expose reasoning text. Thinking-token counts are reported usage, not readable thoughts.".into());
+        activity.detail = Some("Displayed thought summaries are read from this native conversation when available.".into());
         if stream.error.is_some() { activity.finish("failed"); }
         else if stream.success { activity.finish("completed"); }
+    }
+    pub fn antigravity_thought(&self, event: &serde_json::Value) {
+        let Some(text) = event["text"].as_str().filter(|s| !s.is_empty()) else { return; };
+        let id = format!("antigravity:thought:{}:{}", event["conversation_id"].as_str().unwrap_or(""), event["step_index"]);
+        let mut activities = self.2.lock().unwrap();
+        let index = activities.iter().position(|a| a.id == id).unwrap_or_else(|| {
+            activities.push(Activity::new(id, "Thinking".into(), "thinking", false)); activities.len()-1
+        });
+        activities[index].detail = Some(text.into());
+        activities[index].updated_at = activity_now();
+        if event["done"] == true { activities[index].finish("completed"); }
+        drop(activities); self.publish_activities();
     }
     pub fn native_activity(&self, value: &serde_json::Value) {
         if matches!(

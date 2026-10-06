@@ -211,6 +211,8 @@ export interface Mission {
   continuation?: import("./continuations").ContinuationSummary | null;
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
+  /** Verified source of an isolated Hermes callback; presentation lineage only. */
+  callback_parent_mission_id?: string | null;
   /** "hermes" when a controller created it; its controller session then follows. */
   origin?: string | null;
   origin_session_id?: string | null;
@@ -267,7 +269,7 @@ export interface CreateMissionBody {
   /** Stable project identifier — groups the mission under the project. */
   project?: string;
   /**
-   * Harness id (claudecode, codex, opencode, grok, gemini). Goal mode has no
+   * Harness id (claudecode, codex, opencode, grok, antigravity). Goal mode has no
    * dedicated create field: a prompt of the form `/goal <objective>` is what
    * makes the server persist `goal_mode` + `goal_objective` (control/mod.rs
    * `parse_goal_objective`).
@@ -336,12 +338,12 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
 }
 
 /** Harness order for the composer: the native agents first, then routers. */
-const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"];
+const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "antigravity"];
 
 export async function listHarnessChoices(): Promise<HarnessChoice[]> {
   const [backends, models] = await Promise.all([listBackends(), listBackendModels()]);
   return backends
-    .filter((b) => (models[b.id]?.length ?? 0) > 0)
+    .filter((b) => HARNESS_ORDER.includes(b.id) && (models[b.id]?.length ?? 0) > 0)
     .sort((a, b) => {
       const ia = HARNESS_ORDER.indexOf(a.id);
       const ib = HARNESS_ORDER.indexOf(b.id);
@@ -784,7 +786,7 @@ export async function listMissions(): Promise<Mission[]> {
 
 export async function getMission(id: string): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
-  const local = (await origins.localOrigins()).find(row=>row.id===id);
+  const local = (await origins.localOrigins(id)).find(row=>row.id===id);
   if(local && origins.localPending(local))return local;
   try{const remote=await api<Mission>(`/api/control/missions/${id}`);if(local)await origins.rememberCoreState([local],[remote],observedAt);return remote;}catch(error){if(local)return local;throw error;}
 }
@@ -816,7 +818,7 @@ export interface QueuedMessage {
 export async function listQueuedMessages(missionId: string): Promise<QueuedMessage[]> {
   // Native launch precedes Core registration. Its follow-ups live in the local
   // durable queue until synchronization; querying Core here races that POST.
-  const local = (await import("./localOrigins").then(m => m.localOrigins())).find(row => row.id === missionId);
+  const local = (await import("./localOrigins").then(m => m.localOrigins(missionId))).find(row => row.id === missionId);
   if (local?.local_sync_pending) return [];
   const rows = await api<QueuedMessage[]>(`/api/control/queue?mission_id=${encodeURIComponent(missionId)}`);
   if (!Array.isArray(rows) || rows.some(row => !row || typeof row.id !== "string" || typeof row.content !== "string")) throw new Error("Invalid queue response");

@@ -1056,6 +1056,15 @@ final class APIService {
         return try await get(path)
     }
     
+    func listAntigravityModels(workspaceId: String?) async throws -> [[String]] {
+        var components = URLComponents()
+        if let workspaceId {
+            components.queryItems = [URLQueryItem(name: "workspace_id", value: workspaceId)]
+        }
+        let query = components.percentEncodedQuery.map { "?" + $0 } ?? ""
+        return try await get("/api/providers/antigravity-models" + query)
+    }
+
     // MARK: - Workspaces
 
     func listWorkspaces() async throws -> [Workspace] {

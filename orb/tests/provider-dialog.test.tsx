@@ -35,5 +35,5 @@ it("keeps the login modal open during callback submission and exposes a rejected
   finish(new Response(JSON.stringify({ status: "failed", message: "Callback rejected" })));
   await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain("Callback rejected"));
   fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
-  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });

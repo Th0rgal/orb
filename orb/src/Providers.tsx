@@ -31,7 +31,7 @@ import {
 } from "./api";
 
 type AuthKind = "oauth" | "api";
-type Owner = "cliproxy" | "sandboxed" | "gemini";
+type Owner = "cliproxy" | "sandboxed";
 type Status = "connected" | "needs_reauth" | "not_configured";
 
 type Method = { label: string; kind: AuthKind; desc: string };
@@ -71,14 +71,14 @@ const KINDS: Kind[] = [
     id: "google",
     name: "Google",
     methods: [
-      { label: "Gemini CLI OAuth", kind: "oauth", desc: "Own oauth_creds.json. Not owned by CLIProxyAPI." },
+      { label: "Google OAuth", kind: "oauth", desc: "Google OAuth for OpenCode, managed by sandboxed.sh." },
       { label: "API key", kind: "api", desc: "Google AI Studio key." },
     ],
   },
   {
     id: "kimi",
     name: "Kimi",
-    methods: [{ label: "Kimi Code", kind: "oauth", desc: "Device OAuth. Still owned by sandboxed.sh (300s tokens)." }],
+    methods: [{ label: "Kimi Code", kind: "oauth", desc: "Device sign-in managed by CLIProxyAPI." }],
   },
   {
     id: "github-copilot",
@@ -97,7 +97,7 @@ const BACKENDS: Record<string, string[]> = {
   anthropic: ["claudecode", "opencode"],
   openai: ["codex", "opencode"],
   xai: ["grok", "opencode"],
-  google: ["gemini", "opencode"],
+  google: ["opencode"],
   kimi: ["opencode"],
   "github-copilot": ["opencode"],
 };
@@ -107,7 +107,6 @@ const BACKEND_LABEL: Record<string, string> = {
   opencode: "OpenCode",
   codex: "Codex",
   grok: "Grok",
-  gemini: "Gemini",
 };
 
 type Account = {
@@ -125,7 +124,6 @@ type Account = {
 
 function ownerFor(type: string, auth: AuthKind): Owner {
   if (auth === "api") return "sandboxed";
-  if (type === "google") return "gemini";
   if (type === "github-copilot") return "sandboxed";
   if (type === "anthropic" || type === "openai" || type === "xai" || type === "kimi") return "cliproxy";
   return "sandboxed";
@@ -133,7 +131,6 @@ function ownerFor(type: string, auth: AuthKind): Owner {
 
 function ownerLabel(o: Owner) {
   if (o === "cliproxy") return "CLIProxyAPI";
-  if (o === "gemini") return "Gemini CLI";
   return "sandboxed.sh";
 }
 
@@ -178,11 +175,11 @@ const SEED: Account[] = [
     id: "a-gem",
     type: "google",
     name: "Google",
-    method: "Gemini CLI OAuth",
+    method: "Google OAuth",
     auth: "oauth",
-    owner: "gemini",
+    owner: "sandboxed",
     status: "connected",
-    backends: ["gemini", "opencode"],
+    backends: ["opencode"],
     enabled: true,
   },
   {
@@ -291,6 +288,20 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
+  const [adding, setAdding] = createSignal(false);
+  const [loginOptions, setLoginOptions] = createSignal<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>();
+  const [addType, setAddType] = createSignal("");
+  const [removing, setRemoving] = createSignal<AIProvider | null>(null);
+  const [removeBusy, setRemoveBusy] = createSignal(false);
+  const [removeError, setRemoveError] = createSignal<string | null>(null);
+  const remove = async () => {
+    const account = removing(); if (!account || removeBusy()) return;
+    setRemoveBusy(true);
+    try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRemoving(null); p.onRefresh(); }
+    catch (error) { setRemoveError(String(error)); }
+    finally { setRemoveBusy(false); }
+  };
+  onMount(() => { void api<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("/api/ai/providers/cli-proxy-login").then(setLoginOptions).catch(() => setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."})); });
   const oauth = () => p.list.filter((x) => x.uses_oauth);
   const keys = () => p.list.filter((x) => !x.uses_oauth);
   const [toggleError, setToggleError] = createSignal<string | null>(null);
@@ -333,10 +344,11 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
       <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
 
       <section class="s-sec">
-        <h3>Subscriptions (OAuth)</h3>
+        <div class="section-row"><h3>Subscriptions (OAuth)</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}>Add subscription account</button></div>
+        <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -344,7 +356,6 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </div>
       </section>
 
-      <AntigravityProvider />
       <CloudProviders />
 
       <section class="s-sec">
@@ -359,6 +370,8 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </div>
       </section>
 
+      <Show when={adding()}><Dialog title="Add subscription account" onClose={() => setAdding(false)} footer={<DialogButton onClick={() => { const kind = loginOptions()?.providers.find(x => x.id === addType()); if (!kind) return; setAdding(false); setReauth({id: "", provider_type: kind.id, provider_type_name: kind.name, name: kind.name, enabled: true, uses_oauth: true, credential_owner: "cli_proxy", status: {type: "needs_auth"}}); }}>Continue in browser</DialogButton>}><Field label="Subscription"><select class="s-input" value={addType()} onChange={e => setAddType(e.currentTarget.value)}><For each={loginOptions()?.providers ?? []}>{kind => <option value={kind.id}>{kind.name}</option>}</For></select></Field><p class="s-row-desc">Choose the account to connect in your browser. You can add more than one account.</p></Dialog></Show>
+      <Show when={removing()}>{account => <Dialog title={`Remove ${account().name} and all credentials?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove provider and credentials</DialogButton>}><p class="s-row-desc">This deletes the subscription login and any independent API key saved on this provider. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
         {(a) => (
@@ -370,7 +383,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
               setReauth(null);
               setUsage(previous => { const next = { ...previous }; delete next[id]; return next; });
               p.onRefresh();
-              void getProviderUsage(id, true).then(value => {
+              if (id) void getProviderUsage(id, true).then(value => {
                 if (!disposed) setUsage(previous => ({ ...previous, [id]: value }));
               }).catch(() => {});
             }}
@@ -417,7 +430,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
 const LEGACY_OAUTH_TYPES = new Set(["anthropic", "openai", "google"]);
 const reconnectable = (a: AIProvider) => cliProxyReconnectable(a) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type));
 
-const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi"]);
+const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi", "antigravity"]);
 
 /** Reconnect via CLIProxyAPI when the backend says so; fall back to the
  * type allowlist for backends that predate the credential_owner field. */
@@ -450,25 +463,31 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   const [session, setSession] = createSignal<{ id: string; url: string; flow?: string; instructions?: string } | null>(null);
   const proxy = cliProxyReconnectable(p.provider);
   let disposed = false;
+  let completed = false;
+  const [resetting, setResetting] = createSignal(false);
+  let pollGeneration = 0;
   const [phase, setPhase] = createSignal<"starting" | "awaiting" | "finishing" | "failed">("starting");
   const [error, setError] = createSignal<string | null>(null);
   const [paste, setPaste] = createSignal("");
   let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   const stopPolling = () => {
+    pollGeneration++;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };
-  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (proxy && s) void cancelCliProxyLogin(s.id).catch(() => {}); });
+  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (proxy && s && !completed) void cancelCliProxyLogin(s.id).catch(() => {}); });
 
   const startPolling = (id: string) => {
     stopPolling();
+    const generation = pollGeneration;
     pollTimer = setInterval(() => {
       getCliProxyLogin(id)
         .then((st) => {
-          if (disposed) return;
+          if (disposed || generation !== pollGeneration) return;
           if (st.status === "completed") {
             stopPolling();
+            completed = true;
             p.onDone();
           } else if (st.status === "failed") {
             stopPolling();
@@ -477,6 +496,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
           }
         })
         .catch((e: Error) => {
+          if (disposed || generation !== pollGeneration) return;
           stopPolling();
           setError(e.message);
           setPhase("failed");
@@ -484,13 +504,14 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     }, 2000);
   };
 
-  onMount(() => {
+  const beginLogin = () => {
+    setPhase("starting"); setError(null); setPaste("");
     const start = proxy
       ? startCliProxyLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
-        if (disposed) return;
+        if (disposed) { if (proxy) void cancelCliProxyLogin(s.id).catch(() => {}); return; }
         setSession(s);
         setPhase("awaiting");
         if (proxy) startPolling(s.id);
@@ -500,7 +521,22 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         setError(e.message);
         setPhase("failed");
       });
-  });
+  };
+  onMount(beginLogin);
+  const closeLogin = async () => {
+    const s = session();
+    try { if (proxy && s && !completed) await cancelCliProxyLogin(s.id); completed = true; p.onClose(); }
+    catch (e) { setError(`Could not cancel sign-in: ${String(e)}`); }
+  };
+  const retryLogin = async () => {
+    if (resetting()) return;
+    setResetting(true);
+    stopPolling();
+    const s = session();
+    try { if (proxy && s && !completed) await cancelCliProxyLogin(s.id); setSession(null); beginLogin(); }
+    catch (e) { setError(`Could not reset sign-in: ${String(e)}`); }
+    finally { setResetting(false); }
+  };
 
   const submitPaste = () => {
     const s = session();
@@ -512,7 +548,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       : completeProviderOAuth(p.provider.id, url).then(() => ({ status: "completed" as const, message: undefined }));
     submit.then((st) => {
         if (disposed) return;
-        if (st.status === "completed") { stopPolling(); p.onDone(); return; }
+        if (st.status === "completed") { stopPolling(); completed = true; p.onDone(); return; }
         if (st.status === "failed") {
           setError(st.message ?? "callback rejected");
           setPhase("failed");
@@ -528,12 +564,13 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
 
   return (
     <Dialog
-      title={`Reconnect ${p.provider.name}`}
+      title={`${p.provider.id ? "Reconnect" : "Connect"} ${p.provider.name}`}
       busy={phase() === "finishing"}
-      onClose={p.onClose}
+      onClose={() => void closeLogin()}
       footer={
         <>
-          <DialogButton disabled={phase() === "finishing"} onClick={p.onClose}>
+          <Show when={phase() === "failed"}><DialogButton disabled={resetting()} onClick={() => void retryLogin()}>Try again</DialogButton></Show>
+          <DialogButton disabled={phase() === "finishing"} onClick={() => void closeLogin()}>
             {phase() === "failed" ? "Close login" : "Cancel"}
           </DialogButton>
         </>
@@ -563,6 +600,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
             <DialogButton onClick={() => session() && void openExternalUrl(session()!.url)}>
               Open
             </DialogButton>
+            <DialogButton onClick={() => { const url = session()?.url; if (url) void navigator.clipboard.writeText(url).catch(e => setError(String(e))); }}>Copy link</DialogButton>
           </div>
         </div>
         <Show when={session()?.flow !== "device"}>
@@ -690,7 +728,7 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
   );
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => void; onEditKey?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage);
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
@@ -730,9 +768,11 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
         ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
         {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
+        ...(p.onRemove ? [{kind:"item" as const,label:"Remove provider…",onClick:p.onRemove}] : []),
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
+          <Show when={a.provider_type === "antigravity"}><AntigravityProvider embedded /></Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
           </Show>

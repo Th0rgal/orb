@@ -326,6 +326,7 @@ pub(crate) async fn catalog_model_options_for_state(
         state.config.working_dir.as_path(),
     );
     drop(cached);
+    apply_cli_proxy_catalog(&mut providers, &store_providers).await;
 
     let mut models = Vec::new();
     for provider in &providers {
@@ -701,6 +702,16 @@ async fn resolve_visible_codex_models(
     state: &AppState,
     candidates: &[String],
 ) -> Option<HashSet<String>> {
+    // Native Codex uses this endpoint in proxy-owned mode. OpenAI's API
+    // catalog and inference probes describe a different route and can leave
+    // unroutable models visible (for example gpt-5.4-mini).
+    if let Some(endpoint) = crate::api::oauth_owner::codex_via_cli_proxy() {
+        // Preserve the existing picker if the sidecar is temporarily down;
+        // an unavailable catalog must not make an installed harness vanish.
+        return fetch_cli_proxy_model_ids(&state.http_client, &endpoint)
+            .await
+            .ok();
+    }
     let api_keys =
         crate::api::ai_providers::get_all_openai_keys_for_codex(state.config.working_dir.as_path());
     if api_keys.is_empty() {
@@ -760,6 +771,40 @@ async fn resolve_visible_codex_models(
     Some(visible_models)
 }
 
+async fn fetch_cli_proxy_model_ids(
+    client: &reqwest::Client,
+    endpoint: &crate::api::oauth_owner::CliProxyEndpoint,
+) -> Result<HashSet<String>, ()> {
+    let base = endpoint.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    let response = client
+        .get(url)
+        .bearer_auth(&endpoint.api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| ())?
+        .error_for_status()
+        .map_err(|_| ())?;
+    let body: serde_json::Value = response.json().await.map_err(|_| ())?;
+    let entries = body.get("data").and_then(|v| v.as_array()).ok_or(())?;
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .ok_or(())
+        })
+        .collect()
+}
+
 /// Default provider configuration.
 fn default_providers_config() -> ProvidersConfig {
     let mut config: ProvidersConfig =
@@ -774,7 +819,7 @@ fn default_providers_config() -> ProvidersConfig {
     config
 }
 
-// ==================== Dynamic Model Catalog Fetching ====================
+// ==================== Dynamic Model Catalog Fetching =============    }
 
 /// Convert a model ID to a human-readable display name by title-casing segments.
 /// e.g. "glm-5" -> "GLM 5", "grok-4-fast" -> "Grok 4 Fast", "gpt-5.3-codex" -> "GPT 5.3 Codex"
@@ -1314,7 +1359,10 @@ pub fn get_api_key_for_provider(
             // ChatGPT/Codex and Grok Build OAuth are CLI/subscription credentials;
             // neither is a replacement for an API Platform key on the respective
             // OpenAI-compatible API.
-            if !matches!(provider_type, ProviderType::OpenAI | ProviderType::Xai) {
+            if !matches!(
+                provider_type,
+                ProviderType::OpenAI | ProviderType::Xai | ProviderType::Antigravity
+            ) {
                 if let Some(ref oauth) = provider.oauth {
                     if !oauth.access_token.is_empty() {
                         return Some(oauth.access_token.clone());
@@ -1678,6 +1726,118 @@ fn apply_connection_models(providers: &mut Vec<Provider>, store: &[AIProvider], 
                 models,
             });
         }
+    }
+}
+
+/// OAuth subscriptions are limited to the live CLIProxyAPI model registry.
+/// Public/API-key catalogs may contain models that this transport cannot route.
+async fn apply_cli_proxy_catalog(providers: &mut [Provider], store: &[AIProvider]) {
+    if !super::oauth_owner::management_enabled() {
+        return;
+    }
+    let Some(endpoint) = super::oauth_owner::cli_proxy_endpoint() else {
+        return;
+    };
+    let base = endpoint.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    type Cache = Option<(String, Instant, serde_json::Value)>;
+    static CACHE: OnceLock<tokio::sync::Mutex<Cache>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(None))
+        .lock()
+        .await;
+    if !cache
+        .as_ref()
+        .is_some_and(|(key, until, _)| key == &url && *until > Instant::now())
+    {
+        let response = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(&endpoint.api_key)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await;
+        if let Ok(response) = response {
+            if response.status().is_success() {
+                if let Ok(value) = response.json::<serde_json::Value>().await {
+                    if value.get("data").is_some_and(serde_json::Value::is_array) {
+                        *cache =
+                            Some((url.clone(), Instant::now() + Duration::from_secs(30), value));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, _, value)) = cache
+        .as_ref()
+        .filter(|(key, until, _)| key == &url && *until > Instant::now())
+    {
+        apply_cli_proxy_catalog_value(providers, store, value);
+    } else {
+        apply_cli_proxy_catalog_value(providers, store, &serde_json::json!({"data":[]}));
+    }
+}
+
+fn apply_cli_proxy_catalog_value(
+    providers: &mut [Provider],
+    store: &[AIProvider],
+    value: &serde_json::Value,
+) {
+    let Some(rows) = value.get("data").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for provider in providers {
+        let Some(kind) = ProviderType::from_id(&provider.id) else {
+            continue;
+        };
+        let accounts: Vec<_> = store
+            .iter()
+            .filter(|a| a.enabled && a.provider_type == kind)
+            .collect();
+        if accounts.is_empty() || accounts.iter().any(|a| a.api_key.is_some()) {
+            continue;
+        }
+        let owner = match kind {
+            ProviderType::Anthropic => "anthropic",
+            ProviderType::OpenAI => "openai",
+            ProviderType::Kimi => "moonshot",
+            ProviderType::Xai => "xai",
+            ProviderType::Antigravity => "antigravity",
+            _ => continue,
+        };
+        provider.models = rows
+            .iter()
+            .filter_map(|row| {
+                if row.get("owned_by")?.as_str()? != owner {
+                    return None;
+                }
+                let raw = row.get("id")?.as_str()?;
+                let id = if kind == ProviderType::Antigravity {
+                    raw.strip_prefix("antigravity/")?
+                } else if raw.contains('/') {
+                    return None;
+                } else if kind == ProviderType::Kimi {
+                    raw.strip_prefix("kimi-").unwrap_or(raw)
+                } else {
+                    raw
+                };
+                if (kind == ProviderType::OpenAI && !is_codex_backend_model_id(id))
+                    || (kind == ProviderType::Xai && !is_grok_backend_model_id(id))
+                {
+                    return None;
+                }
+                Some(ProviderModel {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    description: None,
+                })
+            })
+            .collect();
+        provider.models.sort_by(|a, b| a.id.cmp(&b.id));
+        provider.models.dedup_by(|a, b| a.id == b.id);
     }
 }
 
@@ -2071,7 +2231,6 @@ pub async fn list_backend_model_options(
     // being up-to-date.
     let codex_filter: &dyn Fn(&str) -> bool = &|id: &str| is_codex_backend_model_id(id);
     push_options("codex", Some(&["openai"]), false, Some(codex_filter));
-    push_options("gemini", Some(&["google"]), false, None);
     push_options("opencode", None, true, None);
     let grok_filter: &dyn Fn(&str) -> bool = &|id: &str| is_grok_backend_model_id(id);
     push_options("grok", Some(&["xai"]), false, Some(grok_filter));
@@ -2086,6 +2245,25 @@ pub async fn list_backend_model_options(
             if let Some(options) = backends.get_mut("codex") {
                 let before = options.len();
                 options.retain(|opt| visible_models.contains(&opt.value));
+                if crate::api::oauth_owner::codex_via_cli_proxy().is_some() {
+                    let mut additional: Vec<_> = visible_models
+                        .iter()
+                        .filter(|id| {
+                            is_codex_backend_model_id(id)
+                                && !options.iter().any(|opt| &opt.value == *id)
+                        })
+                        .cloned()
+                        .collect();
+                    additional.sort();
+                    for id in additional {
+                        options.push(BackendModelOption {
+                            label: format!("OpenAI — {}", model_id_to_display_name(&id)),
+                            value: id,
+                            description: None,
+                            provider_id: None,
+                        });
+                    }
+                }
                 tracing::info!(
                     before,
                     after = options.len(),
@@ -2258,7 +2436,7 @@ async fn discover_workspace_antigravity_models(
         if models.is_empty() {
             return Err("No Antigravity models in the selected workspace");
         }
-        Ok(models)
+        Ok(crate::antigravity::group_models(models))
     })
     .await;
     let _ = child.kill().await;
@@ -2459,42 +2637,6 @@ pub async fn validate_model_override(
                 Err("Use an exact model ID from agy models".into())
             }
         }
-        "gemini" => {
-            // Gemini expects raw model IDs from Google
-            let google = providers.iter().find(|p| p.id == "google");
-            if let Some(provider) = google {
-                if !provider.models.iter().any(|m| m.id == model_override) {
-                    // Allow unknown Gemini models (escape hatch for new models)
-                    if model_override.starts_with("gemini-") {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "Model '{}' not found in Google catalog. Available models: {}. For custom Gemini models, use format 'gemini-*'",
-                            model_override,
-                            provider
-                                .models
-                                .iter()
-                                .map(|m| &m.id)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ))
-                    }
-                } else {
-                    Ok(())
-                }
-            } else {
-                // Google not configured, but allow if it looks like a Gemini model
-                if model_override.starts_with("gemini-") {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Google provider not configured. Expected a Gemini model ID (e.g., 'gemini-3.1-pro-preview'), got '{}'",
-                        model_override
-                    ))
-                }
-            }
-        }
         "grok" => {
             let xai = providers.iter().find(|p| p.id == "xai");
             if let Some(provider) = xai {
@@ -2570,6 +2712,125 @@ fn is_grok_backend_model_id(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_proxy_catalog_replaces_subscription_only_models_and_keeps_api_models() {
+        let mut accounts = Vec::new();
+        let mut providers = Vec::new();
+        for kind in [
+            ProviderType::OpenAI,
+            ProviderType::Kimi,
+            ProviderType::Antigravity,
+            ProviderType::Anthropic,
+        ] {
+            let mut account = AIProvider::new(kind, "Account".into());
+            account.enabled = true;
+            if kind == ProviderType::Anthropic {
+                account.api_key = Some("independent-api-key".into());
+            }
+            accounts.push(account);
+            providers.push(Provider {
+                id: kind.id().into(),
+                name: kind.id().into(),
+                billing: "subscription".into(),
+                description: String::new(),
+                models: vec![ProviderModel {
+                    id: "stale".into(),
+                    name: "Stale".into(),
+                    description: None,
+                }],
+            });
+        }
+        apply_cli_proxy_catalog_value(
+            &mut providers,
+            &accounts,
+            &serde_json::json!({"data":[
+                {"id":"gpt-6.1-sol","owned_by":"openai"},
+                {"id":"gpt-image-2","owned_by":"openai"},
+                {"id":"kimi-k3","owned_by":"moonshot"},
+                {"id":"antigravity/gemini-3-flash","owned_by":"antigravity"},
+                {"id":"gemini-3-flash","owned_by":"antigravity"}
+            ]}),
+        );
+        let ids = |kind: ProviderType| {
+            providers
+                .iter()
+                .find(|p| p.id == kind.id())
+                .unwrap()
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(ProviderType::OpenAI), vec!["gpt-6.1-sol"]);
+        assert_eq!(ids(ProviderType::Kimi), vec!["k3"]);
+        assert_eq!(ids(ProviderType::Antigravity), vec!["gemini-3-flash"]);
+        assert_eq!(ids(ProviderType::Anthropic), vec!["stale"]);
+        apply_cli_proxy_catalog_value(&mut providers, &accounts, &serde_json::json!({"data":[]}));
+        assert!(providers
+            .iter()
+            .filter(|p| p.id != "anthropic")
+            .all(|p| p.models.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn cli_proxy_visibility_uses_model_metadata_and_exact_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for prefix in ["", "/v1"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let size = stream.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..size]);
+                assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+                assert!(!request.contains("/responses"));
+                let body = r#"{"data":[{"id":"gpt-5.5"},{"id":"gpt-6.1-sol"}]}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+                base_url: format!("http://{address}{prefix}"),
+                api_key: "test-only-key".into(),
+            };
+            let ids = fetch_cli_proxy_model_ids(&reqwest::Client::new(), &endpoint)
+                .await
+                .unwrap();
+            assert_eq!(ids, HashSet::from(["gpt-5.5".into(), "gpt-6.1-sol".into()]));
+            assert!(!ids.contains("gpt-5.5-codex"));
+            assert!(!ids.contains("gpt-5.4-mini"));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_proxy_visibility_does_not_accept_invalid_or_failed_catalogs() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, body) in [
+            ("503 Service Unavailable", r#"{"data":[{"id":"gpt-5.5"}]}"#),
+            ("200 OK", r#"{"models":[{"id":"gpt-5.5"}]}"#),
+            ("200 OK", r#"{"data":[{}]}"#),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                stream.read(&mut bytes).await.unwrap();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+                base_url: format!("http://{address}"),
+                api_key: "test-only-key".into(),
+            };
+            assert!(
+                fetch_cli_proxy_model_ids(&reqwest::Client::new(), &endpoint)
+                    .await
+                    .is_err()
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

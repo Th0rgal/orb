@@ -624,3 +624,11 @@ export async function listBackendModelOptions(options?: {
   if (!res.ok) throw new Error("Failed to fetch backend model options");
   return res.json();
 }
+
+/** Native account models from the mission's selected execution workspace. */
+export async function listAntigravityModels(workspaceId?: string): Promise<[string, string][]> {
+  const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  const res = await apiFetch(`/api/providers/antigravity-models${query}`);
+  if (!res.ok) throw new Error("Could not discover Antigravity models. Sign in with agy on this workspace and retry.");
+  return res.json();
+}

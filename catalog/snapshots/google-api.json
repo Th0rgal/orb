@@ -7,6 +7,11 @@
   "completeness": "partial",
   "models": [
     {
+      "id": "gemini-4-argon-eap",
+      "name": "Gemini 4 Argon EAP",
+      "description": "Frontier reasoning and agentic coding (Gemini 4 Argon)"
+    },
+    {
       "id": "gemini-3.1-pro-preview",
       "name": "Gemini 3.1 Pro Preview",
       "description": "Advanced reasoning with three-tier thinking"

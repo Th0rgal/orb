@@ -76,7 +76,7 @@ This limit applies to Codex native goals, not every backend's ordinary message.
 
 - `codex` + `gpt-5.6-terra`: default for bounded code changes
 - `codex` + `gpt-6.1-sol` (default; `gpt-6-astra` as fallback): hard blockers, formal proofs, and adversarial certification
-- `gemini` + `gemini-3.1-pro-preview` or `gemini-2.5-pro`: good for proofs and parallel analysis
+- `antigravity` + an exact model ID from `agy models` on the execution machine: native Google-account execution. Gemini CLI is retired; do not dispatch `backend="gemini"` or substitute Google API credentials.
 - `opencode`: cheap redundancy
 
 Always match `backend` to `model_override`. Workers are never Claude (operator policy; enforced).

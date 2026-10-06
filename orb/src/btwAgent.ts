@@ -2,7 +2,7 @@ import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey} from './sideQuestionStorage';
-import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,localRunActive} from './localAgents';
+import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
@@ -22,7 +22,7 @@ import {transferFile} from './uploads';
 import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
-export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number};
+export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
 export function btwSession(parent:string):BtwSession|undefined{try{return JSON.parse(localStorage.getItem(storageKey(parent))??'null')??undefined;}catch{return undefined;}}
 function save(parent:string,s:BtwSession){localStorage.setItem(storageKey(parent),JSON.stringify(s));}
@@ -45,19 +45,30 @@ export function btwQueueStatus(mission: Mission): string {
  return '';
 }
 const ACTIVE=['active','running','pending','queued','starting','resuming','waiting_background','paused'];
-// Core recovery replaces a side mission and tags the old one; follow the chain
-// so the panel keeps showing the session that will actually answer.
-async function currentSide(parent:string,s:BtwSession):Promise<Mission>{
- let mission=await getMission(s.id);
- for(let hop=0;hop<5;hop++){
+// Event sequences belong to one mission. Resolve the entire replacement chain
+// before changing the saved session, and never carry its predecessor's boundary.
+async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal):Promise<Mission>{
+ const version=connectionVersion(),seen=new Set<string>();
+ const check=()=>{if(version!==connectionVersion())throw new Error('Connection changed.');if(signal?.aborted)throw new Error('Side question cancelled.');};
+ let mission=await getMission(s.id);check();
+ for(let hop=0;hop<16;hop++){
+  seen.add(mission.id);
   const next=mission.tags?.find(tag=>tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
-  if(!next||next===mission.id)break;
-  mission=await getMission(next);s.id=mission.id;save(parent,s);
+  if(!next){
+   if(mission.id!==s.id){s.id=mission.id;s.baseline=0;delete s.afterSequence;s.active=ACTIVE.includes(mission.status);save(parent,s);}
+   return mission;
+  }
+  if(seen.has(next))throw new Error('Side session recovery contains a cycle.');
+  mission=await getMission(next).catch(error=>{
+   // A missing replacement is not proof that the saved side session was deleted.
+   if(error instanceof ApiError&&error.status===404)throw new Error('Recovered side session is unavailable (404). Retry after recovery finishes.');
+   throw error;
+  });check();
  }
- return mission;
+ throw new Error('Side session recovery chain is too long.');
 }
 const locks=new Set<string>();
-export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else await cancelMission(s.id);}
+export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
  const paths:string[]=[];
@@ -79,7 +90,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   await restoreLocalBindings();
   await reconcileLocalRun(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
-  void getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(m.status))follow(s.id);}).catch(()=>{});
+  await getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(m.status))follow(s.id);}).catch(()=>{});
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
@@ -93,20 +104,29 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  const publish=(text:string)=>{if(!signal.aborted&&connectionVersion()===version&&text!==previous){previous=text;receive({type:'snapshot',text} as SideEvent);}};
  const streamText=()=>live.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'').join('\n\n');
  // Unfinished thoughts are never stored: only the live stream carries them.
- const live=new TranscriptReducer();
- setLiveThoughts(all=>({...all,[s.id]:[]}));
- const stopStream=s.local?undefined:streamMission(s.id,event=>{
-  live.apply(event);
-  streamedText=streamText();
-  if(streamedText)publish(streamedText);
-  if(event.type==='mission_status_changed'||event.type==='status')wake?.();
-  setLiveThoughts(all=>({...all,[s.id]:thoughtsOf(live.items).map(item=>({...item}))}));
- },()=>{});
+ let live=new TranscriptReducer(),streamId:string|undefined,stopStream:(()=>void)|undefined;
+ const attach=()=>{
+  if(streamId===s.id)return;
+  stopStream?.();live=new TranscriptReducer();streamedText='';
+  if(streamId!==undefined)publish('');
+  const id=s.id;streamId=id;
+  setLiveThoughts(all=>({...all,[id]:[]}));
+  stopStream=streamMission(id,event=>{
+   if(id!==s.id||signal.aborted||connectionVersion()!==version)return;
+   live.apply(event);
+   streamedText=streamText();
+   if(streamedText)publish(streamedText);
+   if(event.type==='mission_status_changed'||event.type==='status')wake?.();
+   setLiveThoughts(all=>({...all,[id]:thoughtsOf(live.items).map(item=>({...item}))}));
+  },()=>{});
+ };
  const abortWake=()=>wake?.();signal.addEventListener('abort',abortWake);
  try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
-  const mission=await currentSide(parent,s),events=await getMissionEvents(s.id);
+  const mission=await currentSide(parent,s,signal);attach();
+  const events=await getMissionEvents(s.id);
+  if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
   let text='';const reducer=new TranscriptReducer();
   for(const event of btwTurnEvents(events,s)){
@@ -135,11 +155,19 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
  try{
   let s=btwSession(parent);
   if(s){
+   // Native completion can precede its transcript/status update to Core.
+   // A queued local follow-up must observe that update before the status guard.
+   if(s.local&&!s.active)await finishing.get(s.id);
+   if(s.local&&s.launchPending){
+    // Native recovery proves the prior attempt stopped before releasing Core.
+    // Transport failures and live processes retain the fence.
+    await recoverLocalLaunch(s.id);
+    await setClientMissionStatus(s.id,'interrupted');
+    s={...s,launchPending:false,active:false};save(parent,s);
+   }
    try {
-    const current=await currentSide(parent,s);
-    // A local launch refused before it began leaves Core pending with no native run.
-    if(s.local&&current.status==='pending'&&!localRunActive(s.id))await setClientMissionStatus(s.id,'failed');
-    else if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
+    const current=await currentSide(parent,s,signal);
+    if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
     s={...s,active:false};save(parent,s);
    } catch(error) {
     if(!(error instanceof ApiError)||error.status!==404)throw error;
@@ -164,8 +192,19 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
-   const attempt=localStorage.getItem(attemptKey)||crypto.randomUUID();localStorage.setItem(attemptKey,attempt);
-   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})});
+   const stored=localStorage.getItem(attemptKey);
+   let cached:{id:string;logical:string;prompt:string;snapshot:typeof snapshot}|undefined;
+   try{const parsed=JSON.parse(stored||'null');if(parsed?.id)cached=parsed;}catch{/* Legacy UUID-only attempt. */}
+   const attachmentDigest=attachments.length?Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(attachments)))),b=>b.toString(16).padStart(2,'0')).join(''):'';
+   const logical=JSON.stringify([question,attachmentDigest]);
+   const attempt=cached?.id||stored||crypto.randomUUID();
+   if(cached?.logical===logical){prompt=cached.prompt;snapshot=cached.snapshot;}
+   const retained=cached??{id:attempt,logical,prompt,snapshot};
+   localStorage.setItem(attemptKey,JSON.stringify(retained));
+   const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
+    if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
+    throw error;
+   });
    s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);
   };
   if(!reuse)await createSide();
@@ -184,11 +223,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     await createSide();
    }
   }
-  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});let receipt;try{receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,sharedDirectory:true,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});}catch(error){
-   // Definitive refusals spawned nothing; release Core so a retry is allowed.
-   if(/^Local launch (deferred|rejected)/.test(error instanceof Error?error.message:String(error))){try{await setClientMissionStatus(s!.id,'failed');}catch{}}
-   throw error;
-  }s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
+  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;s!.conversationCursor=snapshot.cursor;s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
  }finally{locks.delete(key);}
  await watchBtw(parent,signal,receive);

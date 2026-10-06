@@ -62,9 +62,9 @@ use crate::workspace_exec::WorkspaceExec;
 
 use super::automation_variables::substitute_custom_variables;
 use super::control::{
-    resolve_claudecode_default_model, resolve_codex_default_model, resolve_gemini_default_model,
-    resolve_grok_default_model, safe_truncate_index, AgentEvent, AgentTreeNode, ControlRunState,
-    ControlStatus, ExecutionProgress, FrontendToolHub,
+    resolve_claudecode_default_model, resolve_codex_default_model, resolve_grok_default_model,
+    safe_truncate_index, AgentEvent, AgentTreeNode, ControlRunState, ControlStatus,
+    ExecutionProgress, FrontendToolHub,
 };
 use super::library::SharedLibrary;
 
@@ -2189,11 +2189,6 @@ pub(crate) use super::runners::codex::{
     extract_codex_reset_window, run_codex_turn_with_rotation, summarize_codex_usage_caps,
 };
 
-// Gemini runner moved to `super::runners::gemini` (Phase 2). Re-exported so
-// the control.rs dispatch keeps its path.
-#[allow(unused_imports)]
-pub(crate) use super::runners::gemini::run_gemini_turn;
-
 // OpenCode runner moved to `super::runners::opencode` (Phase 2). Re-exported
 // so the control.rs dispatch keeps its path.
 #[allow(unused_imports)]
@@ -3957,10 +3952,6 @@ async fn run_mission_turn(
         config.default_model = Some(resolve_codex_default_model());
     } else if backend_id == "antigravity" && model_override.is_none() {
         config.default_model = None;
-    } else if backend_id == "gemini" && model_override.is_none() {
-        // Pin Gemini to a stable backend default instead of inheriting the
-        // global model or relying on the CLI's own default.
-        config.default_model = Some(resolve_gemini_default_model());
     } else if backend_id == "grok" && model_override.is_none() {
         // Pin Grok Build to its own default model. Without this the global
         // DEFAULT_MODEL (typically `anthropic/claude-opus-5`) flows
@@ -4296,22 +4287,12 @@ async fn run_mission_turn(
         user_message
     };
     let skill_cwd = workspace::configured_project_dir(&workspace, &mission_work_dir);
-    if project_has_skills && matches!(backend_id.as_str(), "grok" | "gemini") {
+    if project_has_skills && backend_id == "grok" {
         let exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
         let configured = get_backend_string_setting(&backend_id, "cli_path")
-            .or_else(|| {
-                if backend_id == "gemini" {
-                    std::env::var("GEMINI_CLI_PATH").ok()
-                } else {
-                    None
-                }
-            })
             .unwrap_or_else(|| backend_id.clone());
-        let binary = if backend_id == "grok" {
-            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await
-        } else {
-            ensure_gemini_cli_available(&exec, &skill_cwd, &configured).await
-        };
+        let binary =
+            super::runners::grok::ensure_grok_cli_available(&exec, &skill_cwd, &configured).await;
         match binary {
             Ok(binary) => {
                 workspace
@@ -4494,9 +4475,8 @@ async fn run_mission_turn(
     // send): goal-mode missions need the raw `/goal ...` text preserved;
     // OpenCode resumes its own per-mission session storage (so the framed
     // `convo` would duplicate context the CLI is about to load); grok/codex
-    // see the history-framed convo on normal turns; gemini always gets the
-    // framed convo; Claude Code maintains its own session and gets the raw
-    // user message.
+    // see the history-framed convo on normal turns; Claude Code maintains its
+    // own session and gets the raw user message.
     let is_goal_mode = user_message.trim_start().starts_with("/goal ");
     let has_opencode_session = session_id
         .as_deref()
@@ -4532,7 +4512,6 @@ async fn run_mission_turn(
             },
             is_continuation,
         ),
-        "gemini" => (convo.clone(), is_continuation),
         _ => (user_message.clone(), is_continuation),
     };
 
@@ -5751,6 +5730,16 @@ pub(crate) fn detect_opencode_provider_auth(
             configured_providers.insert("google".to_string());
         }
     }
+    if let Ok(value) = std::env::var("GEMINI_API_KEY") {
+        if !value.trim().is_empty() {
+            has_google = true;
+            configured_providers.insert("google".to_string());
+        }
+    }
+    if crate::api::ai_providers::google_cli_proxy_account_available() {
+        has_google = true;
+        configured_providers.insert("google".to_string());
+    }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
@@ -5803,6 +5792,18 @@ pub(crate) fn detect_opencode_provider_auth(
                 }
             }
         }
+    }
+
+    // Explicit provider configuration wins over every credential source.
+    if app_working_dir.is_some_and(|working_dir| {
+        crate::api::ai_providers::provider_explicitly_disabled(
+            working_dir,
+            crate::ai_providers::ProviderType::Google,
+        )
+    }) {
+        has_google = false;
+        configured_providers.remove("google");
+        configured_providers.remove("gemini");
     }
 
     OpenCodeAuthState {
@@ -6127,6 +6128,14 @@ fn cli_proxy_opencode_provider_definition(
 /// CLIProxyAPI: OpenCode authenticates to the proxy with its key instead.
 fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
+    // Antigravity is proxy-only. Mask any legacy host/workspace OAuth entry
+    // even when management is unavailable; a missing proxy key fails closed.
+    map.insert(
+        "antigravity".into(),
+        serde_json::json!({
+            "type": "api", "key": std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default()
+        }),
+    );
     for (provider, keys) in [
         (
             crate::ai_providers::ProviderType::Anthropic,
@@ -6144,6 +6153,18 @@ fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
             map.insert(
                 (*key).to_string(),
                 serde_json::json!({ "type": "api", "key": endpoint.api_key }),
+            );
+        }
+    }
+    if let Ok(key) = std::env::var("SANDBOXED_PROXY_SECRET") {
+        if !key.trim().is_empty() {
+            map.insert(
+                "google".into(),
+                serde_json::json!({"type":"api","key":&key}),
+            );
+            map.insert(
+                "gemini".into(),
+                serde_json::json!({"type":"api","key":&key}),
             );
         }
     }
@@ -6340,7 +6361,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 model_id: model_entry.clone()
             }
         })),
-        "builtin" => {
+        "builtin" | "antigravity" => {
             // Point at the local OpenAI-compatible proxy that handles model
             // chain resolution and failover.  The proxy runs on the same host
             // and is accessible from shared-network workspaces.
@@ -6361,11 +6382,15 @@ pub(crate) fn ensure_opencode_provider_for_model(
                     crate::api::proxy_liveness::MISSION_ID_HEADER: mid
                 });
             }
+            let mut model = serde_json::json!({"name": model_id});
+            if provider_id == "antigravity" {
+                model["id"] = serde_json::json!(format!("antigravity/{model_id}"));
+            }
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "Builtin",
+                "name": if provider_id == "antigravity" { "Antigravity subscription" } else { "Builtin" },
                 "models": {
-                    model_id: { "name": model_id }
+                    model_id: model
                 },
                 "options": options
             }))
@@ -6413,6 +6438,36 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 "options": options
             }))
         }
+        "google" | "gemini" => {
+            // Route Google/Gemini models (including `gemini-4-argon-eap`) through
+            // the host proxy so the router uses the Gemini API key first and falls
+            // back to CLIProxyAPI automatically.
+            let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+            let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    tracing::error!("SANDBOXED_PROXY_SECRET not set; google proxy auth will fail");
+                    String::new()
+                });
+            let mut options = serde_json::json!({
+                "baseURL": format!("http://{}:{}/v1", host_ip, port),
+                "apiKey": proxy_key
+            });
+            if let Some(mid) = mission_id {
+                options["headers"] = serde_json::json!({
+                    crate::api::proxy_liveness::MISSION_ID_HEADER: mid
+                });
+            }
+            Some(serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Google",
+                "models": {
+                    model_id: { "name": model_id }
+                },
+                "options": options
+            }))
+        }
         _ => custom_opencode_provider_definition(app_working_dir, provider_id),
     };
 
@@ -6436,13 +6491,56 @@ pub(crate) fn ensure_opencode_provider_for_model(
         None => return,
     };
 
+    if matches!(provider_id, "google" | "gemini")
+        && ["google", "gemini"].iter().any(|alias| {
+            providers_map
+                .get(*alias)
+                .and_then(|provider| provider.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        })
+    {
+        return;
+    }
+
+    // A mission may register its explicit override and then its agent default.
+    // Refresh the Google transport while retaining both model definitions.
+    let mut provider_def = provider_def;
+    if matches!(provider_id, "google" | "gemini") {
+        if let Some(existing) = providers_map.get(provider_id).and_then(|v| v.as_object()) {
+            let mut merged = existing.clone();
+            let mut models = existing
+                .get("models")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            if let Some(definition) = provider_def.as_object() {
+                merged.extend(definition.clone());
+                if let Some(new_models) = definition.get("models").and_then(|v| v.as_object()) {
+                    for (id, definition) in new_models {
+                        models
+                            .entry(id.clone())
+                            .or_insert_with(|| definition.clone());
+                    }
+                }
+            }
+            merged.insert("models".to_string(), serde_json::Value::Object(models));
+            provider_def = serde_json::Value::Object(merged);
+        }
+    }
+
     let cli_proxy_owned_provider =
         matches!(provider_id, "anthropic" | "claude" | "openai" | "codex")
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
-    if provider_id == "builtin" || provider_id == "kimi" || cli_proxy_owned_provider {
+    if provider_id == "builtin"
+        || provider_id == "kimi"
+        || provider_id == "antigravity"
+        || matches!(provider_id, "google" | "gemini")
+        || cli_proxy_owned_provider
+    {
         // Always overwrite proxy-backed providers — the proxy secret
-        // (options.apiKey) changes on every server restart, Kimi must not
-        // keep a stale api.kimi.com block from workspace config, and a
+        // (options.apiKey) changes on every server restart, Kimi/Google must not
+        // keep a stale upstream block from workspace config, and a
         // CLIProxyAPI-owned Anthropic/OpenAI block must track the proxy URL.
         providers_map.insert(provider_id.to_string(), provider_def);
     } else if let Some(existing) = providers_map.get_mut(provider_id) {
@@ -6685,7 +6783,9 @@ fn build_opencode_auth_from_ai_providers(
 
     let mut map = serde_json::Map::new();
     for provider in providers {
-        if !provider.enabled {
+        if !provider.enabled
+            || provider.provider_type == crate::ai_providers::ProviderType::Antigravity
+        {
             continue;
         }
         let keys: Vec<&str> = match provider.provider_type {
@@ -6817,26 +6917,8 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             }
         }
 
-        if let Some(dest_path) = auth_path.as_ref() {
-            if dest_path.as_path() != source_path.as_path() && source_path.exists() {
-                if let Some(parent) = dest_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        tracing::warn!(
-                            "Failed to create OpenCode auth directory {}: {}",
-                            parent.display(),
-                            e
-                        );
-                    }
-                }
-                if let Err(e) = std::fs::copy(&source_path, dest_path) {
-                    tracing::warn!(
-                        "Failed to copy OpenCode auth.json to workspace {}: {}",
-                        dest_path.display(),
-                        e
-                    );
-                }
-            }
-        }
+        // Write only the merged, ownership-filtered snapshot below. Copying
+        // the raw host file first would briefly expose proxy-owned OAuth.
     }
 
     let managed_auth = build_opencode_auth_from_ai_providers(app_working_dir);
@@ -6940,6 +7022,7 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             ("zai", "Z.AI"),
             ("minimax", "Minimax"),
             ("cerebras", "Cerebras"),
+            ("antigravity", "Antigravity"),
         ];
         for (key, label) in provider_entries {
             let entry = if key == "openai" {
@@ -7937,15 +8020,21 @@ pub(crate) async fn check_claudecode_connectivity(
 
 /// Proactive API connectivity check for OpenCode.
 /// Tests basic internet, then checks the appropriate API based on configured providers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn check_opencode_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
-    has_openai: bool,
-    has_anthropic: bool,
-    has_google: bool,
-    has_zai: bool,
-    has_minimax: bool,
+    auth: &OpenCodeAuthState,
+    host_proxy_url: Option<&str>,
 ) -> Result<(), String> {
+    let has_openai = auth.has_openai;
+    let has_anthropic = auth.has_anthropic;
+    let has_google = auth.has_google;
+    let has_zai = auth.has_zai;
+    let has_minimax = auth.configured_providers.contains("minimax");
+    if let Some(url) = host_proxy_url {
+        return check_api_reachability(workspace_exec, cwd, "Sandboxed model proxy", url).await;
+    }
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
@@ -9305,10 +9394,6 @@ pub async fn check_backend_prerequisites(
             let cli = cli_path.unwrap_or("codex");
             check_codex_prerequisites(&workspace_exec, cwd, cli).await
         }
-        "gemini" => {
-            let cli = cli_path.unwrap_or("gemini");
-            check_gemini_prerequisites(&workspace_exec, cwd, cli).await
-        }
         "antigravity" => {
             let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;
             BackendPreflightResult { backend_id: "antigravity".into(), available, cli_available: available, auto_install_possible: false, missing_dependencies: if available { vec![] } else { vec!["agy CLI".into()] }, message: Some("Install Antigravity CLI and sign in as the execution user with agy; verify access with agy models".into()) }
@@ -9389,7 +9474,7 @@ pub async fn check_backend_prerequisites(
             auto_install_possible: false,
             missing_dependencies: vec![format!("unknown backend: {}", backend_id)],
             message: Some(format!(
-                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, gemini, grok, chatgpt_ui",
+                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, chatgpt_ui",
                 backend_id
             )),
         },
@@ -9533,266 +9618,6 @@ async fn check_codex_prerequisites(
             Some("Codex CLI not found but can be auto-installed via npm/bun.".to_string())
         },
     }
-}
-
-async fn check_gemini_prerequisites(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    cli_path: &str,
-) -> BackendPreflightResult {
-    let program = cli_path.split_whitespace().next().unwrap_or(cli_path);
-
-    let cli_available = command_available(workspace_exec, cwd, program).await;
-
-    if cli_available {
-        return BackendPreflightResult {
-            backend_id: "gemini".to_string(),
-            available: true,
-            cli_available: true,
-            auto_install_possible: false,
-            missing_dependencies: vec![],
-            message: None,
-        };
-    }
-
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
-
-    let auto_install_possible = has_npm || has_bun;
-
-    BackendPreflightResult {
-        backend_id: "gemini".to_string(),
-        available: auto_install_possible,
-        cli_available: false,
-        auto_install_possible,
-        missing_dependencies: if !auto_install_possible {
-            vec!["npm or bun".to_string()]
-        } else {
-            vec![]
-        },
-        message: if !auto_install_possible {
-            Some("Gemini CLI not found and neither npm nor bun is available. Install Node.js/npm or Bun in the workspace template.".to_string())
-        } else {
-            Some("Gemini CLI not found but can be auto-installed via npm/bun.".to_string())
-        },
-    }
-}
-
-/// Returns the path/command to the Gemini CLI that should be used.
-/// Auto-installs via npm/bun if not found and auto-install is enabled.
-/// If the installed CLI requires Node 20+ but only Node 18 is available,
-/// returns a `bun run <entry_point>` command instead.
-pub(crate) async fn ensure_gemini_cli_available(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    cli_path: &str,
-) -> Result<String, String> {
-    let program = cli_path.split(' ').next().unwrap_or(cli_path);
-
-    // Check if already available
-    if command_available(workspace_exec, cwd, program).await {
-        // Verify Node.js version is sufficient (gemini CLI requires Node 20+)
-        if let Some(bun_cmd) = gemini_bun_fallback_if_needed(workspace_exec, cwd, cli_path).await {
-            return Ok(bun_cmd);
-        }
-        return Ok(cli_path.to_string());
-    }
-
-    // Check bun's global bin directories
-    const BUN_GLOBAL_GEMINI_PATHS: &[&str] =
-        &["/root/.cache/.bun/bin/gemini", "/root/.bun/bin/gemini"];
-    for gemini_path in BUN_GLOBAL_GEMINI_PATHS {
-        if command_available(workspace_exec, cwd, gemini_path).await {
-            tracing::info!(
-                path = %gemini_path,
-                "Found Gemini CLI in bun global bin"
-            );
-            if let Some(bun_cmd) =
-                gemini_bun_fallback_if_needed(workspace_exec, cwd, gemini_path).await
-            {
-                return Ok(bun_cmd);
-            }
-            return Ok(gemini_path.to_string());
-        }
-    }
-
-    // Auto-install Gemini CLI if enabled (defaults to true)
-    let auto_install = env_var_bool("SANDBOXED_SH_AUTO_INSTALL_GEMINI", true);
-    if !auto_install {
-        return Err(format!(
-            "Gemini CLI '{}' not found in workspace. Install it or set GEMINI_CLI_PATH.",
-            cli_path
-        ));
-    }
-
-    let has_bun = command_available(workspace_exec, cwd, "bun").await
-        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
-    let has_npm = command_available(workspace_exec, cwd, "npm").await;
-
-    if !has_bun && !has_npm {
-        return Err(format!(
-            "Gemini CLI '{}' not found and neither npm nor bun is available in the workspace. Install Node.js/npm or Bun in the workspace template, or set GEMINI_CLI_PATH.",
-            cli_path
-        ));
-    }
-
-    let install_cmd = if has_bun {
-        r#"export PATH="/root/.bun/bin:/root/.cache/.bun/bin:$PATH" && bun install -g @google/gemini-cli@latest 2>&1"#
-    } else {
-        "npm install -g @google/gemini-cli@latest 2>&1"
-    };
-
-    tracing::info!(
-        installer = if has_bun { "bun" } else { "npm" },
-        "Auto-installing Gemini CLI"
-    );
-
-    let output = workspace_exec
-        .output(
-            cwd,
-            "/bin/sh",
-            &["-lc".to_string(), install_cmd.to_string()],
-            std::collections::HashMap::new(),
-        )
-        .await
-        .map_err(|e| format!("Failed to install Gemini CLI: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut message = String::new();
-        if !stderr.trim().is_empty() {
-            message.push_str(stderr.trim());
-        }
-        if !stdout.trim().is_empty() {
-            if !message.is_empty() {
-                message.push_str(" | ");
-            }
-            message.push_str(stdout.trim());
-        }
-        if message.is_empty() {
-            message = "Gemini CLI install failed with no output".to_string();
-        }
-        return Err(format!("Gemini CLI install failed: {}", message));
-    }
-
-    // Re-check availability after install
-    if command_available(workspace_exec, cwd, cli_path).await {
-        if let Some(bun_cmd) = gemini_bun_fallback_if_needed(workspace_exec, cwd, cli_path).await {
-            return Ok(bun_cmd);
-        }
-        return Ok(cli_path.to_string());
-    }
-    for gemini_path in BUN_GLOBAL_GEMINI_PATHS {
-        if command_available(workspace_exec, cwd, gemini_path).await {
-            tracing::info!(
-                path = %gemini_path,
-                "Gemini CLI available after auto-install"
-            );
-            if let Some(bun_cmd) =
-                gemini_bun_fallback_if_needed(workspace_exec, cwd, gemini_path).await
-            {
-                return Ok(bun_cmd);
-            }
-            return Ok(gemini_path.to_string());
-        }
-    }
-
-    Err(format!(
-        "Gemini CLI install completed but '{}' is still not available in workspace PATH.",
-        cli_path
-    ))
-}
-
-/// Check if Node.js version is too old for Gemini CLI (requires 20+).
-/// If so, return a `bun run <entry_point>` command as fallback.
-async fn gemini_bun_fallback_if_needed(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    _cli_path: &str,
-) -> Option<String> {
-    // Check Node.js major version
-    let node_available = workspace_exec
-        .output(
-            cwd,
-            "/bin/sh",
-            &["-lc".to_string(), "node --version 2>/dev/null".to_string()],
-            std::collections::HashMap::new(),
-        )
-        .await
-        .ok();
-
-    if let Some(ref node_version) = node_available {
-        let version_str = String::from_utf8_lossy(&node_version.stdout);
-        let version_str = version_str.trim().trim_start_matches('v');
-        if let Some(major) = version_str
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-        {
-            if major >= 20 {
-                return None; // Node.js version is sufficient
-            }
-            tracing::info!(
-                node_version = %version_str,
-                "Node.js version too old for Gemini CLI (requires 20+), falling back to bun"
-            );
-        } else {
-            tracing::info!("Could not parse Node.js version, falling back to bun");
-        }
-    } else {
-        tracing::info!("Node.js not available, falling back to bun");
-    }
-
-    // Find the gemini CLI entry point and run via bun
-    const GEMINI_ENTRY_POINTS: &[&str] = &[
-        "/root/.cache/.bun/install/global/node_modules/@google/gemini-cli/dist/index.js",
-        "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js",
-        "/usr/lib/node_modules/@google/gemini-cli/dist/index.js",
-    ];
-
-    // Determine which bun path to use
-    let bun_path = if command_available(workspace_exec, cwd, "bun").await {
-        "bun".to_string()
-    } else if command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await {
-        "/root/.bun/bin/bun".to_string()
-    } else if command_available(workspace_exec, cwd, "/root/.cache/.bun/bin/bun").await {
-        "/root/.cache/.bun/bin/bun".to_string()
-    } else {
-        tracing::warn!("Node.js too old and bun not available; gemini CLI may fail");
-        return None;
-    };
-
-    for entry_point in GEMINI_ENTRY_POINTS {
-        let check = workspace_exec
-            .output(
-                cwd,
-                "/bin/sh",
-                &[
-                    "-lc".to_string(),
-                    format!("test -f {} && echo found", entry_point),
-                ],
-                std::collections::HashMap::new(),
-            )
-            .await;
-
-        if let Ok(output) = check {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim() == "found" {
-                let cmd = format!("{} run {}", bun_path, entry_point);
-                tracing::info!(
-                    bun = %bun_path,
-                    entry_point = %entry_point,
-                    "Using bun to run Gemini CLI (Node.js < 20)"
-                );
-                return Some(cmd);
-            }
-        }
-    }
-
-    tracing::warn!("Could not find Gemini CLI entry point for bun fallback");
-    None
 }
 
 pub(crate) fn usage_value_tokens(value: &serde_json::Value, keys: &[&str]) -> u64 {
@@ -10285,6 +10110,30 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn retired_gemini_preflight_does_not_install_and_antigravity_uses_selected_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::default_host(directory.path().into());
+        let retired =
+            super::check_backend_prerequisites(&workspace, "gemini", Some("/usr/bin/true")).await;
+        assert!(!retired.available);
+        assert!(!retired.auto_install_possible);
+        assert!(retired.message.unwrap().contains("Unknown backend"));
+        let current =
+            super::check_backend_prerequisites(&workspace, "antigravity", Some("/usr/bin/true"))
+                .await;
+        assert!(current.available);
+        assert!(!current.auto_install_possible);
+        let missing = super::check_backend_prerequisites(
+            &workspace,
+            "antigravity",
+            Some("/no-such-agy-binary"),
+        )
+        .await;
+        assert!(!missing.available);
+        assert!(missing.message.unwrap().contains("agy models"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn container_env_path_accepts_canonical_mission_path_under_symlink_root() {
@@ -10717,6 +10566,36 @@ mod tests {
             assert_eq!(auth["anthropic"]["access"], "fresh");
             assert_eq!(auth["anthropic"]["expires"], 200);
         }
+    }
+
+    #[test]
+    fn antigravity_oauth_never_reaches_opencode_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Antigravity,
+            "Google".into(),
+        );
+        provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "google-access-must-not-export".into(),
+            refresh_token: "google-refresh-must-not-export".into(),
+            expires_at: i64::MAX,
+        });
+        fs::write(
+            store.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(build_opencode_auth_from_ai_providers(temp.path()).is_none());
+        let mut auth = Some(serde_json::json!({"antigravity": {
+            "type":"oauth", "access":"legacy-access", "refresh":"legacy-refresh"
+        }}));
+        super::overlay_opencode_auth(&mut auth, super::cli_proxy_opencode_auth_overlay().unwrap());
+        let auth = auth.unwrap();
+        assert_eq!(auth["antigravity"]["type"], "api");
+        assert!(auth["antigravity"].get("access").is_none());
+        assert!(auth["antigravity"].get("refresh").is_none());
     }
 
     #[test]
@@ -12281,6 +12160,103 @@ mod tests {
     }
 
     #[test]
+    fn ensure_opencode_google_preserves_override_when_registering_agent_model() {
+        let temp = tempfile::tempdir().unwrap();
+        for provider in ["google", "gemini"] {
+            let config_dir = temp.path().join(provider);
+            fs::create_dir_all(&config_dir).unwrap();
+            for model in ["gemini-4-argon-eap", "gemini-3.1-pro-preview"] {
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    temp.path(),
+                    &format!("{provider}/{model}"),
+                    "10.88.0.1",
+                    None,
+                );
+            }
+            let config: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+            )
+            .unwrap();
+            let definition = &config["provider"][provider];
+            assert!(definition["models"]["gemini-4-argon-eap"].is_object());
+            assert!(definition["models"]["gemini-3.1-pro-preview"].is_object());
+            assert_eq!(definition["npm"], "@ai-sdk/openai-compatible");
+            assert!(definition["options"]["baseURL"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://10.88.0.1:"));
+        }
+    }
+
+    #[test]
+    fn detect_opencode_google_disablement_wins_over_managed_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_dir = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store_dir).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Google,
+            "Google".into(),
+        );
+        provider.api_key = Some("test-google-key".into());
+        fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::to_vec(&vec![provider]).unwrap(),
+        )
+        .unwrap();
+        assert!(super::detect_opencode_provider_auth(Some(temp.path())).has_google);
+        for alias in ["google", "gemini"] {
+            fs::write(
+                temp.path().join("opencode.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "provider": {alias: {"enabled": false}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let auth = super::detect_opencode_provider_auth(Some(temp.path()));
+            assert!(!auth.has_google, "disabled alias {alias}");
+            assert!(!auth.configured_providers.contains("google"));
+            assert!(!auth.configured_providers.contains("gemini"));
+        }
+    }
+
+    #[test]
+    fn ensure_opencode_provider_preserves_disabled_google() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        for aliases in [
+            serde_json::json!({"google":{"enabled":false}}),
+            serde_json::json!({"google":{},"gemini":{"enabled":false}}),
+            serde_json::json!({"google":{"enabled":false},"gemini":{}}),
+        ] {
+            for prefix in ["google", "gemini"] {
+                let original = serde_json::json!({"provider":aliases});
+                fs::write(
+                    config_dir.join("opencode.json"),
+                    serde_json::to_vec(&original).unwrap(),
+                )
+                .unwrap();
+                ensure_opencode_provider_for_model(
+                    &config_dir,
+                    &app_dir,
+                    &format!("{prefix}/gemini-4-argon-eap"),
+                    "10.88.0.1",
+                    None,
+                );
+                let config: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(config_dir.join("opencode.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(config, original);
+            }
+        }
+    }
+
+    #[test]
     fn ensure_opencode_provider_builtin_uses_workspace_host_ip() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config_dir = temp.path().join("ws");
@@ -12314,6 +12290,34 @@ mod tests {
             .as_str()
             .expect("mission id header");
         assert_eq!(mission_header, "00000000-0000-0000-0000-000000000123");
+    }
+
+    #[test]
+    fn ensure_opencode_provider_antigravity_keeps_explicit_proxy_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "antigravity/claude-sonnet",
+            "10.88.0.1",
+            None,
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        let provider = &config["provider"]["antigravity"];
+        assert_eq!(
+            provider["models"]["claude-sonnet"]["id"],
+            "antigravity/claude-sonnet"
+        );
+        assert!(provider["options"]["baseURL"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://10.88.0.1:"));
     }
 
     #[test]
@@ -14828,11 +14832,14 @@ mod tests {
     fn a_limit_reported_after_the_reply_parks_the_account() {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::account_limits::account_key(uuid::Uuid::new_v4());
-        let reply =
-            super::AgentResult::success("Done.", 0).with_data(super::late_usage_limit_data(
-                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
-             purchase more credits or try again at Oct 5th, 2026 2:09 PM.",
-            ));
+        let reset = chrono::Utc::now() + chrono::Duration::days(2);
+        let message = format!(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to \
+             purchase more credits or try again at {} (UTC).",
+            reset.format("%b %-d, %Y %-I:%M %p")
+        );
+        let reply = super::AgentResult::success("Done.", 0)
+            .with_data(super::late_usage_limit_data(&message));
         super::note_turn_for_limits(dir.path(), &key, "openai", "Codex", &reply);
         assert!(crate::account_limits::shared().is_cooling(&key));
         // A later served turn without a limit releases it.

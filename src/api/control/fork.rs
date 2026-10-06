@@ -32,6 +32,15 @@ pub async fn fork_mission(
             "Side questions require an idempotency key".into(),
         ));
     }
+    let fingerprint = req.side_question.as_deref().map(|question| {
+        side_payload_fingerprint(
+            &req.backend,
+            &req.model_override,
+            req.model_effort.as_deref(),
+            question,
+            req.side_context_mode.as_deref(),
+        )
+    });
     let control = control_for_user(&state, &user).await;
     if req.side_question.is_some() {
         let rows = control
@@ -49,19 +58,27 @@ pub async fn fork_mission(
         // Launch receipts exist even when the parent has no project/track.
         // Recover completed attempts too: losing the response must not rerun it.
         let mut existing_live = None;
-        for existing in rows.iter().filter(|mission| {
-            !matches!(
-                mission.status,
-                MissionStatus::Failed | MissionStatus::Interrupted
-            )
-        }) {
+        for existing in &rows {
             let Some(receipt) = side_launch_receipt(&state.config.working_dir, existing.id)
                 .map_err(internal_error)?
             else {
                 continue;
             };
-            if receipt.key == req.idempotency_key.trim() {
-                if !receipt.accepted {
+            if receipt.key == side_request_key(id, &req.idempotency_key) {
+                // Terminal executions still own their accepted idempotency key.
+                // Only a failure before dispatch may be replaced by a new launch.
+                if matches!(
+                    existing.status,
+                    MissionStatus::Failed | MissionStatus::Interrupted
+                ) && !receipt.accepted
+                    && !reconcile_side_launch(&state, &control, existing).await?
+                {
+                    continue;
+                }
+                if Some(receipt.fingerprint.as_str()) != fingerprint.as_deref() {
+                    return Err((StatusCode::CONFLICT, "This side request key was already used for different launch content; the new question was not sent.".into()));
+                }
+                if !receipt.accepted && !reconcile_side_launch(&state, &control, existing).await? {
                     return Err((StatusCode::SERVICE_UNAVAILABLE, format!(
                         "Side session {} has incomplete initialization; inspect or stop it before retrying. No accepted launch was recovered.", existing.id
                     )));
@@ -203,7 +220,7 @@ pub async fn fork_mission(
         "parent_mission_id": if req.side_question.is_some(){None}else{Some(id)},
         "project": source.project.project,
         "tags": tags,
-        "idempotency_key": req.idempotency_key,
+        "idempotency_key": if req.side_question.is_some() { side_request_key(id, &req.idempotency_key) } else { req.idempotency_key },
         "remote_node_id": placement.map(|p| p.node_id),
         "prompt": prompt,
     }))
@@ -215,14 +232,107 @@ pub async fn fork_mission(
         Extension(user),
         Some(Json(create)),
         req.side_question.is_some(),
+        fingerprint.as_deref(),
     )
     .await?;
     if req.side_question.is_some() {
         let child_id: Uuid =
             serde_json::from_value(response.0["id"].clone()).map_err(internal_error)?;
-        accept_side_launch(&state.config.working_dir, child_id).map_err(internal_error)?;
+        // Dispatch is already accepted. Do not turn an acknowledgment-write
+        // failure into an API failure; retries reconcile the durable work record.
+        if let Err(error) = accept_side_launch(&state.config.working_dir, child_id) {
+            tracing::warn!(%child_id, %error, "side launch accepted; receipt promotion pending reconciliation");
+        }
     }
     Ok(response)
+}
+
+async fn reconcile_side_launch(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission: &Mission,
+) -> Result<bool, (StatusCode, String)> {
+    let store = &control.mission_store;
+    let mut accepted = store
+        .get_deferred_goal(mission.id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    if let Some(run) = store
+        .get_latest_mission_run(mission.id)
+        .await
+        .map_err(internal_error)?
+    {
+        accepted |= !is_remote_mission_job_owner(&run.owner_actor_id);
+    }
+    if !accepted
+        && mission
+            .project
+            .tags
+            .iter()
+            .any(|tag| tag == "placement:client")
+    {
+        let events = store
+            .get_events(mission.id, Some(&["user_message"]), Some(1), None)
+            .await
+            .map_err(internal_error)?;
+        if let Some(prompt) = events.first() {
+            // Initialization persists the client prompt before publishing its
+            // delivery. Replay the original delivery id, never a second turn.
+            if worker_location::client_owner(mission).is_some()
+                && mission.status == MissionStatus::Pending
+            {
+                worker_location::enqueue(
+                    store,
+                    mission.id,
+                    worker_location::initial_delivery_id(mission.id),
+                    prompt.content.clone(),
+                )
+                .await
+                .map_err(internal_error)?;
+            }
+            accepted = true;
+        }
+    }
+    if !accepted {
+        let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
+            .await
+            .map_err(internal_error)?;
+        accepted = handles
+            .iter()
+            .any(|handle| handle.mission_id == mission.id && handle.accepted_at.is_some());
+        if !accepted {
+            accepted = !crate::remote_node::job_ledger::terminal_receipts_for_mission(
+                &state.config.working_dir,
+                mission.id,
+            )
+            .await
+            .map_err(internal_error)?
+            .is_empty();
+        }
+    }
+    if accepted {
+        if let Err(error) = accept_side_launch(&state.config.working_dir, mission.id) {
+            tracing::warn!(mission_id = %mission.id, %error, "recovered accepted side launch; receipt repair pending");
+        }
+    }
+    Ok(accepted)
+}
+
+pub(super) fn side_payload_fingerprint(
+    backend: &str,
+    model: &str,
+    effort: Option<&str>,
+    question: &str,
+    context: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = serde_json::json!([backend, model, effort, question, context]);
+    format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
+}
+
+fn side_request_key(parent: Uuid, key: &str) -> String {
+    format!("btw:{parent}:{}", key.trim())
 }
 
 fn side_creation_lock(user: &str, parent: Uuid) -> Arc<tokio::sync::Mutex<()>> {
@@ -541,6 +651,7 @@ fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct SideLaunchReceipt {
     key: String,
+    fingerprint: String,
     accepted: bool,
 }
 
@@ -561,12 +672,14 @@ pub(super) fn record_side_launch(
     root: &std::path::Path,
     id: Uuid,
     key: &str,
+    fingerprint: &str,
 ) -> Result<(), String> {
     write_side_launch(
         root,
         id,
         &SideLaunchReceipt {
             key: key.trim().into(),
+            fingerprint: fingerprint.into(),
             accepted: false,
         },
     )

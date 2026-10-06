@@ -31,6 +31,7 @@ export function AgentActivity(p: {items: LocalActivity[]; running: boolean; comp
   const timer = setInterval(() => { if (p.running) setNow(Date.now()); }, 1000);
   onCleanup(() => clearInterval(timer));
   const progress = () => p.items.find(a => a.id === 'antigravity:status');
+  const hasThoughts = () => p.items.some(a => a.id.startsWith('antigravity:thought:') && a.detail);
   const tasks = createMemo(() => p.items.filter(a => a.background || a.id.startsWith('task:')));
   const tools = createMemo(() => {
     const spawned = new Set(tasks().map(a => a.tool_use_id).filter(Boolean));
@@ -80,7 +81,7 @@ export function AgentActivity(p: {items: LocalActivity[]; running: boolean; comp
       <Show when={history().length}><span class="agent-task-state">{historyLabel()}</span></Show>
     </>}</Show>} />
     <Show when={progress()}>{status => <div class="agent-progress-meta" title={status().detail ?? undefined}>
-      <span tabIndex={0} title={status().detail ?? undefined}>Reasoning text unavailable</span>
+      <span tabIndex={0} title={status().detail ?? undefined}>{hasThoughts() ? "Thought summaries available in Activity" : "Waiting for thought summaries"}</span>
       <Show when={status().thinking_tokens != null}> · {status().thinking_tokens?.toLocaleString()} thinking tokens reported</Show>
       <Show when={p.running && status().updated_at}> · Last event {Math.max(0, Math.floor((now() - status().updated_at!) / 1000))}s ago</Show>
       <Show when={p.running && current()?.id !== status().id}> · Elapsed {activityDuration(status(), now(), true)}</Show>

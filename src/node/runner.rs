@@ -420,6 +420,18 @@ impl JobRunner {
                 } else {
                     Some(clamp_timeout(*timeout_secs, self.max_job_secs))
                 };
+                let thought_stop = CancellationToken::new();
+                let thought_monitor = managed_auth
+                    .iter()
+                    .any(|profile| profile == "antigravity")
+                    .then(|| {
+                        let log = log_path.clone();
+                        let home = mission_dir.clone();
+                        let stop = thought_stop.clone();
+                        tokio::spawn(async move {
+                            monitor_antigravity_thoughts(&home, &log, stop).await;
+                        })
+                    });
                 let outcome = run_logged_command_with_deadline(
                     cmd,
                     CommandEnvironment::Clear,
@@ -427,8 +439,12 @@ impl JobRunner {
                     limit_secs,
                     token,
                 )
-                .await?;
-                let (state, exit_code, error) = outcome.into_job_result();
+                .await;
+                thought_stop.cancel();
+                if let Some(monitor) = thought_monitor {
+                    let _ = monitor.await;
+                }
+                let (state, exit_code, error) = outcome?.into_job_result();
                 Ok((state, exit_code, error, None))
             }
             JobPayload::LeanBuild { .. } => {
@@ -1672,5 +1688,98 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("job {job_id} did not reach a terminal state in time");
+    }
+}
+
+/// Supplement headless events with the CLI's own displayed thought summaries.
+async fn monitor_antigravity_thoughts(home: &Path, log: &Path, stop: CancellationToken) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut reader = crate::antigravity::thoughts::Reader::new(home);
+    let mut offset = 0;
+    let mut pending = String::new();
+    loop {
+        if let Ok(mut file) = std::fs::File::open(log) {
+            if file.seek(SeekFrom::Start(offset)).is_ok() {
+                let mut bytes = vec![];
+                if file.take(512 * 1024).read_to_end(&mut bytes).is_ok() {
+                    offset += bytes.len() as u64;
+                    pending.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(end) = pending.find('\n') {
+                        let line: String = pending.drain(..=end).collect();
+                        if let Ok(value) = serde_json::from_str(&line) {
+                            reader.observe(&value);
+                        }
+                    }
+                    if pending.len() > 512 * 1024 {
+                        pending.clear();
+                    }
+                }
+            }
+        }
+        for event in reader.poll() {
+            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log) {
+                let line = format!("{}\n", event);
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+        if stop.is_cancelled() {
+            break;
+        }
+        tokio::select! { _ = stop.cancelled() => {}, _ = tokio::time::sleep(Duration::from_millis(500)) => {} }
+    }
+}
+
+#[cfg(test)]
+mod antigravity_thought_tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_thought_monitor_keeps_job_identity_and_stops_cleanly() {
+        let home = tempfile::tempdir().unwrap();
+        let sid = Uuid::new_v4().to_string();
+        let dir = home.path().join(".gemini/antigravity-cli/conversations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = rusqlite::Connection::open(dir.join(format!("{sid}.db"))).unwrap();
+        db.execute_batch(
+            "CREATE TABLE steps(idx INTEGER,step_type INTEGER,status INTEGER,step_payload BLOB)",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO steps VALUES(10,15,3,?1)",
+            [vec![162u8, 1, 4, 26, 2, b'o', b'k']],
+        )
+        .unwrap();
+        let log = home.path().join("job.log");
+        std::fs::write(&log,format!("{}\n{}\n",serde_json::json!({"event":"init","conversation_id":sid}),serde_json::json!({"event":"step_update","step_update":{"conversation_id":sid,"step_index":9}}))).unwrap();
+        let stop = CancellationToken::new();
+        let done = stop.clone();
+        let h = home.path().to_path_buf();
+        let l = log.clone();
+        let task = tokio::spawn(async move {
+            monitor_antigravity_thoughts(&h, &l, done).await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if std::fs::read_to_string(&log)
+                    .unwrap()
+                    .contains("thought_update")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.cancel();
+        task.await.unwrap();
+        let text = std::fs::read_to_string(log).unwrap();
+        let events: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2]["conversation_id"], sid);
+        assert_eq!(events[2]["text"], "ok");
+        assert_eq!(events[2]["done"], true);
     }
 }

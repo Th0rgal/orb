@@ -4,7 +4,7 @@ This guide will walk you through setting up and using sandboxed.sh for the first
 
 ## What is sandboxed.sh?
 
-sandboxed.sh is a powerful AI agent orchestration platform that manages multiple AI coding assistants (OpenCode, Claude Code, Codex, Gemini, and Grok) through a unified dashboard. It provides:
+sandboxed.sh is a powerful AI agent orchestration platform that manages multiple AI coding assistants (OpenCode, Claude Code, Codex, Antigravity (`agy`), and Grok) through a unified dashboard. It provides:
 
 - **Git-backed configuration library** - Store and version control your skills, agents, commands, and tools
 - **Multiple workspace support** - Isolated containers for different projects
@@ -219,7 +219,7 @@ You can modify the content directly and click **Save** to update the library.
 
 ## Step 5: Configure AI Harness Settings
 
-sandboxed.sh supports multiple AI coding harnesses (OpenCode, Claude Code, Codex, Gemini, and Grok). OpenCode, Claude Code, Codex, and sandboxed.sh settings can be managed through configuration profiles.
+sandboxed.sh supports multiple AI coding harnesses (OpenCode, Claude Code, Codex, Antigravity (`agy`), and Grok). OpenCode, Claude Code, Codex, and sandboxed.sh settings can be managed through configuration profiles.
 
 ### 5.1 Access Config Editor
 
@@ -287,7 +287,7 @@ Configure your mission:
 3. **Model Override (optional)** - Force a specific model for this mission:
    - **Claude Code**: use a raw model ID (e.g., `claude-opus-5`)
    - **Codex**: use a raw model ID (e.g., `gpt-5.5` or `gpt-5.3-codex`)
-   - **Gemini**: use a raw model ID (e.g., `gemini-3.1-pro-preview`)
+   - **Antigravity**: select an exact model ID discovered by `agy models` as the execution user in the target workspace
    - **Grok**: use the canonical raw CLI model ID `grok-4.5`; availability is
      account- and region-dependent (including in the EU), so confirm with
      `grok models` if the CLI rejects it

@@ -50,7 +50,7 @@ async function apiRaw(path: string): Promise<Response> {
 
 export interface EventPage { events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
 export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number}={}):Promise<EventPage>{
- const query=new URLSearchParams({limit:'1000',include_counts:'false'});
+ const query=new URLSearchParams({limit:'200',include_counts:'false'});
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
  const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
@@ -79,7 +79,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       if (isGeneratedRemoteJobStatus(ev)) return null;
       // Canonical rows are the finalized text_op bubble; treat both as the
       // turn's final message (the reducer dedupes identical text).
-      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id }), type: "assistant_message" };
+      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision }), type: "assistant_message" };
     case "text_op": {
       let ops: unknown = [];
       try {
@@ -219,17 +219,42 @@ export function streamMission(
  * Text contents are deliberately never an identity: two real replies may match. */
 export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): StreamEvent[] {
   const identity = (event: StreamEvent): string | undefined => {
+    // Mutable snapshots reuse a row ID; only the same revision overlaps.
+    if (event.sequence != null) return `sequence:${event.sequence}:${event.type}`;
     const id = event.eventId ?? event.data.id;
     if (id != null) return `${event.type}:${id}`;
-    if (event.sequence != null) return `sequence:${event.sequence}:${event.type}`;
     if ((event.type === "tool_call" || event.type === "tool_result") && event.data.tool_call_id)
       return `${event.type}:${event.data.tool_call_id}`;
     return undefined;
   };
   const known = new Set(history.map(identity).filter(Boolean));
-  // Stored rows also retain tool ids when they have sequence metadata.
-  for (const event of history) if (event.type === "tool_call" || event.type === "tool_result") known.add(`${event.type}:${event.data.tool_call_id}`);
-  let cut = 0;
-  held.forEach((event,index) => { const key=identity(event); if(key && known.has(key)) cut=index+1; });
-  return held.filter((event, index) => event.type === "user_message" || index >= cut);
+  const revisions = new Map<string, number>();
+  for (const event of history) {
+    const eventId=event.eventId ?? event.data.id;
+    if(eventId != null && event.type !== 'text_delta' && event.type !== 'text_op') known.add(`${event.type}:${eventId}`);
+    if (event.type === "tool_call" || event.type === "tool_result") known.add(`${event.type}:${event.data.tool_call_id}`);
+    const bubble = String(event.data.bubble_id ?? "");
+    if (event.type === 'assistant_message' && event.data.canonical === true && typeof event.data.revision === 'number') revisions.set(bubble, Math.max(revisions.get(bubble) ?? 0, event.data.revision));
+    if (event.type === 'text_op' && Array.isArray(event.data.ops)) for (const op of event.data.ops) {
+      if (op.type === 'snapshot' && typeof op.revision === 'number') revisions.set(bubble, Math.max(revisions.get(bubble) ?? 0, op.revision));
+    }
+  }
+  let finalizedThrough = -1;
+  held.forEach((event,index) => {
+    const key=identity(event);
+    if(event.type === 'assistant_message' && event.data.canonical !== true && key && known.has(key)) finalizedThrough=index;
+  });
+  return held.filter((event,index) => {
+    if (event.type === 'user_message') return true;
+    const key=identity(event);
+    if(key && known.has(key)) return false;
+    const bubble=String(event.data.bubble_id ?? 'text_delta_latest');
+    if(index <= finalizedThrough && (event.type==='thinking'||event.type==='text_delta'||(event.type==='text_op'&&bubble==='text_delta_latest'))) return false;
+    if(event.type==='text_op'&&Array.isArray(event.data.ops)&&event.data.ops.some(op=>op.type==='snapshot')) {
+      const revision=Math.max(...event.data.ops.filter(op=>op.type==='snapshot').map(op=>Number(op.revision)));
+      if(revision <= (revisions.get(bubble) ?? -1)) return false;
+    }
+    // A persisted tool confirms only itself, never the text preceding it.
+    return true;
+  });
 }

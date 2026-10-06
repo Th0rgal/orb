@@ -21,7 +21,7 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "gemini", "antigravity"] as const;
+export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "antigravity"] as const;
 export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
 
 const FILE_CAP = 512 * 1024;
@@ -45,6 +45,7 @@ export interface LocalBinding {
   bin: string;
   cwd: string;
   model?: string;
+  effort?: string;
   sessionId?: string;
   transferId?: string;
 }
@@ -407,9 +408,8 @@ export interface StartLocal {
   cwd: string;
   prompt: string;
   model?: string;
+  effort?: string;
   sessionId?: string;
-  /** /btw side runs read the parent's folder while the parent works. */
-  sharedDirectory?: boolean;
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
@@ -439,7 +439,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     }
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
-      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [], shared_directory: req.sharedDirectory ?? false },
+      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
     });
     pendingLaunches.set(req.id,launch);
     const receipt = await launch as ClientRunReceipt;
@@ -570,7 +570,7 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
- await rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model});
+ await rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model,effort:request.effort});
  await reconcileLocalRun(mission.id);
  return mission;
 }
