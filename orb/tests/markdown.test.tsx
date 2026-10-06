@@ -155,6 +155,18 @@ it("keeps brackets inside code-formatted file link labels", async () => {
   expect(resolve).toHaveBeenCalledExactlyOnceWith(path);
 });
 
+it("handles balanced parentheses and angle-bracketed destinations in file links", async () => {
+  const path = '/tmp/My (draft).pdf';
+  const ref = {source: 'workspace', path, name: 'My (draft).pdf'};
+  const resolve = vi.fn(async () => [ref]);
+  const {container, getAllByRole} = render(() => <FileReferenceContext.Provider value={{resolve, open: () => {}, search: () => {}}}>
+    <MdView text={'**[details (`safe`)](file:///tmp/My (draft).pdf)** and [`other`](<file:///tmp/My (draft).pdf>)'}/>
+  </FileReferenceContext.Provider>);
+  await waitFor(() => expect(getAllByRole('button')).toHaveLength(2));
+  expect(container.textContent).toBe('details (safe) and other');
+  expect(resolve).toHaveBeenCalledWith(path);
+});
+
 it("renders formatted link labels even without a file resolver", () => {
   const {container} = render(() => <MdView text={'[\`files/Context/\`](file:///tmp/Context/) [**notes**](file:///tmp/notes.md) [\`docs\`](https://example.com/docs)'}/>);
   expect(container.textContent).toBe('files/Context/ notes docs');

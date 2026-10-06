@@ -25,14 +25,13 @@ export function safeHref(raw: string): string | null {
   return /^(https?:|mailto:)/i.test(raw.trim()) ? raw.trim() : null;
 }
 
+import { normalizeFileUrl } from "./fileResources";
+
 /** File URLs go through Orb's scoped file resolver, never webview navigation. */
 function fileLinkTarget(raw: string): string {
-  if (!/^file:/i.test(raw)) return raw;
-  try {
-    const url = new URL(raw);
-    if (url.hostname && url.hostname !== "localhost") return raw;
-    return decodeURIComponent(url.pathname).replace(/^\/([a-z]:\/)/i, "$1") + url.hash;
-  } catch { return raw; }
+  const unwrapped =
+    raw.startsWith("<") && raw.endsWith(">") ? raw.slice(1, -1) : raw;
+  return normalizeFileUrl(unwrapped);
 }
 
 function plainInline(text: string, links: boolean): JSX.Element[] {
@@ -68,7 +67,7 @@ function inline(text: string, links = true): JSX.Element[] {
   // Emphasis that wraps a code span is taken whole first, or the span would
   // split it and leave its asterisks as text. Links likewise stay whole so
   // code-formatted labels do not expose their brackets and destination.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\([^)]+\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
@@ -85,7 +84,7 @@ function inline(text: string, links = true): JSX.Element[] {
 }
 function inlineText(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\(([^)]+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
+  const re = /(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(...plainInline(text.slice(last, m.index), links));
@@ -266,7 +265,7 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\(([^)]+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
+ const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
  return parseMarkdown(source).map(block=>block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(plain).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text)).join('\n');
 }
 
@@ -358,7 +357,7 @@ export function MdView(p: { text: string; compact?: boolean }) {
 
 function hlInline(text: string): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /(\*\*)(.+?)(\*\*)|(`)([^`]+)(`)|(\[)([^\]]+)(\]\()([^)]+)(\))/g;
+  const re = /(\*\*)(.+?)(\*\*)|(\[)((?:`[^`\n]*`|[^\]`\n])+)(\]\()(<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)(\))|(`)([^`]+)(`)/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(text.slice(last, m.index));
@@ -370,22 +369,22 @@ function hlInline(text: string): JSX.Element[] {
           <span class="md-p">{m[3]}</span>
         </>,
       );
-    else if (m[4])
+    else if (m[9])
       out.push(
         <>
-          <span class="md-p">{m[4]}</span>
-          <span class="md-code">{m[5]}</span>
-          <span class="md-p">{m[6]}</span>
+          <span class="md-p">{m[9]}</span>
+          <span class="md-code">{m[10]}</span>
+          <span class="md-p">{m[11]}</span>
         </>,
       );
     else
       out.push(
         <>
-          <span class="md-p">{m[7]}</span>
-          <span class="md-link">{m[8]}</span>
-          <span class="md-p">{m[9]}</span>
-          <span class="md-link">{m[10]}</span>
-          <span class="md-p">{m[11]}</span>
+          <span class="md-p">{m[4]}</span>
+          <span class="md-link">{m[5]}</span>
+          <span class="md-p">{m[6]}</span>
+          <span class="md-link">{m[7]}</span>
+          <span class="md-p">{m[8]}</span>
         </>,
       );
     last = m.index + m[0].length;
