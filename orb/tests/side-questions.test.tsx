@@ -4,7 +4,7 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/App';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{}};});
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -172,5 +172,21 @@ it('offers a reconnect path for a live side session after its local attempt is l
  await handle.ask('Unsent question');
  fireEvent.click(await screen.findByText('Open existing side agent'));
  expect(open).toHaveBeenCalledWith(id);
- expect(screen.getByText('Unsent question')).toBeTruthy();
+ expect(screen.getText ? screen.getByText('Unsent question') : screen.getByText('Unsent question')).toBeTruthy();
+});
+
+it('strips synthetic remote cancellation notes from saved side history on mount',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('synthetic-history'),{
+  history:[{id:'t1',question:'Analyze status',answer:"Remote node 'old-agent' job e7c48aba-3101-4c3b-b7ad-1e17dab704dd reached state 'cancelled' (exit None) after the mission left Active (paused); the mission status is preserved. error: cancelled"}],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:false,
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="synthetic-history" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText(/Side question was interrupted before the agent answered/)).toBeTruthy();
+ expect(screen.queryByText(/reached state 'cancelled'/)).toBeNull();
+ expect(screen.getByText('Analyze status')).toBeTruthy();
 });

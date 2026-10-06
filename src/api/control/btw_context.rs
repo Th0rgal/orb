@@ -3,12 +3,21 @@ use super::*;
 const STAGE: &str = include_str!("../../../scripts/orb_stage_conversation.py");
 
 pub(super) fn snapshot_id(prompt: &str) -> Option<Uuid> {
-    prompt.lines().find_map(|line| {
+    if let Some(id) = prompt.lines().find_map(|line| {
         line.strip_prefix("@conversation: .paloma/conversation/")?
             .strip_suffix("/conversation.json")?
             .parse()
             .ok()
-    })
+    }) {
+        return Some(id);
+    }
+    let marker = "\\n@conversation: .paloma/conversation/";
+    let rest = prompt.split(marker).nth(1)?;
+    let (candidate, after) = rest.split_once("/conversation.json")?;
+    if !after.starts_with("\\n") {
+        return None;
+    }
+    candidate.parse().ok()
 }
 
 pub(super) fn remote_prefix(mission: &Mission, prompt: &str) -> String {
@@ -105,9 +114,19 @@ mod tests {
             )),
             Some(id)
         );
+        assert_eq!(
+            snapshot_id(&format!(
+                r#"- [user]: "<main_conversation_update>\n@conversation: .paloma/conversation/{id}/conversation.json\n</main_conversation_update>\n""#
+            )),
+            Some(id)
+        );
         assert_eq!(snapshot_id("@conversation: /etc/passwd"), None);
         assert_eq!(
             snapshot_id("@conversation: .paloma/conversation/../../etc/conversation.json"),
+            None
+        );
+        assert_eq!(
+            snapshot_id(r#"\n@conversation: .paloma/conversation/../../etc/conversation.json\n"#),
             None
         );
     }

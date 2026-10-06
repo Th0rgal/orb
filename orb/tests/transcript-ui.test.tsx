@@ -30,6 +30,19 @@ describe("thinking fold", () => {
     expect(container.querySelector(".st-think-body")?.textContent).toBe("I'll read the file.");
     expect(container.querySelector(".st-tool-name")?.textContent).toBe("read");
   });
+
+  it("auto-collapses completed standalone thoughts and formats inline code and bold when expanded", () => {
+    const items = buildTranscript([
+      ev("thinking", { content: "Checking `src/styles.css` and **MissionDock**.", done: true }),
+    ]);
+    const { container } = render(() => <Transcript items={items} />);
+    expect(container.querySelector(".st-think-body")).toBeNull();
+    container.querySelector<HTMLButtonElement>(".st-think-head")!.click();
+    const body = container.querySelector(".st-think-body");
+    expect(body).not.toBeNull();
+    expect(body?.querySelector("code")?.textContent).toBe("src/styles.css");
+    expect(body?.querySelector("strong")?.textContent).toBe("MissionDock");
+  });
 });
 
 it("latest checklist is visible outside folded raw work, with real progress and no Plan/Build control",()=>{

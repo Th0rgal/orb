@@ -142,3 +142,45 @@ async fn stalled_hermes_probe_does_not_hold_other_accounts_for_the_request_timeo
     assert!(started.elapsed() < Duration::from_secs(2));
     server.abort();
 }
+
+#[test]
+fn hermes_options_includes_builtin_and_custom_router_chains() {
+    let now = chrono::Utc::now();
+    let chains = vec![
+        crate::provider_health::ModelChain {
+            id: "builtin/smart".into(),
+            name: "Smart (Default)".into(),
+            entries: vec![],
+            is_default: true,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        },
+        crate::provider_health::ModelChain {
+            id: "private".into(),
+            name: "Private".into(),
+            entries: vec![],
+            is_default: false,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        },
+    ];
+    let models = json!({
+        "data": [
+            {"id": "hermes-agent"},
+            {"id": "builtin/smart"},
+            {"id": "configured-alias"}
+        ]
+    });
+    let out = hermes_model_options(&chains, &models);
+    assert_eq!(
+        out["models"]["items"],
+        json!([
+            {"id": "", "name": "Profile default"},
+            {"id": "builtin/smart", "name": "Smart (Default) · builtin/smart"},
+            {"id": "builtin/private", "name": "Private · builtin/private"},
+            {"id": "configured-alias", "name": "configured-alias"}
+        ])
+    );
+}

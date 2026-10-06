@@ -5546,10 +5546,20 @@ pub async fn post_message(
             .await?;
             // Idle continuations retain their immediate-delivery behavior.
             // A racing dispatch or temporary failure leaves the durable entry
-            // queued for the same-node retry loop.
+            // queued for the same-node retry loop; permanent continuation
+            // refusals withdraw the unsubmitted entry and surface immediately.
             if !placement.live {
-                let _ = remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
-                    .await;
+                if let Err((status, error)) =
+                    remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
+                        .await
+                {
+                    if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                        || error.starts_with(remote_grok::REMOTE_AUTH_REQUIRED)
+                    {
+                        let _ = remote_queue::finish(&state.projects, &user.id, id, "cancelled");
+                        return Err((status, error));
+                    }
+                }
             }
             let queued =
                 remote_queue::is_waiting(&state.projects, &user.id, id).map_err(internal_error)?;
@@ -12154,6 +12164,28 @@ pub(super) async fn create_mission_inner(
             interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
             return Err(internal_error(error));
         }
+    } else if let Some(prior_id) = req.supersedes_mission_id {
+        if let Some(prior_receipt) = fork::side_launch_receipt(&state.config.working_dir, prior_id)
+            .map_err(internal_error)?
+        {
+            if let Err(error) = fork::record_side_launch(
+                &state.config.working_dir,
+                mission.id,
+                req.idempotency_key.as_deref().unwrap_or(&prior_receipt.key),
+                &prior_receipt.fingerprint,
+            )
+            .and_then(|()| {
+                if prior_receipt.accepted {
+                    fork::accept_side_launch(&state.config.working_dir, mission.id)
+                } else {
+                    Ok(())
+                }
+            }) {
+                interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable")
+                    .await;
+                return Err(internal_error(error));
+            }
+        }
     }
 
     // Match actor/sweep lock order before taking the PR-writer lock. The track
@@ -18755,13 +18787,42 @@ pub async fn delete_mission(
     Path(mission_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    let child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
+    let mut ids_to_delete = HashSet::with_capacity(child_ids.len() + 1);
+    ids_to_delete.insert(mission_id);
+    ids_to_delete.extend(child_ids);
+    let mut mission_statuses = HashMap::new();
+    for id in &ids_to_delete {
+        if let Some(m) = control
+            .mission_store
+            .get_mission(*id)
+            .await
+            .map_err(internal_error)?
+        {
+            mission_statuses.insert(m.id, m.status);
+        }
+    }
     if control
         .mission_store
         .cloud_executions()
         .await
         .map_err(internal_error)?
         .iter()
-        .any(|e| e.mission_id == mission_id && e.turns.iter().any(|t| !t.phase.terminal()))
+        .any(|e| {
+            ids_to_delete.contains(&e.mission_id)
+                && e.turns.iter().any(|t| {
+                    !t.phase.terminal()
+                        && t.phase != crate::api::cloud_agents::Phase::Incompatible
+                        && (matches!(
+                            t.phase,
+                            crate::api::cloud_agents::Phase::Queued
+                                | crate::api::cloud_agents::Phase::Submitting
+                                | crate::api::cloud_agents::Phase::Running
+                                | crate::api::cloud_agents::Phase::CancelRequested
+                        ) || mission_statuses.get(&e.mission_id)
+                            != Some(&MissionStatus::Acknowledged))
+                })
+        })
     {
         return Err((StatusCode::CONFLICT, "Cloud work is still active or unconfirmed; archive the conversation or confirm cancellation before deleting its receipts".into()));
     }
@@ -25606,6 +25667,76 @@ async fn control_actor_loop(
                                 id,
                                 new_status,
                             );
+                            if new_status == MissionStatus::Acknowledged {
+                                if let Ok(child_ids) =
+                                    collect_child_mission_ids(&mission_store, id).await
+                                {
+                                    for child_id in child_ids {
+                                        let child_bg = background_tasks
+                                            .read()
+                                            .await
+                                            .get(&child_id)
+                                            .map_or(0, std::collections::HashMap::len);
+                                        let child_runner_active = running_mission_id
+                                            == Some(child_id)
+                                            || parallel_runners
+                                                .get(&child_id)
+                                                .is_some_and(|runner| runner.is_running());
+                                        if child_bg > 0 || child_runner_active {
+                                            continue;
+                                        }
+                                        let Ok(Some(child)) =
+                                            mission_store.get_mission(child_id).await
+                                        else {
+                                            continue;
+                                        };
+                                        if matches!(
+                                            child.status,
+                                            MissionStatus::Active
+                                                | MissionStatus::Pending
+                                                | MissionStatus::WaitingBackground
+                                                | MissionStatus::Acknowledged
+                                        ) {
+                                            continue;
+                                        }
+                                        if mission_store
+                                            .update_mission_status(
+                                                child_id,
+                                                MissionStatus::Acknowledged,
+                                            )
+                                            .await
+                                            .is_ok()
+                                        {
+                                            if let Err(error) =
+                                                release_local_mission_disk(&config, child_id).await
+                                            {
+                                                tracing::error!(mission = %child_id, %error,
+                                                    "terminal mission lease cleanup failed; retaining conservative admission state");
+                                            }
+                                            maybe_schedule_mission_metadata_refresh_for_status(
+                                                &mission_store,
+                                                &events_tx,
+                                                child_id,
+                                                MissionStatus::Acknowledged,
+                                            );
+                                            let _ = events_tx.send(
+                                                AgentEvent::MissionStatusChanged {
+                                                    completion: None,
+                                                    execution: None,
+                                                    mission_id: child_id,
+                                                    status: MissionStatus::Acknowledged,
+                                                    summary: None,
+                                                },
+                                            );
+                                            super::scope_reaper::schedule_mission_scope_teardown(
+                                                Arc::clone(&mission_store),
+                                                child_id,
+                                                MissionStatus::Acknowledged,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                         let _ = respond.send(result);
                     }

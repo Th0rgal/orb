@@ -1039,6 +1039,20 @@ fn should_use_grok_bridge(requested_model: &str, exact_chain_exists: bool) -> bo
     super::grok_tool_bridge::is_bridge_model(requested_model) && !exact_chain_exists
 }
 
+async fn resolve_stored_chain_id(
+    chain_store: &crate::provider_health::ModelChainStore,
+    requested_model: &str,
+) -> Option<String> {
+    if chain_store.get(requested_model).await.is_some() {
+        return Some(requested_model.to_string());
+    }
+    let candidate = match requested_model.strip_prefix("builtin/") {
+        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        _ => format!("builtin/{requested_model}"),
+    };
+    chain_store.get(&candidate).await.map(|_| candidate)
+}
+
 async fn get_deferred_request(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
@@ -1435,13 +1449,7 @@ async fn native_protocol_proxy(
             });
         }
     }
-    let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
-    let resolved_chain_id = if exact_chain_exists {
-        Some(requested_model.clone())
-    } else {
-        let prefixed = format!("builtin/{requested_model}");
-        state.chain_store.get(&prefixed).await.map(|_| prefixed)
-    };
+    let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
     let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
         let configured = state
             .chain_store
@@ -2032,16 +2040,7 @@ pub(crate) async fn chat_completions_inner(
     //    Anything else errors — no silent fallback, so typos surface.
     let standard_accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
 
-    let resolved_chain_id = if exact_chain_exists {
-        Some(requested_model.clone())
-    } else {
-        let prefixed = format!("builtin/{}", requested_model);
-        if state.chain_store.get(&prefixed).await.is_some() {
-            Some(prefixed)
-        } else {
-            None
-        }
-    };
+    let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
 
     let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
         let chain_entries = state
@@ -9196,5 +9195,48 @@ mod tests {
         assert!(payload["tools"][0]["functionDeclarations"][0]
             .get("parametersJsonSchema")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_stored_chain_id_matches_custom_chains_with_or_without_builtin_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::provider_health::ModelChainStore::new(dir.path().join("chains.json")).await;
+        let now = chrono::Utc::now();
+        store
+            .upsert(crate::provider_health::ModelChain {
+                id: "private".into(),
+                name: "Private".into(),
+                entries: vec![crate::provider_health::ChainEntry {
+                    provider_id: "zai".into(),
+                    model_id: "glm-5.1".into(),
+                }],
+                is_default: false,
+                strip_thinking: false,
+                created_at: now,
+                updated_at: now,
+            })
+            .await;
+
+        assert_eq!(
+            resolve_stored_chain_id(&store, "private").await.as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "builtin/private")
+                .await
+                .as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "smart").await.as_deref(),
+            Some("builtin/smart")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "builtin/smart")
+                .await
+                .as_deref(),
+            Some("builtin/smart")
+        );
     }
 }

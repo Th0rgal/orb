@@ -299,7 +299,7 @@ function AgentTurn(p: { turn: Extract<Turn, { role: "agent" }>; streaming?: bool
   );
 }
 
-const draftLightbox = (images: DraftImage[]) => images.map((image, index) => ({ src: image.dataUrl, label: image.reference ? `Image #${image.reference}` : `Image ${index + 1}` }));
+export const draftLightbox = (images: DraftImage[]) => images.map((image, index) => ({ src: image.dataUrl, label: image.reference ? `Image #${image.reference}` : `Image ${index + 1}` }));
 
 function OptimisticMessage(p: {draft:{text:string; images:DraftImage[]}}) {
   const [viewing,setViewing]=createSignal<number|null>(null);
@@ -316,6 +316,7 @@ export function Composer(p: {
   onSend: (t: string, images: DraftImage[], files?: UploadedFile[]) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   textOnly?: boolean;
+  imagesOnly?: boolean;
   controls?: JSX.Element;
   disabled?: boolean;
   autofocus?: boolean;
@@ -358,7 +359,7 @@ export function Composer(p: {
   const uploadTarget = () => p.uploadTarget ?? "core";
   const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : `context:${p.projectSlug ?? ""}`;
   const attachSources = async (sources: UploadSource[]) => {
-    if (p.textOnly) return;
+    if (p.textOnly || p.imagesOnly) return;
     const scope = p.scope;
     const destination = attachmentTarget();
     setUploading(true); setUploadError(null); setCtx(false);
@@ -379,7 +380,8 @@ export function Composer(p: {
   let composerElement:HTMLDivElement|undefined;
   nativeComposerDrop(()=>composerElement, async sources=>{
     if(sending()||uploading()||readingImages()) { setUploadError("Please wait for the current attachment or message to finish, then drop your files again."); return; }
-    await attachSources(sources);
+    if (p.imagesOnly) await attachMixed(sources);
+    else await attachSources(sources);
   });
   const attachMixed = async (sources: UploadSource[]) => {
     if (p.textOnly) return;
@@ -401,12 +403,13 @@ export function Composer(p: {
       await pasteImages({clipboardData:clipboard,preventDefault(){}} as unknown as ClipboardEvent);
     }
     const files = sources.filter(source => !pictures.includes(source));
-    if (files.length) await attachSources(files);
+    if (files.length && !p.imagesOnly) await attachSources(files);
+    else if (files.length && p.imagesOnly) setImageError("Use a PNG, JPEG, WebP or GIF image.");
     } catch(error){setUploadError(error instanceof Error?error.message:String(error));}
   };
   const chooseFiles = async () => {
     setCtx(false); setUploadError(null);
-    if (!hasNativePicker()) { fileInput.click(); return; }
+    if (p.imagesOnly || !hasNativePicker()) { fileInput.click(); return; }
     const scope = p.scope;
     const selection = uploadTarget();
     try { const files = await pickNativeFiles(); if (!disposed && scope === p.scope && selection === uploadTarget()) await attachMixed(files); }
@@ -493,7 +496,7 @@ export function Composer(p: {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
     else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
   });
-  const modes = createMemo(() => p.textOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
@@ -502,7 +505,7 @@ export function Composer(p: {
     return items.length ? { query: q.query, items } : null;
   });
   const at = createMemo(() => {
-    if (p.textOnly || voiceActive() || atOff() || slash()) return null;
+    if (p.textOnly || p.imagesOnly || voiceActive() || atOff() || slash()) return null;
     const q = atQuery(text(), caret());
     if (!q.open) return null;
     const demo = (p.files ?? []).map((f) => ({
@@ -604,11 +607,11 @@ export function Composer(p: {
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sending() || uploading() || readingImages()) return;
-    if (!p.textOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
+    if (!p.textOnly && !p.imagesOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
       return;
     }
-    const sideMode = !p.textOnly && (mode() === "btw" || /^\/btw(?:\s|$)/.test(payload));
+    const sideMode = !p.textOnly && !p.imagesOnly && (mode() === "btw" || /^\/btw(?:\s|$)/.test(payload));
     if (sideMode && !p.onBtw) { setUploadError("Side questions require an existing conversation."); return; }
     if (sideMode && !payload.replace(/^\/btw\s*/, "").trim() && !images().length && !uploaded.length) { setMode(null); p.onOpenBtw?.(); return; }
     const sentImages = images();
@@ -625,7 +628,7 @@ export function Composer(p: {
     try {
       await attachmentLoad;
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
-      const resolved = p.textOnly ? {text: original, files: []} : await prepareUploads(original, originalUploads, destination);
+      const resolved = (p.textOnly || p.imagesOnly) ? {text: original, files: []} : await prepareUploads(original, originalUploads, destination);
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
       uploaded = resolved.files;
       payload = draftOf(resolved.text);
@@ -692,11 +695,11 @@ export function Composer(p: {
   });
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
-      <input ref={fileInput} type="file" multiple hidden aria-label="Choose files or images" onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
-      <button class="plus" title="Add context" disabled={uploading() || sending()} onClick={() => setCtx(!ctx())}>
+      <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
+      <button class="plus" title={p.imagesOnly ? "Attach image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : undefined} disabled={uploading() || sending()} onClick={() => p.imagesOnly ? void chooseFiles() : setCtx(!ctx())}>
         <Ic.PlusIcon size={14} />
       </button>
-      <Show when={ctx()}>
+      <Show when={ctx() && !p.imagesOnly}>
         <div class="menu plus-menu slash-menu">
           <button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span>Upload file or image…</button>
           <Show when={atItems().some((i) => i.section === "Folders") || (p.files?.length ?? 0) > 0}>

@@ -28,7 +28,23 @@ const DisclosureState=createContext<Map<string,boolean>>();
 function disclosure(key:string,initial=false){
  const state=useContext(DisclosureState);
  const [open,setOpen]=createSignal(state?.get(key)??initial);
- return [open,(value:boolean)=>{state?.set(key,value);setOpen(value);}] as const;
+ const [explicit,setExplicit]=createSignal(state?.has(key)??false);
+ return [open,(value:boolean)=>{state?.set(key,value);setExplicit(true);setOpen(value);},explicit] as const;
+}
+
+/** Inline code and bold spans inside thought summaries, so raw backticks don't clutter the transcript. */
+function thinkInline(text: string): JSX.Element[] {
+  const out: JSX.Element[] = [];
+  const re = /`([^`\n]+)`|\*\*([^*\n]+)\*\*/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1] !== undefined) out.push(<code>{m[1]}</code>);
+    else if (m[2] !== undefined) out.push(<strong>{m[2]}</strong>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
 }
 
 /** Short, human-readable target for a tool call row (Cursor-style). */
@@ -202,10 +218,10 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
         <PromptEditor value={draft()} disabled={sending()} input={setDraft} cancel={()=>{if(!sending())setEditing(false);}} submit={()=>void submit()}/>
 
         <div class="prompt-editor-actions">
-          <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={16} /></button>
-          <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={15} /></button>
+          <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={13} /></button>
+          <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={13} /></button>
           <span role="status">{copyState()}</span>
-          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={18}/></button></Show>
+          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={14}/></button></Show>
         </div>
         <Show when={sendError()}><ErrorNotice error={sendError()} /></Show>
       </Show>
@@ -250,17 +266,18 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
 }
 
 export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
-  const [open, setOpen] = disclosure(`think:${p.item.key}`,true);
+  const [open, setOpen, isExplicit] = disclosure(`think:${p.item.key}`, !p.item.done);
+  const shown = () => isExplicit() ? open() : !p.item.done;
   return (
-    <div class={`st-think ${open() ? "open" : ""}`}>
-      <button class="st-think-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
+    <div class={`st-think ${shown() ? "open" : ""}`}>
+      <button class="st-think-head" aria-expanded={shown()} onClick={() => setOpen(!shown())}>
         <Show when={p.item.done} fallback={<span class="shimmer">Thinking</span>}>
           <span>Thinking</span>
         </Show>
-        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
+        <Ic.ChevronRight size={12} class={`chev ${shown() ? "open" : ""}`} />
       </button>
-      <Show when={open() && p.item.text}>
-        <div class="st-think-body">{p.item.text}</div>
+      <Show when={shown() && p.item.text}>
+        <div class="st-think-body">{thinkInline(p.item.text)}</div>
       </Show>
     </div>
   );
@@ -313,7 +330,7 @@ function WorkFold(p: { items: WorkItem[] }) {
         <div class="st-work-body">
           <For each={p.items}>
             {(t) => (t.kind === "tool" ? <ToolRow item={t} /> : (
-              <Show when={t.text}><div class="st-think-body">{t.text}</div></Show>
+              <Show when={t.text}><div class="st-think-body">{thinkInline(t.text)}</div></Show>
             ))}
           </For>
         </div>

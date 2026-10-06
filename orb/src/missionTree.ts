@@ -36,6 +36,24 @@ export function holds<M extends Linked>(node: NestedMission<M>, id: string): boo
   return node.children.some(child => child.mission.id === id || holds(child, id));
 }
 
+/** Return the selected missions and every mission they launched, at any depth. */
+export function missionSubtree<M extends Linked>(missions: readonly M[], rootIds: readonly string[]): M[] {
+  const included = new Set(rootIds);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const mission of missions) {
+      if (included.has(mission.id)) continue;
+      const parent = missionParent(mission);
+      if (parent && included.has(parent)) {
+        included.add(mission.id);
+        added = true;
+      }
+    }
+  }
+  return missions.filter(mission => included.has(mission.id));
+}
+
 /** Keep archived parents as context for visible workers, without restoring them. */
 export function missionTreeRows<M extends Linked>(missions:M[],visible:(mission:M)=>boolean):M[]{
  const byId=new Map(missions.map(m=>[m.id,m]));

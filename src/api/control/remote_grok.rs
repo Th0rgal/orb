@@ -1683,6 +1683,14 @@ async fn continue_inner(
     let replacement = || {
         (StatusCode::CONFLICT, format!("{REMOTE_RESUME_REQUIRES_REPLACEMENT}: PR or explicit-track missions need create admission; create a remote replacement with supersedes_mission_id={mission_id}"))
     };
+    if crate::api::mission_horizon::superseded_by(&mission).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {mission_id} has been superseded; create a remote replacement with supersedes_mission_id={mission_id}"
+            ),
+        ));
+    }
     if mission.project.github_pr.is_some()
         || mission.project.tags.iter().any(|tag| tag == "pr-writer")
     {

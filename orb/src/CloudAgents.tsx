@@ -6,37 +6,81 @@ import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider } from './cloudAgentApi';
 import './cloudAgents.css';
 import { ProviderLogo } from './ProviderLogo';
-import { Composer, floatingDock } from './App';
+import { Composer, draftLightbox, floatingDock } from './App';
 import { Transcript } from './Transcript';
 import type { StreamItem } from './transcriptModel';
 import { ProjectPicker } from './ProjectPicker';
 import { CloudModelPicker } from './CloudModelPicker';
 import type { ModelParam } from './cloudAgentApi';
 import { AgentChoice, AgentChoiceMenu } from './AgentChoice';
+import { type DraftImage, IMAGE_COUNT, imagePrompt, readImagePaste, stageRemoteImages } from './imageAttachments';
+import { Lightbox } from './Lightbox';
 export function CloudAgentPage(p: { project: string; path?: string; projects?: {id: string; name: string}[]; onProject?: (id: string) => void; onCreateProject?: () => void; onCreated: (m: Mission) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
   const [provider, setProvider] = createSignal<CloudProvider>('chatgpt');
   const [accountId, setAccountId] = createSignal('');
   const [prompt, setPrompt] = createSignal(''); const [model, setModel] = createSignal(''); const [modelParams,setModelParams]=createSignal<ModelParam[]>([]);
+  const [images, setImages] = createSignal<DraftImage[]>([]); const [viewing, setViewing] = createSignal<number | null>(null);
+  const [imageError, setImageError] = createSignal(''); const [readingImages, setReadingImages] = createSignal(false);
   const [repositoriesLoading, setRepositoriesLoading] = createSignal(true);
   const [repo, setRepo] = createSignal(''); const [ref, setRef] = createSignal('');
   const [options, setOptions] = createSignal<{models: {id: string; name?: string; displayName?: string}[]; repos: {url: string}[]}>({models: [], repos: []});
   const [error, setError] = createSignal(''); const [busy, setBusy] = createSignal(false); const [loaded, setLoaded] = createSignal(false);
   const [open, setOpen] = createSignal<string | null>(null);
   const close = () => setOpen(null);
-  let attempt: { signature: string; key: string } | undefined;
+  let ta!: HTMLTextAreaElement; let fileInput!: HTMLInputElement;
+  let attempt: { signature: string; key: string; prompt: string } | undefined;
   const account = () => accounts().find(a => a.provider === provider() && a.id === accountId()) ?? accounts().find(a => a.provider === provider() && a.available) ?? accounts().find(a => a.provider === provider());
+  const canAttach = () => Boolean(account()?.capabilities.attachments);
   onMount(async () => { try { setAccounts(await cloudAccounts()); } catch(e) { setError(String(e)); } finally { setLoaded(true); } });
   const choose = (value: CloudProvider) => {
-    setError(''); setProvider(value); setAccountId(''); setModel(''); setModelParams([]); setRepo(''); setRef('');
+    setError(''); setImageError(''); setProvider(value); setAccountId(''); setModel(''); setModelParams([]); setRepo(''); setRef(''); setImages([]);
+  };
+  const pasteImages = async (event: ClipboardEvent) => {
+    if (!canAttach()) return;
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const files = Array.from(clipboard.files).filter(file => file.type.startsWith("image/"));
+    const html = clipboard.getData("text/html");
+    const plain = clipboard.getData("text/plain");
+    if (!files.length && !/<img\b|data-proton-embedded\s*=/i.test(html)) return;
+    event.preventDefault();
+    if (readingImages() || busy()) return;
+    setImageError('');
+    const original = prompt(), start = ta?.selectionStart ?? original.length, end = ta?.selectionEnd ?? original.length;
+    setReadingImages(true);
+    try {
+      const first = Math.max(0, ...images().map(image => image.reference ?? 0)) + 1;
+      const next = await readImagePaste(html, plain, files, first);
+      if (images().length + next.images.length > IMAGE_COUNT) throw new Error(`Attach up to ${IMAGE_COUNT} images at a time.`);
+      if (prompt() !== original) throw new Error("The draft changed while images loaded. Paste again to insert them at the cursor.");
+      const value = original.slice(0, start) + next.text + original.slice(end);
+      setImages(previous => [...previous, ...next.images]);
+      setPrompt(value); if (ta) { ta.value = value; ta.setSelectionRange(start + next.text.length, start + next.text.length); }
+    } catch (e) { setImageError(e instanceof Error ? e.message : String(e)); }
+    finally { setReadingImages(false); }
+  };
+  const attachImageFiles = async (files: File[]) => {
+    if (!canAttach() || !files.length || busy() || readingImages()) return;
+    const pictures = files.filter(file => file.type.startsWith("image/"));
+    if (pictures.length !== files.length) { setImageError("Use a PNG, JPEG, WebP or GIF image."); if (!pictures.length) return; }
+    const clipboard = { files: pictures, getData: () => "" };
+    await pasteImages({ clipboardData: clipboard, preventDefault() {} } as unknown as ClipboardEvent);
   };
   const submit = async () => {
-    if (busy() || !account()?.available || !prompt().trim()) return;
-    const body = { title: prompt().trim().slice(0, 100), prompt: prompt(), project: p.project, tags: p.path ? [`orb-folder:${p.path}`] : [], cloud: { provider: provider(), account: account()!.id, ...(model() ? {model: model(), ...(modelParams().length ? {model_params:modelParams()} : {})} : {}), ...(repo() ? {repository: repo()} : {}), ...(ref() ? {git_ref: ref()} : {}) } };
-    const signature = JSON.stringify(body);
-    if (attempt?.signature !== signature) attempt = {signature, key: crypto.randomUUID()};
+    const rawPrompt = prompt().trim() || (images().length ? "Please look at the attached images." : "");
+    if (busy() || readingImages() || !account()?.available || !rawPrompt) return;
+    const cloud = { provider: provider(), account: account()!.id, ...(model() ? {model: model(), ...(modelParams().length ? {model_params:modelParams()} : {})} : {}), ...(repo() ? {repository: repo()} : {}), ...(ref() ? {git_ref: ref()} : {}) };
+    const signature = JSON.stringify({ title: rawPrompt.slice(0, 100), prompt: rawPrompt, images: images().map(i => i.id), project: p.project, tags: p.path ? [`orb-folder:${p.path}`] : [], cloud });
     setBusy(true); setError('');
-    try { p.onCreated(await launchCloud({...body, idempotency_key: attempt.key})); } catch(e) { setError(String(e)); } finally { setBusy(false); }
+    try {
+      if (attempt?.signature !== signature) {
+        const sentPrompt = images().length ? imagePrompt(rawPrompt, await stageRemoteImages(images(), undefined, "core"), images()) : prompt();
+        attempt = { signature, key: crypto.randomUUID(), prompt: sentPrompt };
+      }
+      const body = { title: rawPrompt.slice(0, 100), prompt: attempt.prompt, project: p.project, tags: p.path ? [`orb-folder:${p.path}`] : [], cloud };
+      p.onCreated(await launchCloud({...body, idempotency_key: attempt.key}));
+    } catch(e) { setError(String(e)); } finally { setBusy(false); }
   };
   return <section class="new-agent cloud-agent-page" aria-label="Cloud agent"><div class="new-inner">
     <div class="na-meta">
@@ -52,15 +96,29 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         icon={<ProviderLogo type={provider()}/>} suffix={<Show when={account()?.experimental}><span class="cloud-experimental" title="Experimental connector" aria-label="Experimental connector"><Ic.FlaskIcon size={13}/></span></Show>}
         disabled={busy()} open={open() === 'account'} onOpen={() => setOpen('account')} onClose={close} onSelect={setAccountId}/></Show>
     </div>
-    <div class="composer tall">
-      <div class="composer-field"><textarea aria-label="Prompt" autofocus rows={2} placeholder="Describe a task for your cloud agent" value={prompt()} disabled={busy()} onInput={e => setPrompt(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); } }} /></div>
-      <div class="plus-wrap"><ProviderLogo type={provider()}/></div>
+    <div class="composer tall"
+      onDragOver={e => { if (canAttach() && Array.from(e.dataTransfer?.types ?? []).includes("Files")) { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("drop-active"); } }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) e.currentTarget.classList.remove("drop-active"); }}
+      onDrop={e => { if (!canAttach()) return; e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove("drop-active"); void attachImageFiles(Array.from(e.dataTransfer?.files ?? [])); }}>
+      <div class="composer-field">
+        <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = prompt().replaceAll(`[Image #${image.reference}]`, ""); setPrompt(value); if (ta) ta.value = value; } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show>
+        <Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
+        <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
+        <textarea ref={ta} aria-label="Prompt" autofocus rows={2} placeholder="Describe a task for your cloud agent" value={prompt()} disabled={busy()} onPaste={event => void pasteImages(event)} onInput={e => setPrompt(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); } }} />
+      </div>
+      <div class="plus-wrap">
+        <Show when={canAttach()}>
+          <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden aria-label="Choose images" onChange={event => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachImageFiles(files); }} />
+          <button class="plus" title="Attach image" aria-label="Attach image" disabled={busy() || readingImages()} onClick={() => fileInput.click()}><Ic.PlusIcon size={14} /></button>
+        </Show>
+        <ProviderLogo type={provider()}/>
+      </div>
       <div class="picks">
         <AgentChoice label="Service" value={provider()} items={Object.entries(cloudNames).map(([value,label]) => ({value,label}))} disabled={busy()}
           open={open() === 'service'} onOpen={() => setOpen('service')} onClose={close} onSelect={value => void choose(value as CloudProvider)}/>
         <Show when={account()?.available && account()?.capabilities.models}><CloudModelPicker provider={provider()} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError} onRepositories={repos=>setOptions({models:[],repos})} onRepositoriesLoading={setRepositoriesLoading}/></Show>
       </div>
-      <div class="send-slot"><button class="send" aria-label="Create cloud agent" title="Create cloud agent" disabled={busy() || !account()?.available || !prompt().trim() || !p.project} onClick={() => void submit()}><Show when={busy()} fallback={<Ic.ArrowUpIcon size={14} />}><Ic.Spinner size={14} /></Show></button></div>
+      <div class="send-slot"><button class="send" aria-label="Create cloud agent" title="Create cloud agent" disabled={busy() || readingImages() || !account()?.available || (!prompt().trim() && !images().length) || !p.project} onClick={() => void submit()}><Show when={busy()} fallback={<Ic.ArrowUpIcon size={14} />}><Ic.Spinner size={14} /></Show></button></div>
     </div>
     <div class="cloud-page-details">
       <Show when={account()?.available && account()?.capabilities.repository}><div class="cloud-repository">
@@ -90,7 +148,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
   const [model,setModel]=createSignal(''),[modelParams,setModelParams]=createSignal<ModelParam[]>([]);
   let initialized=false;
   createEffect(()=>{const e=execution();if(e&&!initialized){initialized=true;setModel(e.turns.at(-1)?.model ?? e.selection.model ?? '');setModelParams(e.turns.at(-1)?.model_params ?? e.selection.model_params ?? []);}});
-  let attempt: {text: string; key: string; model:string; params:ModelParam[]} | undefined; let stopPoll: (() => void) | undefined; let disposed = false; let refreshing: Promise<void> | undefined;
+  let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let stopPoll: (() => void) | undefined; let disposed = false; let refreshing: Promise<void> | undefined;
   const refresh = (): Promise<void> => {
     if (refreshing) return refreshing;
     refreshing = (async () => {
@@ -108,11 +166,18 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
   onMount(() => { void refresh(); stopPoll = pollWhileVisible(refresh, 3000); void cloudAccounts().then(value => { if (!disposed) setAccounts(value); }).catch(e => { if (!disposed) setError(String(e)); }); });
   onCleanup(() => { disposed = true; stopPoll?.(); p.onMission?.(null); });
   const account = () => accounts().find(a => a.id === execution()?.selection.account && a.provider === execution()?.selection.provider);
-  const send = async (text: string) => {
-    if (busy() || !text.trim() || !execution() || !cloudCanSend(execution()!)) return false;
-    if (attempt?.text !== text || attempt?.model!==model() || JSON.stringify(attempt?.params)!==JSON.stringify(modelParams())) attempt = {text, key: crypto.randomUUID(),model:model(),params:modelParams()};
+  const send = async (text: string, images: DraftImage[] = []) => {
+    if (busy() || (!text.trim() && !images.length) || !execution() || !cloudCanSend(execution()!)) return false;
+    const signature = JSON.stringify({ text, images: images.map(i => i.id), model: model(), params: modelParams() });
     setBusy(true);
-    try { await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model || execution()?.selection.provider==='hermes' ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})}); attempt = undefined; await refresh(); return true; } catch(e) { setError(String(e)); return false; } finally { setBusy(false); }
+    try {
+      if (attempt?.signature !== signature) {
+        const sent = images.length ? imagePrompt(text, await stageRemoteImages(images, undefined, "core"), images) : text;
+        attempt = { signature, text: sent, key: crypto.randomUUID(), model: model(), params: modelParams() };
+      }
+      await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model || execution()?.selection.provider==='hermes' ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})});
+      attempt = undefined; await refresh(); return true;
+    } catch(e) { setError(String(e)); return false; } finally { setBusy(false); }
   };
   const cancel = async () => { setBusy(true); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
   const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
@@ -146,7 +211,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
         <Show when={e().selection.provider === 'chatgpt'} fallback={fallback}>
           <QuizAnswer text={item.text} fallback={fallback}
             disabled={busy() || !cloudCanSend(e()) || !account()?.capabilities.follow_up || item.key !== `${e().turns.at(-1)?.key}:answer`}
-            onSubmit={send}/>
+            onSubmit={text => send(text, [])}/>
         </Show>}/>
       <Show when={progress()}>{text => <p class="cloud-working" role="status"><span class="cloud-working-dot" aria-hidden="true"/>{text()}</p>}</Show>
       <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)))}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>
@@ -159,7 +224,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     </>}</Show>
   </div></div><div class="dock" ref={floatingDock}><div class="col">
     <Show when={execution()}>{e => <>
-      <Show when={account()?.capabilities.follow_up}><Composer textOnly picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send} controls={<Show when={account()?.capabilities.models}><div class="picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div></Show>}
+      <Show when={account()?.capabilities.follow_up}><Composer textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments)} picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send} controls={<Show when={account()?.capabilities.models}><div class="picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div></Show>}
         onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
       <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
         <span role="status">{cloudPhase(e().turns.at(-1)?.phase ?? '')}</span>

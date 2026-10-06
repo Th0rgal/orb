@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
+import { countNested, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed") => ({ id, parent_mission_id: parent, status });
 
@@ -27,6 +27,25 @@ test("callback-created reviews nest under their verified source, with explicit o
  expect(roots.map(r=>r.mission.id)).toEqual(["source","owner"]);
  expect(roots[0].children.map(r=>r.mission.id)).toEqual(["review"]);
  expect(roots[1].children.map(r=>r.mission.id)).toEqual(["explicit"]);
+});
+
+test("missionSubtree collects spawned subagents at any depth, including callback children, without looping", () => {
+  const rows = [
+    m("grandchild", "child"),
+    { ...m("callback-child"), callback_parent_mission_id: "parent" },
+    m("child", "parent"),
+    m("parent"),
+    m("unrelated"),
+    m("loop-a", "loop-b"),
+    m("loop-b", "loop-a"),
+  ];
+  expect(missionSubtree(rows, ["parent"]).map(r => r.id)).toEqual([
+    "grandchild",
+    "callback-child",
+    "child",
+    "parent",
+  ]);
+  expect(missionSubtree(rows, ["loop-a"]).map(r => r.id)).toEqual(["loop-a", "loop-b"]);
 });
 
 test("archiving a parent does not turn its visible worker into a root conversation",()=>{

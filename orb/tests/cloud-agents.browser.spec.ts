@@ -230,3 +230,67 @@ test('Hermes approvals, turn-only stop and reload retain the same conversation',
  expect(actions[2].body.mission_id).toBe(id);
  expect(actions[2].body.cloud_model).toBe('');
 });
+
+test('Hermes cloud agent supports custom router model selection and image attachments on launch and follow-up',async({page})=>{
+ const id='cccccccc-cccc-4ccc-cccc-cccccccccccc';
+ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64');
+ const mission={id,title:'Inspect image',backend:'cloud_hermes',project:'demo',workspace_id:'00000000-0000-0000-0000-000000000000',status:'awaiting_user',history:[],created_at:'',updated_at:''};
+ const launches:any[]=[],followups:any[]=[];
+ let uploadedCount=0;
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ await page.route('**/api/**',async route=>{
+  const request=route.request(),path=new URL(request.url()).pathname;
+  if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
+  if(path==='/api/fs/upload'&&request.method()==='POST'){
+   uploadedCount++;
+   return route.fulfill({json:{path:`/var/lib/sandboxed-sh/context/image-${uploadedCount}.png`}});
+  }
+  if(path==='/api/fs/download')return route.fulfill({contentType:'image/png',body:png});
+  if(path==='/api/control/missions'&&request.method()==='POST'){
+   const body=request.postDataJSON();
+   launches.push(body);
+   return route.fulfill({json:mission});
+  }
+  if(path==='/api/control/message'&&request.method()==='POST'){
+   followups.push(request.postDataJSON());
+   return route.fulfill({json:{message_accepted:true,queued:true,mission_id:id}});
+  }
+  let json:unknown={};
+  if(path==='/api/projects')json={projects:[{slug:'demo',title:'Demo'}]};
+  else if(path==='/api/cloud/accounts')json=[{id:'paloma',provider:'hermes',label:'Paloma',available:true,capabilities:{models:true,attachments:true,follow_up:true,cancel:true}}];
+  else if(path==='/api/cloud/hermes/options')json={models:{items:[{id:'',name:'Profile default'},{id:'builtin/smart',name:'Smart (Default) · builtin/smart'},{id:'builtin/private',name:'Private · builtin/private'}]}};
+  else if(path==='/api/control/missions')json=launches.length?[mission]:[];
+  else if(path===`/api/control/missions/${id}`)json=mission;
+  else if(path.endsWith('/cloud'))json={mission_id:id,selection:{provider:'hermes',account:'paloma',model:'builtin/private'},turns:[{key:'first',prompt:launches[0]?.prompt ?? 'Inspect image\n\n[Image #1] [Uploaded: /var/lib/sandboxed-sh/context/image-1.png]',phase:'response_complete',external_id:'run_img',result:'Red pixel seen.',artifacts:[],branches:[]}]};
+  else if(path.endsWith('/cloud/children'))json={missions:[]};
+  else if(path.endsWith('/files'))json={entries:[]};
+  else if(path.endsWith('/crons'))json={jobs:[]};
+  else if(path.includes('/controller'))json={job:null,runs:[]};
+  else if(path==='/api/control/queue'||path==='/api/backends')json=[];
+  else if(path==='/api/providers/backend-models')json={backends:{}};
+  return route.fulfill({json});
+ });
+ await page.goto('/');
+ await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
+ const form=page.getByRole('region',{name:'Cloud agent'});
+ await form.getByLabel('Service',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await form.getByLabel('Model',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'Private · builtin/private'}).click();
+ await expect(form.getByLabel('Model',{exact:true})).toContainText('Private · builtin/private');
+ await form.getByLabel('Choose images').setInputFiles({name:'pixel.png',mimeType:'image/png',buffer:png});
+ await expect(form.locator('.composer-image img')).toBeVisible();
+ await form.getByLabel('Prompt',{exact:true}).fill('Describe this image [Image #1]');
+ await form.getByRole('button',{name:'Create cloud agent'}).click();
+ await expect.poll(()=>launches.length).toBe(1);
+ expect(launches[0].cloud).toEqual({provider:'hermes',account:'paloma',model:'builtin/private'});
+ expect(launches[0].prompt).toContain('[Uploaded: /var/lib/sandboxed-sh/context/image-1.png]');
+ await expect(page.getByText('Red pixel seen.',{exact:true})).toBeVisible();
+ await expect(page.locator('.message-image img')).toBeVisible();
+ await page.getByLabel('Choose images').setInputFiles({name:'followup.png',mimeType:'image/png',buffer:png});
+ await page.getByPlaceholder('Continue this conversation…').fill('Compare with second image [Image #1]');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await expect.poll(()=>followups.length).toBe(1);
+ expect(followups[0].cloud_model).toBe('builtin/private');
+ expect(followups[0].content).toContain('[Uploaded: /var/lib/sandboxed-sh/context/image-2.png]');
+});
