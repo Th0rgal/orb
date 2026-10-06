@@ -52,6 +52,8 @@ it("uses node evidence for queued/running and preserves terminal failures",()=>{
  expect(missionPhase(m,true)).toMatchObject({label:"Remote job stopped",failed:true,moving:false});
  m.status="failed";m.remote_job!.terminal_reason="orphan_no_runner";
  expect(missionPhase(m,true)).toMatchObject({label:"Failed",detail:"The backend could not find an active runner."});
+ m.status="interrupted";m.remote_job!.terminal_reason="operator_cancelled_detached_run";
+ expect(missionPhase(m,true)).toMatchObject({label:"Interrupted",detail:"The run was stopped. Send a follow-up or click Resume to continue."});
 });
 
 import { remoteLaunchPreflight, remoteHarnessSupport, remoteHarnessNeedsProxy, remoteLaunchUnconfirmed, TYPED_LAUNCH_UNSUPPORTED } from "../src/missionLaunch";

@@ -1,6 +1,6 @@
 import { missionParent } from "./missionTree";
 import { destinationHarnessChoices } from "./harness-models";
-import { RemoteQueue } from "./RemoteQueue";
+import { RemoteQueue, type RemoteQueueHandle } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {NextReminder} from "./AutomaticReminder";
@@ -17,6 +17,7 @@ import { monitorSoftware } from "./softwareInventory";
 import {QueuedMessages} from "./QueuedMessages";
 import {enqueueLocalMessage,startLocalQueueWorker,queuedLocalMessages,acceptedLocalMessages,forgetAcceptedLocalMessages,sendQueuedNow,resumePrompt} from "./localMessageQueue";
 import {createQueuedEdit} from "./queuedEdit";
+import {messagePresentation} from "./messagePresentation";
 import {BtwSettings} from "./btwSettings";
 import {createPlanProgress, type PlanProgressData} from "./PlanProgress";
 import { nativeComposerDrop } from "./composerDrop";
@@ -344,6 +345,8 @@ export function Composer(p: {
   editingQueued?: { onCancel: () => void };
   /** Enter on an empty draft (e.g. send the queued follow-ups now). */
   onEmptySubmit?: () => void;
+  /** Right arrow on an empty draft edits the first queued message. */
+  onEditFirstQueued?: () => void;
 }) {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
@@ -671,6 +674,12 @@ export function Composer(p: {
     if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
       e.stopPropagation();
       close();
+      return;
+    }
+    if (e.key === "Escape" && p.editingQueued) {
+      e.preventDefault();
+      e.stopPropagation();
+      p.editingQueued.onCancel();
     }
   };
   onMount(() => {
@@ -1017,6 +1026,11 @@ export function Composer(p: {
             if (e.key === "Backspace" && mode() && !text() && ta.selectionStart === 0 && ta.selectionEnd === 0) {
               e.preventDefault();
               clearMode();
+              return;
+            }
+            if (e.key === "ArrowRight" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing && !text() && !images().length && !mode() && !p.editingQueued && p.onEditFirstQueued) {
+              e.preventDefault();
+              p.onEditFirstQueued();
               return;
             }
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -2405,12 +2419,29 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     forgetAcceptedLocalMessages(ids);
   });
   let sideQuestions: SideQuestionsHandle | undefined;
+  let remoteQueue: RemoteQueueHandle | undefined;
   const [sideRevision,setSideRevision] = createSignal<{text:string;append:boolean}>();
   const queuedEdit = createQueuedEdit({setRevision:setSideRevision,onError:message=>setSendError(message)});
   const editingQueued = queuedEdit.editing;
   const sendQueueFromComposer = () => {
-    if (editingQueued() || !queuedLocalMessages(p.id).some(row => row.state === "queued" && row.waiting)) return;
-    void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+    if (editingQueued()) return;
+    if (clientPlaced()) {
+      if (!queuedLocalMessages(p.id).some(row => row.state === "queued" && row.waiting)) return;
+      void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    if (remoteQueue?.hasQueued()) {
+      void remoteQueue.sendNow().catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+    }
+  };
+  const editFirstQueued = () => {
+    if (editingQueued()) return;
+    if (clientPlaced()) {
+      const first = queuedLocalMessages(p.id).find(row => row.waiting && row.state === "queued" && !row.error);
+      if (first) void queuedEdit.start({ id: first.id, text: first.text });
+      return;
+    }
+    remoteQueue?.editFirst();
   };
   // Waiting messages go first: they are what the user asked for next. With none, the agent continues its work.
   const resume = () => {
@@ -2625,8 +2656,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (transfer) void adoptTransferredWorkspace(transfer).catch(e => setSendError(String(e)));
   });
   const clientPlaced = () => !!mission()?.tags?.includes("placement:client");
+  const [sendingImmediate, setSendingImmediate] = createSignal(false);
   const busy = () => {
     if(!p.id)return !p.launchError;
+    if (sendingImmediate()) return true;
     if (localRunActive(p.id)) return true;
     if(clientPlaced()&&localRunKnown(p.id))return queuedLocalMessages(p.id).some(row=>row.state==='dispatching');
     const s = mission()?.status;
@@ -2797,6 +2830,79 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       .then(() => refresh());
   };
 
+  const sendRemoteImmediate = async (ordered: { id: string; content: string; attached?: boolean }[]) => {
+    if (!ordered.length) return;
+    const wasBusy = busy();
+    setSendingImmediate(true);
+    setSendError(null);
+    try {
+      if (wasBusy) {
+        await cancelMission(p.id).catch(() => {});
+        for (let poll = 0; poll < 20; poll++) {
+          try {
+            const current = await getMission(p.id);
+            if (disposed) return;
+            setMission(current);
+            const stillStopping =
+              ["active", "running", "starting", "resuming"].includes(current.status) ||
+              current.execution?.state === "stopping" ||
+              (!!current.remote_job && current.remote_job.phase !== "finished");
+            if (!stillStopping) break;
+          } catch {
+            break;
+          }
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+      const project = mission()?.project;
+      const attachItems = project ? await loadAttachItems(project).catch(() => []) : [];
+      for (let i = 0; i < ordered.length; i++) {
+        const row = ordered[i];
+        const presented = messagePresentation(row.content);
+        const cleanText = presented.text;
+        const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
+        const freshId = crypto.randomUUID();
+        let sent = false;
+        for (let attempt = 0; attempt < 16; attempt++) {
+          try {
+            const result = await sendMissionMessage(p.id, cleanText, attachments, freshId);
+            if (result.replacement) {
+              const replacement = result.replacement;
+              const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
+              rememberLaunch(replacement.id, { prompt: cleanText, nodeId, destination: nodeLabel(nodeId), replacement: true });
+              for (const rest of ordered.slice(i + 1)) {
+                const restText = messagePresentation(rest.content).text;
+                const restAttach = (project ? mentionedChips(restText, attachItems) : []).map(chipToAttachment);
+                await sendMissionMessage(replacement.id, restText, restAttach, crypto.randomUUID()).catch(() => {});
+              }
+              p.onFork?.(replacement);
+              return;
+            }
+            const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: cleanText, queued: result.queued, receipt: true, attached: Boolean(row.attached || presented.attached || attachments.length > 0) } };
+            if (replaying) held.push(event);
+            else applyLive(event);
+            sent = true;
+            break;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (attempt < 15 && /still has a remote job|stopping|409/i.test(msg)) {
+              await new Promise(r => setTimeout(r, 250));
+              continue;
+            }
+            throw e;
+          }
+        }
+        if (!sent) break;
+      }
+      await refresh();
+    } catch (e) {
+      setSendError(launchError(e));
+      throw e;
+    } finally {
+      setSendingImmediate(false);
+    }
+  };
+
   return (
     <>
       <div
@@ -2843,7 +2949,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy()} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy() || remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />
@@ -2856,14 +2962,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       </div>
       <div class="dock" ref={floatingDock}>
         <div class="col">
-          <Show when={items().some(i => i.kind === "user" && i.queued && clientPlaced() && !remoteQueuedIds().includes(i.messageId ?? ""))}>
-            <section class="queued-messages" aria-label="Queued messages" aria-live="polite">
-              <div class="queued-label">Queued messages</div>
-              <ol><For each={items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && i.queued === true && clientPlaced() && !remoteQueuedIds().includes(i.messageId ?? ""))}>{item => <li data-message-id={item.messageId}><UserTurn text={item.text} attached={item.attached} /></li>}</For></ol>
-            </section>
-          </Show>
           <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})} onOpenSession={p.onFork?async id=>p.onFork?.(await getMission(id)):undefined}/></Show>
           <RemoteQueue mission={p.id}
+            ref={handle => remoteQueue = handle}
+            editing={editingQueued()}
+            onEdit={row => void queuedEdit.start(row)}
+            onSendImmediate={sendRemoteImmediate}
             pending={!clientPlaced() && optimistic()?.waiting && !sendError() ? {id:optimistic()!.id,content:optimistic()!.text} : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
             onRows={reconcileRemoteQueue} onCancel={id=>{
@@ -2885,13 +2989,31 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onSend={async (text,images)=>{
               const id=editingQueued();
               if(!id)return sendMsg(text,images);
+              if(queuedEdit.editingRemote()&&remoteQueue){
+                const saved=await remoteQueue.replaceEdited(
+                  id,
+                  ()=>sendMsg(text,images,followAttach(),crypto.randomUUID()),
+                  async after=>{
+                    const project=mission()?.project;
+                    const attachItems=project?await loadAttachItems(project).catch(()=>[]):[];
+                    for(const r of after){
+                      const cleanText=messagePresentation(r.content).text;
+                      const chips=project?mentionedChips(cleanText,attachItems):[];
+                      await sendMsg(cleanText,[],chips,crypto.randomUUID());
+                    }
+                  },
+                );
+                if(saved)queuedEdit.finish(false);
+                return saved;
+              }
               const saved=await sendMsg(text,images,followAttach(),id as ReturnType<typeof crypto.randomUUID>,true);
               if(saved)queuedEdit.finish(false);
               return saved;
             }}
             onDraft={queuedEdit.trackDraft}
             editingQueued={editingQueued()?{onCancel:()=>queuedEdit.finish(true)}:undefined}
-            onEmptySubmit={clientPlaced()?sendQueueFromComposer:undefined}
+            onEmptySubmit={sendQueueFromComposer}
+            onEditFirstQueued={editFirstQueued}
             onStop={stopM}
             scope={`m:${p.id}`}
             uploadTarget={clientPlaced() ? "local" : mission()?.remote_node_id ?? mission()?.remote_job?.node_id ?? "core"}

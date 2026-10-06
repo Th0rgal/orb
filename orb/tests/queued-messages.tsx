@@ -1,7 +1,7 @@
 import {createSignal} from 'solid-js';
 import {render} from 'solid-js/web';
 import {QueuedMessages} from '../src/QueuedMessages';
-import {enqueueLocalMessage} from '../src/localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages} from '../src/localMessageQueue';
 import {createQueuedEdit} from '../src/queuedEdit';
 import {Composer} from '../src/App';
 import '../src/styles.css';
@@ -17,6 +17,7 @@ render(()=>{
   <Composer revision={revision()} busy placeholder="Send follow-up" onDraft={edit.trackDraft}
    editingQueued={edit.editing()?{onCancel:()=>edit.finish(true)}:undefined}
    onEmptySubmit={()=>{(window as unknown as {queueSent:number}).queueSent=((window as unknown as {queueSent?:number}).queueSent??0)+1;}}
+   onEditFirstQueued={()=>{const first=queuedLocalMessages('queue-fixture').find(r=>r.waiting&&r.state==='queued'&&!r.error);if(first)void edit.start({id:first.id,text:first.text});}}
    onSend={async(text)=>{const id=edit.editing();await enqueueLocalMessage({...request,prompt:text},text,id?{id:id as ReturnType<typeof crypto.randomUUID>,replace:true}:{});if(id)edit.finish(false);return true;}}
    onStop={()=>{}}/>
  </main>;

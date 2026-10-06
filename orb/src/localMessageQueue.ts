@@ -162,11 +162,12 @@ export async function retryQueuedMessage(id:string){
 }
 const settling=new Map<string,Promise<void>>();
 const stopping=new Set<string>();
-export async function sendQueuedNow(mission:string){
+export async function sendQueuedNow(mission:string,id?:string){
  const key=storageKey(),runKey=`${key}:${mission}`;
  if(stopping.has(runKey))return;
  stopping.add(runKey);
  try {
+  if(id)await prioritizeQueuedMessage(id);
   // The queue waits behind its first message: one that needs attention is retried first.
   const first=(await read(key)).find(row=>row.mission===mission);
   if(first&&retryable(first))await retryQueuedMessage(first.id);
