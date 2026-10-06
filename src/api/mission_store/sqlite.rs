@@ -14973,6 +14973,7 @@ mod tests {
 
     #[tokio::test]
     async fn antigravity_snapshots_remain_durable_and_finalized_steps_cannot_reopen() {
+        use crate::api::control::events::TextOp;
         let temp_dir = tempfile::tempdir().unwrap();
         let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
             .await
