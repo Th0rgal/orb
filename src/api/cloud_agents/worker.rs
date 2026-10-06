@@ -42,7 +42,7 @@ pub fn start(
                     );
                 }
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 }

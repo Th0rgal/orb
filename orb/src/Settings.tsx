@@ -52,7 +52,7 @@ function Card(p: { title?: string; children: JSX.Element }) {
   );
 }
 
-function CloudAccountsCard() {
+function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -70,6 +70,7 @@ function CloudAccountsCard() {
     <Show when={error()}><p role="alert">{error()}</p></Show>
     <For each={accounts()}>{a => <Row title={`${cloudNames[a.provider]} · ${a.label}`} desc={a.reason}>
       <span>{a.available ? "Available" : "Unavailable"}{a.experimental ? " · Experimental" : ""}</span>
+      <Show when={a.provider === "hermes" && p.onOpenPage}><button class="s-btn" onClick={() => p.onOpenPage?.("hermes-settings")}>Configure</button></Show>
     </Row>}</For>
   </Card>;
 }
@@ -205,7 +206,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <h2>Client</h2>
         <BackendTab />
         <LocalAgentsCard />
-        <CloudAccountsCard />
+        <CloudAccountsCard onOpenPage={p.onOpenPage} />
         <Show when={isConnected()}>
           <section class="s-sec">
             <h3>Execution</h3>

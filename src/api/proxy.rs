@@ -981,6 +981,32 @@ async fn collect_proxy_models(state: &Arc<super::routes::AppState>) -> Vec<Model
     data
 }
 
+pub(crate) async fn collect_routable_catalog_models(
+    state: &Arc<super::routes::AppState>,
+) -> Vec<crate::api::providers::CatalogModelOption> {
+    let direct_models =
+        crate::api::providers::catalog_model_options_for_state(state, true, true).await;
+    let mut models = routable_direct_catalog_models(state, direct_models).await;
+    if let Some(bridge_model) = super::grok_tool_bridge::advertised_model(&state.config.working_dir)
+    {
+        if !models.iter().any(|m| m.value == bridge_model) {
+            models.push(crate::api::providers::CatalogModelOption {
+                provider_id: "grok".to_string(),
+                provider_name: "Grok".to_string(),
+                id: bridge_model
+                    .strip_prefix("grok/")
+                    .unwrap_or(bridge_model)
+                    .to_string(),
+                value: bridge_model.to_string(),
+                name: format!("Grok ({bridge_model})"),
+                description: None,
+                configured: true,
+            });
+        }
+    }
+    models
+}
+
 async fn routable_direct_catalog_models(
     state: &Arc<super::routes::AppState>,
     models: Vec<crate::api::providers::CatalogModelOption>,
@@ -5976,6 +6002,23 @@ fn transform_anthropic_sse_to_openai(
                                         }
                                     }
                                 }
+                                "thinking_delta" => {
+                                    if let Some(thinking) = delta
+                                        .and_then(|d| d.get("thinking"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        if !thinking.is_empty() {
+                                            let chunk = serde_json::json!({
+                                                "id": stream_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created,
+                                                "model": model_id,
+                                                "choices": [{ "index": 0, "delta": { "reasoning_content": thinking }, "finish_reason": serde_json::Value::Null }],
+                                            });
+                                            chunks.push(format!("data: {}\n\n", chunk));
+                                        }
+                                    }
+                                }
                                 "input_json_delta" => {
                                     let block_index =
                                         parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -6762,9 +6805,9 @@ fn transform_google_sse_to_openai(
         (
             Box::pin(inner),
             Vec::<u8>::new(),
-            false, // sent role chunk
-            false, // emitted terminal chunk
-            false, // emitted tool call
+            false,  // sent role chunk
+            false,  // emitted terminal chunk
+            0usize, // next tool call index across the entire SSE stream
             stream_id,
             model_id,
             created,
@@ -6775,7 +6818,7 @@ fn transform_google_sse_to_openai(
             mut buf,
             mut sent_role,
             mut emitted_done,
-            mut emitted_tool_call,
+            mut next_tool_idx,
             stream_id,
             model_id,
             created,
@@ -6802,7 +6845,7 @@ fn transform_google_sse_to_openai(
                                     buf,
                                     sent_role,
                                     emitted_done,
-                                    emitted_tool_call,
+                                    next_tool_idx,
                                     stream_id,
                                     model_id,
                                     created,
@@ -6861,20 +6904,31 @@ fn transform_google_sse_to_openai(
                         .and_then(|v| v.get("parts"))
                         .and_then(|v| v.as_array())
                     {
-                        for (idx, part) in parts.iter().enumerate() {
+                        for part in parts {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 if !text.is_empty() {
+                                    let is_thought = part
+                                        .get("thought")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let delta = if is_thought {
+                                        serde_json::json!({ "reasoning_content": text })
+                                    } else {
+                                        serde_json::json!({ "content": text })
+                                    };
                                     let chunk = serde_json::json!({
                                         "id": stream_id,
                                         "object": "chat.completion.chunk",
                                         "created": created,
                                         "model": model_id,
-                                        "choices": [{ "index": 0, "delta": { "content": text }, "finish_reason": serde_json::Value::Null }],
+                                        "choices": [{ "index": 0, "delta": delta, "finish_reason": serde_json::Value::Null }],
                                     });
                                     chunks.push(format!("data: {}\n\n", chunk));
                                 }
                             }
                             if let Some(fc) = part.get("functionCall") {
+                                let tool_idx = next_tool_idx;
+                                next_tool_idx += 1;
                                 let name =
                                     fc.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                                 let args = fc
@@ -6892,8 +6946,8 @@ fn transform_google_sse_to_openai(
                                         "index": 0,
                                         "delta": {
                                             "tool_calls": [{
-                                                "index": idx,
-                                                "id": format!("call_{}", idx),
+                                                "index": tool_idx,
+                                                "id": format!("call_{}", tool_idx),
                                                 "type": "function",
                                                 "function": { "name": name, "arguments": args_str }
                                             }]
@@ -6902,14 +6956,13 @@ fn transform_google_sse_to_openai(
                                     }],
                                 });
                                 chunks.push(format!("data: {}\n\n", chunk));
-                                emitted_tool_call = true;
                             }
                         }
                     }
 
                     if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
                         let mut finish_reason = finish_reason_from_google(Some(fr)).to_string();
-                        if emitted_tool_call && finish_reason == "stop" {
+                        if next_tool_idx > 0 && finish_reason == "stop" {
                             finish_reason = "tool_calls".to_string();
                         }
                         let mut finish_chunk = serde_json::json!({
@@ -6946,7 +6999,7 @@ fn transform_google_sse_to_openai(
                             buf,
                             sent_role,
                             emitted_done,
-                            emitted_tool_call,
+                            next_tool_idx,
                             stream_id,
                             model_id,
                             created,
@@ -6965,7 +7018,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 emitted_done,
-                                emitted_tool_call,
+                                next_tool_idx,
                                 stream_id,
                                 model_id,
                                 created,
@@ -6984,7 +7037,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 true,
-                                emitted_tool_call,
+                                next_tool_idx,
                                 stream_id,
                                 model_id,
                                 created,
@@ -8252,6 +8305,64 @@ mod tests {
             .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
             .collect::<String>();
 
+        assert!(text.contains("\"finish_reason\":\"tool_calls\""));
+    }
+
+    #[test]
+    fn google_stream_assigns_distinct_indices_and_ids_across_multiple_function_call_chunks() {
+        let chunk1 = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "name": "terminal",
+                                "args": { "command": "echo first" }
+                            }
+                        }]
+                    }
+                }]
+            }
+        });
+        let chunk2 = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "name": "terminal",
+                                "args": { "command": "echo second" }
+                            }
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        });
+        let sse_bytes_1 = Bytes::from(format!("data: {}\n\n", chunk1));
+        let sse_bytes_2 = Bytes::from(format!("data: {}\n\n", chunk2));
+        let input = futures::stream::iter(vec![Ok(sse_bytes_1), Ok(sse_bytes_2)]);
+
+        let out = futures::executor::block_on(async move {
+            transform_google_sse_to_openai(
+                input,
+                "chatcmpl-test".to_string(),
+                1,
+                "gemini-2.5-pro".to_string(),
+            )
+            .collect::<Vec<_>>()
+            .await
+        });
+
+        let text = out
+            .into_iter()
+            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        assert!(text.contains("\"index\":0"));
+        assert!(text.contains("\"id\":\"call_0\""));
+        assert!(text.contains("\"index\":1"));
+        assert!(text.contains("\"id\":\"call_1\""));
         assert!(text.contains("\"finish_reason\":\"tool_calls\""));
     }
 

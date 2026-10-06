@@ -124,8 +124,9 @@ import {
   openExternalUrl,
   listNodeAntigravityModels,
 } from "./api";
+const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 
-const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -317,6 +318,7 @@ export function Composer(p: {
   onStop?: () => void;
   textOnly?: boolean;
   imagesOnly?: boolean;
+  directFileUpload?: boolean;
   controls?: JSX.Element;
   disabled?: boolean;
   autofocus?: boolean;
@@ -357,7 +359,7 @@ export function Composer(p: {
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
-  const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : `context:${p.projectSlug ?? ""}`;
+  const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : p.projectSlug ? `context:${p.projectSlug}` : uploadTarget();
   const attachSources = async (sources: UploadSource[]) => {
     if (p.textOnly || p.imagesOnly) return;
     const scope = p.scope;
@@ -380,7 +382,7 @@ export function Composer(p: {
   let composerElement:HTMLDivElement|undefined;
   nativeComposerDrop(()=>composerElement, async sources=>{
     if(sending()||uploading()||readingImages()) { setUploadError("Please wait for the current attachment or message to finish, then drop your files again."); return; }
-    if (p.imagesOnly) await attachMixed(sources);
+    if (p.imagesOnly || p.directFileUpload) await attachMixed(sources);
     else await attachSources(sources);
   });
   const attachMixed = async (sources: UploadSource[]) => {
@@ -409,7 +411,7 @@ export function Composer(p: {
   };
   const chooseFiles = async () => {
     setCtx(false); setUploadError(null);
-    if (p.imagesOnly || !hasNativePicker()) { fileInput.click(); return; }
+    if (p.imagesOnly || p.directFileUpload || !hasNativePicker()) { fileInput.click(); return; }
     const scope = p.scope;
     const selection = uploadTarget();
     try { const files = await pickNativeFiles(); if (!disposed && scope === p.scope && selection === uploadTarget()) await attachMixed(files); }
@@ -695,11 +697,11 @@ export function Composer(p: {
   });
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
-      <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
-      <button class="plus" title={p.imagesOnly ? "Attach image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : undefined} disabled={uploading() || sending()} onClick={() => p.imagesOnly ? void chooseFiles() : setCtx(!ctx())}>
+      <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly || p.directFileUpload ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
+      <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sending()} onClick={() => (p.imagesOnly || p.directFileUpload) ? void chooseFiles() : setCtx(!ctx())}>
         <Ic.PlusIcon size={14} />
       </button>
-      <Show when={ctx() && !p.imagesOnly}>
+      <Show when={ctx() && !p.imagesOnly && !p.directFileUpload}>
         <div class="menu plus-menu slash-menu">
           <button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span>Upload file or image…</button>
           <Show when={atItems().some((i) => i.section === "Folders") || (p.files?.length ?? 0) > 0}>
@@ -1335,14 +1337,14 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "btw-settings";
+  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "btw-settings" || selected() === "hermes-settings";
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing") {
+      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "btw-settings" && h[i] !== "hermes-settings") {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -1613,6 +1615,12 @@ export default function App() {
       setPlusFor(null);
       setEnvOpen(null);
     };
+    const onOpenPage = (ev: Event) => {
+      const target = (ev as CustomEvent<string>).detail;
+      if (target) open(target);
+    };
+    window.addEventListener("orb:open-page", onOpenPage);
+    onCleanup(() => window.removeEventListener("orb:open-page", onOpenPage));
     window.addEventListener("pointerdown", closePlus);
     onCleanup(() => window.removeEventListener("pointerdown", closePlus));
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
@@ -1735,6 +1743,7 @@ export default function App() {
             </button>
             <div class="settings-nav-gap" />
             <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">Client</span></button>
+            <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><ProviderLogo type="hermes" /></span><span class="row-label">Hermes</span></button>
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Btw</span></button>
             <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.BranchIcon /></span><span class="row-label">Routing</span></button>
           </Show>
@@ -1774,7 +1783,8 @@ export default function App() {
             <Match when={selected() === "settings" || selected() === "execution"}>
               <span>Settings · Client</span>
             </Match>
-          <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
+            <Match when={selected() === "hermes-settings"}><span>Settings · Hermes</span></Match>
+            <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
             <Match when={selected() === "routing"}><span>Settings · Routing</span></Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
@@ -2045,6 +2055,7 @@ export default function App() {
               onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
               onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
           </Match>
+          <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
           <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
           <Match when={selected() === "settings" || selected() === "execution"}>
             <Settings onOpenPage={open} />

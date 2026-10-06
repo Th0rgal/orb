@@ -162,19 +162,35 @@ fn internal(msg: impl std::fmt::Display) -> ApiError {
 }
 
 /// Hermes home: `HERMES_HOME`, else the directory holding `HERMES_STATE_DB`.
-fn hermes_home() -> Option<PathBuf> {
+pub(super) fn hermes_home() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("HERMES_HOME") {
         let path = PathBuf::from(home.trim());
         if path.join("cron").is_dir() {
             return Some(path);
         }
+        if path.join(".hermes/cron").is_dir() {
+            return Some(path.join(".hermes"));
+        }
     }
-    super::projects_overview::hermes_state_db_path()
+    if let Some(home) = super::projects_overview::hermes_state_db_path()
         .and_then(|db| db.parent().map(Path::to_path_buf))
         .filter(|home| home.join("cron").is_dir())
+    {
+        return Some(home);
+    }
+    #[cfg(not(test))]
+    {
+        for candidate in ["/var/lib/hermes/.hermes", "/var/lib/hermes"] {
+            let path = PathBuf::from(candidate);
+            if path.join("cron").is_dir() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
-fn load_jobs(home: &Path) -> Vec<serde_json::Value> {
+pub(super) fn load_jobs(home: &Path) -> Vec<serde_json::Value> {
     let Ok(raw) = std::fs::read_to_string(home.join("cron/jobs.json")) else {
         return Vec::new();
     };
@@ -200,7 +216,7 @@ fn str_field(job: &serde_json::Value, key: &str) -> Option<String> {
 /// Pick the project's controller: the explicitly recorded cron id wins, then
 /// a job bound to the project (`controller.project`), then a job delivering
 /// into the project (`deliver: project:<slug>`).
-fn find_job<'a>(
+pub(super) fn find_job<'a>(
     jobs: &'a [serde_json::Value],
     keys: &[String],
     recorded_id: Option<&str>,
@@ -551,7 +567,7 @@ fn is_silent(report: &str, delivery_outcome: Option<&str>, failed: bool) -> bool
         || report.trim().eq_ignore_ascii_case("[SILENT]")
 }
 
-fn build_runs(home: &Path, job_id: &str, limit: usize) -> Vec<ControllerRun> {
+pub(super) fn build_runs(home: &Path, job_id: &str, limit: usize) -> Vec<ControllerRun> {
     let executions = load_executions(home, job_id, limit * 2 + 4);
     let mut used = vec![false; executions.len()];
     let mut runs: Vec<ControllerRun> = Vec::new();

@@ -19,22 +19,33 @@ export function modelChoices(models:CloudModel[]) {
 }
 export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:ModelParam[];disabled?:boolean;onChange:(model:string,params:ModelParam[])=>void;onError:(error:string)=>void;onRepositories?:(repos:{url:string}[])=>void;onRepositoriesLoading?:(loading:boolean)=>void}){
  const provider = createMemo(()=>p.provider);
- const [models,setModels]=createSignal<CloudModel[]>([]),[open,setOpen]=createSignal(false),[loading,setLoading]=createSignal(true);
+ const [models,setModels]=createSignal<CloudModel[]>([]),[efforts,setEfforts]=createSignal<{id:string;name?:string;displayName?:string}[]>([]),[open,setOpen]=createSignal<'model'|'effort'|null>(null),[loading,setLoading]=createSignal(true);
  createEffect(()=>{
   const selectedProvider=provider();
   if(selectedProvider==='grok_bot')return;
   let current=true; // provider changes discard late discovery replies
-  setModels([]);setLoading(true);p.onRepositories?.([]);p.onRepositoriesLoading?.(true);
-  void api<{models:{items:CloudModel[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='hermes'?'hermes':selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
-   if(!current)return;setModels(data.models.items ?? []);p.onRepositories?.(data.repositories?.items ?? []);
+  setModels([]);setEfforts([]);setLoading(true);p.onRepositories?.([]);p.onRepositoriesLoading?.(true);
+  void api<{models:{items:CloudModel[]};efforts?:{id:string;name?:string;displayName?:string}[]|{items:{id:string;name?:string;displayName?:string}[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='hermes'?'hermes':selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
+   if(!current)return;
+   const effortItems=Array.isArray(data.efforts)?data.efforts:(data.efforts?.items ?? []);
+   setModels(data.models.items ?? []);
+   setEfforts(effortItems);
+   p.onRepositories?.(data.repositories?.items ?? []);
    if(!p.model){
     const selected=data.models.items?.find(m=>m.id===(selectedProvider==='hermes'?'':selectedProvider==='chatgpt'?'gpt-6-pro':'default')) ?? data.models.items?.[0];
-    if(selected)p.onChange(selected.id,selected.variants?.find(v=>v.isDefault)?.params ?? selected.variants?.[0]?.params ?? []);
+    if(selected){
+     const baseParams=selected.variants?.find(v=>v.isDefault)?.params ?? selected.variants?.[0]?.params ?? [];
+     const existingEffort=p.params.filter(x=>x.id==='effort'||x.id==='reasoning_effort');
+     p.onChange(selected.id,(effortItems.length && existingEffort.length)?[...baseParams,...existingEffort]:baseParams);
+    }
    }
   }).catch(error=>{if(current)p.onError(String(error));}).finally(()=>{if(current){setLoading(false);p.onRepositoriesLoading?.(false);}});
   onCleanup(()=>{current=false;});
  });
- const value=()=>JSON.stringify({id:p.model,params:p.params});
+ const hasEffortPicker=()=>efforts().length>0;
+ const currentEffort=()=>p.params.find(x=>x.id==='effort'||x.id==='reasoning_effort')?.value ?? '';
+ const modelParamsOnly=()=>hasEffortPicker()?p.params.filter(x=>x.id!=='effort'&&x.id!=='reasoning_effort'):p.params;
+ const value=()=>JSON.stringify({id:p.model,params:modelParamsOnly()});
  const choices=createMemo(()=>{
   const items=modelChoices(models());
   // Keep the recorded model visible even if discovery no longer lists it.
@@ -45,5 +56,16 @@ export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:M
   }
   return items;
  });
- return <Show when={!loading()} fallback={<button class="model" disabled>Loading models…</button>}><AgentChoice label="Model" value={value()} items={choices()} disabled={p.disabled || !models().length} open={open()} onOpen={()=>setOpen(true)} onClose={()=>setOpen(false)} onSelect={value=>{const choice=JSON.parse(value);p.onChange(choice.id,choice.params);}} searchable/></Show>;
+ const effortChoices=createMemo(()=>{
+  const items=efforts().map(e=>({value:e.id,label:e.displayName ?? e.name ?? (e.id || 'Default effort')}));
+  const cur=currentEffort();
+  if(cur && !items.some(i=>i.value===cur)) items.push({value:cur,label:cur});
+  return items;
+ });
+ return <Show when={!loading()} fallback={<button class="model" disabled>Loading models…</button>}>
+  <AgentChoice label="Model" value={value()} items={choices()} disabled={p.disabled || !models().length} open={open()==='model'} onOpen={()=>setOpen('model')} onClose={()=>setOpen(null)} onSelect={val=>{const choice=JSON.parse(val);const eff=currentEffort();const nextParams=hasEffortPicker()&&eff?[...choice.params,{id:'effort',value:eff}]:choice.params;p.onChange(choice.id,nextParams);}} searchable/>
+  <Show when={hasEffortPicker()}>
+   <AgentChoice label="Effort" value={currentEffort()} items={effortChoices()} disabled={p.disabled} open={open()==='effort'} onOpen={()=>setOpen('effort')} onClose={()=>setOpen(null)} onSelect={eff=>{const rest=p.params.filter(x=>x.id!=='effort'&&x.id!=='reasoning_effort');p.onChange(p.model,eff?[...rest,{id:'effort',value:eff}]:rest);}}/>
+  </Show>
+ </Show>;
 }

@@ -54,6 +54,7 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
    <Show when={p.usage?.reset_at||p.usage?.reset_at_ms}>{reset=><p class="cloud-provider-note">Resets {new Date(p.usage?.reset_at??Number(reset())).toLocaleDateString()}</p>}</Show>
   </Show>
   <Show when={dashboards[p.provider]}><div class="p-acc-actions"><button class="s-btn" onClick={()=>void visit()}>{p.provider==='cursor_cloud'?'View usage in Cursor':`Open ${cloudNames[p.provider]}`} ↗</button></div></Show>
+  <Show when={p.provider==='hermes'}><div class="p-acc-actions"><button class="s-btn" onClick={()=>window.dispatchEvent(new CustomEvent('orb:open-page',{detail:'hermes-settings'}))}>Configure Hermes</button></div></Show>
   <Show when={error()}><p class="s-row-desc c-red" role="alert">{error()}</p></Show>
  </div></Show></div>;
 }

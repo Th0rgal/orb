@@ -1525,7 +1525,7 @@ impl AssistantMcp {
                     }
                 }),
             },
-            ToolDefinition {name:"list_cloud_models".into(),description:"Discover actual hosted model IDs, labels and supported parameter combinations before creating or following up a cloud mission. Grok Bot has no model selector.".into(),input_schema:json!({"type":"object","required":["provider"],"properties":{"provider":{"type":"string","enum":["chatgpt","cursor_cloud"]}}})},
+            ToolDefinition {name:"list_cloud_models".into(),description:"Discover actual hosted model IDs, labels and supported parameter combinations before creating or following up a cloud mission. Grok Bot has no model selector.".into(),input_schema:json!({"type":"object","required":["provider"],"properties":{"provider":{"type":"string","enum":["chatgpt","cursor_cloud","hermes"]}}})},
             ToolDefinition { name: "list_cloud_accounts".into(), description: "Discover hosted agent accounts and effective capabilities. Unavailable connectors cannot launch; connecting never starts work.".into(), input_schema: json!({"type":"object","properties":{}}) },
             ToolDefinition { name: "get_cloud_execution".into(), description: "Read a bounded page of durable hosted turns, external identities and results. Defaults to the latest turn and 4096 characters per result/detail; prompts are omitted. Pass offset=0 to read from the beginning. Follow page.next_offset for subsequent turns. To continue text, select that turn with offset and limit=1, then pass its text_slices field's next_offset as text_offset. Character offsets are Unicode scalar values. Poll the last unfinished turn again until terminal; revision changes as execution advances. Artifact/branch payloads are omitted; counts are included. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":5},"text_offset":{"type":"integer","minimum":0},"text_limit":{"type":"integer","minimum":1,"maximum":8192},"include_prompt":{"type":"boolean"}}}) },
             ToolDefinition {
@@ -1537,7 +1537,7 @@ impl AssistantMcp {
                     "properties": {
                         "title": {"type": "string"},
                         "prompt": {"type": "string", "description": "Codex native /goal objective: maximum 4000 Unicode characters, including automatic writer promotion. Put supporting detail in referenced artifacts; never rely on truncation."},
-                        "cloud": {"type":"object","description":"Hosted execution. Discover availability with list_cloud_accounts. Requires idempotency_key; never pass credentials, machine paths or attachments.","required":["provider","account"],"properties":{"provider":{"type":"string","enum":["chatgpt","grok_bot","cursor_cloud"]},"account":{"type":"string"},"repository":{"type":"string"},"git_ref":{"type":"string"},"model":{"type":"string"},"model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}}},"additionalProperties":false},
+                        "cloud": {"type":"object","description":"Hosted execution. Discover availability with list_cloud_accounts. Requires idempotency_key; never pass credentials, machine paths or attachments.","required":["provider","account"],"properties":{"provider":{"type":"string","enum":["chatgpt","grok_bot","cursor_cloud","hermes"]},"account":{"type":"string"},"repository":{"type":"string"},"git_ref":{"type":"string"},"model":{"type":"string"},"model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}}},"additionalProperties":false},
                         "workspace_id": {"type": "string"},
                         "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "chatgpt_ui"]},
                         "model_override": {"type": "string", "description": "Exact account-supported model ID. For ChatGPT UI Pro use the canonical ID gpt-5.6-pro; the harness verifies the visible Pro picker option. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol."},
@@ -3739,6 +3739,7 @@ impl AssistantMcp {
                 let path = match arguments.get("provider").and_then(Value::as_str) {
                     Some("chatgpt") => "/api/cloud/chatgpt/options",
                     Some("cursor_cloud") => "/api/cloud/cursor/options",
+                    Some("hermes") => "/api/cloud/hermes/options",
                     _ => return Err("This provider does not expose model selection".into()),
                 };
                 let response = self.api_get(path).await?;

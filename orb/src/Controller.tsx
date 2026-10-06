@@ -3,7 +3,7 @@ import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import { MdView } from "./Markdown";
 import { pollWhileVisible } from "./poll";
 import { ControllerSettingsPanel } from "./ControllerSettings";
-import { controllerAction, getProjectController, getProjectCron, getProjectSteers, isConnected, projectCronAction, updateProjectCron, type ControllerJob, type ControllerRun, type ControllerView as View, type ProjectSteers, type ProjectSteer } from "./api";
+import { bumpProjects, controllerAction, deleteProjectCron, getProjectController, getProjectCron, getProjectSteers, isConnected, projectCronAction, updateProjectCron, type ControllerJob, type ControllerRun, type ControllerView as View, type ProjectSteers, type ProjectSteer } from "./api";
 import { SteerComposer } from "./SteerComposer";
 import { cacheLoad, cachePeek, cachePut, cacheRemember } from "./pageCache";
 import { ControllerSkeleton } from "./Skeleton";
@@ -269,12 +269,29 @@ export function ControllerView(p: { slug: string; id?: string }) {
     }
   };
 
+  const removeCron = async () => {
+    if (!p.id || busy()) return;
+    setBusy("delete");
+    try {
+      await deleteProjectCron(p.slug, p.id);
+      const cleared: View = { slug: p.slug, job: null, runs: [] };
+      cachePut(viewKey(), cleared);
+      setView(cleared);
+      setError(null);
+      bumpProjects();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div class="col cr-view" style={{ flex: 1, "min-height": 0, display: "flex", "flex-direction": "column" }}>
     <div class="scroll">
       <div class="col cr-page">
         <Show when={view()} fallback={error() ? <p class="s-lead">{error()}</p> : <ControllerSkeleton />}>
-          <Show when={job()} fallback={<p class="s-lead">This project has no controller cron in Hermes.</p>}>
+          <Show when={job()} fallback={<p class="s-lead">{p.id ? "This cron was removed from Hermes." : "This project has no controller cron in Hermes."}</p>}>
             {(j) => (
               <>
                 <div class="cr-head">
@@ -316,6 +333,11 @@ export function ControllerView(p: { slug: string; id?: string }) {
                     <button class="s-btn sm" disabled={!!busy() || running() || job()?.archived} onClick={() => act("run")}>
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
+                    <Show when={!!p.id}>
+                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron()}>
+                        {busy() === "delete" ? "Deleting…" : "Delete"}
+                      </button>
+                    </Show>
                   </div>
                 </div>
                 <Show when={error()}>

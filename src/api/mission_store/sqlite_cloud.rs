@@ -42,7 +42,15 @@ pub(super) async fn save(
                 if old.parent_mission_id != execution.parent_mission_id || old.request_signature != execution.request_signature || old.selection != execution.selection || old.turns.first().map(|t| &t.prompt) != execution.turns.first().map(|t| &t.prompt) { return Err("Idempotency key already used for another cloud launch".into()); }
                 return Ok(old);
             }
-            if expected != Some(old.revision) || execution.mission_id != old.mission_id || execution.selection != old.selection || execution.parent_mission_id != old.parent_mission_id { return Err("Cloud execution revision changed".into()); }
+            let selection_compatible = if execution.selection.provider == crate::api::cloud_agents::Provider::Hermes {
+                execution.selection.provider == old.selection.provider
+                    && execution.selection.account == old.selection.account
+                    && execution.selection.repository == old.selection.repository
+                    && execution.selection.git_ref == old.selection.git_ref
+            } else {
+                execution.selection == old.selection
+            };
+            if expected != Some(old.revision) || execution.mission_id != old.mission_id || !selection_compatible || execution.parent_mission_id != old.parent_mission_id { return Err("Cloud execution revision changed".into()); }
             new_turn = execution.turns.iter().any(|turn| turn.phase == crate::api::cloud_agents::Phase::Queued && !old.turns.iter().any(|previous| previous.key == turn.key));
             execution.revision = old.revision + 1;
         } else {

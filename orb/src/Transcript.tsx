@@ -64,7 +64,8 @@ function toolTarget(name: string, args: unknown): string {
     case "run_terminal_command":
     case "shell_command":
     case "bash":
-      t = pick("command", "cmd");
+    case "terminal":
+      t = pick("command", "cmd", "preview");
       break;
     case "read_file":
     case "write_file":
@@ -72,21 +73,23 @@ function toolTarget(name: string, args: unknown): string {
     case "read":
     case "write":
     case "edit":
-      t = pick("file_path", "filePath", "path", "file");
+      t = pick("file_path", "filePath", "path", "file", "preview");
       break;
     case "grep":
     case "glob":
-      t = pick("pattern", "query");
+    case "search_files":
+      t = pick("pattern", "query", "preview");
       break;
     case "task":
-      t = pick("description", "prompt");
+    case "delegate_task":
+      t = pick("description", "prompt", "preview");
       break;
     case "webfetch":
     case "web_fetch":
-      t = pick("url");
+      t = pick("url", "preview");
       break;
     default:
-      t = pick("file_path", "path", "command", "query", "url", "pattern", "prompt", "description");
+      t = pick("file_path", "path", "command", "query", "url", "pattern", "prompt", "description", "preview");
   }
   if (t.length > 90) t = `${t.slice(0, 90)}…`;
   return t;
