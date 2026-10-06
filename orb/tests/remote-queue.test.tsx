@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
-import { RemoteQueue } from '../src/RemoteQueue';
+import { RemoteQueue, type RemoteQueueHandle } from '../src/RemoteQueue';
 const backend = vi.hoisted(() => ({ list: vi.fn(), api: vi.fn() }));
 vi.mock('../src/api', () => ({ listQueuedMessages: backend.list, api: backend.api, connectionVersion: () => 1 }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -12,7 +12,7 @@ it('shows durable remote messages in order and removes only the selected entry',
   await screen.findByText('2 Queued');
   expect(rows).toHaveBeenLastCalledWith(['one', 'two']);
   expect(screen.queryByText('Local')).toBeNull();
-  await fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' })[0]);
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: First' }));
   await waitFor(() => expect(cancel).toHaveBeenCalledWith('one'));
   expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one', { method: 'DELETE' });
   expect(screen.queryByText('First')).toBeNull();
@@ -24,7 +24,7 @@ it('keeps the queue visible if cancellation fails', async () => {
   const cancel = vi.fn();
   render(() => <RemoteQueue mission="remote" onRows={() => {}} onCancel={cancel}/>);
   await screen.findByText('Try again');
-  await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Try again' }));
   await screen.findByRole('alert');
   expect(screen.getByText('Try again')).toBeTruthy();
   expect(cancel).not.toHaveBeenCalled();
@@ -46,7 +46,7 @@ it('shows host follow-ups with the blocking writer and cancellation', async () =
   await screen.findByText('1 Queued');
   expect(screen.getByText(/Waiting for PR writer blocker/)).toBeTruthy();
   expect(screen.queryByText('Consumed')).toBeNull();
-  await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+  await fireEvent.click(screen.getByRole('button',{name:'Remove queued message: Follow up'}));
   await waitFor(()=>expect(cancel).toHaveBeenCalledWith('host'));
 });
 
@@ -57,9 +57,53 @@ it('shows sending and confirmed receipts without waiting for a slow queue poll',
   const [confirmed,setConfirmed]=createSignal<{id:string;content:string}[]>([]);
   render(()=><RemoteQueue mission="remote" pending={pending()} confirmed={confirmed()} onRows={()=>{}} onCancel={()=>{}}/>);
   expect(screen.getByText('Continue overnight')).toBeTruthy();
-  expect(screen.queryByRole('button',{name:'Cancel'})).toBeNull();
+  expect(screen.queryByRole('button',{name:/Remove queued message/})).toBeNull();
   setConfirmed([{id:'next',content:'Continue overnight'}]);setPending(undefined);
   await screen.findByText('1 Queued');
   expect(screen.getAllByText('Continue overnight')).toHaveLength(1);
-  expect(screen.getByRole('button',{name:'Cancel'})).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Remove queued message: Continue overnight'})).toBeTruthy();
 });
+
+it('supports editing, replacing in order, and sending a queued remote message immediately', async () => {
+  backend.list.mockResolvedValue([{ id: 'one', content: 'First', source: 'remote-queue' }, { id: 'two', content: 'Second', source: 'remote-queue' }]);
+  backend.api.mockResolvedValue({ ok: true });
+  const edit = vi.fn(), sendImmediate = vi.fn().mockResolvedValue(undefined);
+  let handle!: RemoteQueueHandle;
+  render(() => <RemoteQueue mission="remote" ref={h => handle = h} onEdit={edit} onSendImmediate={sendImmediate} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button', { name: 'Edit queued message: First' }));
+  expect(edit).toHaveBeenCalledWith({ id: 'one', text: 'First', remote: true });
+  const sendReplaced = vi.fn().mockResolvedValue(true);
+  const replayAfter = vi.fn().mockResolvedValue(undefined);
+  expect(await handle.replaceEdited('one', sendReplaced, replayAfter)).toBe(true);
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one', { method: 'DELETE' });
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/two', { method: 'DELETE' });
+  expect(sendReplaced).toHaveBeenCalledTimes(1);
+  expect(replayAfter).toHaveBeenCalledWith([{ content: 'Second', attached: undefined }]);
+});
+
+it('sends the selected remote queued message immediately ahead of earlier rows and strips attachment trailers', async () => {
+  const attachedContent = 'Please add a markdown file inside @Context\n\n<!-- paloma:attachment:dd4b234f-6097-4d72-82c7-aae18689e1fc -->\nAttached context: read `.paloma/messages/dd4b234f-6097-4d72-82c7-aae18689e1fc/.paloma/attach.md` (paths in that manifest are relative to `.paloma/messages/dd4b234f-6097-4d72-82c7-aae18689e1fc`).';
+  backend.list.mockResolvedValue([{ id: 'one', content: 'First', source: 'remote-queue' }, { id: 'two', content: attachedContent, source: 'remote-queue' }]);
+  backend.api.mockResolvedValue({ ok: true });
+  const sendImmediate = vi.fn().mockResolvedValue(undefined);
+  render(() => <RemoteQueue mission="remote" onSendImmediate={sendImmediate} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Please add a markdown file inside @Context' }));
+  await waitFor(() => expect(sendImmediate).toHaveBeenCalledWith([
+    { id: 'two', content: 'Please add a markdown file inside @Context', attached: true },
+    { id: 'one', content: 'First', attached: undefined },
+  ]));
+});
+
+it('keeps the error alert visible when sendNow fails after clearing the queue', async () => {
+  backend.list.mockResolvedValue([{ id: 'one', content: 'First', source: 'remote-queue' }]);
+  backend.api.mockResolvedValue({ ok: true });
+  const sendImmediate = vi.fn().mockRejectedValue(new Error('Immediate dispatch failed'));
+  render(() => <RemoteQueue mission="remote" onSendImmediate={sendImmediate} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('1 Queued');
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: First' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Immediate dispatch failed');
+});
+

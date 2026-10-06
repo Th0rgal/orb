@@ -197,7 +197,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
         </details>}
       </Show>
       <Show when={p.attached || presentation().attached}><small class="user-context">Attached context</small></Show>
-      <Show when={!fork()}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
+      <Show when={!fork() && p.onSend}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
       </>}>
         <PromptEditor value={draft()} disabled={sending()} input={setDraft} cancel={()=>{if(!sending())setEditing(false);}} submit={()=>void submit()}/>
 

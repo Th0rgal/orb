@@ -15,18 +15,17 @@ export function QueuedMessages(p:{mission:string;editing?:string;onEdit?:(row:{i
    <span class="queue-count">{rows().length} {attention() ? "Needs attention" : "Queued"}</span>
    <Show when={canSendNow()&&!attention()&&!p.editing}><span class="queue-hint"><Ic.ReturnIcon size={13}/> to Send</span></Show>
    <div class="queue-options">
-    <Show when={canSendNow()}><button type="button" class="queue-send-now" title="Stops the current turn, then sends the next message" disabled={working()||!!p.editing} onClick={()=>void act(()=>sendQueuedNow(p.mission))}>Send now</button></Show>
     <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
    </div>
   </header>
-  <Show when={!collapsed()}><ol>
-   <For each={rows()}>{(row,index)=><li class="queue-row" classList={{editing:p.editing===row.id,failed:!!row.error}}>
+  <Show when={!collapsed()}><ol classList={{scrollable:rows().length>6}}>
+   <For each={rows()}>{row=><li class="queue-row" classList={{editing:p.editing===row.id,failed:!!row.error}}>
     <div class="queue-line">
      <span class="queue-text" title={row.text}>{row.text}</span>
      <Show when={p.editing===row.id} fallback={<span class="queue-row-actions">
-      <Show when={p.onEdit&&row.state==='queued'}><button type="button" title="Edit" aria-label={`Edit queued message: ${row.text}`} disabled={working()||!!p.editing} onClick={()=>p.onEdit!({id:row.id,text:row.text})}><Ic.PencilIcon size={14}/></button></Show>
-      <Show when={row.state==='queued'&&index()>firstQueued()}><button type="button" title="Send next" aria-label={`Send next: ${row.text}`} disabled={working()} onClick={()=>void act(()=>prioritizeQueuedMessage(row.id))}><Ic.ArrowUpIcon size={14}/></button></Show>
-      <button type="button" title="Remove" aria-label={`Remove queued message: ${row.text}`} disabled={working()||!canDiscardQueuedMessage(row)||p.editing===row.id} onClick={()=>void act(()=>removeQueuedMessage(row.id))}><Ic.TrashIcon size={14}/></button>
+      <Show when={p.onEdit&&row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${row.text}`} disabled={working()||!!p.editing} onClick={()=>p.onEdit!({id:row.id,text:row.text})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button></Show>
+      <Show when={row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Send now: ${row.text}`} disabled={working()||!!p.editing} onClick={()=>void act(()=>sendQueuedNow(p.mission,row.id))}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button></Show>
+      <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${row.text}`} disabled={working()||!canDiscardQueuedMessage(row)||p.editing===row.id} onClick={()=>void act(()=>removeQueuedMessage(row.id))}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
      </span>}><span class="queue-editing">Editing</span></Show>
     </div>
     <Show when={row.state==='dispatching'}><small>{row.error?'Needs review':'Sending…'}</small></Show>

@@ -58,17 +58,33 @@ test('cancelling an edit leaves the queue untouched',async({page})=>{
  await expect(queue.locator('.queue-text')).toHaveText(['ceci est un message dans la queue','et en voici un autre']);
 });
 
-test('send next reorders, the chevron collapses, and Enter on an empty draft sends the queue',async({page})=>{
+test('ArrowRight edits the first queued message, Escape cancels, the chevron collapses, and Enter on an empty draft sends the queue',async({page})=>{
  await page.goto('/tests/queued-messages.html');
- const queue=page.getByRole('region',{name:'Queued messages'});
+ const queue=page.getByRole('region',{name:'Queued messages'}),input=page.getByPlaceholder('Send follow-up');
  await expect(queue).toContainText('to Send');
- await page.getByRole('button',{name:'Send next: et en voici un autre'}).click();
- await expect(queue.locator('.queue-text')).toHaveText(['et en voici un autre','ceci est un message dans la queue']);
+ const editBtn=page.getByRole('button',{name:'Edit queued message: ceci est un message dans la queue'});
+ const sendNowBtn=page.getByRole('button',{name:'Send now: ceci est un message dans la queue'});
+ await expect(sendNowBtn).toBeVisible();
+ await expect(page.getByRole('button',{name:'Send now: et en voici un autre'})).toBeVisible();
+ await editBtn.hover();
+ await page.waitForTimeout(150);
+ await page.locator('main').screenshot({path:'test-results/orb-queue-hover-edit.png'});
+ await sendNowBtn.hover();
+ await page.waitForTimeout(150);
+ await page.locator('main').screenshot({path:'test-results/orb-queue-hover-send-now.png'});
+ await input.focus();
+ await input.press('ArrowRight');
+ await expect(input).toHaveValue('ceci est un message dans la queue');
+ await expect(queue).toContainText('Editing');
+ await page.locator('main').screenshot({path:'test-results/orb-queue-editing.png'});
+ await input.press('Escape');
+ await expect(input).toHaveValue('');
+ await expect(queue).not.toContainText('Editing');
  await page.getByRole('button',{name:'Hide queued messages'}).click();
  await expect(queue.locator('.queue-text')).toHaveCount(0);
  await page.getByRole('button',{name:'Show queued messages'}).click();
  await expect(queue.locator('.queue-text')).toHaveCount(2);
- await page.getByPlaceholder('Send follow-up').press('Enter');
+ await input.press('Enter');
  expect(await page.evaluate(()=>(window as unknown as {queueSent?:number}).queueSent)).toBe(1);
 });
 

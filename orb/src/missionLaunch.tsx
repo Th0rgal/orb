@@ -196,7 +196,9 @@ export function missionPhase(mission: Mission | null, activity: boolean) {
         ? mission?.tags?.includes("placement:client")
           ? "The backend restarted and marked this conversation interrupted. This does not confirm that the agent on your computer stopped."
           : "The backend restarted during this run. The conversation is preserved; send a follow-up to continue if it does not resume."
-        : reason === "orphan_no_runner" ? "The backend could not find an active runner." : mission?.status_message ?? reason?.replaceAll("_", " ") ?? "The mission stopped before completion." };
+        : reason === "orphan_no_runner" ? "The backend could not find an active runner."
+        : ["operator_cancelled_detached_run", "remote_job_cancelled"].includes(reason ?? "") ? "The run was stopped. Send a follow-up or click Resume to continue."
+        : mission?.status_message ?? reason?.replaceAll("_", " ") ?? "The mission stopped before completion." };
   }
   if (["completed","done"].includes(status)) return { label:"Completed", moving:false, detail:activity ? "" : "The mission completed without transcript output." };
   if (["awaiting_user","waiting_user","acknowledged"].includes(status)) return {label:"Ready for a follow-up",moving:false,detail:activity ? "" : "Send a message to continue this conversation."};

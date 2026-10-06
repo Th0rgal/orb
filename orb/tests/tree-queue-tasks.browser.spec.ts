@@ -176,11 +176,13 @@ test("remote queue appears while the message request is still pending",async({pa
   const queue=page.getByRole("region",{name:"Queued messages",exact:true});
   await expect(queue).toContainText("Continue overnight despite a slow connection");
   await expect(queue).toContainText("Sending…");
-  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toHaveCount(0);
+  await expect(queue.getByRole("button",{name:/Remove queued message/})).toHaveCount(0);
   expect(state.posts).toHaveLength(0);
   release();
   await expect(queue).toContainText("1 Queued");
   await expect(queue.locator(".queue-row")).toHaveCount(1);
-  await expect(queue.getByRole("button",{name:"Cancel",exact:true})).toBeVisible();
+  await expect(queue.getByRole("button",{name:"Edit queued message: Continue overnight despite a slow connection",exact:true})).toBeVisible();
+  await expect(queue.getByRole("button",{name:"Send now: Continue overnight despite a slow connection",exact:true})).toBeVisible();
+  await expect(queue.getByRole("button",{name:"Remove queued message: Continue overnight despite a slow connection",exact:true})).toBeVisible();
   expect(state.posts).toHaveLength(1);
 });
