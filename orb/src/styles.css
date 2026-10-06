@@ -1574,12 +1574,14 @@ button.fork-trigger:hover { color: var(--fg); }
 .prompt-edit { position: absolute; top: 8px; right: 8px; opacity: 0; background: var(--bg-elev); }
 .user:hover .prompt-edit, .prompt-edit:focus-visible { opacity: 1; }
 .prompt-editor { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: 0; color: var(--fg); font: inherit; line-height: inherit; resize: none; min-height: 1lh; max-height: none; display: block; padding: 0; }
-.user.editing { content-visibility: visible; width:var(--editing-width); min-height:var(--editing-height); max-width:100%; box-sizing:border-box; }
+.user.editing { content-visibility: visible; width:var(--editing-width); min-height:var(--editing-height); max-width:100%; box-sizing:border-box; border-color:var(--stroke-strong); }
 .scroll:has(.user.editing) { overflow-anchor: none; }
 .user.editing .prompt-editor { min-height: var(--editing-text-height, 1lh); }
-.prompt-editor-actions .send { flex: none; margin-left: auto; width:32px; height:32px; padding:0; border-radius:50%; display:grid; place-items:center; }
-.prompt-editor-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; white-space: normal; }
-.prompt-editor-actions > span { flex: 1; color: var(--fg-3); font-size: 11px; }
+.prompt-editor-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 24px; margin: 6px -30px 0 0; white-space: normal; }
+.prompt-editor-actions > .icon-btn { width: 22px; height: 22px; }
+.prompt-editor-actions > span { flex: 1; color: var(--fg-3); font-size: 11px; margin-left: 2px; }
+.prompt-editor-actions .send { flex: none; margin-left: auto; width: 24px; height: 24px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+.prompt-editor-actions .send:disabled { opacity: .35; cursor: default; }
 
 /* Files: conversation stays mounted beside the read-only workbench. */
 .app[data-files-open="true"] { grid-template-columns: var(--sb-w) minmax(420px,1fr) minmax(480px,var(--file-panel-width,45%)); }
@@ -2610,7 +2612,6 @@ select.orb-select-native:disabled { cursor: default; }
 .composer-image img { cursor: zoom-in; }
 
 /* A saved prompt must not turn the floating composer into a second transcript. */
-.prompt-editor-actions .send { width: auto; padding: 0 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .resend-status { color: var(--fg-3); font-size: 12px; margin: -12px 10px 20px; }
 .resend-status button { margin-left: 10px; text-decoration: underline; }
 
