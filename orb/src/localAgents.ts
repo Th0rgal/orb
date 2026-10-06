@@ -488,6 +488,7 @@ async function reconcileRun(id: string): Promise<void> {
   try {
     const state = await pollLocal(id);
     if (runVersions.get(id)!==version) return;
+    if (!state.done) recordLocalFailure(id, null);
     setRunning(prev => ({ ...prev, [id]: !state.done }));
     if(!state.done&&!followers.has(id))void followLocal(id,()=>{}).catch(console.error);
     setLiveText(prev => ({ ...prev, [id]: state.text }));
@@ -499,11 +500,27 @@ async function reconcileRun(id: string): Promise<void> {
   } catch (error) {
     // A transport error does not mean the process stopped.
     if (runVersions.get(id)===version && /no local run/i.test(String(error))) {
-      setRunning(prev => ({ ...prev, [id]: false }));
       if (localBinding(id) && !launching.has(id)) {
-        await nativeRecovery(id).catch(() => {});
-        // A failed recovery keeps the server fence. A deliberate send surfaces
-        // the exact error; background polling must not produce unhandled errors.
+        try {
+          await nativeRecovery(id);
+          if (runVersions.get(id)!==version) return;
+          recordLocalFailure(id, null);
+          setRunning(prev => ({ ...prev, [id]: false }));
+          window.dispatchEvent(new Event("orb:refresh"));
+        } catch {
+          // A failed recovery keeps the server fence. Do not mark the local run
+          // settled while another window or orphan process still holds it.
+          if (runVersions.get(id)===version) {
+            setRunning(prev => {
+              if (!Object.hasOwn(prev, id)) return prev;
+              const next = { ...prev };
+              delete next[id];
+              return next;
+            });
+          }
+        }
+      } else {
+        setRunning(prev => ({ ...prev, [id]: false }));
       }
     }
   }

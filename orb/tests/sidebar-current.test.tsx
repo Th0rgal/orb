@@ -47,6 +47,17 @@ describe("open conversation in the sidebar", () => {
     expect(view.getByText("Open")).toBeTruthy();
   });
 
+  it("reflects status transitions of the open conversation on its sidebar row immediately", async () => {
+    listed = [{ ...mission, status: "active" }];
+    const [current, setCurrent] = createSignal<Mission>({ ...mission, status: "active" });
+    const view = render(() => <LiveProjectsSection currentMission={current()} selected={() => "m:restored"}
+      harnessChoices={[]} onFork={() => {}} open={() => {}} onNewAgent={() => {}} onNewProject={() => {}} />);
+    const row = await view.findByRole("button", { name: "Open plan", exact: true });
+    expect(row.getAttribute("aria-description")).toBe("Running");
+    setCurrent({ ...mission, status: "interrupted" });
+    await waitFor(() => expect(view.getByRole("button", { name: "Open plan", exact: true }).getAttribute("aria-description")).toBe("Interrupted"));
+  });
+
   it("reopens a previously collapsed parent when navigating back to its child", async () => {
     const parent = { ...mission, id: "parent", title: "Parent" };
     const child = { ...mission, parent_mission_id: "parent" };

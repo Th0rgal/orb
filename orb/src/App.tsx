@@ -2661,6 +2661,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (transfer) void adoptTransferredWorkspace(transfer).catch(e => setSendError(String(e)));
   });
   const clientPlaced = () => !!mission()?.tags?.includes("placement:client");
+  createEffect(() => {
+    const status = mission()?.status;
+    if (!p.id || !clientPlaced() || !status || !localFailure(p.id) || localRunActive(p.id)) return;
+    if (!["failed", "not_feasible"].includes(status) && !queuedLocalMessages(p.id).some(row => !!row.result && ((row.result.exit_code != null && row.result.exit_code !== 0) || !!row.result.error))) {
+      recordLocalFailure(p.id, null);
+    }
+  });
   const [sendingImmediate, setSendingImmediate] = createSignal(false);
   const busy = () => {
     if(!p.id)return !p.launchError;
@@ -2954,7 +2961,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={clientPlaced() ? localRunActive(p.id) : busy() || remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />
