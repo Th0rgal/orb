@@ -56,3 +56,22 @@ export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[
  const visible=new Set(main.map(m=>m.id));
  return archived.filter(m=>m.status==="acknowledged"&&!visible.has(m.id));
 }
+
+export const ARCHIVE_DAY_MS = 24 * 60 * 60 * 1000;
+export const ARCHIVE_WEEK_MS = 7 * ARCHIVE_DAY_MS;
+
+/** Filter archived missions by minimum age (`updated_at` falling back to `created_at`). */
+export function filterArchivedMissionsByAge<M extends { updated_at?: string | null; created_at?: string | null }>(
+  rows: readonly M[],
+  maxAgeMs?: number,
+  now = Date.now(),
+): M[] {
+  if (!maxAgeMs) return [...rows];
+  const cutoff = now - maxAgeMs;
+  return rows.filter(mission => {
+    const raw = mission.updated_at || mission.created_at || "";
+    const timestamp = Date.parse(raw);
+    return Number.isFinite(timestamp) && timestamp <= cutoff;
+  });
+}
+

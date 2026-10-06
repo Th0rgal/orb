@@ -607,7 +607,7 @@ export function Composer(p: {
     }
     const sideMode = !p.textOnly && (mode() === "btw" || /^\/btw(?:\s|$)/.test(payload));
     if (sideMode && !p.onBtw) { setUploadError("Side questions require an existing conversation."); return; }
-    if (sideMode && !payload.replace(/^\/btw\s*/, "").trim() && !images().length && !uploaded.length) { p.onOpenBtw?.(); return; }
+    if (sideMode && !payload.replace(/^\/btw\s*/, "").trim() && !images().length && !uploaded.length) { setMode(null); p.onOpenBtw?.(); return; }
     const sentImages = images();
     const originalMode = mode();
     const originalUploads = uploaded;

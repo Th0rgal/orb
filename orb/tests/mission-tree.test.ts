@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows } from "../src/missionTree";
+import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed") => ({ id, parent_mission_id: parent, status });
 
@@ -44,3 +44,17 @@ test("an archived ancestor is shown once and returns to archives when its last c
  child.status="acknowledged";
  expect(archiveOnlyRows(rows,missionTreeRows(rows,m=>m.status!=="acknowledged")).map(m=>m.id)).toEqual(["parent","child","other"]);
 });
+
+test("filterArchivedMissionsByAge filters all, older than 1 day, and older than 1 week", () => {
+  const now = Date.UTC(2026, 9, 6, 12, 0, 0);
+  const rows = [
+    { id: "fresh", updated_at: new Date(now - 2 * 60 * 60 * 1000).toISOString() },
+    { id: "two-days", updated_at: new Date(now - 2 * ARCHIVE_DAY_MS).toISOString() },
+    { id: "eight-days", updated_at: new Date(now - 8 * ARCHIVE_DAY_MS).toISOString() },
+    { id: "created-fallback", updated_at: "", created_at: new Date(now - 10 * ARCHIVE_DAY_MS).toISOString() },
+  ];
+  expect(filterArchivedMissionsByAge(rows, undefined, now).map(r => r.id)).toEqual(["fresh", "two-days", "eight-days", "created-fallback"]);
+  expect(filterArchivedMissionsByAge(rows, ARCHIVE_DAY_MS, now).map(r => r.id)).toEqual(["two-days", "eight-days", "created-fallback"]);
+  expect(filterArchivedMissionsByAge(rows, ARCHIVE_WEEK_MS, now).map(r => r.id)).toEqual(["eight-days", "created-fallback"]);
+});
+

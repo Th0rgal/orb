@@ -2254,7 +2254,6 @@ select.orb-select-native:disabled { cursor: default; }
 /* Overlay layouts cover the toolbar, so keep a reachable close control. */
 @media(max-width:1150px) {
   .btw-sidebar .btw-actions { display:flex; }
-  .btw-sidebar .btw-actions > button:first-child { display:none; }
 }
 
 .file-panel-resize { touch-action:none; }
