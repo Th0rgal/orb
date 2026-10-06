@@ -68,7 +68,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, missionParent, missionTreeRows, archiveOnlyRows, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, type NestedMission } from "./missionTree";
 
 /** Sidebar section listing the core backend's projects with their missions
  * and hosted files. Replaces the demo projects when connected. */
@@ -249,7 +249,10 @@ export function LiveProjectsSection(p: {
   const [archivesLoading, setArchivesLoading] = createSignal(false);
   const [archivesError, setArchivesError] = createSignal<string | null>(null);
   const [archivesMore, setArchivesMore] = createSignal(false);
+  const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
   let archivesOffset = 0;
+  let archivesLoaded = false;
+  let archivesRequest: Promise<void> | null = null;
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
@@ -317,7 +320,11 @@ export function LiveProjectsSection(p: {
   const removeRow = (id: string) => {
     missionRevision++;
     for (const slug of Object.keys(missions)) setMissions(slug, rows => rows.filter(m => m.id !== id));
-    setArchivedMissions(rows => rows.filter(m => m.id !== id));
+    setArchivedMissions(rows => {
+      const next = rows.filter(m => m.id !== id);
+      archivesOffset = Math.max(0, archivesOffset - (rows.length - next.length));
+      return next;
+    });
     setSelectedAgents(ids => ids.filter(x => x !== id));
   };
   const forgetDeleted = (ids: string[]) => {
@@ -512,9 +519,9 @@ export function LiveProjectsSection(p: {
     return request;
   };
   createEffect(on(connectionVersion, () => {
-    setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard("");
+    setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null);
     setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null; setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
-    setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0;
+    setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0; archivesLoaded = false; archivesRequest = null;
     setCronUnsupported(false);
     setCronChecking(false);
     setCronInfo(null);
@@ -894,11 +901,66 @@ export function LiveProjectsSection(p: {
       if (currentConnection(version) && failures.length) setActionError(failures.join("; "));
     } finally { setBatchBusy(false); }
   };
+  const archivedMissionRows = (slug?: string): Mission[] => {
+    const rows = new Map<string, Mission>();
+    for (const mission of archivedMissions()) rows.set(mission.id, mission);
+    // Archived ancestors already shown around visible children have one row.
+    const inMain = Object.keys(missions).flatMap(s => visibleMissions(s));
+    return archiveOnlyRows([...rows.values()], inMain)
+      .filter(m => slug === undefined || (m.project ?? "") === slug)
+      .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+  };
+  const applyArchiveSelection = (maxAgeMs?: number, slug?: string) => {
+    const matching = filterArchivedMissionsByAge(archivedMissionRows(slug), maxAgeMs);
+    const ids = matching.map(m => m.id);
+    batch(() => {
+      setArchivesOpen(true);
+      if (slug !== undefined) setArchiveExpanded(slug, true);
+      for (const m of matching) setArchiveExpanded(m.project ?? "", true);
+      setSelectionActive(ids.length > 0);
+      setSelectedAgents(ids);
+      selectionAnchor = ids[0] ?? null;
+      setDeleteTargets(ids);
+    });
+  };
+  const selectAndDeleteArchives = async (maxAgeMs?: number, slug?: string) => {
+    setArchiveMenu(null); setMissionMenu(null); setForkTarget(null);
+    setArchivesOpen(true);
+    if (slug !== undefined) setArchiveExpanded(slug, true);
+    if (!archivesLoaded || archivesLoading() || archivesMore()) {
+      const version = connectionVersion();
+      if (archivesLoading() && archivesRequest) await archivesRequest;
+      if (!currentConnection(version)) return;
+      if (!archivesLoaded) await loadArchives(false);
+      while (currentConnection(version) && archivesMore() && !archivesError()) {
+        await loadArchives(true);
+      }
+      if (!currentConnection(version) || archivesError()) return;
+    }
+    applyArchiveSelection(maxAgeMs, slug);
+  };
+  const archiveDeleteMenuItems = (slug?: string): MenuEntry[] => [
+    { kind: "item", label: "Delete all…", icon: Ic.TrashIcon, danger: true, onClick: () => void selectAndDeleteArchives(undefined, slug) },
+    { kind: "item", label: "Delete older than 1 day…", icon: Ic.TrashIcon, danger: true, onClick: () => void selectAndDeleteArchives(ARCHIVE_DAY_MS, slug) },
+    { kind: "item", label: "Delete older than 1 week…", icon: Ic.TrashIcon, danger: true, onClick: () => void selectAndDeleteArchives(ARCHIVE_WEEK_MS, slug) },
+  ];
+  const openArchiveMenu = (e: MouseEvent, slug?: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionMenu(null);
+    setMissionMenu(null);
+    setControllerMenu(null);
+    setFileMenu(null);
+    setForkTarget(null);
+    if (!archivesLoaded && !archivesLoading()) void loadArchives();
+    setArchiveMenu({ x: e.clientX, y: e.clientY, slug });
+  };
   /** Fork the clicked mission without changing the currently open conversation. */
   const missionMenuItems = (mission: Mission, x: number, y: number): MenuEntry[] => selectedFor(mission.id).length > 1 ? [
     {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
     {kind: "item", label: `Archive ${selectedFor(mission.id).length} conversations`, icon: Ic.ArchiveIcon, onClick: () => void archiveSelection(mission.id)},
     {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
+    ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
     ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Fork conversation", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { const rect = anchor?.parentElement?.getBoundingClientRect(); setForkTarget({ mission, x: rect ? rect.right + 3 : x, y: anchor?.getBoundingClientRect().top ?? y }); } }] : []),
@@ -910,6 +972,7 @@ export function LiveProjectsSection(p: {
     ...(["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(mission.status)
       ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
       : []),
+    ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
   ];
   /** Right-click handler shared by every agent row. Suppresses the native menu
    * and the sidebar-wide one without opening a different conversation. */
@@ -917,6 +980,9 @@ export function LiveProjectsSection(p: {
     e.preventDefault();
     e.stopPropagation();
     setActionMenu(null);
+    setArchiveMenu(null);
+    setControllerMenu(null);
+    setFileMenu(null);
     setForkTarget(null);
     setSelectionActive(true);
     if (!selectedAgents().includes(mission.id)) { setSelectedAgents([mission.id]); selectionAnchor = mission.id; }
@@ -1108,11 +1174,7 @@ export function LiveProjectsSection(p: {
     return { id: `project:${slug}`, data: { kind: "project", slug, label: project.title || slug }, expanded: open, children };
   });
   const archiveNodes = (): Node[] => {
-    const rows = new Map<string, Mission>();
-    for (const mission of archivedMissions()) rows.set(mission.id, mission);
-    // Archived ancestors already shown around visible children have one row.
-    const inMain = Object.keys(missions).flatMap(slug => visibleMissions(slug));
-    const nodes = archiveOnlyRows([...rows.values()], inMain).sort((a,b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
+    const nodes = archivedMissionRows()
       .map(m => missionNode(m.project ?? "", { mission: m, children: [] }));
     for (const project of projects()) {
       const job = controllers[project.slug]?.job;
@@ -1129,19 +1191,28 @@ export function LiveProjectsSection(p: {
       expanded: !!archiveExpanded[slug], children,
     })).sort((a,b) => a.data.label.localeCompare(b.data.label));
   };
-  const loadArchives = async (more = false) => {
-    if (archivesLoading()) return;
+  const loadArchives = (more = false): Promise<void> => {
+    if (archivesLoading()) return archivesRequest ?? Promise.resolve();
     const version = connectionVersion(), revision = missionRevision;
     setArchivesLoading(true); setArchivesError(null);
-    try {
-      const rows = await listArchivedMissions(more ? archivesOffset : 0);
-      if (!currentConnection(version) || revision !== missionRevision) return;
-      const projected = rows.filter(m => !isBtwMission(m)).map(m => archiving.has(m.id) ? {...m,status:archiving.get(m.id)!} : m);
-      setArchivedMissions(previous => more ? [...previous, ...projected.filter(m => !previous.some(old => old.id === m.id))] : projected);
-      archivesOffset = (more ? archivesOffset : 0) + rows.length;
-      setArchivesMore(rows.length === 100);
-    } catch (error) { if (currentConnection(version)) setArchivesError(String(error)); }
-    finally { if (currentConnection(version)) setArchivesLoading(false); }
+    let run: Promise<void> | undefined;
+    run = (async () => {
+      try {
+        const rows = await listArchivedMissions(more ? archivesOffset : 0);
+        if (!currentConnection(version) || revision !== missionRevision) return;
+        const projected = rows.filter(m => !isBtwMission(m)).map(m => archiving.has(m.id) ? {...m,status:archiving.get(m.id)!} : m);
+        setArchivedMissions(previous => more ? [...previous, ...projected.filter(m => !previous.some(old => old.id === m.id))] : projected);
+        archivesOffset = (more ? archivesOffset : 0) + rows.length;
+        archivesLoaded = true;
+        setArchivesMore(rows.length === 100);
+      } catch (error) { if (currentConnection(version)) setArchivesError(String(error)); }
+      finally {
+        if (archivesRequest === run) archivesRequest = null;
+        if (currentConnection(version)) setArchivesLoading(false);
+      }
+    })();
+    archivesRequest = run;
+    return run;
   };
   const toggleArchives = () => {
     const open = !archivesOpen(); setArchivesOpen(open);
@@ -1234,10 +1305,10 @@ export function LiveProjectsSection(p: {
   const renderRow = (row: TreeRow<RowData>) => {
     const d = row.data;
     const contextMenu = (e: MouseEvent) => {
-      e.preventDefault(); e.stopPropagation(); setMissionMenu(null); setActionFocus(false);
+      e.preventDefault(); e.stopPropagation(); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setFileMenu(null); setActionFocus(false);
       setActionMenu({ x: e.clientX, y: e.clientY, slug: d.slug, path: d.path ?? "" });
     };
-    if (d.kind === "archive-project") return <button class="row archive-project-row" aria-expanded={row.expanded} onClick={() => setArchiveExpanded(d.slug, !archiveExpanded[d.slug])}>
+    if (d.kind === "archive-project") return <button class="row archive-project-row" aria-expanded={row.expanded} onClick={() => setArchiveExpanded(d.slug, !archiveExpanded[d.slug])} onContextMenu={e => openArchiveMenu(e, d.slug)}>
       <span class="row-ico" style={{ color: projectColor(d.slug) ?? "var(--fg-3)" }}><Show when={row.expanded} fallback={<SidebarIcon.Folder />}><SidebarIcon.FolderOpen /></Show></span>
       <span class="row-label">{d.label}</span>
       <SidebarIcon.ChevronRight size={12} class={`history-chevron ${row.expanded ? "open" : ""}`} />
@@ -1274,7 +1345,7 @@ export function LiveProjectsSection(p: {
         onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
         if (!d.controller) return;
         e.preventDefault(); e.stopPropagation();
-        setActionMenu(null); setMissionMenu(null);
+        setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null);
         setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,archived:!!d.job?.archived});
       }}>
         <span class="row-ico glyph"><CronGlyph job={d.job!} running={!!ticking()} /></span><span class="row-label">{d.label}</span>
@@ -1288,7 +1359,7 @@ export function LiveProjectsSection(p: {
       onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.kind === "file" && cutFile()?.slug === d.slug && cutFile()?.path === d.path ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id)) ? "mission-cut" : ""} ${d.mission ? (selectionActive() ? selectedAgents().includes(d.mission.id) : p.selected() === row.id) ? "active" : "" : p.selected() === row.id ? "active" : ""}`} {...tip}
       onPointerEnter={e => { tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) onMissionContext(e, d.mission); else {
-        e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null);
+        e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null);
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id); else { setSelectionActive(false); setSelectedAgents([]); p.open(row.id); } }}>
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
@@ -1315,13 +1386,13 @@ export function LiveProjectsSection(p: {
       <Show when={projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
       </Show>
-      <button class="section archive-section-toggle" aria-expanded={archivesOpen()} aria-controls="sidebar-archives" onClick={toggleArchives}>
+      <button class="section archive-section-toggle" aria-expanded={archivesOpen()} aria-controls="sidebar-archives" onClick={toggleArchives} onContextMenu={e => openArchiveMenu(e)}>
         <span class="archive-section-label">Archived</span>
         <Show when={archivesLoading() && archivesOpen()}><span class="archive-loading-icon" aria-hidden="true"><Ic.Spinner size={13} /></span></Show>
         <span class="archive-section-chevron"><SidebarIcon.ChevronRight size={12} class={`history-chevron ${archivesOpen() ? "open" : ""}`} /></span>
       </button>
       <Show when={archivesOpen()}>
-        <div id="sidebar-archives" aria-busy={archivesLoading()} onKeyDown={moveKey}>
+        <div id="sidebar-archives" aria-busy={archivesLoading()} onKeyDown={moveKey} onContextMenu={e => openArchiveMenu(e)}>
           <SidebarTree nodes={archiveNodes()} label="Archived conversations" selected={p.selected()} selectedIds={selectionActive() ? selectedAgents().map(id => `m:${id}`) : undefined} render={renderRow} />
           <Show when={archivesLoading()}><span class="archive-loading-announcement" role="status">Loading archives</span></Show>
           <Show when={archivesError()}><div class="row note" role="alert">Couldn’t load archives. <button onClick={() => void loadArchives()}>Retry</button></div></Show>
@@ -1335,6 +1406,7 @@ export function LiveProjectsSection(p: {
           <p>This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running or paused will be kept.</p>
         </Dialog>
       </Show>
+      <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
         {kind:"item",label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)}
       ]} onClose={()=>setControllerMenu(null)} />}</Show>

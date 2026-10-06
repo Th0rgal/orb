@@ -91,7 +91,7 @@ export function FilePanelButton() {
       >
         <Ic.FileIcon size={16} />
       </button>
-    </Show><Show when={side?.available()}><button class="files-toggle" title="Side question" aria-label="Side question" aria-expanded={side?.visible()} onClick={() => side?.visible() ? side.hide() : side?.show()}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 9h8M7 13h5"/></svg></button></Show></>
+    </Show><Show when={side?.available()}><button class="files-toggle" title="Toggle side question (⌘⇧J)" aria-keyshortcuts="Meta+Shift+J" aria-label="Side question" aria-expanded={side?.visible()} onClick={() => side?.visible() ? side.hide() : side?.show()}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 9h8M7 13h5"/></svg></button></Show></>
   );
 }
 export function FilePanelProvider(p: {
@@ -510,6 +510,19 @@ export function FilePanelProvider(p: {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!e.repeat) setMaximized(v => !v);
+      return;
+    }
+    if (openSide() && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) {
+        if (sideVisible()) setSideVisible(false);
+        else {
+          setFilesOpened(false);
+          setSideVisible(true);
+          openSide()?.();
+        }
+      }
       return;
     }
     if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {

@@ -20,7 +20,6 @@ export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files
 // Local side history stays separate from mission events and the main draft.
 export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
  const side=useSidePanel();
- const [docked,setDocked]=createSignal(false);
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
  const [history,setHistory]=createSignal<SideExchange[]>([]),[open,setOpen]=createSignal(false),[busy,setBusy]=createSignal(false);
  const [turnId,setTurnId]=createSignal(crypto.randomUUID());
@@ -60,7 +59,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
   setHistory((saved?.history??[]).map(row=>({...row,id:row.id??crypto.randomUUID()})));setBusy(false);setOpen(saved?.open??false);
-  setDocked(saved?.docked??false);setQuestion(saved?.pending?.question??'');
+  setQuestion(saved?.pending?.question??'');
   setAnswer(saved?.pending?.answer??'');
   setError(saved?.pending ? saved.pending.error || 'Side question interrupted. Retry to request a complete answer.' : '');
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
@@ -80,17 +79,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(String(e));setBusy(false);}});
   }
-  if(saved?.open&&saved.docked)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
+  if(saved?.open)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
   });
  }));
  createEffect(()=>{
   const current=key();
-  const snapshot={history:history(),draft:draft(),model:model(),open:docked()&&side?side.visible():open(),docked:docked(),
+  const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,
     pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments()}:undefined,
     queue:queue()};
   if(loadedKey()===current)void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
  });
- side?.register(()=>{setDocked(true);setOpen(true);});
+ side?.register(()=>setOpen(true));
  onCleanup(()=>{abort?.abort();side?.register(undefined);});
  const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[],retryTurn=false)=>{
   text=text.trim();if(!text)return false;
@@ -101,7 +100,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(selected!==key())return false;
    for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
    setQueue(rows=>[...rows,{id:crypto.randomUUID(),question:text,attachments}].slice(0,20));
-   setOpen(true);if(docked())side?.show();setDraft('');
+   setOpen(true);side?.show();setDraft('');
    revealSentQuestion();
    return true;
   }
@@ -114,7 +113,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(controller.signal.aborted||current!==key())return false;
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   setPendingAttachments(attachments);
-  setOpen(true);if(docked())side?.show();setBusy(true);setQuestion(text);setAnswer('');setError('');setDraft('');
+  setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setError('');setDraft('');
   revealSentQuestion();
   void askBtwAgent(p.mission,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
@@ -131,10 +130,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   .finally(()=>{if(current===key()&&abort===controller){setBusy(false);queueMicrotask(sendNext);}});
   return true;
  };
- const reveal=()=>{setOpen(true);if(docked())side?.show();};
+ const reveal=()=>{setOpen(true);side?.show();};
  p.ref({ask,open:reveal});
  const escape=(event:KeyboardEvent)=>{
-  if(event.key==='Escape'&&!event.defaultPrevented&&open()&&!docked()){
+  if(event.key==='Escape'&&!event.defaultPrevented&&open()&&!side){
    event.preventDefault();setOpen(false);
   }
  };
@@ -153,14 +152,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(!draft){setPreparing(false);return;}
   if(busy())return;
   setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setError('');setPreparing(true);
-  setOpen(true);if(docked())side?.show();revealSentQuestion();
+  setOpen(true);side?.show();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
  return <>
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
-  <Show when={open()}><Portal mount={docked() ? side?.target() : inline}><section class="btw-panel" aria-label="Side questions">
-   <header><div><strong>Side question</strong></div><div class="btw-actions"><Show when={side}><button class="icon-btn" aria-label={docked()?"Move side question below conversation":"Move side question to right panel"} title={docked()?"Move below conversation":"Move to right panel"} onClick={()=>{if(docked()){setDocked(false);side?.hide();}else{setDocked(true);side?.show();}}}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d={docked()?"m11 9-3 3 3 3":"m8 9 3 3-3 3"}/></svg></button></Show><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);if(docked())side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
+  <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
+   <header><div><strong>Side question</strong></div><div class="btw-actions"><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={scroll}>
     <For each={turns}>{exchange=><article data-side-turn={exchange.id}>
      <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>

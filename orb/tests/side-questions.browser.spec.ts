@@ -13,8 +13,10 @@ test('side conversation stays separate while the agent works',async({page})=>{
  await expect(page.getByPlaceholder('Send follow-up')).toHaveValue(/Keep this draft\n\nAbout this side question/);
  await page.getByPlaceholder('Ask a side question…').fill('Keep this side draft');
  await expect(page.getByPlaceholder('Ask a side question…')).toHaveCSS('resize','none');
- if(!await page.locator('.btw-sidebar .btw-panel').isVisible())await page.getByLabel('Move side question to right panel').click();
  await expect(page.locator('.btw-sidebar .btw-panel')).toBeVisible();
+ await expect(page.locator('main .btw-panel')).toHaveCount(0);
+ await expect(page.getByLabel('Move side question to right panel')).toHaveCount(0);
+ await expect(page.getByLabel('Move side question below conversation')).toHaveCount(0);
  await expect(page.getByPlaceholder('Ask a side question…')).toHaveValue('Keep this side draft');
  await page.getByRole('button',{name:'Files',exact:true}).click();
  await expect(page.locator('.btw-sidebar')).not.toBeVisible();
@@ -66,7 +68,7 @@ test('drops images and documents into either composer and sends them only to btw
  const requests=await mockAgent(page,'Received attachments.');
  await page.goto('/tests/side-questions.html');
  for(const side of [false,true]){
-  if(side)await page.getByRole('button',{name:'Side question',exact:true}).click();
+  if(side&&!await page.locator('.btw-sidebar').isVisible())await page.getByRole('button',{name:'Side question',exact:true}).click();
   await page.getByPlaceholder(side?'Ask a side question…':'Send follow-up').fill(side?'Describe these files':'/btw Describe these files');
   const input=page.getByPlaceholder(side?'Ask a side question…':'Ask without interrupting…');
   const composer=input.locator('..').locator('..');
@@ -146,9 +148,14 @@ test('resizing the side panel keeps the visible conversation paragraph anchored'
  await expect(page.locator('main')).not.toHaveAttribute('data-panel-resizing','true');
 });
 
-test('side question shares expand and restore shortcuts with Files',async({page})=>{
+test('side question toggles with Meta+Shift+J and shares expand and restore shortcuts with Files',async({page})=>{
  await page.goto('/tests/side-questions.html');
- await page.getByRole('button',{name:'Side question',exact:true}).click();
+ await page.keyboard.press('Meta+Shift+j');
+ await expect(page.locator('.btw-sidebar')).toBeVisible();
+ await page.keyboard.press('Meta+Shift+j');
+ await expect(page.locator('.btw-sidebar')).not.toBeVisible();
+ await page.keyboard.press('Meta+Shift+j');
+ await expect(page.locator('.btw-sidebar')).toBeVisible();
  await page.keyboard.press('Meta+Shift+f');
  await expect(page.locator('.btw-sidebar')).toHaveClass(/maximized/);
  const panelTop=await page.locator('.btw-sidebar').evaluate(el=>el.getBoundingClientRect().top);
