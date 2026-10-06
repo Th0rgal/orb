@@ -1370,6 +1370,7 @@ async fn run_codex_turn(
         cancel_token: Some(cancel.clone()),
         extra_env,
         continuity,
+        mission_id: Some(mission_id),
         external_chatgpt_auth: prepared_oauth_account.as_ref().map(|account| {
             crate::backend::codex::client::CodexExternalChatgptAuth {
                 access_token: account.access_token.clone(),

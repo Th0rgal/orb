@@ -5,9 +5,10 @@
 //! Hermes owns the job; this module only exposes a read model and lifecycle
 //! actions so a client can show the controller inside its project:
 //!
-//! - `GET  /api/projects/:slug/controller`         — job, settings, recent runs
-//! - `PUT  /api/projects/:slug/controller`         — edit the job's settings
-//! - `POST /api/projects/:slug/controller/action`  — `pause` | `resume` | `run` | `archive` | `restore`
+//! - `GET    /api/projects/:slug/controller`        — job, settings, recent runs
+//! - `PUT    /api/projects/:slug/controller`        — edit the job's settings
+//! - `DELETE /api/projects/:slug/controller`        — remove the controller job from Hermes
+//! - `POST   /api/projects/:slug/controller/action` — `pause` | `resume` | `run` | `archive` | `restore` | `delete`
 //!
 //! The data is read straight from the Hermes cron store that lives on the
 //! same host (`<hermes home>/cron/jobs.json`, `executions.db`, and one
@@ -845,11 +846,57 @@ async fn update_controller(
     Ok(Json(view))
 }
 
+async fn delete_controller(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<Json<ControllerView>, ApiError> {
+    if !super::projects_overview::is_plain_key(&slug) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
+    }
+    let slug = super::projects_overview::canonicalize_project_slug(&slug);
+    let recorded = recorded_controller_id(&state, &slug);
+    let (_, job_id) = resolve_controller(slug.clone(), recorded).await?;
+
+    match super::project_crons::hermes(
+        &state,
+        reqwest::Method::DELETE,
+        &format!("/api/jobs/{job_id}"),
+        None,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(response) if response.status() == StatusCode::NOT_FOUND => {}
+        Err(response) => {
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .map_err(internal)?;
+            return Err((status, String::from_utf8_lossy(&body).into_owned()));
+        }
+    }
+
+    state
+        .projects
+        .clear_controller_binding(&slug, &job_id)
+        .map_err(internal)?;
+
+    Ok(Json(ControllerView {
+        slug,
+        job: None,
+        settings: None,
+        runs: Vec::new(),
+    }))
+}
+
 async fn controller_action(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(slug): AxumPath<String>,
     Json(req): Json<ActionRequest>,
 ) -> Result<Json<ControllerView>, ApiError> {
+    if req.action.as_str() == "delete" {
+        return delete_controller(State(state), AxumPath(slug)).await;
+    }
     if !super::projects_overview::is_plain_key(&slug) {
         return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
     }
@@ -858,12 +905,10 @@ async fn controller_action(
         "resume" => "resume",
         "run" | "trigger" => "run",
         other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "unknown action '{other}'; expected pause, resume, run, archive or restore"
-                ),
-            ))
+            let msg = format!(
+                "unknown action '{other}'; expected pause, resume, run, archive, restore or delete"
+            );
+            return Err((StatusCode::BAD_REQUEST, msg));
         }
     };
     let slug = super::projects_overview::canonicalize_project_slug(&slug);
@@ -1000,7 +1045,9 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
     Router::new()
         .route(
             "/:slug/controller",
-            get(get_controller).put(update_controller),
+            get(get_controller)
+                .put(update_controller)
+                .delete(delete_controller),
         )
         .route("/:slug/controller/action", post(controller_action))
 }

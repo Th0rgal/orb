@@ -1240,6 +1240,23 @@ impl ProjectsStore {
         Ok(())
     }
 
+    pub fn clear_controller_binding(&self, slug: &str, job_id: &str) -> Result<(), String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "UPDATE projects SET controller_cron_id = NULL WHERE slug = ?1 AND controller_cron_id = ?2",
+                params![slug, job_id],
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM controller_archives WHERE slug = ?1 AND job_id = ?2",
+                params![slug, job_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn bind_project_cron(&self, slug: &str, job_id: &str) -> Result<(), String> {
         self.bind_project_cron_in_folder(slug, job_id, "")
     }

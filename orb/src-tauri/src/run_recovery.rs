@@ -53,7 +53,10 @@ fn nested_git_repo_between(path: &std::path::Path, root: &std::path::Path) -> bo
         if dir == root {
             return false;
         }
-        if dir.join(".git").exists() {
+        if dir.join(".git").exists()
+            || dir.join("AGENTS.md").exists()
+            || dir.join("CLAUDE.md").exists()
+        {
             return true;
         }
         cur = dir.parent();
@@ -101,11 +104,18 @@ fn child_git_repo_process_does_not_block_parent_workspace_recovery() {
     let root = tempfile::tempdir().unwrap();
     let sub_repo = root.path().join("paloma/sandboxed_sh");
     std::fs::create_dir_all(sub_repo.join(".git")).unwrap();
+    let multi_repo_workspace = root.path().join("paloma");
+    std::fs::write(multi_repo_workspace.join("AGENTS.md"), "# Paloma\n").unwrap();
     let plain_sub = root.path().join("scratch");
     std::fs::create_dir_all(&plain_sub).unwrap();
     assert!(!process_blocks_workspace(
         "agy",
         Some(&sub_repo),
+        root.path()
+    ));
+    assert!(!process_blocks_workspace(
+        "agy",
+        Some(&multi_repo_workspace),
         root.path()
     ));
     assert!(process_blocks_workspace(

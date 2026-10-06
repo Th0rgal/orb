@@ -836,6 +836,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             axum::routing::delete(control::remove_from_queue),
         )
         .route(
+            "/api/control/queue/:id/send-now",
+            post(control::send_queued_now),
+        )
+        .route(
             "/api/control/queue",
             axum::routing::delete(control::clear_queue),
         )

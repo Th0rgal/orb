@@ -1148,6 +1148,16 @@ impl NativeGrokObserver {
             self.stream.error =
                 Some("Antigravity conversation identity was not durably persisted".into());
         }
+        if let Some(err) = self
+            .stream
+            .antigravity
+            .as_ref()
+            .and_then(|s| s.finish().err())
+        {
+            if self.stream.error.is_none() {
+                self.stream.error = Some(err);
+            }
+        }
         let success = succeeded
             && self
                 .stream

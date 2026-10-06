@@ -42,6 +42,8 @@ import {
   archiveProject,
   bumpProjects,
   createProjectCron,
+  deleteProjectController,
+  deleteProjectCron,
   listProjectCrons,
   getProjectCronDefaults,
   mkdirProjectFile,
@@ -294,7 +296,10 @@ export function LiveProjectsSection(p: {
   const [cronDefaults, setCronDefaults] = createSignal<import("./api").ProjectCronDefaults | null>(null);
   const [defaultsError, setDefaultsError] = createSignal<string | null>(null);
   const [crons, setCrons] = createStore<Record<string, import("./api").ControllerJob[]>>({});
-  const [controllerMenu, setControllerMenu] = createSignal<{x:number;y:number;slug:string;archived:boolean} | null>(null);
+  const [controllerMenu, setControllerMenu] = createSignal<{x:number;y:number;slug:string;id?:string;name:string;controller:boolean;archived:boolean} | null>(null);
+  const [deleteCronTarget, setDeleteCronTarget] = createSignal<{slug:string;id?:string;name:string;controller:boolean} | null>(null);
+  const [deletingCron, setDeletingCron] = createSignal(false);
+  const [deleteCronError, setDeleteCronError] = createSignal<string | null>(null);
   const [actionMenu, setActionMenu] = createSignal<{ x: number; y: number; slug: string; path: string } | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ slug: string; path: string } | null>(null);
   const [folderName, setFolderName] = createSignal("");
@@ -683,7 +688,7 @@ export function LiveProjectsSection(p: {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
     deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
     setDeletingIds(new Set<string>());
-    setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null);
+    setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null); setControllerMenu(null); setDeleteCronTarget(null); setDeletingCron(false); setDeleteCronError(null);
     setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null; setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
     setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0; archivesLoaded = false; archivesRequest = null;
     setCronUnsupported(false);
@@ -1009,6 +1014,34 @@ export function LiveProjectsSection(p: {
         void loadDir(slug, "");
       }
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+  };
+  const confirmDeleteCron = async () => {
+    const target = deleteCronTarget();
+    if (!target || deletingCron()) return;
+    const version = connectionVersion();
+    setDeletingCron(true);
+    setDeleteCronError(null);
+    try {
+      if (target.controller) {
+        const view = await deleteProjectController(target.slug);
+        if (version !== connectionVersion()) return;
+        cachePut(`c:${target.slug}:`, view);
+        setControllers(target.slug, reconcile(view));
+        if (p.selected() === `c:${target.slug}`) p.open(null);
+      } else if (target.id) {
+        await deleteProjectCron(target.slug, target.id);
+        if (version !== connectionVersion()) return;
+        cachePut(`c:${target.slug}:${target.id}`, { slug: target.slug, job: null, runs: [] });
+        setCrons(target.slug, (list) => (list ?? []).filter((j) => j.id !== target.id));
+        if (p.selected() === `pc:${target.slug}:${target.id}`) p.open(null);
+      }
+      setDeleteCronTarget(null);
+      bumpProjects();
+    } catch (e) {
+      if (version === connectionVersion()) setDeleteCronError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingCron(false);
+    }
   };
   const changeArchiveState = async (mission: Mission, restore: boolean) => {
     if (archiving.has(mission.id) || deletingIds().has(mission.id)) return false;
@@ -1546,10 +1579,9 @@ export function LiveProjectsSection(p: {
       const ticking = () => d.controller && (controllers[d.slug]?.runs ?? []).some(r => r.status === "running" || r.status === "claimed");
       return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${p.selected() === row.id ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron"]))} onClick={() => p.open(row.id)}
         onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
-        if (!d.controller) return;
         e.preventDefault(); e.stopPropagation();
         setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null);
-        setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,archived:!!d.job?.archived});
+        setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,id:d.controller ? undefined : d.job?.id,name:d.label,controller:!!d.controller,archived:!!d.job?.archived});
       }}>
         <span class="row-ico glyph"><CronGlyph job={d.job!} running={!!ticking()} /></span><span class="row-label">{d.label}</span>
         <span class="row-machine"><Show when={!d.job!.enabled || d.job!.state === "paused"} fallback={<span class="row-machine-name cron-next">{ticking() ? "ticking" : untilLabel(d.job!.next_run_at, Date.now())}</span>}>
@@ -1612,8 +1644,10 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
-        {kind:"item",label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)}
+        ...(menu.controller ? [{kind:"item" as const,label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)},{kind:"sep" as const}] : []),
+        {kind:"item",label:"Delete…",icon:Ic.TrashIcon,danger:true,onClick:()=>{setControllerMenu(null);setDeleteCronError(null);setDeleteCronTarget({slug:menu.slug,id:menu.id,name:menu.name,controller:menu.controller});}}
       ]} onClose={()=>setControllerMenu(null)} />}</Show>
+      <Show when={deleteCronTarget()} keyed>{target => <ConfirmDialog title="Delete cron?" description={`Delete ${target.name} from Hermes? This cannot be undone.`} action="Delete" busy={deletingCron()} error={deleteCronError()} onConfirm={() => void confirmDeleteCron()} onClose={() => !deletingCron() && setDeleteCronTarget(null)} />}</Show>
       <Show when={fileMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
         { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
         { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },

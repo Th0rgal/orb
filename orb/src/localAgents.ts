@@ -507,10 +507,11 @@ async function reconcileRun(id: string): Promise<void> {
           recordLocalFailure(id, null);
           setRunning(prev => ({ ...prev, [id]: false }));
           window.dispatchEvent(new Event("orb:refresh"));
-        } catch {
+        } catch (recoveryError) {
           // A failed recovery keeps the server fence. Do not mark the local run
           // settled while another window or orphan process still holds it.
           if (runVersions.get(id)===version) {
+            recordLocalFailure(id, recoveryError);
             setRunning(prev => {
               if (!Object.hasOwn(prev, id)) return prev;
               const next = { ...prev };

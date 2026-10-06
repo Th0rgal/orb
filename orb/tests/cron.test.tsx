@@ -182,3 +182,14 @@ it("shows prompt limit failures next to Save and retains the edited instruction"
  expect(input.value.length).toBe(7466);
  expect(screen.getByText('7,466 / 5,000 characters')).toBeTruthy();
 });
+
+it("deletes a cron from the Settings page after confirmation", async () => {
+  const onDelete = vi.fn(async () => {});
+  render(() => <CronForm draftKey="delete-test" view={view()} save={async () => view()} onSaved={() => {}} onDelete={onDelete} />);
+  const deleteBtn = screen.getByRole("button", { name: "Delete cron…" });
+  expect(deleteBtn).toBeTruthy();
+  fireEvent.click(deleteBtn);
+  expect(screen.getByRole("dialog", { name: "Delete cron?" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+  await waitFor(() => expect(onDelete).toHaveBeenCalledOnce());
+});

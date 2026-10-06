@@ -17,10 +17,10 @@ use uuid::Uuid;
 /// control actor answers by handing over one message queued for the mission.
 pub(crate) const PARKED_MARKER: &str = "claudecode_parked";
 
-/// Stream-json stdin is required: a parked session receives its next message
-/// there.
+/// Stream-json stdin is required: a parked or live session receives its next
+/// message there.
 pub(crate) fn enabled() -> bool {
-    crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
+    crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", true)
 }
 
 static PARKED: LazyLock<Mutex<HashMap<Uuid, oneshot::Sender<String>>>> =
@@ -50,6 +50,42 @@ pub(crate) fn deliver(mission_id: Uuid, content: String) -> Result<(), String> {
         return Err(content);
     };
     slot.send(content)
+}
+
+static MIDTURN: LazyLock<Mutex<HashMap<Uuid, mpsc::UnboundedSender<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// User messages forced immediately ("Send now") into a live turn arrive here
+/// and are injected into the running harness without cancelling the turn.
+pub(crate) fn midturn_messages(mission_id: Uuid) -> mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    MIDTURN.lock().unwrap().insert(mission_id, tx);
+    rx
+}
+
+/// True when the mission has a parked or live mid-turn session that can accept
+/// a user message immediately without restarting the turn.
+pub(crate) fn can_deliver_now(mission_id: Uuid) -> bool {
+    PARKED.lock().unwrap().contains_key(&mission_id)
+        || MIDTURN
+            .lock()
+            .unwrap()
+            .get(&mission_id)
+            .is_some_and(|tx| !tx.is_closed())
+}
+
+/// Deliver a user message immediately to a parked or live mid-turn session.
+/// Returns `Err(content)` when no live session can take it.
+pub(crate) fn deliver_now(mission_id: Uuid, content: String) -> Result<(), String> {
+    let content = match deliver(mission_id, content) {
+        Ok(()) => return Ok(()),
+        Err(content) => content,
+    };
+    let sender = MIDTURN.lock().unwrap().get(&mission_id).cloned();
+    match sender {
+        Some(tx) => tx.send(content).map_err(|err| err.0),
+        None => Err(content),
+    }
 }
 
 static EFFORT: LazyLock<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Option<String>>>>> =
@@ -108,6 +144,7 @@ impl Drop for SessionGuard {
     fn drop(&mut self) {
         ATTACHED.lock().unwrap().remove(&self.0);
         EFFORT.lock().unwrap().remove(&self.0);
+        MIDTURN.lock().unwrap().remove(&self.0);
         unpark(self.0);
     }
 }
@@ -214,6 +251,21 @@ mod tests {
         assert_eq!(request["request"]["subtype"], "apply_flag_settings");
         assert_eq!(request["request"]["settings"]["effortLevel"], "xhigh");
         assert!(effort_request(None)["request"]["settings"]["effortLevel"].is_null());
+    }
+
+    #[test]
+    fn midturn_delivery_reaches_live_session_and_cleans_up_on_drop() {
+        let mission = Uuid::new_v4();
+        assert!(!can_deliver_now(mission));
+        assert_eq!(deliver_now(mission, "early".into()), Err("early".into()));
+        let guard = SessionGuard::attach(mission, false);
+        let mut rx = midturn_messages(mission);
+        assert!(can_deliver_now(mission));
+        assert_eq!(deliver_now(mission, "midturn".into()), Ok(()));
+        assert_eq!(rx.try_recv().unwrap(), "midturn");
+        drop(guard);
+        assert!(!can_deliver_now(mission));
+        assert_eq!(deliver_now(mission, "late".into()), Err("late".into()));
     }
 
     #[test]

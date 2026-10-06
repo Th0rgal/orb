@@ -17,7 +17,7 @@ export function RemoteQueue(p: {
   pending?: {id:string;content:string};
   editing?: string;
   onEdit?: (row: {id: string; text: string; remote: true}) => void;
-  onSendImmediate?: (ordered: {id: string; content: string; attached?: boolean}[]) => Promise<void>;
+  onSendImmediate?: (ordered: {id: string; content: string; attached?: boolean}[], liveInjected?: {id: string; content: string; attached?: boolean}[]) => Promise<void>;
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
   ref?: (handle: RemoteQueueHandle) => void;
@@ -77,6 +77,17 @@ export function RemoteQueue(p: {
     setWorking(true); setError("");
     const version = connectionVersion(), mission = p.mission;
     try {
+      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" }).catch(() => ({ delivered: false }));
+      if (live?.delivered) {
+        if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
+        revision++;
+        deletedIds.add(target.id);
+        setRows(previous => previous.filter(row => row.id !== target.id));
+        p.onRows(rows().map(row => row.id));
+        p.onCancel(target.id);
+        await p.onSendImmediate?.([], [{ id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined }]);
+        return;
+      }
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
       const payload = ordered.map(r => {
         const presented = messagePresentation(r.content);

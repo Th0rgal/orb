@@ -3,7 +3,7 @@ import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import { MdView } from "./Markdown";
 import { pollWhileVisible } from "./poll";
 import { ControllerSettingsPanel } from "./ControllerSettings";
-import { bumpProjects, controllerAction, deleteProjectCron, getProjectController, getProjectCron, getProjectSteers, isConnected, projectCronAction, updateProjectCron, type ControllerJob, type ControllerRun, type ControllerView as View, type ProjectSteers, type ProjectSteer } from "./api";
+import { bumpProjects, controllerAction, deleteProjectController, deleteProjectCron, getProjectController, getProjectCron, getProjectSteers, isConnected, projectCronAction, updateProjectCron, type ControllerJob, type ControllerRun, type ControllerView as View, type ProjectSteers, type ProjectSteer } from "./api";
 import { SteerComposer } from "./SteerComposer";
 import { cacheLoad, cachePeek, cachePut, cacheRemember } from "./pageCache";
 import { ControllerSkeleton } from "./Skeleton";
@@ -270,10 +270,11 @@ export function ControllerView(p: { slug: string; id?: string }) {
   };
 
   const removeCron = async () => {
-    if (!p.id || busy()) return;
+    if (busy()) return;
     setBusy("delete");
     try {
-      await deleteProjectCron(p.slug, p.id);
+      if (p.id) await deleteProjectCron(p.slug, p.id);
+      else await deleteProjectController(p.slug);
       const cleared: View = { slug: p.slug, job: null, runs: [] };
       cachePut(viewKey(), cleared);
       setView(cleared);
@@ -281,6 +282,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
       bumpProjects();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      throw e;
     } finally {
       setBusy(null);
     }
@@ -334,7 +336,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
                     <Show when={!!p.id}>
-                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron()}>
+                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(() => {})}>
                         {busy() === "delete" ? "Deleting…" : "Delete"}
                       </button>
                     </Show>
@@ -357,7 +359,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                 </div>
 
                 <Show when={tab() === "settings"}>
-                  <ControllerSettingsPanel slug={p.slug} id={p.id} view={view()!} onSaved={setView} save={p.id ? (patch) => updateProjectCron(p.slug, p.id!, patch) : undefined} />
+                  <ControllerSettingsPanel slug={p.slug} id={p.id} view={view()!} onSaved={setView} save={p.id ? (patch) => updateProjectCron(p.slug, p.id!, patch) : undefined} onDelete={removeCron} deleting={busy() === "delete"} deleteDisabled={!!busy() || running()} />
                 </Show>
                 <div class="cr-timeline" style={{ display: tab() === "runs" ? "block" : "none" }}>
                   <For each={entries()}>

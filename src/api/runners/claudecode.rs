@@ -1305,9 +1305,7 @@ pub fn run_claudecode_turn<'a>(
         // MID-TURN (picked up after the current tool call completes, like
         // typing in the interactive CLI). The positional prompt is ignored
         // by the CLI in this mode, so it is not added.
-        let stream_input = native_plan
-            || (crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
-                && !force_argv_prompt);
+        let stream_input = native_plan || (super::live_session::enabled() && !force_argv_prompt);
         if stream_input {
             args.push("--input-format".to_string());
             args.push("stream-json".to_string());
@@ -1872,6 +1870,8 @@ pub fn run_claudecode_turn<'a>(
         let _session_guard = super::live_session::SessionGuard::attach(mission_id, keep_alive);
         let mut effort_changes =
             (stream_input && !native_plan).then(|| super::live_session::effort_changes(mission_id));
+        let mut midturn_messages = (stream_input && !native_plan)
+            .then(|| super::live_session::midturn_messages(mission_id));
         let mut background = super::live_session::ClaudeBackground::default();
         let mut parked = false;
         let mut parked_slot: Option<tokio::sync::oneshot::Receiver<String>> = None;
@@ -2132,6 +2132,33 @@ pub fn run_claudecode_turn<'a>(
                         })
                     };
                     tracing::info!(mission_id = %mission_id, ?effort, applied, "Effort change for the running Claude session");
+                }
+                Some(content) = async { midturn_messages.as_mut().expect("guarded by is_some").recv().await }, if midturn_messages.is_some() => {
+                    let frame = serde_json::json!({
+                        "type": "user",
+                        "message": { "role": "user", "content": [{ "type": "text", "text": content }] }
+                    });
+                    let delivered = if let Some(prompt) = pending_initial_prompt.as_mut() {
+                        *prompt = format!("{prompt}{frame}\n");
+                        true
+                    } else {
+                        stdin_writer.as_mut().is_some_and(|w| {
+                            use std::io::Write as _;
+                            writeln!(w, "{}", frame).and_then(|_| w.flush()).is_ok()
+                        })
+                    };
+                    if delivered {
+                        tracing::info!(mission_id = %mission_id, "Injected user message mid-turn into running Claude session");
+                        if parked {
+                            parked = false;
+                            parked_slot = None;
+                            super::live_session::unpark(mission_id);
+                            turn_wait_state = ClaudeTurnWaitState::AwaitingClaude;
+                            idle_deadline = claudecode_idle_deadline(turn_wait_state, Instant::now(), idle_timeout, tool_idle_timeout, post_tool_result_idle_timeout, tool_timeout_override);
+                        } else {
+                            extra_input_pending = true;
+                        }
+                    }
                 }
                 message = async { parked_slot.as_mut().expect("guarded by is_some").await }, if parked_slot.is_some() => {
                     parked_slot = None;
@@ -2429,6 +2456,11 @@ pub fn run_claudecode_turn<'a>(
                                 }
                             }
                             turn_wait_state = ClaudeTurnWaitState::AwaitingClaude;
+                        } else if main_thread && matches!(&claude_event, ClaudeEvent::Assistant(_))
+                        {
+                            // A new assistant message arrived after mid-turn input was injected,
+                            // meaning the CLI consumed the mid-turn input within this turn.
+                            extra_input_pending = false;
                         }
                     }
                     if !matches!(claude_event, ClaudeEvent::System(_)) {
@@ -3753,7 +3785,7 @@ pub(crate) async fn run_claudecode_turn_with_recovery(
         return result;
     }
     let mut force_argv_prompt = false;
-    if crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false)
+    if super::live_session::enabled()
         && claudecode_result_is_startup_transport_failure(&result)
         && !cancel.is_cancelled()
         && !crate::api::routes::is_shutdown_initiated()

@@ -32,6 +32,8 @@ pub struct CodexConfig {
     pub extra_env: std::collections::HashMap<String, String>,
     /// Durable per-mission native identity. None preserves the legacy driver.
     pub continuity: Option<super::continuity::Config>,
+    /// Optional mission ID used to register mid-turn live user message steering.
+    pub mission_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ impl Default for CodexConfig {
             cancel_token: None,
             extra_env: std::collections::HashMap::new(),
             continuity: None,
+            mission_id: None,
         }
     }
 }

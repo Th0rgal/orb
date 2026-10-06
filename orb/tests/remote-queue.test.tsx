@@ -107,3 +107,32 @@ it('keeps the error alert visible when sendNow fails after clearing the queue', 
   expect(alert.textContent).toContain('Immediate dispatch failed');
 });
 
+it('injects the selected queued message live without deleting remaining queued messages when the harness accepts mid-turn input', async () => {
+  backend.list.mockResolvedValue([
+    { id: 'one', content: 'First', source: 'remote-queue' },
+    { id: 'two', content: 'Steer live now', source: 'remote-queue' },
+  ]);
+  backend.api.mockImplementation((path: string, init?: RequestInit) => {
+    if (path === '/api/control/queue/two/send-now' && init?.method === 'POST') {
+      return Promise.resolve({ ok: true, delivered: true });
+    }
+    return Promise.resolve({ ok: true });
+  });
+  const sendImmediate = vi.fn().mockResolvedValue(undefined);
+  const cancel = vi.fn();
+  const rows = vi.fn();
+  render(() => <RemoteQueue mission="remote" onSendImmediate={sendImmediate} onRows={rows} onCancel={cancel}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Steer live now' }));
+  await waitFor(() => expect(sendImmediate).toHaveBeenCalledWith(
+    [],
+    [{ id: 'two', content: 'Steer live now', attached: undefined }],
+  ));
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/two/send-now', { method: 'POST' });
+  expect(backend.api).not.toHaveBeenCalledWith('/api/control/queue/one', { method: 'DELETE' });
+  expect(backend.api).not.toHaveBeenCalledWith('/api/control/queue/two', { method: 'DELETE' });
+  expect(cancel).toHaveBeenCalledWith('two');
+  expect(cancel).not.toHaveBeenCalledWith('one');
+  expect(screen.getByText('First')).toBeTruthy();
+  expect(screen.queryByText('Steer live now')).toBeNull();
+});

@@ -129,6 +129,13 @@ pub struct Stream {
     pub agent_response_active: bool,
     completed_steps: HashSet<u64>,
     tools: HashSet<String>,
+    pub background_tasks: BTreeMap<String, bool>,
+}
+
+fn parse_background_task_started(output: &str) -> Option<String> {
+    let (_, rest) = output.split_once("Tool is running as a background task with task id:")?;
+    let id = rest.lines().next()?.trim();
+    (!id.is_empty()).then(|| id.to_owned())
 }
 
 impl Stream {
@@ -266,6 +273,37 @@ impl Stream {
             events.push(json!({"type":"tool_call","toolCallId":id,"name":name,"toolName":name,"rawInput":info["parameters"]}));
         }
         if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
+            if let Some(output) = info["output"].as_str() {
+                if let Some(task_id) = parse_background_task_started(output) {
+                    self.background_tasks.insert(task_id, true);
+                } else if name == "manage_task" {
+                    let action = info["parameters"]["Action"].as_str().unwrap_or_default();
+                    let task_id = info["parameters"]["TaskId"]
+                        .as_str()
+                        .map(|s| s.trim_matches('"'));
+                    let lower = output.to_ascii_lowercase();
+                    if action == "kill" {
+                        if let Some(task_id) = task_id {
+                            self.background_tasks.insert(task_id.to_owned(), false);
+                        }
+                    } else if action == "kill_all" {
+                        for running in self.background_tasks.values_mut() {
+                            *running = false;
+                        }
+                    } else if action == "status"
+                        && (lower.contains("not running")
+                            || lower.contains("completed")
+                            || lower.contains("finished")
+                            || lower.contains("exited")
+                            || lower.contains("killed")
+                            || lower.contains("terminated"))
+                    {
+                        if let Some(task_id) = task_id {
+                            self.background_tasks.insert(task_id.to_owned(), false);
+                        }
+                    }
+                }
+            }
             events.push(json!({"type":"tool_call_update","toolCallId":id,"name":name,"toolName":name,"status":if body["state"] == "ERROR" || !info["error"].is_null() {"failed"} else {"completed"},"output":info["output"],"rawOutput":info["output"]}));
         }
         events
@@ -274,6 +312,48 @@ impl Stream {
     pub fn observe_stderr(&mut self, line: &str) {
         if let Some(marker) = ErrorMarker::parse(line) {
             self.error_marker = Some(marker);
+        }
+    }
+
+    pub fn unfinished_background_tasks(&self) -> Vec<&str> {
+        self.background_tasks
+            .iter()
+            .filter_map(|(id, running)| (*running).then_some(id.as_str()))
+            .collect()
+    }
+
+    pub fn reconcile_transcript_background_tasks(&mut self, home: &std::path::Path) {
+        let Some(session) = self.session.as_deref() else {
+            return;
+        };
+        if self.background_tasks.values().all(|running| !*running) {
+            return;
+        }
+        let path = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs/transcript.jsonl");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in content.lines() {
+            let Ok(entry) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(text) = entry["content"].as_str() else {
+                continue;
+            };
+            for (task_id, running) in &mut self.background_tasks {
+                if *running
+                    && (text.contains(&format!("Task id \"{task_id}\" finished with result:"))
+                        || text.contains(&format!("Task id \"{task_id}\" was canceled"))
+                        || text.contains(&format!("Task id \"{task_id}\" was cancelled"))
+                        || text.contains(&format!("Task id \"{task_id}\" was killed"))
+                        || text.contains(&format!("Task id \"{task_id}\" was terminated")))
+                {
+                    *running = false;
+                }
+            }
         }
     }
 
@@ -325,6 +405,13 @@ impl Stream {
                 return Err(short.to_owned());
             }
             return Err("Antigravity ended without a SUCCESS result; resume this conversation before retrying work".into());
+        }
+        let unfinished = self.unfinished_background_tasks();
+        if !unfinished.is_empty() {
+            return Err(format!(
+                "Antigravity ended its headless turn while background task(s) {} were still running; resume this conversation to inspect task logs or re-run foreground commands",
+                unfinished.join(", ")
+            ));
         }
         Ok(())
     }
@@ -643,5 +730,73 @@ mod tests {
             mismatch.finish().unwrap_err(),
             "Antigravity changed conversation identity during the turn"
         );
+    }
+
+    #[test]
+    fn unfinished_background_task_fails_finish_until_killed_or_completed_in_transcript() {
+        let mut stream = Stream::default();
+        let session = "54998702-4037-4d0c-9514-b32d90d6465c";
+        let task_id = format!("{session}/task-988");
+        stream.feed(&json!({"event":"init","conversation_id":session}));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":988,
+                "state":"DONE",
+                "step_type":"tool",
+                "tool_name":"run_command",
+                "tool_info":{
+                    "name":"run_command",
+                    "parameters":{"CommandLine":"pytest -q"},
+                    "output":format!("Created At: 2026-10-06T18:36:14Z\nTool is running as a background task with task id: {task_id}\nTask logs are available at: file:///root/.gemini/antigravity-cli/brain/{session}/.system_generated/tasks/task-988.log")
+                }
+            }
+        }));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":989,
+                "state":"DONE",
+                "step_type":"agent_response",
+                "text_delta":"Running full test suite (`task-988`); waiting for completion."
+            }
+        }));
+        stream.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":session,
+                "status":"SUCCESS",
+                "response":"Running full test suite (`task-988`); waiting for completion."
+            }
+        }));
+        let err = stream.finish().unwrap_err();
+        assert!(err.contains(&task_id));
+        assert!(err.contains("background task(s)"));
+
+        // Reconciling against a transcript where the task finished clears the pending state.
+        let home = tempfile::tempdir().unwrap();
+        let logs_dir = home
+            .path()
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            serde_json::to_string(&json!({
+                "step_index": 990,
+                "source": "SYSTEM",
+                "type": "SYSTEM_MESSAGE",
+                "status": "DONE",
+                "content": format!("<SYSTEM_MESSAGE>\nTask id \"{task_id}\" finished with result:\n\nThe command exited with code 0.\n</SYSTEM_MESSAGE>")
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        stream.reconcile_transcript_background_tasks(home.path());
+        assert!(stream.finish().is_ok());
     }
 }

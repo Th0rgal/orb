@@ -77,6 +77,9 @@ export function CronForm(p: {
   deliveryRoute?: { ready: boolean; loading: boolean; error: string | null };
   save: (patch: ControllerPatch) => Promise<ControllerView>;
   onSaved: (view: ControllerView, warning?: string) => void;
+  onDelete?: () => Promise<void>;
+  deleting?: boolean;
+  deleteDisabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
   onClose?: () => void;
 }) {
@@ -87,6 +90,8 @@ export function CronForm(p: {
   const initialDraft = () => ({ ...draftOf(p.view), ...(p.creating ? { deliver: p.view.settings?.deliver ?? `project:${p.view.slug}` } : {}) });
   const [draft, setDraft] = createStore<CronDraft>(restored?.draft ?? initialDraft());
   const [confirmDiscard, setConfirmDiscard] = createSignal(false);
+  const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const [base, setBase] = createSignal<CronDraft>(restored?.base ?? initialDraft());
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -302,6 +307,16 @@ export function CronForm(p: {
       </Section>
       </details>
 
+      <Show when={!p.creating && p.onDelete}>
+        <Section title="Danger zone">
+          <Row title="Delete cron" desc="Permanently remove this cron job from Hermes.">
+            <button type="button" class="s-btn sm danger" disabled={saving() || p.deleting || p.deleteDisabled} onClick={() => { setDeleteError(null); setConfirmDelete(true); }}>
+              {p.deleting ? "Deleting…" : "Delete cron…"}
+            </button>
+          </Row>
+        </Section>
+      </Show>
+
       </fieldset>
       <Show when={p.creating || dirtyCount() > 0 || skillInput().trim() || error()}>
         <div class="cs-save-area">
@@ -326,10 +341,13 @@ export function CronForm(p: {
       <Show when={confirmDiscard()}><ConfirmDialog title="Discard this cron draft?"
         description="Your unsaved changes will be discarded." action="Discard draft" cancelLabel="Keep editing" destructive
         onClose={() => setConfirmDiscard(false)} onConfirm={() => { setConfirmDiscard(false); discard(); p.onClose?.(); }} /></Show>
+      <Show when={confirmDelete()}><ConfirmDialog title="Delete cron?"
+        description={`Delete ${p.view.job?.name || "this cron"} from Hermes? This cannot be undone.`} action="Delete" busy={p.deleting} error={deleteError()}
+        onClose={() => !p.deleting && setConfirmDelete(false)} onConfirm={() => void p.onDelete?.().then(() => setConfirmDelete(false)).catch((e) => setDeleteError(e instanceof Error ? e.message : String(e)))} /></Show>
     </div>
   );
 }
 
-export function ControllerSettingsPanel(p: { slug: string; id?: string; view: ControllerView; onSaved: (v: ControllerView) => void; save?: (patch: ControllerPatch) => Promise<ControllerView> }) {
-  return <CronForm draftKey={`edit:${p.slug}:${p.id ?? "controller"}`} view={p.view} save={(patch) => p.save ? p.save(patch) : updateController(p.slug, patch)} onSaved={p.onSaved} />;
+export function ControllerSettingsPanel(p: { slug: string; id?: string; view: ControllerView; onSaved: (v: ControllerView) => void; save?: (patch: ControllerPatch) => Promise<ControllerView>; onDelete?: () => Promise<void>; deleting?: boolean; deleteDisabled?: boolean }) {
+  return <CronForm draftKey={`edit:${p.slug}:${p.id ?? "controller"}`} view={p.view} save={(patch) => p.save ? p.save(patch) : updateController(p.slug, patch)} onSaved={p.onSaved} onDelete={p.onDelete} deleting={p.deleting} deleteDisabled={p.deleteDisabled} />;
 }

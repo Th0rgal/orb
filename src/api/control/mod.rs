@@ -249,6 +249,55 @@ fn take_for_parked_session(
     Some((QueuedAt::Runner(0), runner.queue.pop_front()?))
 }
 
+fn take_queued_by_id(
+    message_id: Uuid,
+    running_mission_id: Option<Uuid>,
+    queue: &mut VecDeque<ControlQueueEntry>,
+    parallel_runners: &mut std::collections::HashMap<Uuid, super::mission_runner::MissionRunner>,
+) -> Option<(Uuid, QueuedAt, super::mission_runner::QueuedMessage)> {
+    fn plain(content: &str, agent: &Option<String>, source: &Option<String>) -> bool {
+        agent.is_none()
+            && !matches!(
+                source.as_deref(),
+                Some("scheduler" | "scheduled-continuation")
+            )
+            && !content.trim_start().starts_with('/')
+    }
+    if let Some(position) = queue.iter().position(|entry| entry.0 == message_id) {
+        let entry = &queue[position];
+        let mid = entry.3.or(running_mission_id)?;
+        if !plain(&entry.1, &entry.2, &entry.4)
+            || !super::runners::live_session::can_deliver_now(mid)
+        {
+            return None;
+        }
+        let (id, content, agent, _, source) = queue.remove(position)?;
+        return Some((
+            mid,
+            QueuedAt::Main(position),
+            super::mission_runner::QueuedMessage {
+                id,
+                content,
+                agent,
+                source,
+            },
+        ));
+    }
+    for (mid, runner) in parallel_runners.iter_mut() {
+        if let Some(position) = runner.queue.iter().position(|qm| qm.id == message_id) {
+            let entry = &runner.queue[position];
+            if !plain(&entry.content, &entry.agent, &entry.source)
+                || !super::runners::live_session::can_deliver_now(*mid)
+            {
+                return None;
+            }
+            let message = runner.queue.remove(position)?;
+            return Some((*mid, QueuedAt::Runner(position), message));
+        }
+    }
+    None
+}
+
 // Park the whole mission together so a blocked writer does not starve unrelated
 // missions, and later messages for that writer cannot overtake its first one.
 fn park_followup(queue: &mut VecDeque<ControlQueueEntry>, first: ControlQueueEntry) {
@@ -6333,6 +6382,52 @@ pub async fn remove_from_queue(
         Ok(ok_json())
     } else {
         Err((StatusCode::NOT_FOUND, "message not in queue".to_string()))
+    }
+}
+
+/// Deliver a queued message immediately to a running turn when the harness
+/// supports live mid-turn user message injection, without cancelling the turn.
+/// Returns `{"ok": true, "delivered": true}` when injected live, or
+/// `{"ok": true, "delivered": false}` when live mid-turn injection is not
+/// available so the caller can fall back to stop + restart.
+pub async fn send_queued_now(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(message_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    {
+        let _guard = DISPATCH_ADMISSION.lock().await;
+        let _file = dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(internal_error)?;
+        if remote_queue::is_waiting(&state.projects, &user.id, message_id)
+            .map_err(internal_error)?
+        {
+            return Ok(Json(serde_json::json!({ "ok": true, "delivered": false })));
+        }
+    }
+    let (tx, rx) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::SendQueuedNow {
+            message_id,
+            respond: tx,
+        })
+        .await
+        .map_err(session_unavailable)?;
+    match rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to send queued message now".to_string(),
+        )
+    })? {
+        Ok(delivered) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "delivered": delivered,
+        }))),
+        Err(err) if err == "message not in queue" => Err((StatusCode::NOT_FOUND, err)),
+        Err(err) => Err((StatusCode::CONFLICT, err)),
     }
 }
 
@@ -27169,6 +27264,143 @@ async fn control_actor_loop(
 
                         prune_empty_provisional_runners(&mut parallel_runners);
                         let _ = respond.send(removed);
+                    }
+                    ControlCommand::SendQueuedNow { message_id, respond } => {
+                        let exists_in_queue = queue.iter().any(|(id, _, _, _, _)| *id == message_id)
+                            || parallel_runners
+                                .values()
+                                .any(|r| r.queue.iter().any(|qm| qm.id == message_id));
+                        if !exists_in_queue {
+                            let _ = respond.send(Err("message not in queue".to_string()));
+                            continue;
+                        }
+                        let Some((mid, position, message)) = take_queued_by_id(
+                            message_id,
+                            running_mission_id,
+                            &mut queue,
+                            &mut parallel_runners,
+                        ) else {
+                            let _ = respond.send(Ok(false));
+                            continue;
+                        };
+                        if host_followup_source(message.source.as_deref()) {
+                            if let Err(error) = dispatch_admission::admit_followup_locked(
+                                &control_hub,
+                                &mission_store,
+                                mid,
+                                &message.content,
+                            )
+                            .await
+                            {
+                                match position {
+                                    QueuedAt::Main(index) => queue.insert(
+                                        index.min(queue.len()),
+                                        (
+                                            message.id,
+                                            message.content,
+                                            message.agent,
+                                            Some(mid),
+                                            message.source,
+                                        ),
+                                    ),
+                                    QueuedAt::Runner(index) => {
+                                        if let Some(runner) = parallel_runners.get_mut(&mid) {
+                                            runner
+                                                .queue
+                                                .insert(index.min(runner.queue.len()), message);
+                                        }
+                                    }
+                                }
+                                let _ = respond.send(Err(error));
+                                continue;
+                            }
+                        }
+                        let persisted = persist_control_queue_if_changed(
+                            &mission_store,
+                            &session_user_id,
+                            &queue,
+                            &parallel_runners,
+                            &recovered_consumed_user_messages,
+                            &mut last_persisted_queue,
+                        )
+                        .await;
+                        if persisted.is_ok()
+                            && super::runners::live_session::deliver_now(
+                                mid,
+                                message.content.clone(),
+                            )
+                            .is_ok()
+                        {
+                            let _ = events_tx.send(AgentEvent::UserMessage {
+                                id: message.id,
+                                content: message.content,
+                                queued: false,
+                                mission_id: Some(mid),
+                                source: message.source,
+                            });
+                            match position {
+                                QueuedAt::Main(_) => {
+                                    let _ = events_tx.send(AgentEvent::Status {
+                                        state: if running.is_some() {
+                                            ControlRunState::Running
+                                        } else {
+                                            ControlRunState::Idle
+                                        },
+                                        queue_len: queue.len(),
+                                        mission_id: Some(mid),
+                                    });
+                                }
+                                QueuedAt::Runner(_) => {
+                                    if let Some(runner) = parallel_runners.get(&mid) {
+                                        let _ = events_tx.send(AgentEvent::Status {
+                                            state: if runner.is_running() {
+                                                ControlRunState::Running
+                                            } else {
+                                                ControlRunState::Idle
+                                            },
+                                            queue_len: runner.queue.len(),
+                                            mission_id: Some(mid),
+                                        });
+                                    }
+                                }
+                            }
+                            prune_empty_provisional_runners(&mut parallel_runners);
+                            let _ = respond.send(Ok(true));
+                            continue;
+                        }
+                        if let Err(error) = &persisted {
+                            tracing::warn!(
+                                mission_id = %mid,
+                                "Immediate mid-turn delivery skipped, queue could not be persisted: {error}"
+                            );
+                        }
+                        match position {
+                            QueuedAt::Main(index) => queue.insert(
+                                index.min(queue.len()),
+                                (
+                                    message.id,
+                                    message.content,
+                                    message.agent,
+                                    Some(mid),
+                                    message.source,
+                                ),
+                            ),
+                            QueuedAt::Runner(index) => {
+                                if let Some(runner) = parallel_runners.get_mut(&mid) {
+                                    runner.queue.insert(index.min(runner.queue.len()), message);
+                                }
+                            }
+                        }
+                        let _ = persist_control_queue_if_changed(
+                            &mission_store,
+                            &session_user_id,
+                            &queue,
+                            &parallel_runners,
+                            &recovered_consumed_user_messages,
+                            &mut last_persisted_queue,
+                        )
+                        .await;
+                        let _ = respond.send(Ok(false));
                     }
                     ControlCommand::ClearQueue { mission_id, respond } => {
                         let main_mission_id = if running.is_some() {

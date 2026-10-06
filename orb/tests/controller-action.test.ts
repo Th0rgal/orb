@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { controllerAction } from "../src/api";
+import { controllerAction, deleteProjectController } from "../src/api";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -37,3 +37,12 @@ for (const action of ["archive", "restore"] as const) {
     expect(view.job?.enabled).toBe(false);
   });
 }
+
+it("deletes a project controller via DELETE /api/projects/:slug/controller", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+    slug: "verity", job: null, settings: null, runs: [],
+  }), { status: 200 }));
+  const view = await deleteProjectController("verity");
+  expect(fetch.mock.calls[0][1]?.method).toBe("DELETE");
+  expect(view.job).toBeNull();
+});

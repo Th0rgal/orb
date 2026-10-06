@@ -2855,7 +2855,28 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       .then(() => refresh());
   };
 
-  const sendRemoteImmediate = async (ordered: { id: string; content: string; attached?: boolean }[]) => {
+  const sendRemoteImmediate = async (
+    ordered: { id: string; content: string; attached?: boolean }[],
+    liveInjected?: { id: string; content: string; attached?: boolean }[],
+  ) => {
+    if (liveInjected?.length) {
+      for (const row of liveInjected) {
+        const presented = messagePresentation(row.content);
+        const event: StreamEvent = {
+          type: "user_message",
+          eventId: row.id,
+          data: {
+            id: row.id,
+            content: presented.text,
+            queued: false,
+            receipt: true,
+            attached: Boolean(row.attached || presented.attached),
+          },
+        };
+        if (replaying) held.push(event);
+        else applyLive(event);
+      }
+    }
     if (!ordered.length) return;
     const wasBusy = busy();
     setSendingImmediate(true);

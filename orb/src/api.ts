@@ -658,7 +658,7 @@ export async function getProjectController(slug: string, limit = 40): Promise<Co
   return normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller?limit=${limit}`));
 }
 
-export async function controllerAction(slug: string, action: "pause" | "resume" | "run" | "archive" | "restore"): Promise<ControllerView> {
+export async function controllerAction(slug: string, action: "pause" | "resume" | "run" | "archive" | "restore" | "delete"): Promise<ControllerView> {
   const view = normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller/action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -668,6 +668,12 @@ export async function controllerAction(slug: string, action: "pause" | "resume" 
     throw new Error("The scheduler did not wake the paused controller. Your steer is still saved.");
   }
   return view;
+}
+
+export async function deleteProjectController(slug: string): Promise<ControllerView> {
+  return normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller`, {
+    method: "DELETE",
+  }));
 }
 
 /** Additional Hermes jobs explicitly bound to this project by the core. */
@@ -827,6 +833,14 @@ export async function listQueuedMessages(missionId: string): Promise<QueuedMessa
   const rows = await api<QueuedMessage[]>(`/api/control/queue?mission_id=${encodeURIComponent(missionId)}`);
   if (!Array.isArray(rows) || rows.some(row => !row || typeof row.id !== "string" || typeof row.content !== "string")) throw new Error("Invalid queue response");
   return rows.filter(row => row.mission_id === missionId);
+}
+
+/** Attempt to inject a queued message live into a running turn without cancelling it. */
+export async function sendQueuedMessageNow(queueId: string): Promise<boolean> {
+  const res = await api<{ ok: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(queueId)}/send-now`, {
+    method: "POST",
+  });
+  return res.delivered === true;
 }
 
 export class MessageRejectedError extends Error {}

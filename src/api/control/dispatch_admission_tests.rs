@@ -198,6 +198,7 @@ impl Harness {
             .route("/message", axum::routing::post(post_message))
             .route("/queue", axum::routing::get(get_queue).delete(clear_queue))
             .route("/queue/:id", axum::routing::delete(remove_from_queue))
+            .route("/queue/:id/send-now", axum::routing::post(send_queued_now))
             .nest("/projects", crate::api::projects_overview::routes())
             .route("/missions", axum::routing::post(create_mission))
             .route("/missions/:id", axum::routing::get(get_mission))
@@ -11670,4 +11671,95 @@ async fn antigravity_remote_launch_sets_long_running_to_bypass_node_turn_timeout
         "Antigravity remote jobs stay alive across subagent and background task wakeups and must set long_running=true"
     );
     assert_eq!(payload["managed_auth"], json!(["antigravity"]));
+}
+
+#[tokio::test]
+async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_messages() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Paused, None).await;
+
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    for (id, text) in [
+        (first_id, "keep this in the queue"),
+        (second_id, "deliver this mid-turn right now"),
+    ] {
+        let resp = h
+            .request(
+                false,
+                m.id,
+                json!({
+                    "content": text,
+                    "queue_followup": true,
+                    "client_message_id": id,
+                    "continue_identity": Harness::assertion(&m),
+                }),
+            )
+            .await;
+        assert!(resp.status().is_success());
+        assert_eq!(resp.json::<Value>().await.unwrap()["queued"], true);
+    }
+
+    // Without a live midturn listener, send-now returns delivered=false and keeps the item queued.
+    let no_listener = h
+        .state
+        .http_client
+        .post(format!("{}/queue/{second_id}/send-now", h.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_listener.status(), StatusCode::OK);
+    let body: Value = no_listener.json().await.unwrap();
+    assert_eq!(body["delivered"], false);
+
+    let rows_before: Vec<QueuedMessage> = h
+        .state
+        .http_client
+        .get(format!("{}/queue?mission_id={}", h.url, m.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_before.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![first_id, second_id]
+    );
+
+    // Attach a live midturn listener (as Claude stream-json or Codex app-server does).
+    let _guard = crate::api::runners::live_session::SessionGuard::attach(m.id, false);
+    let mut midturn_rx = crate::api::runners::live_session::midturn_messages(m.id);
+
+    let delivered_resp = h
+        .state
+        .http_client
+        .post(format!("{}/queue/{second_id}/send-now", h.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delivered_resp.status(), StatusCode::OK);
+    let delivered_body: Value = delivered_resp.json().await.unwrap();
+    assert_eq!(delivered_body["delivered"], true);
+
+    assert_eq!(
+        midturn_rx.try_recv().ok().as_deref(),
+        Some("deliver this mid-turn right now")
+    );
+
+    // Only the targeted message was popped; the other queued message remains intact.
+    let rows_after: Vec<QueuedMessage> = h
+        .state
+        .http_client
+        .get(format!("{}/queue?mission_id={}", h.url, m.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_after.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![first_id]
+    );
 }

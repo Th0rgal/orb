@@ -711,6 +711,7 @@ fn spawn_antigravity(
     let expected = request.session_id.clone();
     let pid = child.id();
     let guard = text.reader();
+    let transcript_home = std::path::PathBuf::from(&home);
     thread::spawn(move || {
         let _guard = guard;
         let mut stream = crate::antigravity::Stream::default();
@@ -757,6 +758,7 @@ fn spawn_antigravity(
         if let Ok(Some(marker)) = stderr_reader.join() {
             stream.error_marker = Some(marker);
         }
+        stream.reconcile_transcript_background_tasks(&transcript_home);
         output.set_retryable(stream.is_retryable());
         if let Err(message) = stream.finish() {
             if let Ok(mut error) = error.lock() {

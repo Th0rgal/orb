@@ -239,6 +239,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     {
         stream.error_marker = Some(marker);
     }
+    stream.reconcile_transcript_background_tasks(&thought_home);
     let mut result = match stream.finish() {
         Ok(()) if status.is_ok_and(|s| s.success()) => AgentResult::success(stream.summary(), 0)
             .with_terminal_reason(TerminalReason::TurnComplete),

@@ -769,12 +769,21 @@ pub(super) async fn admit_followup(
     id: Uuid,
     content: &str,
 ) -> Result<(), String> {
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    admit_followup_locked(hub, store, id, content).await
+}
+
+pub(super) async fn admit_followup_locked(
+    hub: &ControlHub,
+    store: &Arc<dyn MissionStore>,
+    id: Uuid,
+    content: &str,
+) -> Result<(), String> {
     let state = hub
         .admission_state
         .get()
         .and_then(std::sync::Weak::upgrade)
         .ok_or("Admission state unavailable")?;
-    let _guard = DISPATCH_ADMISSION.lock().await;
     let receipt = prepare(
         DispatchAdmission {
             state,

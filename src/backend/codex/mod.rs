@@ -671,6 +671,13 @@ async fn send_message_streaming_app_server(
         let mut session_arc = session_arc;
         let mut inbound = inbound;
         let cancel_token = cfg.cancel_token.clone();
+        let midturn_mission_id = cfg
+            .mission_id
+            .or_else(|| cfg.continuity.as_ref().map(|c| c.identity.mission_id));
+        let _midturn_guard = midturn_mission_id
+            .map(|mid| crate::api::runners::live_session::SessionGuard::attach(mid, false));
+        let mut midturn_messages =
+            midturn_mission_id.map(crate::api::runners::live_session::midturn_messages);
 
         // Cap the number of automatic reconnects per mission so a
         // systemic codex crash doesn't loop forever. One retry covers
@@ -745,6 +752,48 @@ async fn send_message_streaming_app_server(
                         // The driver stops; unresolved native tool outcomes
                         // remain journaled for explicit reconciliation.
                         break 'outer;
+                    }
+                    Some(steer_text) = async {
+                        match midturn_messages.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(turn_id) = observed_turn_id.as_deref() {
+                            match session_arc.turn_steer(&thread_id, turn_id, &steer_text).await {
+                                Ok(_) => {
+                                    tracing::info!(
+                                        thread_id = %thread_id,
+                                        turn_id = %turn_id,
+                                        "Injected mid-turn user message into Codex via turn/steer"
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        thread_id = %thread_id,
+                                        turn_id = %turn_id,
+                                        %error,
+                                        "Codex mid-turn turn/steer failed; queueing for next turn/started"
+                                    );
+                                    match pending_steer.as_mut() {
+                                        Some(existing) => {
+                                            existing.push_str("\n\n");
+                                            existing.push_str(&steer_text);
+                                        }
+                                        None => pending_steer = Some(steer_text),
+                                    }
+                                }
+                            }
+                        } else {
+                            match pending_steer.as_mut() {
+                                Some(existing) => {
+                                    existing.push_str("\n\n");
+                                    existing.push_str(&steer_text);
+                                }
+                                None => pending_steer = Some(steer_text),
+                            }
+                        }
+                        continue;
                     }
                     msg = async {
                         if let Some(snapshot) = recovered_notifications.pop_front() { Some(snapshot) }

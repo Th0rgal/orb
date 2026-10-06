@@ -960,7 +960,7 @@ async fn execute_tool(turn: &AskTurn, name: &str, arguments: &str) -> String {
                 // path below — which starts a turn when idle and queues for the
                 // next boundary when running, and reports honestly either way.
                 let stream_input_enabled =
-                    crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", false);
+                    crate::util::env_var_bool("SANDBOXED_SH_CLAUDE_STREAM_INPUT", true);
                 let capable = matches!(
                     effective_mid_turn_kind(
                         &mission.backend,
