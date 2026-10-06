@@ -29,12 +29,21 @@ pub fn args_with_effort(
         "stream-json".into(),
         "--dangerously-skip-permissions".into(),
     ];
+    let variant_effort = model
+        .and_then(|id| id.strip_prefix("agy-demo-"))
+        .filter(|level| matches!(*level, "low" | "medium" | "high"));
+    let model = if variant_effort.is_some() {
+        Some("agy-demo")
+    } else {
+        model
+    };
     if let Some(model) = model.filter(|s| !s.is_empty()) {
         args.extend(["--model".into(), model.into()]);
     }
     // agy-demo no longer supplies its own effort default. Preserve explicit choices.
     if let Some(effort) = effort
         .filter(|s| !s.is_empty())
+        .or(variant_effort)
         .or_else(|| (model == Some("agy-demo")).then_some("high"))
     {
         args.extend(["--effort".into(), effort.into()]);
@@ -220,21 +229,78 @@ pub fn models_in_home(
         .join()
         .map_err(|_| "Model discovery reader failed")?
         .map_err(|_| "Cannot read models")?;
-    let models: Vec<_> = text
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .filter(|(id, label)| !id.is_empty() && !label.is_empty())
-        .map(|(id, label)| (id.to_string(), label.to_string()))
-        .collect();
+    let models = group_models(
+        text.lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(id, label)| !id.is_empty() && !label.is_empty())
+            .map(|(id, label)| (id.to_string(), label.to_string()))
+            .collect(),
+    );
     if models.is_empty() {
         return Err("No Antigravity models are available for this account".into());
     }
     Ok(models)
 }
 
+/// Argon's discovered variants are one model with a separate effort control.
+pub fn group_models(models: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .filter_map(|(id, label)| {
+            let variant = id
+                .strip_prefix("agy-demo-")
+                .filter(|level| matches!(*level, "low" | "medium" | "high"));
+            let (id, label) = if let Some(level) = variant {
+                let suffix = format!(
+                    " ({})",
+                    match level {
+                        "low" => "Low",
+                        "medium" => "Medium",
+                        _ => "High",
+                    }
+                );
+                (
+                    "agy-demo".to_string(),
+                    label.strip_suffix(&suffix).unwrap_or(&label).to_string(),
+                )
+            } else {
+                (id, label)
+            };
+            seen.insert(id.clone()).then_some((id, label))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn argon_variants_are_one_model_and_explicit_effort_overrides_old_variant() {
+        let models = group_models(vec![
+            ("agy-demo-medium".into(), "Gemini 4 Argon (Medium)".into()),
+            ("agy-demo-high".into(), "Gemini 4 Argon (High)".into()),
+            ("agy-demo-low".into(), "Gemini 4 Argon (Low)".into()),
+            ("other".into(), "Other".into()),
+        ]);
+        assert_eq!(
+            models,
+            vec![
+                ("agy-demo".into(), "Gemini 4 Argon".into()),
+                ("other".into(), "Other".into())
+            ]
+        );
+        let args = args_with_effort(
+            Some("agy-demo-medium"),
+            Some("high"),
+            Some("same-session"),
+            "continue",
+        );
+        assert!(args.windows(2).any(|v| v == ["--model", "agy-demo"]));
+        assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
+        let args = args_with_effort(Some("agy-demo-low"), None, None, "continue");
+        assert!(args.windows(2).any(|v| v == ["--effort", "low"]));
+    }
     #[test]
     fn thinking_usage_is_per_turn_and_duplicate_steps_are_idempotent() {
         let mut s = Stream::default();

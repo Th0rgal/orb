@@ -49,5 +49,11 @@ export function effortLabel(effort: string | null | undefined, backend?: string 
 
 /** Native agy-demo requires an effort; unset uses our explicit High default. */
 export function defaultEffortLabel(backend?:string|null, model?:string|null):string {
-  return backend === "antigravity" && model === "agy-demo" ? "Default (High)" : DEFAULT_EFFORT_LABEL;
+  const variant = backend === "antigravity" ? model?.match(/^agy-demo-(low|medium|high)$/)?.[1] : undefined;
+  return variant ? `Default (${LABELS[variant as Effort]})` : backend === "antigravity" && model === "agy-demo" ? "Default (High)" : DEFAULT_EFFORT_LABEL;
+}
+
+/** Compatibility for missions saved with the CLI's effort-specific Argon IDs. */
+export function antigravityBaseModel(model?: string | null): string | undefined {
+  return model?.replace(/^agy-demo-(low|medium|high)$/, "agy-demo") ?? undefined;
 }
