@@ -3,10 +3,10 @@ import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
 vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
-import {api,getMission,sendMissionMessage,cancelMission} from '../src/api';
+import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
-vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
-afterEach(()=>{localStorage.clear();vi.clearAllMocks();});
+vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn()),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
+afterEach(async()=>{localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
 it('creates a distinct side agent and never sends to the parent',async()=>{
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'child'});
@@ -19,6 +19,152 @@ it('creates a distinct side agent and never sends to the parent',async()=>{
  await askBtwAgent('parent','Follow up','New context',[],new AbortController().signal,()=>{});
  expect(sendMissionMessage).toHaveBeenCalledWith('child',expect.stringContaining('New context'));
  await stopBtw('parent');expect(cancelMission).toHaveBeenCalledWith('child');
+});
+
+it('follows multiple recovered side missions with a fresh sequence boundary',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents,streamMission}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('recovered-parent'),JSON.stringify({id:'old-side',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:999,afterSequence:9000}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'awaiting_user',history:[],tags:id==='old-side'?['superseded_by:middle-side']:id==='middle-side'?['superseded_by:new-side']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'user_message',content:'Q',sequence:1,id:1,timestamp:''},{event_type:'assistant_message',content:'Recovered answer',sequence:2,id:2,timestamp:''}]);
+ const events:any[]=[];
+ await watchBtw('recovered-parent',new AbortController().signal,event=>events.push(event));
+ expect(btwSession('recovered-parent')).toMatchObject({id:'new-side',baseline:0,active:false});
+ expect(btwSession('recovered-parent')?.afterSequence).toBeUndefined();
+ expect(getMissionEvents).toHaveBeenCalledWith('new-side');
+ expect(streamMission).toHaveBeenCalledWith('new-side',expect.any(Function),expect.any(Function));
+ expect(events.at(-1)).toEqual({type:'done',answer:'Recovered answer'});
+});
+
+it('reconnects to a replacement and rejects late events from the old stream',async()=>{
+ vi.useFakeTimers();
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents,streamMission}=await import('../src/stream');
+ const {watchBtw,btwThoughts}=await import('../src/btwAgent');
+ const callbacks=new Map<string,(event:any)=>void>(),disposes=new Map<string,ReturnType<typeof vi.fn>>();
+ let replaced=false,finished=false;
+ const receive=vi.fn();
+ localStorage.setItem('agent:'+sideQuestionKey('stream-parent'),JSON.stringify({id:'old-stream',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:500}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:finished?'awaiting_user':'active',history:[],tags:id==='old-stream'&&replaced?['superseded_by:new-stream']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockImplementation(async()=>finished?[{event_type:'assistant_message',content:'Final new answer',sequence:1,id:1,timestamp:''}]:[]);
+ vi.mocked(streamMission).mockImplementation((id,callback)=>{callbacks.set(id,callback);const dispose=vi.fn();disposes.set(id,dispose);return dispose;});
+ const abort=new AbortController();
+ const watching=watchBtw('stream-parent',abort.signal,receive);
+ try{
+  await vi.advanceTimersByTimeAsync(0);
+  callbacks.get('old-stream')!({type:'text_delta',data:{content:'Old draft'}});
+  callbacks.get('old-stream')!({type:'thinking',data:{content:'Old thought',done:false}});
+  replaced=true;
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(disposes.get('old-stream')).toHaveBeenCalledOnce();
+  expect(callbacks.has('new-stream')).toBe(true);
+  expect(btwThoughts('stream-parent')).toEqual([]);
+  const boundary=receive.mock.calls.length;
+  callbacks.get('old-stream')!({type:'text_delta',data:{content:'Late old answer'}});
+  expect(receive.mock.calls).toHaveLength(boundary);
+  callbacks.get('new-stream')!({type:'text_delta',data:{content:'New draft'}});
+  expect(receive).toHaveBeenLastCalledWith({type:'snapshot',text:'New draft'});
+  finished=true;
+  callbacks.get('new-stream')!({type:'mission_status_changed',data:{status:'awaiting_user'}});
+  await watching;
+  expect(receive).toHaveBeenLastCalledWith({type:'done',answer:'Final new answer'});
+  expect(disposes.get('new-stream')).toHaveBeenCalledOnce();
+ }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();vi.mocked(streamMission).mockImplementation(()=>vi.fn());}
+});
+
+it('does not accept the old streamed answer when a replacement completes empty',async()=>{
+ vi.useFakeTimers();
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents,streamMission}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ let replaced=false;
+ localStorage.setItem('agent:'+sideQuestionKey('empty-replacement-parent'),JSON.stringify({id:'empty-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:replaced?'awaiting_user':'active',history:[],tags:id==='empty-old'&&replaced?['superseded_by:empty-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([]);
+ vi.mocked(streamMission).mockImplementation((id,callback)=>{if(id==='empty-old')callback({type:'text_delta',data:{content:'Old answer'}});return vi.fn();});
+ const abort=new AbortController();
+ const watching=watchBtw('empty-replacement-parent',abort.signal,()=>{});
+ const result=expect(watching).rejects.toThrow('No response was captured from the side agent (awaiting_user)');
+ try{await vi.advanceTimersByTimeAsync(0);replaced=true;await vi.advanceTimersByTimeAsync(5000);await result;}
+ finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();vi.mocked(streamMission).mockImplementation(()=>vi.fn());}
+});
+
+it('refuses cyclic replacement chains without changing the saved session',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {watchBtw}=await import('../src/btwAgent');
+ const saved={id:'cycle-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:88};
+ localStorage.setItem('agent:'+sideQuestionKey('cycle-parent'),JSON.stringify(saved));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],tags:[`superseded_by:${id==='cycle-old'?'cycle-new':'cycle-old'}`],title:null,created_at:'',updated_at:''}));
+ await expect(watchBtw('cycle-parent',new AbortController().signal,()=>{})).rejects.toThrow('cycle');
+ expect(btwSession('cycle-parent')).toEqual(saved);
+});
+
+it('preserves a pending replacement after a lookup failure instead of starting another side agent',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const saved={id:'missing-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,afterSequence:88};
+ localStorage.setItem('agent:'+sideQuestionKey('missing-parent'),JSON.stringify(saved));
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='missing-new')throw new ApiError(404,'Not found');return {id,status:'completed',history:[],tags:['superseded_by:missing-new'],title:null,created_at:'',updated_at:''};});
+ await expect(askBtwAgent('missing-parent','Next','context',[],new AbortController().signal,()=>{})).rejects.toThrow('Recovered side session is unavailable');
+ expect(btwSession('missing-parent')).toEqual(saved);
+ expect(api).not.toHaveBeenCalled();
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+});
+
+it('does not save replacement identities after cancellation',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {watchBtw}=await import('../src/btwAgent');
+ const abort=new AbortController();
+ const saved={id:'cancel-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
+ localStorage.setItem('agent:'+sideQuestionKey('cancel-parent'),JSON.stringify(saved));
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='cancel-new')abort.abort();return {id,status:'completed',history:[],tags:id==='cancel-old'?['superseded_by:cancel-new']:[],title:null,created_at:'',updated_at:''};});
+ await expect(watchBtw('cancel-parent',abort.signal,()=>{})).rejects.toThrow('cancelled');
+ expect(btwSession('cancel-parent')).toEqual(saved);
+});
+
+it('does not save replacement identities after the backend connection changes',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {bumpConnectionVersion}=await import('../src/api');
+ const {watchBtw}=await import('../src/btwAgent');
+ const saved={id:'connection-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0};
+ localStorage.setItem('agent:'+sideQuestionKey('connection-parent'),JSON.stringify(saved));
+ vi.mocked(getMission).mockImplementation(async id=>{if(id==='connection-new')bumpConnectionVersion(version=>version+1);return {id,status:'completed',history:[],tags:id==='connection-old'?['superseded_by:connection-new']:[],title:null,created_at:'',updated_at:''};});
+ await expect(watchBtw('connection-parent',new AbortController().signal,()=>{})).rejects.toThrow('Connection changed');
+ expect(btwSession('connection-parent')).toEqual(saved);
+});
+
+it('stops the recovered side agent instead of its superseded predecessor',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ localStorage.setItem('agent:'+sideQuestionKey('stop-parent'),JSON.stringify({id:'stop-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='stop-old'?['superseded_by:stop-new']:[],title:null,created_at:'',updated_at:''}));
+ await stopBtw('stop-parent');
+ expect(cancelMission).toHaveBeenCalledWith('stop-new');
+});
+
+it('sends a follow-up to the recovered session using its own sequence boundary',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents}=await import('../src/stream');
+ localStorage.setItem('agent:'+sideQuestionKey('follow-parent'),JSON.stringify({id:'follow-old',question:'First',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0,afterSequence:9000,contextVersion:2,conversationCursor:{sequence:10,visibleHash:'hash'},placement:JSON.stringify([false,undefined,undefined,undefined])}));
+ let sent=false;
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='follow-parent'?'active':'awaiting_user',history:[],tags:id==='follow-old'?['superseded_by:follow-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockImplementation(async()=>sent?[{event_type:'user_message',content:'Next',sequence:2,id:2,timestamp:''},{event_type:'assistant_message',content:'Follow-up answer',sequence:3,id:3,timestamp:''}]:[{event_type:'assistant_message',content:'Earlier recovered answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(sendMissionMessage).mockImplementationOnce(async()=>{sent=true;return {} as any;});
+ const receive=vi.fn();
+ await askBtwAgent('follow-parent','Next','context',[],new AbortController().signal,receive);
+ expect(sendMissionMessage).toHaveBeenCalledWith('follow-new',expect.stringContaining('Next'));
+ expect(api).not.toHaveBeenCalled();
+ expect(btwSession('follow-parent')?.afterSequence).toBe(1);
+ expect(receive).toHaveBeenLastCalledWith({type:'done',answer:'Follow-up answer'});
+});
+
+it('includes the terminal mission reason when a recovered session has no response',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('reason-parent'),JSON.stringify({id:'reason-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],tags:id==='reason-old'?['superseded_by:reason-new']:[],status_message:'No assistant output recorded',title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([]);
+ await expect(watchBtw('reason-parent',new AbortController().signal,()=>{})).rejects.toThrow('completed: No assistant output recorded');
 });
 it('a missing agent endpoint fails without falling back to a normal fork',async()=>{
  vi.mocked(getMission).mockResolvedValue({id:'parent',status:'active',history:[],tags:[],title:null,created_at:'',updated_at:''});

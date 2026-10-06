@@ -44,8 +44,32 @@ export function btwQueueStatus(mission: Mission): string {
  if (['pending','queued','starting','resuming'].includes(mission.status)) return 'Waiting to start…';
  return '';
 }
+const ACTIVE=['active','running','pending','queued','starting','resuming','waiting_background','paused'];
+// Event sequences belong to one mission. Resolve the entire replacement chain
+// before changing the saved session, and never carry its predecessor's boundary.
+async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,version=connectionVersion()):Promise<Mission>{
+ const seen=new Set<string>();
+ const check=()=>{if(version!==connectionVersion())throw new Error('Connection changed.');if(signal?.aborted)throw new Error('Side question cancelled.');};
+ check();
+ let mission=await getMission(s.id);check();
+ for(let hop=0;hop<16;hop++){
+  seen.add(mission.id);
+  const next=mission.tags?.find(tag=>tag.startsWith('superseded_by:'))?.slice('superseded_by:'.length);
+  if(!next){
+   if(mission.id!==s.id){s.id=mission.id;s.baseline=0;delete s.afterSequence;s.active=ACTIVE.includes(mission.status);save(parent,s);}
+   return mission;
+  }
+  if(seen.has(next))throw new Error('Side session recovery contains a cycle.');
+  mission=await getMission(next).catch(error=>{
+   // A missing replacement is not proof that the saved side session was deleted.
+   if(error instanceof ApiError&&error.status===404)throw new Error('Recovered side session is unavailable (404). Retry after recovery finishes.');
+   throw error;
+  });check();
+ }
+ throw new Error('Side session recovery chain is too long.');
+}
 const locks=new Set<string>();
-export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else await cancelMission(s.id);}
+export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
  const paths:string[]=[];
@@ -81,20 +105,29 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  const publish=(text:string)=>{if(!signal.aborted&&connectionVersion()===version&&text!==previous){previous=text;receive({type:'snapshot',text} as SideEvent);}};
  const streamText=()=>live.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'').join('\n\n');
  // Unfinished thoughts are never stored: only the live stream carries them.
- const live=new TranscriptReducer();
- setLiveThoughts(all=>({...all,[s.id]:[]}));
- const stopStream=s.local?undefined:streamMission(s.id,event=>{
-  live.apply(event);
-  streamedText=streamText();
-  if(streamedText)publish(streamedText);
-  if(event.type==='mission_status_changed'||event.type==='status')wake?.();
-  setLiveThoughts(all=>({...all,[s.id]:thoughtsOf(live.items).map(item=>({...item}))}));
- },()=>{});
+ let live=new TranscriptReducer(),streamId:string|undefined,stopStream:(()=>void)|undefined;
+ const attach=()=>{
+  if(streamId===s.id)return;
+  stopStream?.();live=new TranscriptReducer();streamedText='';
+  if(streamId!==undefined)publish('');
+  const id=s.id;streamId=id;
+  setLiveThoughts(all=>({...all,[id]:[]}));
+  stopStream=streamMission(id,event=>{
+   if(id!==s.id||signal.aborted||connectionVersion()!==version)return;
+   live.apply(event);
+   streamedText=streamText();
+   if(streamedText)publish(streamedText);
+   if(event.type==='mission_status_changed'||event.type==='status')wake?.();
+   setLiveThoughts(all=>({...all,[id]:thoughtsOf(live.items).map(item=>({...item}))}));
+  },()=>{});
+ };
  const abortWake=()=>wake?.();signal.addEventListener('abort',abortWake);
  try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
-  const [mission,events]=await Promise.all([getMission(s.id),getMissionEvents(s.id)]);
+  const mission=await currentSide(parent,s,signal,version);attach();
+  const events=await getMissionEvents(s.id);
+  if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
   let text='';const reducer=new TranscriptReducer();
   for(const event of btwTurnEvents(events,s)){
@@ -103,12 +136,12 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   setAgentItems(all=>({...all,[s.id]:reducer.items}));
   setRemoteActivities(all=>({...all,[s.id]:reducer.items.filter(i=>i.kind==='tool').map(i=>i.kind==='tool'?{id:i.callId,label:i.name,done:i.done,failed:false,detail:JSON.stringify({args:i.args,result:i.result})}:{id:'',label:'',done:true,failed:false})}));
   const recorded=reducer.items.filter(i=>i.kind==='text'&&!!i.text.replace(/[.\s…]/g,'')).map(i=>i.kind==='text'?i.text:'').join('\n\n');
-  const active=['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(mission.status);
+  const active=ACTIVE.includes(mission.status);
   text=recorded||text;
   // A terminal persisted response is authoritative, even if shorter than a streamed draft.
   if((active||!text)&&streamedText.length>text.length)text=streamedText;
   publish(text);
-  if(!active){s.active=false;save(parent,s);if(['failed','interrupted','cancelled'].includes(mission.status))throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);if(!text.trim())throw new Error('No response was captured from the side agent. Check its activity for tool errors, then retry.');receive({type:'done',answer:text});return;}
+  if(!active){s.active=false;save(parent,s);if(['failed','interrupted','cancelled'].includes(mission.status))throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);if(!text.trim()){const reason=mission.remote_job?.error||mission.status_message;throw new Error(`No response was captured from the side agent (${mission.status}${reason?`: ${reason}`:''}). Check its activity for tool errors, then retry.`);}receive({type:'done',answer:text});return;}
   await new Promise<void>(resolve=>{
    const timer=setTimeout(done,5000);
    function done(){clearTimeout(timer);wake=undefined;resolve();}
@@ -134,8 +167,8 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     s={...s,launchPending:false,active:false};save(parent,s);
    }
    try {
-    const current=await getMission(s.id);
-    if(['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
+    const current=await currentSide(parent,s,signal,version);
+    if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
     s={...s,active:false};save(parent,s);
    } catch(error) {
     if(!(error instanceof ApiError)||error.status!==404)throw error;
