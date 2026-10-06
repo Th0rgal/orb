@@ -115,341 +115,378 @@ struct OrbConversation: View {
 
     var body: some View {
         ScrollViewReader { scroll in
-            ZStack(alignment: .bottomTrailing) {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if unavailable {
-                            ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))
-                        } else {
-                            if loading && missionID != nil && mission == .null {
-                                ProgressView("Loading conversation…")
-                                    .font(.footnote)
-                                    .foregroundStyle(OrbStyle.textSecondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 20)
-                            }
-                            if missionID == nil && id == nil {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text("What would you like to work on?")
-                                        .font(.title3.weight(.semibold))
-                                    Text(folder.isEmpty ? project : "\(project) / \(folder)")
-                                        .font(.footnote)
-                                        .foregroundStyle(OrbStyle.textSecondary)
-                                }
-                                .padding(.top, 16)
-                            }
-                            if history.count > visibleCount {
-                                Button("Load earlier messages") {
-                                    let anchor = history.suffix(visibleCount).first?.0
-                                    followsLatest = false
-                                    visibleCount += 20
-                                    Task { @MainActor in
-                                        await Task.yield()
-                                        if let anchor { scroll.scrollTo(anchor, anchor: .top) }
-                                    }
-                                }
-                                .font(.footnote.weight(.medium))
-                                .foregroundStyle(OrbStyle.textSecondary)
-                                .padding(.vertical, 6)
-                                .frame(maxWidth: .infinity)
-                                .background(Color.white.opacity(0.03), in: Capsule())
-                                .overlay(Capsule().stroke(OrbStyle.border))
-                                .accessibilityIdentifier("load-earlier")
-                            }
-                            ForEach(Array(history.suffix(visibleCount)), id: \.0) { item in
-                                if item.1 == "user" {
-                                    let images = OrbMessageImages.parse(item.2)
-                                    let isPendingTurn = working && item.0 == lastUserItemID
-                                    HStack {
-                                        Spacer(minLength: 40)
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
-                                            if !images.text.isEmpty {
-                                                Text(images.text)
-                                                    .font(.subheadline)
-                                                    .foregroundStyle(.primary)
-                                                    .textSelection(.enabled)
-                                                    .orbShimmer(active: isPendingTurn)
-                                            }
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 10)
-                                        .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                                .stroke(isPendingTurn ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-                                        )
-                                        .contextMenu {
-                                            if !images.text.isEmpty {
-                                                Button {
-                                                    UIPasteboard.general.string = images.text
-                                                    OrbHaptics.light()
-                                                } label: {
-                                                    Label("Copy message", systemImage: "doc.on.doc")
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .id(item.0)
-                                } else if let quiz = quiz(for: item) {
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        if !quiz.before.isEmpty { OrbRichText(source: quiz.before) }
-                                        OrbQuiz(quiz: quiz, disabled: busy || cloudBlocked || working) { reply in await sendReply(reply) }
-                                        if !quiz.after.isEmpty { OrbRichText(source: quiz.after) }
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(item.0)
-                                } else {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        OrbRichText(source: item.2, onArtifact: { path in
-                                            Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) }
-                                        })
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                                        HStack(spacing: 10) {
-                                            Button {
-                                                UIPasteboard.general.string = item.2
-                                                OrbHaptics.light()
-                                                withAnimation(.snappy(duration: 0.15)) { copiedItemID = item.0 }
-                                                Task {
-                                                    try? await Task.sleep(for: .seconds(1.4))
-                                                    if copiedItemID == item.0 {
-                                                        withAnimation(.snappy(duration: 0.15)) { copiedItemID = nil }
-                                                    }
-                                                }
-                                            } label: {
-                                                HStack(spacing: 4) {
-                                                    Image(systemName: copiedItemID == item.0 ? "checkmark" : "doc.on.doc")
-                                                        .font(.system(size: 10, weight: .medium))
-                                                    if copiedItemID == item.0 {
-                                                        Text("Copied")
-                                                            .font(.caption2)
-                                                    }
-                                                }
-                                                .foregroundStyle(copiedItemID == item.0 ? OrbStyle.success : OrbStyle.textMuted)
-                                                .padding(.vertical, 2)
-                                                .padding(.horizontal, 4)
-                                                .contentShape(Rectangle())
-                                            }
-                                            .buttonStyle(.plain)
-                                            .accessibilityLabel(copiedItemID == item.0 ? "Copied response" : "Copy response")
-                                            Spacer()
-                                        }
-                                    }
-                                    .id(item.0)
-                                }
-                            }
-                            ForEach(turns.indices, id: \.self) { index in
-                                let turn = turns[index]
-                                if !turn["detail"].text.isEmpty && !Self.workingPhases.contains(turn["phase"].text) {
-                                    Text(turn["detail"].text)
-                                        .font(.footnote)
-                                        .foregroundStyle(OrbStyle.textSecondary)
-                                }
-                                ForEach(turn["branches"].items.indices, id: \.self) { branchIndex in
-                                    if let url = safeURL(turn["branches"].items[branchIndex]["prUrl"].text) {
-                                        Link(destination: url) {
-                                            HStack(spacing: 6) {
-                                                Image(systemName: "arrow.triangle.pull")
-                                                    .font(.caption)
-                                                Text("View pull request")
-                                                    .font(.footnote.weight(.medium))
-                                                Image(systemName: "arrow.up.right")
-                                                    .font(.caption2)
-                                            }
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 6)
-                                            .background(OrbStyle.surface, in: Capsule())
-                                            .overlay(Capsule().stroke(OrbStyle.border))
-                                        }
-                                    }
-                                }
-                                ForEach(turn["artifacts"].items.indices, id: \.self) { artifactIndex in
-                                    let artifact = turn["artifacts"].items[artifactIndex]
-                                    Button {
-                                        Task { await download(artifact["path"].text) }
-                                    } label: {
-                                        Label(artifact["path"].text.components(separatedBy: "/").last ?? "File", systemImage: "doc")
-                                            .font(.footnote)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 6)
-                                            .background(OrbStyle.surface, in: Capsule())
-                                            .overlay(Capsule().stroke(OrbStyle.border))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            if !workModel.todos.isEmpty {
-                                OrbMissionTasksCard(todos: workModel.todos)
-                            }
-                            if !workModel.isEmpty || working {
-                                TimelineView(.periodic(from: .now, by: 1)) { context in
-                                    OrbWorkFold(
-                                        model: workModel,
-                                        working: working,
-                                        headline: workModel.liveHeadline(fallback: baseStepLabel()),
-                                        elapsed: elapsedClock(at: context.date),
-                                        accessibilityStatus: progress(at: context.date)
-                                    )
-                                }
-                            }
-                            if working && !liveText.isEmpty {
-                                OrbRichText(source: liveText)
-                                    .transition(.opacity)
-                            }
-                            ForEach(events.filter { event in
-                                event.eventType == "tool_call" && ["ui_native_request", "AskUserQuestion", "question"].contains(event.toolName ?? "") && !answered.contains(event.toolCallId ?? "") && !events.contains(where: { $0.eventType == "tool_result" && $0.toolCallId == event.toolCallId })
-                            }) { event in
-                                if let data = event.content.data(using: .utf8), let request = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                                    OrbQuestion(event: event, request: request) { answered.insert(event.toolCallId ?? "") }
-                                }
-                            }
-                            if !working && ["failed", "blocked", "interrupted", "cancelled", "reconnect required", "submission uncertain", "incompatible", "waiting user"].contains(status), turns.last?["detail"].text.isEmpty != false {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "exclamationmark.circle.fill")
-                                        .font(.caption)
-                                    Text(status == "waiting user" ? "Waiting for your reply" : status.capitalized)
-                                        .font(.footnote.weight(.medium))
-                                }
-                                .foregroundStyle(OrbStyle.warning)
-                                .padding(.vertical, 2)
-                            }
-                        }
-                        if !error.isEmpty { OrbNotice(message: error) }
-                        Color.clear.frame(height: 1).id("conversation-bottom").accessibilityIdentifier("conversation-bottom")
+            conversationContainer(scroll: scroll)
+                .background(OrbStyle.background)
+                .scrollDismissesKeyboard(.interactively)
+                .navigationTitle(mission["title"].text.isEmpty ? (missionID == nil ? "New agent" : "Conversation") : mission["title"].text)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        conversationToolbarMenu
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
                 }
-                .defaultScrollAnchor(.bottom)
-                .onScrollPhaseChange { _, phase in
-                    userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
-                    if userScrolling { followsLatest = atBottom }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if !unavailable {
+                        composer
+                            .padding(.top, 4)
+                            .background(OrbStyle.background.ignoresSafeArea(edges: .bottom))
+                    }
                 }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height + geometry.contentInsets.bottom - 32
-                } action: { _, value in
-                    atBottom = value
-                    if userScrolling { followsLatest = value }
+                .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
+                .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil) }
+                .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: project, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
+                .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
+                .sheet(isPresented: $moving) { moveConversationSheet }
+                .task {
+                    id = missionID
+                    text = OrbDisk.read(draftKey, as: String.self) ?? ""
+                    attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
+                    if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
+                    if let id { mission = OrbReadCache.read("mission:\(id)") ?? .null; execution = OrbReadCache.read("cloud:\(id)") ?? .null; if execution != .null { selection.restore(execution["selection"]) } }
+                    await refresh()
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .seconds(3)) } catch { break }
+                        if phase == .active { await refresh(force: working) }
+                    }
                 }
-                .onScrollGeometryChange(for: CGSize.self) { geometry in
-                    CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
-                } action: { _, _ in
-                    if followsLatest {
-                        Task { @MainActor in
-                            await Task.yield()
-                            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+                .onChange(of: text) { _, value in do { try OrbDisk.save(value, key: draftKey) } catch { self.error = "Could not save draft: \(error.localizedDescription)" } }
+                .onChange(of: attachments) { _, value in do { try OrbDisk.save(value, key: draftKey + ":files") } catch { self.error = "Could not save attachments: \(error.localizedDescription)" } }
+                .onDisappear { stream?.cancel(); stream = nil }
+                .onChange(of: phase) { _, value in
+                    if value == .active { Task { await refresh(force: true) } }
+                    else { stream?.cancel(); stream = nil }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func conversationContainer(scroll: ScrollViewProxy) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            conversationScrollView(scroll: scroll)
+            if !atBottom && !history.isEmpty {
+                scrollToLatestButton(scroll: scroll)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func conversationScrollView(scroll: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                if unavailable {
+                    ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))
+                } else {
+                    conversationContent(scroll: scroll)
+                }
+                if !error.isEmpty { OrbNotice(message: error) }
+                Color.clear.frame(height: 1).id("conversation-bottom").accessibilityIdentifier("conversation-bottom")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .defaultScrollAnchor(.bottom)
+        .onScrollPhaseChange { _, phase in
+            userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+            if userScrolling { followsLatest = atBottom }
+        }
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height + geometry.contentInsets.bottom - 32
+        } action: { _, value in
+            atBottom = value
+            if userScrolling { followsLatest = value }
+        }
+        .onScrollGeometryChange(for: CGSize.self) { geometry in
+            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
+        } action: { _, _ in
+            if followsLatest {
+                Task { @MainActor in
+                    await Task.yield()
+                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+                }
+            }
+        }
+        .onChange(of: working) { _, now in if !now { OrbWorkClock.stop("local:\(id ?? "")") } }
+        .onChange(of: history.last?.0) { _, _ in
+            if !openedAtLatest || followsLatest {
+                scroll.scrollTo("conversation-bottom", anchor: .bottom)
+                openedAtLatest = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func conversationContent(scroll: ScrollViewProxy) -> some View {
+        if loading && missionID != nil && mission == .null {
+            ProgressView("Loading conversation…")
+                .font(.footnote)
+                .foregroundStyle(OrbStyle.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 20)
+        }
+        if missionID == nil && id == nil {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("What would you like to work on?")
+                    .font(.title3.weight(.semibold))
+                Text(folder.isEmpty ? project : "\(project) / \(folder)")
+                    .font(.footnote)
+                    .foregroundStyle(OrbStyle.textSecondary)
+            }
+            .padding(.top, 16)
+        }
+        if history.count > visibleCount {
+            Button("Load earlier messages") {
+                let anchor = history.suffix(visibleCount).first?.0
+                followsLatest = false
+                visibleCount += 20
+                Task { @MainActor in
+                    await Task.yield()
+                    if let anchor { scroll.scrollTo(anchor, anchor: .top) }
+                }
+            }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(OrbStyle.textSecondary)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(Color.white.opacity(0.03), in: Capsule())
+            .overlay(Capsule().stroke(OrbStyle.border))
+            .accessibilityIdentifier("load-earlier")
+        }
+        ForEach(Array(history.suffix(visibleCount)), id: \.0) { item in
+            messageHistoryRow(item: item)
+        }
+        ForEach(turns.indices, id: \.self) { index in
+            turnSummaryRow(turn: turns[index])
+        }
+        if !workModel.todos.isEmpty {
+            OrbMissionTasksCard(todos: workModel.todos)
+        }
+        if !workModel.isEmpty || working {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                OrbWorkFold(
+                    model: workModel,
+                    working: working,
+                    headline: workModel.liveHeadline(fallback: baseStepLabel()),
+                    elapsed: elapsedClock(at: context.date),
+                    accessibilityStatus: progress(at: context.date)
+                )
+            }
+        }
+        if working && !liveText.isEmpty {
+            OrbRichText(source: liveText)
+                .transition(.opacity)
+        }
+        ForEach(pendingQuestionEvents) { event in
+            if let data = event.content.data(using: .utf8), let request = try? JSONDecoder().decode(OrbJSON.self, from: data) {
+                OrbQuestion(event: event, request: request) { answered.insert(event.toolCallId ?? "") }
+            }
+        }
+        if !working && ["failed", "blocked", "interrupted", "cancelled", "reconnect required", "submission uncertain", "incompatible", "waiting user"].contains(status), turns.last?["detail"].text.isEmpty != false {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.caption)
+                Text(status == "waiting user" ? "Waiting for your reply" : status.capitalized)
+                    .font(.footnote.weight(.medium))
+            }
+            .foregroundStyle(OrbStyle.warning)
+            .padding(.vertical, 2)
+        }
+    }
+
+    private var pendingQuestionEvents: [StoredEvent] {
+        events.filter { event in
+            event.eventType == "tool_call" && ["ui_native_request", "AskUserQuestion", "question"].contains(event.toolName ?? "") && !answered.contains(event.toolCallId ?? "") && !events.contains(where: { $0.eventType == "tool_result" && $0.toolCallId == event.toolCallId })
+        }
+    }
+
+    @ViewBuilder
+    private func messageHistoryRow(item: (String, String, String)) -> some View {
+        if item.1 == "user" {
+            let images = OrbMessageImages.parse(item.2)
+            let isPendingTurn = working && item.0 == lastUserItemID
+            HStack {
+                Spacer(minLength: 40)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
+                    if !images.text.isEmpty {
+                        Text(images.text)
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                            .orbShimmer(active: isPendingTurn)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(isPendingTurn ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                )
+                .contextMenu {
+                    if !images.text.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = images.text
+                            OrbHaptics.light()
+                        } label: {
+                            Label("Copy message", systemImage: "doc.on.doc")
                         }
                     }
                 }
-                .onChange(of: working) { _, now in if !now { OrbWorkClock.stop("local:\(id ?? "")") } }
-                .onChange(of: history.last?.0) { _, _ in
-                    if !openedAtLatest || followsLatest {
-                        scroll.scrollTo("conversation-bottom", anchor: .bottom)
-                        openedAtLatest = true
-                    }
-                }
+            }
+            .id(item.0)
+        } else if let quiz = quiz(for: item) {
+            VStack(alignment: .leading, spacing: 12) {
+                if !quiz.before.isEmpty { OrbRichText(source: quiz.before) }
+                OrbQuiz(quiz: quiz, disabled: busy || cloudBlocked || working) { reply in await sendReply(reply) }
+                if !quiz.after.isEmpty { OrbRichText(source: quiz.after) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .id(item.0)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                OrbRichText(source: item.2, onArtifact: { path in
+                    Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) }
+                })
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                if !atBottom && !history.isEmpty {
+                HStack(spacing: 10) {
                     Button {
-                        OrbHaptics.selection()
-                        followsLatest = true
-                        withAnimation(.snappy(duration: 0.22)) {
-                            scroll.scrollTo("conversation-bottom", anchor: .bottom)
+                        UIPasteboard.general.string = item.2
+                        OrbHaptics.light()
+                        withAnimation(.snappy(duration: 0.15)) { copiedItemID = item.0 }
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.4))
+                            if copiedItemID == item.0 {
+                                withAnimation(.snappy(duration: 0.15)) { copiedItemID = nil }
+                            }
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            if working { OrbRunningDots(size: 10) }
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 12, weight: .semibold))
+                        HStack(spacing: 4) {
+                            Image(systemName: copiedItemID == item.0 ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .medium))
+                            if copiedItemID == item.0 {
+                                Text("Copied")
+                                    .font(.caption2)
+                            }
                         }
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
-                        .background(OrbStyle.elevated.opacity(0.95), in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.borderStrong))
-                        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                        .foregroundStyle(copiedItemID == item.0 ? OrbStyle.success : OrbStyle.textMuted)
+                        .padding(.vertical, 2)
+                        .padding(.horizontal, 4)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 10)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    .accessibilityLabel("Scroll to latest message")
+                    .accessibilityLabel(copiedItemID == item.0 ? "Copied response" : "Copy response")
+                    Spacer()
                 }
             }
-            .background(OrbStyle.background)
-            .scrollDismissesKeyboard(.interactively)
-            .navigationTitle(mission["title"].text.isEmpty ? (missionID == nil ? "New agent" : "Conversation") : mission["title"].text)
+            .id(item.0)
+        }
+    }
+
+    @ViewBuilder
+    private func turnSummaryRow(turn: OrbJSON) -> some View {
+        if !turn["detail"].text.isEmpty && !Self.workingPhases.contains(turn["phase"].text) {
+            Text(turn["detail"].text)
+                .font(.footnote)
+                .foregroundStyle(OrbStyle.textSecondary)
+        }
+        ForEach(turn["branches"].items.indices, id: \.self) { branchIndex in
+            if let url = safeURL(turn["branches"].items[branchIndex]["prUrl"].text) {
+                Link(destination: url) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.pull")
+                            .font(.caption)
+                        Text("View pull request")
+                            .font(.footnote.weight(.medium))
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption2)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(OrbStyle.surface, in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.border))
+                }
+            }
+        }
+        ForEach(turn["artifacts"].items.indices, id: \.self) { artifactIndex in
+            let artifact = turn["artifacts"].items[artifactIndex]
+            Button {
+                Task { await download(artifact["path"].text) }
+            } label: {
+                Label(artifact["path"].text.components(separatedBy: "/").last ?? "File", systemImage: "doc")
+                    .font(.footnote)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(OrbStyle.surface, in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.border))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func scrollToLatestButton(scroll: ScrollViewProxy) -> some View {
+        Button {
+            OrbHaptics.selection()
+            followsLatest = true
+            withAnimation(.snappy(duration: 0.22)) {
+                scroll.scrollTo("conversation-bottom", anchor: .bottom)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if working { OrbRunningDots(size: 10) }
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .background(OrbStyle.elevated.opacity(0.95), in: Capsule())
+            .overlay(Capsule().stroke(OrbStyle.borderStrong))
+            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 16)
+        .padding(.bottom, 10)
+        .transition(.scale(scale: 0.9).combined(with: .opacity))
+        .accessibilityLabel("Scroll to latest message")
+    }
+
+    private var conversationToolbarMenu: some View {
+        Menu {
+            if id != nil && !unavailable {
+                Section {
+                    Text(selection.label)
+                    if !status.isEmpty { Text(status.capitalized) }
+                }
+                Button("Rename") { title = mission["title"].text; rename = true }
+                Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
+                Button("Archive") { Task { await mutate(["status": .string("acknowledged")]) } }.disabled(working)
+                if working && (!isCloud || selection.canCancel) {
+                    Button("Stop", role: .destructive) { Task { await cancel() } }
+                }
+                if let url = safeURL(execution["external_url"].text) {
+                    Link("Open in service", destination: url)
+                }
+            }
+            if !project.isEmpty { Button("Project context") { showContext = true } }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .accessibilityLabel("Conversation actions")
+    }
+
+    private var moveConversationSheet: some View {
+        NavigationStack {
+            Form {
+                if !error.isEmpty { OrbNotice(message: error) }
+                TextField("Project slug", text: $destinationProject).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("Folder", text: $destinationFolder).textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
+            .navigationTitle("Move conversation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if id != nil && !unavailable {
-                            Section {
-                                Text(selection.label)
-                                if !status.isEmpty { Text(status.capitalized) }
-                            }
-                            Button("Rename") { title = mission["title"].text; rename = true }
-                            Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
-                            Button("Archive") { Task { await mutate(["status": .string("acknowledged")]) } }.disabled(working)
-                            if working && (!isCloud || selection.canCancel) {
-                                Button("Stop", role: .destructive) { Task { await cancel() } }
-                            }
-                            if let url = safeURL(execution["external_url"].text) {
-                                Link("Open in service", destination: url)
-                            }
-                        }
-                        if !project.isEmpty { Button("Project context") { showContext = true } }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                    }
-                    .accessibilityLabel("Conversation actions")
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !unavailable {
-                    composer
-                        .padding(.top, 4)
-                        .background(OrbStyle.background.ignoresSafeArea(edges: .bottom))
-                }
-            }
-            .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
-            .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil) }
-            .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: project, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
-            .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
-            .sheet(isPresented: $moving) {
-                NavigationStack {
-                    Form {
-                        if !error.isEmpty { OrbNotice(message: error) }
-                        TextField("Project slug", text: $destinationProject).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        TextField("Folder", text: $destinationFolder).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    }
-                    .navigationTitle("Move conversation")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) { Button("Cancel") { moving = false } }
-                        ToolbarItem(placement: .topBarTrailing) { Button("Move") { Task { await move() } }.disabled(destinationProject.trimmingCharacters(in: .whitespaces).isEmpty) }
-                    }
-                }
-            }
-            .task {
-                id = missionID
-                text = OrbDisk.read(draftKey, as: String.self) ?? ""
-                attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
-                if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
-                if let id { mission = OrbReadCache.read("mission:\(id)") ?? .null; execution = OrbReadCache.read("cloud:\(id)") ?? .null; if execution != .null { selection.restore(execution["selection"]) } }
-                await refresh()
-                while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(3)) } catch { break }
-                    if phase == .active { await refresh(force: working) }
-                }
-            }
-            .onChange(of: text) { _, value in do { try OrbDisk.save(value, key: draftKey) } catch { self.error = "Could not save draft: \(error.localizedDescription)" } }
-            .onChange(of: attachments) { _, value in do { try OrbDisk.save(value, key: draftKey + ":files") } catch { self.error = "Could not save attachments: \(error.localizedDescription)" } }
-            .onDisappear { stream?.cancel(); stream = nil }
-            .onChange(of: phase) { _, value in
-                if value == .active { Task { await refresh(force: true) } }
-                else { stream?.cancel(); stream = nil }
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { moving = false } }
+                ToolbarItem(placement: .topBarTrailing) { Button("Move") { Task { await move() } }.disabled(destinationProject.trimmingCharacters(in: .whitespaces).isEmpty) }
             }
         }
     }

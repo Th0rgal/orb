@@ -1711,6 +1711,8 @@ async fn continue_inner(
         }
         // Preserve the generated-track restriction against another owner, but
         // allow our own still-live writer lease to be renewed on continuation.
+        // A conflicting writer lease is a temporary lock, not a permanent
+        // identity mismatch: keep queued follow-ups waiting until it expires.
         if state
             .projects
             .live_leases(Some(slug))
@@ -1722,6 +1724,14 @@ async fn continue_inner(
                     && lease.attempt_id != mission_id.to_string()
             })
         {
+            if queued {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Track '{track}' on project '{slug}' is currently leased by another writer"
+                    ),
+                ));
+            }
             return Err(replacement());
         }
         let writer = super::mission_is_pr_writer_in_store(&store, &mission)
@@ -1919,14 +1929,21 @@ async fn continue_inner(
     // Terminal cleanup may have released the original claim. Reacquire and
     // revalidate it under admission locks before making the mission runnable.
     if let Some(request) = track_claim.as_ref() {
+        let lease_conflict = |error: String| {
+            if queued {
+                (StatusCode::CONFLICT, error)
+            } else {
+                replacement()
+            }
+        };
         state
             .projects
             .acquire_track_lease(request)
-            .map_err(|_| replacement())?;
+            .map_err(|e| lease_conflict(e.to_string()))?;
         state
             .projects
             .revalidate_track_lease(request)
-            .map_err(|_| replacement())?;
+            .map_err(lease_conflict)?;
     }
     // Acquiring a run requires Pending/Active. Under admission locks, mark
     // the mission remote before moving it to Pending so no local scheduler

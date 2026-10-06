@@ -66,7 +66,7 @@ it('shows a remote queued follow-up once and removes it without reopening the co
  render(()=><NativeMissionView id="remote-queued" initial={{id:'remote-queued',status:'active',history:[],created_at:'',updated_at:''}}/>);
  await waitFor(()=>expect(screen.getAllByText('Durable remote follow-up')).toHaveLength(1));
  const {fireEvent}=await import('@solidjs/testing-library');
- await fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+ await fireEvent.click(screen.getByRole('button',{name:'Remove queued message: Durable remote follow-up'}));
  await waitFor(()=>expect(screen.queryByText('Durable remote follow-up')).toBeNull());
 });
 
