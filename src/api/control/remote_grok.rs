@@ -330,6 +330,21 @@ impl GrokStream {
             return;
         };
         if let Some(stream) = self.antigravity.as_mut() {
+            if value["event"] == "thought_update" {
+                if value["conversation_id"].as_str() != stream.session.as_deref() {
+                    return;
+                }
+                if let Some(text) = value["text"].as_str().filter(|s| s.len() <= 256 * 1024) {
+                    self.thinking = text.into();
+                    self.progress = true;
+                    updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
+                    if value["done"] == true {
+                        updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+                    }
+                }
+                return;
+            }
+
             let tools = stream.feed(&value);
             self.progress |= !tools.is_empty() || !stream.text.is_empty();
             if stream.session != self.session_id {
@@ -1922,6 +1937,29 @@ fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_remote_thoughts_require_matching_native_identity() {
+        let mut stream = GrokStream {
+            antigravity: Some(Default::default()),
+            ..Default::default()
+        };
+        stream.feed("{\"event\":\"init\",\"conversation_id\":\"same\"}\n");
+        assert!(stream
+            .feed(
+                "{\"event\":\"thought_update\",\"conversation_id\":\"other\",\"text\":\"wrong\"}\n"
+            )
+            .is_empty());
+        let updates = stream.feed("{\"event\":\"thought_update\",\"conversation_id\":\"same\",\"text\":\"Checking the build.\",\"done\":true}\n");
+        assert_eq!(
+            updates,
+            vec![
+                StreamUpdate::ThinkingSnapshot("Checking the build.".into()),
+                StreamUpdate::TextSnapshot("".into())
+            ]
+        );
+        assert!(stream.text.is_empty());
+    }
 
     #[test]
     fn antigravity_remote_stream_records_progress_and_rejects_wrong_resume() {

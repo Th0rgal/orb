@@ -81,7 +81,7 @@ test('CI waits show one collapsed group with the original actions inside',async(
 test('Antigravity remains visible between tools with usage and capability feedback',async({page})=>{
  await page.goto('/tests/agent-activity.html?antigravity');
  await expect(page.locator('.agent-history-toggle')).toContainText('Working…');
- await expect(page.getByText('Reasoning text unavailable')).toHaveAttribute('title',/does not currently expose/);
+ await expect(page.getByText('Waiting for thought summaries')).toHaveAttribute('title',/Displayed thought summaries/);
  await expect(page.getByText(/1,033 thinking tokens reported/)).toBeVisible();
  await expect(page.getByText(/Last event/)).toBeVisible();
  await page.locator('.agent-history-toggle').click();

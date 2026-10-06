@@ -593,7 +593,7 @@ fn spawn_antigravity(
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    let mut claim_root = PathBuf::from(home).join(".orb/antigravity-attempts");
+    let mut claim_root = PathBuf::from(&home).join(".orb/antigravity-attempts");
     if request.session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
         let bindings = crate::local_bindings(None, None)?;
         if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
@@ -611,6 +611,21 @@ fn spawn_antigravity(
             format!("Cannot start Antigravity: {e}")
         })?;
     let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
+    let thoughts = Arc::new(Mutex::new(crate::antigravity::thoughts::Reader::new(std::path::Path::new(&home))));
+    let thoughts_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thought_reader = thoughts.clone();
+    let thought_stop = thoughts_done.clone();
+    let thought_output = Arc::clone(text);
+    let thought_guard = text.reader();
+    thread::spawn(move || {
+        let _guard = thought_guard;
+        loop {
+            for event in thought_reader.lock().unwrap().poll() { thought_output.antigravity_thought(&event); }
+            if thought_stop.load(std::sync::atomic::Ordering::Acquire) { break; }
+            thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+
     let output = Arc::clone(text);
     let slot = Arc::clone(session_id);
     let error = Arc::clone(error);
@@ -627,6 +642,7 @@ fn spawn_antigravity(
             let Ok(line) = line else { break; };
             let Ok(value) = serde_json::from_str(&line) else { continue; };
             for tool in stream.feed(&value) { output.native_activity(&tool); }
+            if stream.error.is_none() { thoughts.lock().unwrap().observe(&value); }
             if matches!(value["event"].as_str(), Some("init" | "step_update" | "result")) {
                 output.antigravity_progress(&stream);
             }
@@ -643,6 +659,7 @@ fn spawn_antigravity(
                 break;
             }
         }
+        thoughts_done.store(true, std::sync::atomic::Ordering::Release);
         if let Err(message) = stream.finish() {
             if let Ok(mut error) = error.lock() { *error = Some(message); }
         }

@@ -120,12 +120,32 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stream = Stream::default();
     let mut bound = false;
+    let thought_home = match ctx.workspace.env_vars.get("HOME") {
+        Some(home)
+            if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
+                && !crate::workspace::is_container_fallback(ctx.workspace) =>
+        {
+            ctx.workspace.path.join(home.trim_start_matches('/'))
+        }
+        Some(home) => std::path::PathBuf::from(home),
+        None => crate::workspace::resolve_workspace_home_root(
+            &ctx.workspace.path,
+            ctx.workspace.workspace_type,
+            &ctx.workspace.env_vars,
+        ),
+    };
+    let mut thoughts = crate::antigravity::thoughts::Reader::new(&thought_home);
+    let mut thought_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
         let line = tokio::select! {
             _ = ctx.cancel.cancelled() => {
                 stop(&mut child).await;
                 drain.abort();
                 return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
+            }
+            _ = thought_tick.tick() => {
+                publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
+                continue;
             }
             line = lines.next_line() => line,
         };
@@ -169,6 +189,9 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
                 bound = true;
             }
         }
+        if bound {
+            thoughts.observe(&value);
+        }
         let _ = ctx.events_tx.send(AgentEvent::TextDelta {
             content: stream.text.clone(),
             mission_id: Some(ctx.mission_id),
@@ -198,6 +221,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         _ = ctx.cancel.cancelled() => { stop(&mut child).await; drain.abort(); return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled); }
         status = child.wait() => status,
     };
+    publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
     drain.abort();
     let mut result = match stream.finish() {
         Ok(()) if status.is_ok_and(|s| s.success()) => {
@@ -232,5 +256,19 @@ async fn stop(child: &mut tokio::process::Child) {
         .is_err()
     {
         let _ = child.kill().await;
+    }
+}
+
+fn publish_thoughts(
+    reader: &mut crate::antigravity::thoughts::Reader,
+    tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    mission: uuid::Uuid,
+) {
+    for event in reader.poll() {
+        let _ = tx.send(AgentEvent::Thinking {
+            content: event["text"].as_str().unwrap_or_default().into(),
+            done: event["done"] == true,
+            mission_id: Some(mission),
+        });
     }
 }

@@ -1,4 +1,6 @@
 //! Native Antigravity CLI 1.2 event protocol. Shared by Core and Orb.
+#[path = "antigravity_thoughts.rs"]
+pub mod thoughts;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
