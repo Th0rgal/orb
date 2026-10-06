@@ -162,3 +162,17 @@ it('native revisions survive stale replay, tools, canonicalization and the termi
  const canonical:StreamEvent={type:'assistant_message',data:{canonical:true,bubble_id:bubble,revision:2,content:'First update complete'}};
  expect(heldAfterHistory([canonical],[live])).toEqual([]);
 });
+it('a persisted terminal identity confirms unsequenced legacy text but a mutable row ID does not',()=>{
+ const terminal={...final('Done','done'),eventId:'done',sequence:20};
+ expect(heldAfterHistory([terminal],[snap('Working'),final('Done','done')])).toEqual([]);
+ expect(heldAfterHistory([{...snap('Old'),eventId:'text_delta_latest',sequence:1}],[{...snap('New'),eventId:'text_delta_latest',sequence:2}])).toHaveLength(1);
+});
+it('restores a native bubble before its tool and keeps its DOM identity across replay',()=>{
+ const bubble='antigravity:session:turn:1';
+ const tool=ev('tool_call',{tool_call_id:'session:2',name:'bash'});
+ const text=ev('text_op',{bubble_id:bubble,ops:[{type:'snapshot',revision:1,text:'First'}]});
+ const live=buildTranscript([tool,text]);
+ const replay=buildTranscript([text,tool]);
+ expect(live.map(i=>i.kind)).toEqual(['text','tool']);
+ expect(texts(live)[0].key).toEqual(texts(replay)[0].key);
+});

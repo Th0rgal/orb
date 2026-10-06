@@ -230,6 +230,8 @@ export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): S
   const known = new Set(history.map(identity).filter(Boolean));
   const revisions = new Map<string, number>();
   for (const event of history) {
+    const eventId=event.eventId ?? event.data.id;
+    if(eventId != null && event.type !== 'text_delta' && event.type !== 'text_op') known.add(`${event.type}:${eventId}`);
     if (event.type === "tool_call" || event.type === "tool_result") known.add(`${event.type}:${event.data.tool_call_id}`);
     const bubble = String(event.data.bubble_id ?? "");
     if (event.type === 'assistant_message' && event.data.canonical === true && typeof event.data.revision === 'number') revisions.set(bubble, Math.max(revisions.get(bubble) ?? 0, event.data.revision));
