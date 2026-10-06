@@ -63,6 +63,8 @@ pub(crate) const REMOTE_AUTH_REQUIRED: &str = "REMOTE_AUTH_REQUIRED";
 pub(crate) const REMOTE_RESUME_REQUIRES_REPLACEMENT: &str = "REMOTE_RESUME_REQUIRES_REPLACEMENT";
 /// Stable `409` prefix: the node job of this mission is still live.
 pub(crate) const REMOTE_JOB_STILL_RUNNING: &str = "REMOTE_JOB_STILL_RUNNING";
+/// Stable `409` prefix: another writer temporarily owns the generated track.
+pub(crate) const REMOTE_TRACK_BUSY: &str = "REMOTE_TRACK_BUSY";
 
 /// Arguments verified with native Grok 1.0.34 on DGX.
 pub(crate) const GROK_HEADLESS_ARGS: &[&str] = &[
@@ -1722,7 +1724,12 @@ async fn continue_inner(
                     && lease.attempt_id != mission_id.to_string()
             })
         {
-            return Err(replacement());
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "{REMOTE_TRACK_BUSY}: mission {mission_id}'s generated track is owned by another writer; retry after that writer releases it"
+                ),
+            ));
         }
         let writer = super::mission_is_pr_writer_in_store(&store, &mission)
             .await
