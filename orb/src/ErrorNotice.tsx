@@ -25,6 +25,8 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   if (/parallel_missions_cap|maximum.*parallel|parallel mission limit/i.test(raw)) return { title: "Mission limit reached", message: "Wait for a mission to finish or adjust the parallel mission limit in settings." };
   if (/REMOTE_JOB_STILL_RUNNING/.test(raw)) return { title: "A turn is still running", message: "Wait for it to finish before sending this follow-up. Your draft is kept." };
   if (/REMOTE_RESUME_REQUIRES_REPLACEMENT/.test(raw)) return { title: "Couldn’t resume this session", message: "Your draft is kept. Try again; if the problem persists, fork the conversation into a new mission." };
+  if (/There was a network issue connecting to the server/i.test(raw)) return { title: "Network issue connecting to the model server", message: "The connection dropped while the agent was working. Check your internet connection, then resume to continue from the last completed step." };
+  if (/Our servers are experiencing high traffic right now|UNAVAILABLE \(code 503\): The service is currently unavailable/i.test(raw)) return { tone: "warning", title: "The model server is experiencing high traffic", message: "Wait a moment, then resume to continue from the last completed step." };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
   if (/Workspace exceeds transfer limit/.test(raw)) {
     const found = raw.match(/: (.+?) in (\d+) files\. Largest: (.+)$/);

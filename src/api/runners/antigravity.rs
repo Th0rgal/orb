@@ -114,8 +114,14 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let stderr = child.stderr.take().unwrap();
     let drain = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
+        let mut marker = None;
         // Drain stderr without retaining OAuth URLs or other account diagnostics.
-        while let Ok(Some(_)) = lines.next_line().await {}
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(parsed) = crate::antigravity::ErrorMarker::parse(&line) {
+                marker = Some(parsed);
+            }
+        }
+        marker
     });
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stream = Stream::default();
@@ -228,7 +234,11 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         status = child.wait() => status,
     };
     publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
-    drain.abort();
+    if let Ok(Ok(Some(marker))) =
+        tokio::time::timeout(std::time::Duration::from_millis(200), drain).await
+    {
+        stream.error_marker = Some(marker);
+    }
     let mut result = match stream.finish() {
         Ok(()) if status.is_ok_and(|s| s.success()) => AgentResult::success(stream.summary(), 0)
             .with_terminal_reason(TerminalReason::TurnComplete),

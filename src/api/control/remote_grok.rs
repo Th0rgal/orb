@@ -311,6 +311,12 @@ impl GrokStream {
             return;
         }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            if let Some(stream) = self.antigravity.as_mut() {
+                stream.observe_stderr(line);
+                if stream.error.is_some() {
+                    self.error = stream.finish().err().or_else(|| stream.error.clone());
+                }
+            }
             if grok_line_requests_interactive_login(line) && !self.auth_required {
                 self.snapshot_pending(updates);
                 self.auth_required = true;
@@ -354,7 +360,11 @@ impl GrokStream {
             self.text = stream.text.clone();
             self.ended = stream.success;
             self.stop_reason = stream.success.then(|| "end_turn".into());
-            self.error = stream.error.clone();
+            self.error = if stream.error.is_some() {
+                stream.finish().err().or_else(|| stream.error.clone())
+            } else {
+                None
+            };
             for tool in tools {
                 if tool["type"] == "text_op" {
                     updates.push(StreamUpdate::NativeText(tool));
@@ -2034,11 +2044,15 @@ mod tests {
             .await
             .unwrap();
         observer.streaming = LogStreaming::Supported;
+        observer
+            .stream
+            .feed("AGY_ERROR: {\"short_error\":\"read: no route to host\",\"retryable\":true}\n");
         observer.stream.feed(&format!("{}\n", serde_json::json!({"event":"result","result":{"conversation_id":"","status":"ERROR","error":"agy-demo requires --effort"}})));
         let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission.id,"state":"failed","exit_code":1,"created_at":"2026-10-06T06:52:05Z"})).unwrap();
         let verdict = observer.verdict(&status, "old-agent").await;
         assert!(!verdict.success);
         assert!(verdict.content.contains("agy-demo requires --effort"));
+        assert!(verdict.content.contains("read: no route to host"));
         assert!(!verdict
             .content
             .contains("identity was not durably persisted"));

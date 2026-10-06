@@ -464,6 +464,7 @@ export interface PollLocal {
   exit_code?: number | null;
   session_id?: string | null;
   error?: string | null;
+  retryable?: boolean;
   resumed: boolean;
   /** Set while the turn has answered and only its background tasks remain (ms since the epoch). */
   waiting_since?: number | null;

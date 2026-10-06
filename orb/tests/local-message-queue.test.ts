@@ -5,7 +5,7 @@ vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,reopenMission:moc
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
 vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
-import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage,cancelQueuedWakeups,captureWakeupFences,confirmWakeupStops} from '../src/localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage,cancelQueuedWakeups,captureWakeupFences,confirmWakeupStops,cutByConnection} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
 beforeEach(()=>{vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.acknowledged=false;mocks.reopen.mockReset().mockResolvedValue(undefined);mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
@@ -455,3 +455,35 @@ it('Stop removes a dispatch claim while reopening and prevents a late native lau
  await cancelQueuedWakeups('mission');release();await vi.advanceTimersByTimeAsync(100);
  expect(mocks.launch).not.toHaveBeenCalled();expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
+
+it('recognizes Antigravity network and transient high-traffic errors and backs off before resuming',async()=>{
+ expect(cutByConnection({text:'Partial',error:'There was a network issue connecting to the server, please try again. (response may be truncated)'})).toBe(true);
+ expect(cutByConnection({text:'Partial',error:'Our servers are experiencing high traffic right now, please try again in a minute.'})).toBe(true);
+ expect(cutByConnection({text:'Partial',error:'agent executor error: read tcp: read: no route to host'})).toBe(true);
+ expect(cutByConnection({text:'Partial',error:'API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable.'})).toBe(true);
+ expect(cutByConnection({text:'Partial',error:'Unrecognized transient failure',retryable:true})).toBe(true);
+ expect(cutByConnection({text:'Partial',error:'You have hit your usage limit · resets 9pm',retryable:true})).toBe(false);
+
+ mocks.active=false;
+ mocks.follow.mockResolvedValueOnce({
+  text:'Step 1080 partial output',
+  done:true,
+  exit_code:1,
+  error:'There was a network issue connecting to the server, please try again. (response may be truncated) (agent executor error: read: no route to host)',
+  retryable:true,
+  resumed:true,
+ });
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage({...request,harness:'antigravity',bin:'agy'},'first');
+ await vi.advanceTimersByTimeAsync(100);
+ // First launch ran and was requeued with a 1s connection backoff; it does not relaunch at 100ms.
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.status).toHaveBeenCalledWith('mission','interrupted',expect.anything());
+ expect(mocks.failure).toHaveBeenCalledWith('mission',null);
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'queued',autoResumed:true,cut:'connection',resumes:1});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ expect(mocks.launch.mock.calls[1][0].prompt).toBe(resumedPrompt('first','connection'));
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+

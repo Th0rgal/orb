@@ -51,6 +51,8 @@ describe("provider usage limits", () => {
     expect(describeError("You've hit your limit · resets 9pm")).toMatchObject({ title: "Usage limit reached", message: expect.stringContaining("It resets at 9pm.") });
     expect(describeError("Claude AI usage limit reached|1790600000").title).toBe("Claude usage limit reached");
     expect(describeError("Error: 429 Too Many Requests").title).toBe("The provider is rate-limiting requests");
+    expect(describeError("There was a network issue connecting to the server, please try again. (response may be truncated) (agent executor error: read: no route to host)")).toMatchObject({ title: "Network issue connecting to the model server" });
+    expect(describeError("Our servers are experiencing high traffic right now, please try again in a minute. (API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable.)")).toMatchObject({ tone: "warning", title: "The model server is experiencing high traffic" });
     expect(describeError("Increased the rate of the limit checker loop.").tone).toBeUndefined();
   });
 });

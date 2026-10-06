@@ -100,6 +100,8 @@ pub struct PollState {
     pub exit_code: Option<i32>,
     pub session_id: Option<String>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retryable: bool,
     pub resumed: bool,
     /// Set while the turn has answered and only its background tasks remain.
     pub waiting_since: Option<u64>,
@@ -149,7 +151,8 @@ pub async fn local_agents_scan(request: ScanRequest) -> Result<Vec<ScanRow>, Str
 #[tauri::command]
 pub async fn local_antigravity_models(path: String) -> Result<Vec<(String, String)>, String> {
     tauri::async_runtime::spawn_blocking(move || crate::antigravity::models(Path::new(&path)))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
@@ -167,7 +170,8 @@ fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));
             ScanRow {
-                models: vec![], auth_error: None,
+                models: vec![],
+                auth_error: None,
                 id: (*id).to_string(),
                 bin: (*bin).to_string(),
                 // A slow version probe must not hide an installed CLI.
@@ -354,7 +358,12 @@ pub(crate) fn start_with_env_fenced(
         error,
         resumed,
     };
-    watch_exit(software_execution, interaction, run.clone(), request.harness == "antigravity");
+    watch_exit(
+        software_execution,
+        interaction,
+        run.clone(),
+        request.harness == "antigravity",
+    );
     map.insert(request.id, run);
     Ok(())
 }
@@ -413,7 +422,9 @@ fn watch_exit(
         }
         output.wait_drained(None);
         if strict_terminal && error.lock().is_ok_and(|error| error.is_some()) {
-            if let Ok(mut slot) = exit_code.lock() { *slot = Some(1); }
+            if let Ok(mut slot) = exit_code.lock() {
+                *slot = Some(1);
+            }
         }
         done.store(true, Ordering::SeqCst);
         output.finish(PollState {
@@ -423,6 +434,7 @@ fn watch_exit(
             exit_code: *exit_code.lock().unwrap(),
             session_id: session_id.lock().unwrap().clone(),
             error: error.lock().unwrap().clone(),
+            retryable: output.retryable(),
             resumed,
             waiting_since: None,
         });
@@ -448,6 +460,7 @@ pub fn poll_generation(id: &str, expected: Option<&str>) -> Result<PollState, St
         exit_code: *run.exit_code.lock().map_err(|e| e.to_string())?,
         session_id: run.session_id.lock().map_err(|e| e.to_string())?.clone(),
         error: run.error.lock().map_err(|e| e.to_string())?.clone(),
+        retryable: run.text.retryable(),
         resumed: run.resumed,
         waiting_since: run.text.waiting_since(),
     };
@@ -568,14 +581,26 @@ fn spawn_harness(
 
 // A durable create-new marker also fences retries after an Orb restart or lost stdout.
 // Only a confirmed OS spawn failure may release it; a known native ID can resume.
-fn claim_antigravity_attempt(root: &std::path::Path, id: &str, cwd: &std::path::Path, session: Option<&str>) -> Result<Option<PathBuf>, String> {
-    if session.is_some_and(|id| !id.trim().is_empty()) { return Ok(None); }
+fn claim_antigravity_attempt(
+    root: &std::path::Path,
+    id: &str,
+    cwd: &std::path::Path,
+    session: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    if session.is_some_and(|id| !id.trim().is_empty()) {
+        return Ok(None);
+    }
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     use sha2::{Digest, Sha256};
     let mut key = Sha256::new();
     key.update(id.as_bytes());
     key.update([0]);
-    key.update(cwd.canonicalize().map_err(|e| e.to_string())?.as_os_str().as_encoded_bytes());
+    key.update(
+        cwd.canonicalize()
+            .map_err(|e| e.to_string())?
+            .as_os_str()
+            .as_encoded_bytes(),
+    );
     let name = format!("{:x}", key.finalize());
     let path = root.join(name);
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
@@ -583,35 +608,85 @@ fn claim_antigravity_attempt(root: &std::path::Path, id: &str, cwd: &std::path::
             "Antigravity has an earlier launch without a recorded conversation ID. Reconcile that native conversation before retrying; automatic replay is blocked.".to_string()
         } else { e.to_string() })?;
     file.sync_all().map_err(|e| e.to_string())?;
-    std::fs::File::open(root).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
+    std::fs::File::open(root)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| e.to_string())?;
     Ok(Some(path))
 }
 
 fn spawn_antigravity(
-    request: &StartRequest, text: &Arc<Output>, session_id: &Arc<Mutex<Option<String>>>,
-    error: &Arc<Mutex<Option<String>>>, env: &[(String, String)],
+    request: &StartRequest,
+    text: &Arc<Output>,
+    session_id: &Arc<Mutex<Option<String>>>,
+    error: &Arc<Mutex<Option<String>>>,
+    env: &[(String, String)],
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
     let mut claim_root = PathBuf::from(&home).join(".orb/antigravity-attempts");
-    if request.session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+    if request
+        .session_id
+        .as_deref()
+        .is_none_or(|id| id.trim().is_empty())
+    {
         let bindings = crate::local_bindings(None, None)?;
         if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
-            let transfer = uuid::Uuid::parse_str(transfer).map_err(|_| "Invalid transfer identity")?;
+            let transfer =
+                uuid::Uuid::parse_str(transfer).map_err(|_| "Invalid transfer identity")?;
             claim_root = claim_root.join(transfer.to_string());
         }
     }
-    let claim = claim_antigravity_attempt(&claim_root, &request.id, std::path::Path::new(&request.cwd), request.session_id.as_deref())?;
+    let claim = claim_antigravity_attempt(
+        &claim_root,
+        &request.id,
+        std::path::Path::new(&request.cwd),
+        request.session_id.as_deref(),
+    )?;
     let mut command = mission_command(request, env);
-    let mut child = command.current_dir(&request.cwd)
-        .args(crate::antigravity::args_with_effort(request.model.as_deref(), request.effort.as_deref(), request.session_id.as_deref(), &request.prompt))
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().map_err(|e| {
-            if let Some(path) = &claim { let _ = std::fs::remove_file(path); }
+    let mut child = command
+        .current_dir(&request.cwd)
+        .args(crate::antigravity::args_with_effort(
+            request.model.as_deref(),
+            request.effort.as_deref(),
+            request.session_id.as_deref(),
+            &request.prompt,
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if let Some(path) = &claim {
+                let _ = std::fs::remove_file(path);
+            }
             format!("Cannot start Antigravity: {e}")
         })?;
-    let stdout = child.stdout.take().ok_or("Antigravity stdout unavailable")?;
-    let thoughts = Arc::new(Mutex::new(crate::antigravity::thoughts::Reader::new(std::path::Path::new(&home))));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Antigravity stdout unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Antigravity stderr unavailable")?;
+    let stderr_guard = text.reader();
+    let stderr_reader = thread::spawn(move || {
+        let _guard = stderr_guard;
+        let mut marker = None;
+        // Drain stderr without retaining OAuth URLs or unstructured account diagnostics.
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if let Some(parsed) = crate::antigravity::ErrorMarker::parse(&line) {
+                marker = Some(parsed);
+            }
+        }
+        marker
+    });
+    let thoughts = Arc::new(Mutex::new(crate::antigravity::thoughts::Reader::new(
+        std::path::Path::new(&home),
+    )));
     let thoughts_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let thought_reader = thoughts.clone();
     let thought_stop = thoughts_done.clone();
@@ -620,8 +695,12 @@ fn spawn_antigravity(
     thread::spawn(move || {
         let _guard = thought_guard;
         loop {
-            for event in thought_reader.lock().unwrap().poll() { thought_output.antigravity_thought(&event); }
-            if thought_stop.load(std::sync::atomic::Ordering::Acquire) { break; }
+            for event in thought_reader.lock().unwrap().poll() {
+                thought_output.antigravity_thought(&event);
+            }
+            if thought_stop.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             thread::sleep(std::time::Duration::from_millis(500));
         }
     });
@@ -639,29 +718,50 @@ fn spawn_antigravity(
         output.antigravity_progress(&stream);
         output.publish_activities();
         for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break; };
-            let Ok(value) = serde_json::from_str(&line) else { continue; };
-            for tool in stream.feed(&value) { output.native_activity(&tool); }
-            if stream.error.is_none() { thoughts.lock().unwrap().observe(&value); }
-            if matches!(value["event"].as_str(), Some("init" | "step_update" | "result")) {
+            let Ok(line) = line else {
+                break;
+            };
+            let Ok(value) = serde_json::from_str(&line) else {
+                continue;
+            };
+            for tool in stream.feed(&value) {
+                output.native_activity(&tool);
+            }
+            if stream.error.is_none() {
+                thoughts.lock().unwrap().observe(&value);
+            }
+            if matches!(
+                value["event"].as_str(),
+                Some("init" | "step_update" | "result")
+            ) {
                 output.antigravity_progress(&stream);
             }
             output.publish_activities();
             if let Some(id) = &stream.session {
                 if expected.as_deref().is_some_and(|old| old != id) {
                     stream.error = Some("Antigravity resumed a different conversation".into());
-                } else if let Ok(mut slot) = slot.lock() { *slot = Some(id.clone()); }
+                } else if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(id.clone());
+                }
             }
             output.replace(stream.text.clone());
             if stream.error.is_some() {
                 #[cfg(unix)]
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
                 break;
             }
         }
         thoughts_done.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(Some(marker)) = stderr_reader.join() {
+            stream.error_marker = Some(marker);
+        }
+        output.set_retryable(stream.is_retryable());
         if let Err(message) = stream.finish() {
-            if let Ok(mut error) = error.lock() { *error = Some(message); }
+            if let Ok(mut error) = error.lock() {
+                *error = Some(message);
+            }
         }
     });
     Ok(child)
@@ -2318,7 +2418,8 @@ mod tests {
     #[test]
     fn retired_gemini_cannot_be_launched_from_saved_requests() {
         assert!(!HARNESSES.iter().any(|(id, _)| *id == "gemini"));
-        let request = StartRequest { effort: None,
+        let request = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: "retired-harness".into(),
@@ -2331,22 +2432,35 @@ mod tests {
             image_paths: vec![],
         };
         let error = spawn_harness(
-            &request, &Arc::new(Output::default()), &Arc::new(Mutex::new(None)),
-            &Arc::new(Mutex::new(None)), &Arc::new(AtomicBool::new(false)), &[],
-        ).unwrap_err();
+            &request,
+            &Arc::new(Output::default()),
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(AtomicBool::new(false)),
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(error, "unknown local harness gemini");
     }
 
     #[test]
     fn antigravity_unbound_attempt_survives_retry_and_allows_known_resume() {
         let root = tempfile::tempdir().unwrap();
-        let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None).unwrap().unwrap();
+        let marker = claim_antigravity_attempt(root.path(), "mission", root.path(), None)
+            .unwrap()
+            .unwrap();
         assert!(marker.is_file());
         let destination = tempfile::tempdir().unwrap();
-        assert!(claim_antigravity_attempt(root.path(), "mission", destination.path(), None).is_ok());
+        assert!(
+            claim_antigravity_attempt(root.path(), "mission", destination.path(), None).is_ok()
+        );
         assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), None).is_err());
         assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("")).is_err());
-        assert!(claim_antigravity_attempt(root.path(), "mission", root.path(), Some("native-id")).unwrap().is_none());
+        assert!(
+            claim_antigravity_attempt(root.path(), "mission", root.path(), Some("native-id"))
+                .unwrap()
+                .is_none()
+        );
         assert!(claim_antigravity_attempt(root.path(), "other", root.path(), None).is_ok());
     }
 
@@ -2362,26 +2476,54 @@ mod tests {
                 script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"SUCCESS\",\"response\":\"Ready\"}}'\n");
             }
             if outcome == "ERROR" {
-                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"ERROR\",\"response\":\"Partial answer\"}}'\n");
+                script.push_str("printf '%s\\n' 'AGY_ERROR: {\"short_error\":\"read: no route to host\",\"status\":\"UNKNOWN\",\"error_code\":2,\"code_kind\":\"grpc\",\"retryable\":true}' >&2\n");
+                script.push_str("printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"native-session\",\"status\":\"ERROR\",\"error\":\"There was a network issue connecting to the server, please try again.\",\"response\":\"Partial answer\"}}'\n");
             }
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let request = StartRequest { effort: None,
-                cyber_revision: None, cyber_access: None, image_paths: vec![],
-                id: "antigravity-fixture".into(), harness: "antigravity".into(),
-                bin: bin.to_string_lossy().into_owned(), cwd: dir.path().to_string_lossy().into_owned(),
-                prompt: "hello".into(), model: Some("agy-demo".into()), session_id: Some("native-session".into()),
+            let request = StartRequest {
+                effort: None,
+                cyber_revision: None,
+                cyber_access: None,
+                image_paths: vec![],
+                id: "antigravity-fixture".into(),
+                harness: "antigravity".into(),
+                bin: bin.to_string_lossy().into_owned(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "hello".into(),
+                model: Some("agy-demo".into()),
+                session_id: Some("native-session".into()),
             };
             let output = Arc::new(Output::default());
             let session = Arc::new(Mutex::new(None));
             let error = Arc::new(Mutex::new(None));
-            let mut child = spawn_harness(&request, &output, &session, &error, &Arc::new(AtomicBool::new(false)), &[]).unwrap();
+            let mut child = spawn_harness(
+                &request,
+                &output,
+                &session,
+                &error,
+                &Arc::new(AtomicBool::new(false)),
+                &[],
+            )
+            .unwrap();
             let status = child.wait().unwrap();
-            if outcome != "ERROR" { assert!(status.success()); }
+            if outcome != "ERROR" {
+                assert!(status.success());
+            }
             assert!(output.wait_drained(Some(Duration::from_secs(2))));
             assert_eq!(session.lock().unwrap().as_deref(), Some("native-session"));
             assert_eq!(error.lock().unwrap().is_none(), success);
-            if success { assert_eq!(output.snapshot(), "Ready"); }
+            assert_eq!(output.retryable(), outcome == "ERROR");
+            if outcome == "ERROR" {
+                let message = error.lock().unwrap().clone().unwrap();
+                assert!(message.contains(
+                    "There was a network issue connecting to the server, please try again."
+                ));
+                assert!(message.contains("read: no route to host"));
+            }
+            if success {
+                assert_eq!(output.snapshot(), "Ready");
+            }
         }
     }
 
@@ -2506,7 +2648,8 @@ mod tests {
 
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
-        let fresh = StartRequest { effort: None,
+        let fresh = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -2556,14 +2699,16 @@ mod tests {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         );
-        let smart = StartRequest { effort: None,
+        let smart = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             model: Some("builtin/smart".into()),
             ..fresh.clone()
         };
         assert!(opencode_args(&smart).contains(&"sandboxed-sh/builtin/smart".to_string()));
-        let resumed = StartRequest { effort: None,
+        let resumed = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             session_id: Some("ses_abc".into()),
@@ -2607,12 +2752,24 @@ mod tests {
                 json!({"id":"orb-turn/start","result":{}}),
                 json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}),
             ];
-            let input = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            let input = events
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
             let mut sent = Vec::new();
             let result = drive_codex(
-                &mut sent, &mut std::io::Cursor::new(input), prompt, &[],
-                Some("gpt-6.1-sol"), crate::cyber_access::Mode::Standard,
-                "/tmp", None, &Output::default(), &Mutex::new(None),
+                &mut sent,
+                &mut std::io::Cursor::new(input),
+                prompt,
+                &[],
+                Some("gpt-6.1-sol"),
+                crate::cyber_access::Mode::Standard,
+                "/tmp",
+                None,
+                &Output::default(),
+                &Mutex::new(None),
                 &crate::interactions::begin("cyber-goal-boundary"),
             );
             let sent = String::from_utf8(sent).unwrap();
@@ -2861,7 +3018,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
-        let request = StartRequest { effort: None,
+        let request = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: "stdin-test".into(),
@@ -2916,7 +3074,8 @@ printf '%s\n' '{"type":"result"}'
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
-        local_agents_start(StartRequest { effort: None,
+        local_agents_start(StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3061,7 +3220,8 @@ printf '%s\n' '{"type":"result"}'
             .unwrap()
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
-        local_agents_start(StartRequest { effort: None,
+        local_agents_start(StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3136,7 +3296,8 @@ printf '%s\n' '{"type":"result"}'
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
-        local_agents_start(StartRequest { effort: None,
+        local_agents_start(StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3210,7 +3371,8 @@ printf '%s\n' '{"type":"result"}'
     #[cfg(unix)]
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
-        let request = StartRequest { effort: None,
+        let request = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             image_paths: vec![],
@@ -3246,7 +3408,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::write(&bin, "#!/bin/sh\nsleep 10\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
-        local_agents_start(StartRequest { effort: None,
+        local_agents_start(StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3279,7 +3442,8 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, "#!/bin/sh\n[ \"$1\" = --version ] && { echo launcher 1.0.0; exit 0; }\nsleep 30 &\necho $! > child.pid\nwait\n").unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
-            local_agents_start(StartRequest { effort: None,
+            local_agents_start(StartRequest {
+                effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: id.clone(),
@@ -3340,7 +3504,8 @@ printf '%s\n' '{"type":"result"}'
         std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\nhead -3 '{0}'\nif read -r line && read -r line && sleep 0.3 && read -r -t 1 line; then :; fi\ntail -2 '{0}'\ncat >/dev/null\n", events.display())).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
-        local_agents_start(StartRequest { effort: None,
+        local_agents_start(StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -3541,7 +3706,8 @@ mod directory_tests {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
-        let request = StartRequest { effort: None,
+        let request = StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: first.clone(),
@@ -3555,7 +3721,8 @@ mod directory_tests {
         };
         start_with_env(request.clone(), &[]).unwrap();
         let deferred = tauri::async_runtime::block_on(crate::run_recovery::local_run_launch(
-            StartRequest { effort: None,
+            StartRequest {
+                effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -3569,7 +3736,8 @@ mod directory_tests {
         .unwrap_err();
         assert!(deferred.starts_with("Local launch deferred: directory busy"));
         let second = start_with_env(
-            StartRequest { effort: None,
+            StartRequest {
+                effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),

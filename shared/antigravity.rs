@@ -57,6 +57,60 @@ pub fn args_with_effort(
     args
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ErrorMarker {
+    pub short_error: Option<String>,
+    pub status: Option<String>,
+    pub error_code: Option<i64>,
+    pub code_kind: Option<String>,
+    pub retryable: bool,
+}
+
+fn contains_sensitive_auth(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.contains("accounts.google.com")
+        || lower.contains("oauth2")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
+        || lower.contains("client_secret")
+}
+
+impl ErrorMarker {
+    /// Parse a structured `AGY_ERROR: {...}` line from stderr without retaining
+    /// OAuth URLs, tokens, or unstructured account diagnostics.
+    pub fn parse(line: &str) -> Option<Self> {
+        let payload = line.trim().strip_prefix("AGY_ERROR:")?.trim();
+        let value: Value = serde_json::from_str(payload).ok()?;
+        let obj = value.as_object()?;
+        let short_error = obj
+            .get("short_error")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !contains_sensitive_auth(s))
+            .map(str::to_owned);
+        Some(Self {
+            short_error,
+            status: obj
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            error_code: obj.get("error_code").and_then(Value::as_i64),
+            code_kind: obj
+                .get("code_kind")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            retryable: obj
+                .get("retryable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Stream {
     pub turn_id: String,
@@ -65,6 +119,8 @@ pub struct Stream {
     pub expected_session: Option<String>,
     pub text: String,
     pub error: Option<String>,
+    pub error_marker: Option<ErrorMarker>,
+    identity_error: bool,
     pub success: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -125,6 +181,7 @@ impl Stream {
                     .as_deref()
                     .is_some_and(|old| old != id)
             {
+                self.identity_error = true;
                 self.error =
                     Some("Antigravity changed conversation identity during the turn".into());
                 return vec![];
@@ -214,6 +271,21 @@ impl Stream {
         events
     }
 
+    pub fn observe_stderr(&mut self, line: &str) {
+        if let Some(marker) = ErrorMarker::parse(line) {
+            self.error_marker = Some(marker);
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        !self.identity_error
+            && self.session.is_some()
+            && self
+                .error_marker
+                .as_ref()
+                .is_some_and(|marker| marker.retryable)
+    }
+
     /// The terminal receipt repeats only the last response, not every update.
     pub fn summary(&self) -> String {
         self.responses
@@ -225,13 +297,33 @@ impl Stream {
     }
 
     pub fn finish(&self) -> Result<(), String> {
+        let marker_error = if self.identity_error {
+            None
+        } else {
+            self.error_marker
+                .as_ref()
+                .and_then(|marker| marker.short_error.as_deref())
+        };
         if let Some(error) = &self.error {
+            if error.starts_with("Antigravity result:") {
+                if let Some(short) = marker_error {
+                    return Err(short.to_owned());
+                }
+            } else if let Some(short) = marker_error.filter(|short| !error.contains(*short)) {
+                return Err(format!("{error} ({short})"));
+            }
             return Err(error.clone());
         }
         if self.session.is_none() {
+            if let Some(short) = marker_error {
+                return Err(short.to_owned());
+            }
             return Err("Antigravity did not report a conversation ID".into());
         }
         if !self.success {
+            if let Some(short) = marker_error {
+                return Err(short.to_owned());
+            }
             return Err("Antigravity ended without a SUCCESS result; resume this conversation before retrying work".into());
         }
         Ok(())
@@ -493,5 +585,63 @@ mod tests {
         stream.feed(&json!({"event":"result","result":{"conversation_id":"","status":"ERROR","error":error}}));
         assert_eq!(stream.finish().unwrap_err(), error);
         assert!(stream.session.is_none());
+    }
+
+    #[test]
+    fn stderr_error_marker_enriches_friendly_error_and_marks_bound_session_retryable() {
+        let mut stream = Stream::default();
+        stream.feed(
+            &json!({"event":"init","conversation_id":"ddd67091-4a2f-4fba-b905-7a8144dee4eb"}),
+        );
+        stream.observe_stderr("non-marker line https://accounts.google.com/o/oauth2/auth?secret=1");
+        assert!(stream.error_marker.is_none());
+        stream.observe_stderr(
+            r#"AGY_ERROR: {"short_error":"agent executor error: generating and executing: request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": read tcp [2a01:14:8010:4250:115a:9d6:a0ad:1246]:57897->[2001:4860:4841:400::]:443: read: no route to host","status":"UNKNOWN","error_code":2,"code_kind":"grpc","retryable":true,"error_id":"err-1"}"#,
+        );
+        stream.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":"ddd67091-4a2f-4fba-b905-7a8144dee4eb",
+                "status":"ERROR",
+                "error":"There was a network issue connecting to the server, please try again. (response may be truncated)"
+            }
+        }));
+        assert!(stream.is_retryable());
+        let err = stream.finish().unwrap_err();
+        assert!(
+            err.contains("There was a network issue connecting to the server, please try again.")
+        );
+        assert!(err.contains("read: no route to host"));
+    }
+
+    #[test]
+    fn stderr_error_marker_redacts_oauth_and_never_marks_unbound_or_changed_identity_retryable() {
+        let marker = ErrorMarker::parse(
+            r#"AGY_ERROR: {"short_error":"visit https://accounts.google.com/o/oauth2/v2/auth","status":"UNAUTHENTICATED","retryable":true}"#,
+        )
+        .unwrap();
+        assert!(marker.short_error.is_none());
+        let mut unbound = Stream::default();
+        unbound.observe_stderr(
+            r#"AGY_ERROR: {"short_error":"API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable.","status":"UNAVAILABLE","error_code":14,"code_kind":"grpc","retryable":true}"#,
+        );
+        assert!(!unbound.is_retryable());
+        assert_eq!(
+            unbound.finish().unwrap_err(),
+            "API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable."
+        );
+        let mut mismatch = Stream {
+            expected_session: Some("expected".into()),
+            ..Default::default()
+        };
+        mismatch.observe_stderr(
+            r#"AGY_ERROR: {"short_error":"read: no route to host","retryable":true}"#,
+        );
+        mismatch.feed(&json!({"event":"init","conversation_id":"wrong"}));
+        assert!(!mismatch.is_retryable());
+        assert_eq!(
+            mismatch.finish().unwrap_err(),
+            "Antigravity changed conversation identity during the turn"
+        );
     }
 }

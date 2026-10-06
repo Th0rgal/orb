@@ -123,6 +123,7 @@ pub struct Output(
     /// When the turn answered and only its background tasks remain (ms since
     /// the epoch), or zero.
     std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicBool,
 );
 
 pub struct ReaderGuard(Arc<Output>);
@@ -134,6 +135,12 @@ impl Drop for ReaderGuard {
     }
 }
 impl Output {
+    pub fn set_retryable(&self, retryable: bool) {
+        self.6.store(retryable, Ordering::SeqCst);
+    }
+    pub fn retryable(&self) -> bool {
+        self.6.load(Ordering::SeqCst)
+    }
     /// The turn has answered and now only waits for its background tasks, or
     /// it started working again.
     pub fn waiting_on_background(&self, waiting: bool) {
@@ -184,29 +191,61 @@ impl Output {
     /// A status snapshot, not a tool or a fabricated reasoning message.
     pub fn antigravity_progress(&self, stream: &crate::antigravity::Stream) {
         let mut activities = self.2.lock().unwrap();
-        let index = activities.iter().position(|a| a.id == "antigravity:status").unwrap_or_else(|| {
-            activities.push(Activity::new("antigravity:status".into(), "Working…".into(), "status", false));
-            activities.len() - 1
-        });
+        let index = activities
+            .iter()
+            .position(|a| a.id == "antigravity:status")
+            .unwrap_or_else(|| {
+                activities.push(Activity::new(
+                    "antigravity:status".into(),
+                    "Working…".into(),
+                    "status",
+                    false,
+                ));
+                activities.len() - 1
+            });
         let activity = &mut activities[index];
         activity.updated_at = activity_now();
         activity.thinking_tokens = stream.thinking_tokens;
-        activity.label = if stream.agent_response_active { "Generating response…" } else { "Working…" }.into();
-        activity.detail = Some("Displayed thought summaries are read from this native conversation when available.".into());
-        if stream.error.is_some() { activity.finish("failed"); }
-        else if stream.success { activity.finish("completed"); }
+        activity.label = if stream.agent_response_active {
+            "Generating response…"
+        } else {
+            "Working…"
+        }
+        .into();
+        activity.detail = Some(
+            "Displayed thought summaries are read from this native conversation when available."
+                .into(),
+        );
+        if stream.error.is_some() {
+            activity.finish("failed");
+        } else if stream.success {
+            activity.finish("completed");
+        }
     }
     pub fn antigravity_thought(&self, event: &serde_json::Value) {
-        let Some(text) = event["text"].as_str().filter(|s| !s.is_empty()) else { return; };
-        let id = format!("antigravity:thought:{}:{}", event["conversation_id"].as_str().unwrap_or(""), event["step_index"]);
+        let Some(text) = event["text"].as_str().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let id = format!(
+            "antigravity:thought:{}:{}",
+            event["conversation_id"].as_str().unwrap_or(""),
+            event["step_index"]
+        );
         let mut activities = self.2.lock().unwrap();
-        let index = activities.iter().position(|a| a.id == id).unwrap_or_else(|| {
-            activities.push(Activity::new(id, "Thinking".into(), "thinking", false)); activities.len()-1
-        });
+        let index = activities
+            .iter()
+            .position(|a| a.id == id)
+            .unwrap_or_else(|| {
+                activities.push(Activity::new(id, "Thinking".into(), "thinking", false));
+                activities.len() - 1
+            });
         activities[index].detail = Some(text.into());
         activities[index].updated_at = activity_now();
-        if event["done"] == true { activities[index].finish("completed"); }
-        drop(activities); self.publish_activities();
+        if event["done"] == true {
+            activities[index].finish("completed");
+        }
+        drop(activities);
+        self.publish_activities();
     }
     pub fn native_activity(&self, value: &serde_json::Value) {
         if matches!(
@@ -609,6 +648,7 @@ mod tests {
             exit_code: Some(0),
             session_id: None,
             error: None,
+            retryable: false,
             resumed: false,
             waiting_since: None,
         }
@@ -665,7 +705,12 @@ mod tests {
         assert_eq!(rows[0].thinking_tokens, Some(42));
         let captured = Arc::new(Mutex::new(Vec::new()));
         let events = captured.clone();
-        output.subscribe(Channel::new(move |event| { events.lock().unwrap().push(event); Ok(()) })).unwrap();
+        output
+            .subscribe(Channel::new(move |event| {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }))
+            .unwrap();
         assert_eq!(captured.lock().unwrap().len(), 1);
         stream.success = true;
         output.antigravity_progress(&stream);
