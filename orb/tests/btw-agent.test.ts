@@ -129,6 +129,32 @@ it('stops the recovered side agent instead of its superseded predecessor',async(
  await stopBtw('stop-parent');
  expect(cancelMission).toHaveBeenCalledWith('stop-new');
 });
+
+it('sends a follow-up to the recovered session using its own sequence boundary',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents}=await import('../src/stream');
+ localStorage.setItem('agent:'+sideQuestionKey('follow-parent'),JSON.stringify({id:'follow-old',question:'First',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0,afterSequence:9000,contextVersion:2,conversationCursor:{sequence:10,visibleHash:'hash'},placement:JSON.stringify([false,undefined,undefined,undefined])}));
+ let sent=false;
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='follow-parent'?'active':'awaiting_user',history:[],tags:id==='follow-old'?['superseded_by:follow-new']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockImplementation(async()=>sent?[{event_type:'user_message',content:'Next',sequence:2,id:2,timestamp:''},{event_type:'assistant_message',content:'Follow-up answer',sequence:3,id:3,timestamp:''}]:[{event_type:'assistant_message',content:'Earlier recovered answer',sequence:1,id:1,timestamp:''}]);
+ vi.mocked(sendMissionMessage).mockImplementationOnce(async()=>{sent=true;return {} as any;});
+ const receive=vi.fn();
+ await askBtwAgent('follow-parent','Next','context',[],new AbortController().signal,receive);
+ expect(sendMissionMessage).toHaveBeenCalledWith('follow-new',expect.stringContaining('Next'));
+ expect(api).not.toHaveBeenCalled();
+ expect(btwSession('follow-parent')?.afterSequence).toBe(1);
+ expect(receive).toHaveBeenLastCalledWith({type:'done',answer:'Follow-up answer'});
+});
+
+it('includes the terminal mission reason when a recovered session has no response',async()=>{
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('reason-parent'),JSON.stringify({id:'reason-old',question:'Q',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'completed',history:[],tags:id==='reason-old'?['superseded_by:reason-new']:[],status_message:'No assistant output recorded',title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([]);
+ await expect(watchBtw('reason-parent',new AbortController().signal,()=>{})).rejects.toThrow('completed: No assistant output recorded');
+});
 it('a missing agent endpoint fails without falling back to a normal fork',async()=>{
  vi.mocked(getMission).mockResolvedValue({id:'parent',status:'active',history:[],tags:[],title:null,created_at:'',updated_at:''});
  vi.mocked(api).mockRejectedValue(new Error('404'));
