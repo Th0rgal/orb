@@ -1,3 +1,4 @@
+import { AntigravityProvider } from "./AntigravityProvider";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
@@ -771,6 +772,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
+          <Show when={a.provider_type === "antigravity"}><AntigravityProvider embedded /></Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
           </Show>

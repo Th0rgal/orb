@@ -18880,6 +18880,53 @@ async fn delete_mission_with_children(
     Ok(ids_to_delete)
 }
 
+/// Renamed deletion directories are the durable cleanup queue. Scan only known
+/// workspace parents and the exact reserved UUID format; never follow symlinks.
+pub(crate) fn start_deleted_workspace_cleanup(workspaces: workspace::SharedWorkspaceStore) {
+    tokio::spawn(async move {
+        loop {
+            let mut parents = HashSet::new();
+            for ws in workspaces.list().await {
+                for root in workspace::mission_workspace_roots_for_workspace(&ws) {
+                    parents.insert(workspace::workspaces_root_for(&root));
+                }
+            }
+            for parent in parents {
+                let Ok(mut entries) = tokio::fs::read_dir(&parent).await else {
+                    continue;
+                };
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name();
+                    let Some(ids) = name
+                        .to_str()
+                        .and_then(|name| name.strip_prefix(".deleted-mission-"))
+                    else {
+                        continue;
+                    };
+                    if !ids.is_ascii()
+                        || ids.len() != 73
+                        || ids.as_bytes()[36] != b'-'
+                        || Uuid::parse_str(&ids[..36]).is_err()
+                        || Uuid::parse_str(&ids[37..]).is_err()
+                    {
+                        continue;
+                    }
+                    if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                        continue;
+                    }
+                    if let Err(error) = tokio::fs::remove_dir_all(entry.path()).await {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(path = %entry.path().display(), %error,
+                                "quarantined workspace cleanup will retry");
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
+}
+
 async fn cleanup_mission_workspace_dirs_for_delete(
     mission_store: &Arc<dyn MissionStore>,
     workspaces: &workspace::SharedWorkspaceStore,
@@ -18924,6 +18971,22 @@ async fn cleanup_mission_workspace_dirs_for_delete(
         }
     }
 
+    // Check every descendant before touching any directory; paused children
+    // must retain their workspace even when the parent is terminal.
+    if let Some(mission) = missions.iter().find(|m| {
+        matches!(
+            m.status,
+            MissionStatus::Paused | MissionStatus::Active | MissionStatus::WaitingBackground
+        )
+    }) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Cannot delete mission {} while it is {:?}. Cancel it first.",
+                mission.id, mission.status
+            ),
+        ));
+    }
     let mut deleted_dirs = Vec::new();
     for mission in missions {
         let Some(ws) = workspaces.get(mission.workspace_id).await else {
@@ -18956,7 +19019,14 @@ async fn cleanup_mission_workspace_dirs_for_delete(
         if !dir.exists() {
             continue;
         }
-        match tokio::fs::remove_dir_all(&dir).await {
+        // Quarantine on the same filesystem before removing the record. Recursive
+        // cleanup can take minutes for build trees and must not hold the request.
+        let trash = dir.with_file_name(format!(
+            ".deleted-mission-{}-{}",
+            mission.id,
+            Uuid::new_v4()
+        ));
+        match tokio::fs::rename(&dir, &trash).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
@@ -18974,7 +19044,7 @@ async fn cleanup_mission_workspace_dirs_for_delete(
             mission_id = %mission.id,
             workspace_id = %mission.workspace_id,
             path = %dir.display(),
-            "removed mission workspace directory during explicit delete",
+            "quarantined mission workspace directory during explicit delete",
         );
         deleted_dirs.push(dir.to_string_lossy().to_string());
     }
@@ -35066,6 +35136,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_workspace_cleanup_recovers_quarantined_directories_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
+        let parent = workspace::workspaces_root_for(temp.path());
+        let trash = parent.join(format!(
+            ".deleted-mission-{}-{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ));
+        let unrelated = parent.join(".deleted-mission-user-files");
+        tokio::fs::create_dir_all(&trash).await.unwrap();
+        tokio::fs::write(trash.join("artifact"), b"old build")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&unrelated).await.unwrap();
+        start_deleted_workspace_cleanup(workspaces);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while trash.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(unrelated.exists());
+    }
+
+    #[tokio::test]
     async fn cleanup_mission_workspace_dirs_for_delete_removes_worker_dirs() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
@@ -35098,6 +35195,21 @@ mod tests {
         tokio::fs::create_dir_all(&worker_dir)
             .await
             .expect("worker workspace dir should be created");
+
+        store
+            .update_mission_status(worker.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        let refused = cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, boss.id, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert!(boss_dir.exists());
+        assert!(worker_dir.exists());
+        store
+            .update_mission_status(worker.id, MissionStatus::Completed)
+            .await
+            .unwrap();
 
         let deleted_dirs =
             cleanup_mission_workspace_dirs_for_delete(&store, &workspaces, boss.id, &[])
