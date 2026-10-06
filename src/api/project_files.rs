@@ -448,6 +448,7 @@ async fn delete_file(
 async fn list_projects(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::project_crons::sync_local_hermes_jobs_if_present(&state).await;
     let projects = state
         .projects
         .list_projects()

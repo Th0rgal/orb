@@ -693,14 +693,18 @@ export async function createProjectCron(slug: string, draft: ProjectCronDraft): 
 }
 
 export async function getProjectCron(slug: string, id: string): Promise<ControllerView> {
-  const data = await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
-  return getProjectCronFromJob(slug, data.job);
+  const data = await api<{ job: HermesJob; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
+  return getProjectCronFromJob(slug, data.job, data.runs ?? []);
 }
 
 export async function updateProjectCron(slug: string, id: string, patch: ControllerPatch): Promise<ControllerView> {
   const current = patch.continuity === undefined ? undefined : await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
-  const data = await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hermesPatch(patch, current?.job)) });
-  return getProjectCronFromJob(slug, data.job);
+  const data = await api<{ job: HermesJob; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hermesPatch(patch, current?.job)) });
+  return getProjectCronFromJob(slug, data.job, data.runs ?? []);
+}
+
+export async function deleteProjectCron(slug: string, id: string): Promise<void> {
+  await api<unknown>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function projectCronAction(slug: string, id: string, action: "pause" | "resume" | "run"): Promise<ControllerView> {

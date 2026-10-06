@@ -24,7 +24,11 @@ export function scheduleExpression(schedule: HermesJob["schedule"]): string {
   return schedule.display ?? "";
 }
 
-export function getProjectCronFromJob(slug: string, raw: HermesJob): ControllerView {
+export function getProjectCronFromJob(
+  slug: string,
+  raw: HermesJob,
+  runs: import("./api").ControllerRun[] = [],
+): ControllerView {
   if (!raw || typeof raw !== "object" || !raw.id) throw new Error("Hermes did not return a job record");
   const repeat = raw.repeat;
   const prompt = raw.prompt ?? "";
@@ -39,7 +43,7 @@ export function getProjectCronFromJob(slug: string, raw: HermesJob): ControllerV
       no_agent: raw.no_agent ?? false, continuity: raw.continuity ?? (Array.isArray(raw.context_from) ? raw.context_from.some((ref) => ref.toLowerCase() === "self") : raw.context_from?.toLowerCase() === "self"),
       enabled_toolsets: raw.enabled_toolsets ?? [],
     },
-    runs: [],
+    runs,
   };
 }
 

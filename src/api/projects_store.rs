@@ -1296,6 +1296,65 @@ impl ProjectsStore {
             .map_err(|e| e.to_string())
     }
 
+    pub fn ensure_default_project(&self) -> Result<(), String> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "INSERT INTO projects (slug, title, created_at, updated_at) \
+                 VALUES ('default', 'Default', ?1, ?1) \
+                 ON CONFLICT(slug) DO NOTHING",
+                params![now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn cron_owner(&self, job_id: &str) -> Result<Option<String>, String> {
+        let connection = self.lock()?;
+        if let Some(slug) = connection
+            .query_row(
+                "SELECT slug FROM project_crons WHERE job_id = ?1 LIMIT 1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(Some(slug));
+        }
+        if let Some(slug) = connection
+            .query_row(
+                "SELECT slug FROM projects WHERE controller_cron_id = ?1 LIMIT 1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(Some(slug));
+        }
+        connection
+            .query_row(
+                "SELECT slug FROM controller_archives WHERE job_id = ?1 LIMIT 1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn unbind_project_cron(&self, slug: &str, job_id: &str) -> Result<bool, String> {
+        let connection = self.lock()?;
+        let removed = connection
+            .execute(
+                "DELETE FROM project_crons WHERE slug = ?1 AND job_id = ?2",
+                params![slug, job_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(removed > 0)
+    }
+
     /// Every explicit binding, keyed by project slug. Read once per overview
     /// render rather than per row.
     pub fn bindings(&self) -> Result<HashMap<String, ProjectConversation>, String> {

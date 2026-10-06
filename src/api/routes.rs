@@ -857,6 +857,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(super::cloud_agents::hermes::options),
         )
         .route(
+            "/api/cloud/hermes/settings",
+            get(super::cloud_agents::hermes::settings)
+                .put(super::cloud_agents::hermes::update_settings),
+        )
+        .route(
             "/api/control/missions/:id/cloud/children",
             get(super::cloud_agents::hermes::children),
         )

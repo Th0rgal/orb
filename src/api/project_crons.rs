@@ -117,11 +117,177 @@ async fn hermes_request(
 
 fn project_exists(store: &ProjectsStore, slug: &str) -> Result<(), Response> {
     valid_slug(slug)?;
+    if slug == "default" {
+        store
+            .ensure_default_project()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
+    }
     match store.get_project(slug) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err((StatusCode::NOT_FOUND, "project not found").into_response()),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
     }
+}
+
+pub(crate) fn sync_hermes_jobs_with_list(
+    store: &ProjectsStore,
+    jobs: &[Value],
+    mission_projects: &std::collections::HashMap<String, String>,
+) -> Result<usize, String> {
+    let mut bound = 0;
+    for job in jobs {
+        let Some(id) = job
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if store.cron_owner(id)?.is_some() {
+            continue;
+        }
+        let explicit_project = job
+            .pointer("/controller/project")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                job.get("deliver").and_then(Value::as_str).and_then(|d| {
+                    d.split(',')
+                        .map(str::trim)
+                        .find_map(|part| part.strip_prefix("project:"))
+                })
+            });
+        if let Some(proj_slug) = explicit_project {
+            let canonical = super::projects_overview::canonicalize_project_slug(proj_slug);
+            let target = if canonical.is_empty() {
+                proj_slug.to_string()
+            } else {
+                canonical
+            };
+            if target == "default" {
+                store.ensure_default_project()?;
+                store.bind_project_cron("default", id)?;
+                bound += 1;
+                continue;
+            }
+            if let Some(project) = store.get_project(&target)? {
+                let primary_id = super::project_controller::find_job(
+                    jobs,
+                    &super::projects_overview::project_tag_keys(&target),
+                    project.controller_cron_id.as_deref(),
+                )
+                .and_then(|j| j.get("id").and_then(Value::as_str));
+                if primary_id == Some(id) {
+                    continue;
+                }
+                store.bind_project_cron(&target, id)?;
+                bound += 1;
+                continue;
+            }
+        }
+
+        let mut origin_project: Option<String> = None;
+        for ptr in ["/origin/session_id", "/origin/chat_id", "/session_id"] {
+            let Some(sid) = job
+                .pointer(ptr)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if let Some(mission_id) = sid.strip_prefix("orb_") {
+                if let Some(proj_slug) = mission_projects.get(mission_id) {
+                    if proj_slug == "default" || store.get_project(proj_slug)?.is_some() {
+                        origin_project = Some(proj_slug.clone());
+                        break;
+                    }
+                }
+            }
+            if let Some(proj_slug) = store.project_for_session(sid)? {
+                if proj_slug == "default" || store.get_project(&proj_slug)?.is_some() {
+                    origin_project = Some(proj_slug);
+                    break;
+                }
+            }
+        }
+
+        let target = origin_project.unwrap_or_else(|| "default".to_string());
+        if target == "default" {
+            store.ensure_default_project()?;
+        }
+        store.bind_project_cron(&target, id)?;
+        bound += 1;
+    }
+    Ok(bound)
+}
+
+async fn collect_job_mission_projects(
+    state: &AppState,
+    jobs: &[Value],
+) -> std::collections::HashMap<String, String> {
+    let mut mission_projects = std::collections::HashMap::new();
+    for job in jobs {
+        for ptr in ["/origin/session_id", "/origin/chat_id", "/session_id"] {
+            if let Some(mission_id) = job
+                .pointer(ptr)
+                .and_then(Value::as_str)
+                .and_then(|s| s.trim().strip_prefix("orb_"))
+            {
+                if let Ok(uuid) = uuid::Uuid::parse_str(mission_id) {
+                    if let Ok(Some((_, m))) = state.control.find_mission_store_owner(uuid).await {
+                        if let Some(proj) = m.project.project.filter(|p| !p.trim().is_empty()) {
+                            mission_projects.insert(mission_id.to_string(), proj);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mission_projects
+}
+
+pub(crate) async fn sync_hermes_jobs(state: &AppState) -> Result<usize, String> {
+    let mut jobs = match hermes(
+        state,
+        reqwest::Method::GET,
+        "/api/jobs?include_disabled=true",
+        None,
+    )
+    .await
+    {
+        Ok(value) => value
+            .get("jobs")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| value.as_array().cloned())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    if jobs.is_empty() {
+        jobs = super::project_controller::hermes_home()
+            .map(|h| super::project_controller::load_jobs(&h))
+            .unwrap_or_default();
+    }
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let mission_projects = collect_job_mission_projects(state, &jobs).await;
+    sync_hermes_jobs_with_list(&state.projects, &jobs, &mission_projects)
+}
+
+pub(crate) async fn sync_local_hermes_jobs_if_present(state: &AppState) {
+    let jobs = super::project_controller::hermes_home()
+        .map(|h| super::project_controller::load_jobs(&h))
+        .unwrap_or_default();
+    if jobs.is_empty() {
+        return;
+    }
+    let mission_projects = collect_job_mission_projects(state, &jobs).await;
+    let _ = sync_hermes_jobs_with_list(&state.projects, &jobs, &mission_projects);
 }
 
 fn delivery_ready(store: &ProjectsStore, slug: &str) -> Result<bool, Response> {
@@ -145,9 +311,14 @@ fn prepare_delivery(
     if !creating && !object.contains_key("deliver") {
         return Ok(());
     }
+    let default_deliver = if slug == "default" && !delivery_ready(store, slug)? {
+        "local".to_string()
+    } else {
+        format!("project:{slug}")
+    };
     let deliver = match object.get("deliver") {
-        None | Some(Value::Null) => format!("project:{slug}"),
-        Some(Value::String(text)) if text.trim().is_empty() => format!("project:{slug}"),
+        None | Some(Value::Null) => default_deliver,
+        Some(Value::String(text)) if text.trim().is_empty() => default_deliver,
         Some(Value::String(text)) => text.trim().to_owned(),
         _ => return Err((StatusCode::BAD_REQUEST, "delivery must be a string").into_response()),
     };
@@ -213,6 +384,7 @@ fn owned(store: &ProjectsStore, slug: &str, id: &str) -> Result<(), Response> {
 }
 
 async fn list(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
+    let _ = sync_hermes_jobs(&state).await;
     if let Err(e) = project_exists(&state.projects, &slug) {
         return e;
     }
@@ -326,6 +498,10 @@ async fn get_one(
             .project_cron_folder(&slug, &id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
         result["job"]["folder"] = json!(folder);
+        let runs = super::project_controller::hermes_home()
+            .map(|h| super::project_controller::build_runs(&h, &id, 30))
+            .unwrap_or_default();
+        result["runs"] = json!(runs);
         Ok(result)
     })
     .map(Json)
@@ -347,16 +523,89 @@ async fn update(
     if let Err(error) = prepare_delivery(&state.projects, &slug, &mut body, false) {
         return error;
     }
-    hermes(
+    let folder = match body.as_object_mut().and_then(|o| o.remove("folder")) {
+        None => None,
+        Some(Value::String(folder)) if valid_folder(&folder) => Some(folder),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "folder must be a relative project folder path",
+            )
+                .into_response()
+        }
+    };
+    if let Some(ref f) = folder {
+        if let Err(e) = state.projects.lock().and_then(|c| {
+            c.execute(
+                "UPDATE project_crons SET folder = ?1 WHERE slug = ?2 AND job_id = ?3",
+                rusqlite::params![f, slug, id],
+            )
+            .map_err(|e| e.to_string())
+        }) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+    }
+    let response = if body.as_object().is_some_and(|o| o.is_empty()) {
+        hermes(
+            &state,
+            reqwest::Method::GET,
+            &format!("/api/jobs/{id}"),
+            None,
+        )
+        .await
+    } else {
+        hermes(
+            &state,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{id}"),
+            Some(body),
+        )
+        .await
+    };
+    response
+        .and_then(|mut result| {
+            let saved_folder = state
+                .projects
+                .project_cron_folder(&slug, &id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
+            result["job"]["folder"] = json!(saved_folder);
+            let runs = super::project_controller::hermes_home()
+                .map(|h| super::project_controller::build_runs(&h, &id, 30))
+                .unwrap_or_default();
+            result["runs"] = json!(runs);
+            Ok(result)
+        })
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .unwrap_or_else(|e| e)
+}
+
+async fn remove(
+    State(state): State<Arc<AppState>>,
+    Path((slug, id)): Path<(String, String)>,
+) -> Response {
+    if let Err(e) = valid_slug(&slug) {
+        return e;
+    }
+    if let Err(e) = owned(&state.projects, &slug, &id) {
+        return e;
+    }
+    match hermes(
         &state,
-        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
         &format!("/api/jobs/{id}"),
-        Some(body),
+        None,
     )
     .await
-    .map(Json)
-    .map(IntoResponse::into_response)
-    .unwrap_or_else(|e| e)
+    {
+        Ok(_) => {}
+        Err(error) if error.status() == StatusCode::NOT_FOUND => {}
+        Err(error) => return error,
+    }
+    if let Err(e) = state.projects.unbind_project_cron(&slug, &id) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    Json(json!({ "deleted": id })).into_response()
 }
 
 async fn action(
@@ -392,7 +641,10 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/:slug/crons/defaults", get(defaults))
         .route("/:slug/crons", get(list).post(create))
-        .route("/:slug/crons/:id", get(get_one).patch(update))
+        .route(
+            "/:slug/crons/:id",
+            get(get_one).patch(update).delete(remove),
+        )
         .route("/:slug/crons/:id/action", post(action))
 }
 
@@ -636,6 +888,38 @@ mod tests {
         assert_eq!(
             result.unwrap_err().status(),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn sync_hermes_jobs_binds_unassigned_crons_to_default_and_respects_origin_and_controllers() {
+        let store = store();
+        let mut mission_projects = std::collections::HashMap::new();
+        mission_projects.insert("m-other".to_string(), "other".to_string());
+        let jobs = vec![
+            json!({"id": "canonical-controller", "name": "Controller", "controller": {"project": "orbit"}}),
+            json!({"id": "orbit-secondary", "name": "Orbit extra", "deliver": "project:orbit"}),
+            json!({"id": "from-orb-mission", "name": "Mission cron", "origin": {"chat_id": "orb_m-other"}}),
+            json!({"id": "unassigned-hermes", "name": "Morning brief", "deliver": "local"}),
+        ];
+        let bound = sync_hermes_jobs_with_list(&store, &jobs, &mission_projects).unwrap();
+        assert_eq!(bound, 3);
+        assert_eq!(
+            store.project_cron_ids("orbit").unwrap(),
+            vec!["orbit-secondary"]
+        );
+        assert_eq!(
+            store.project_cron_ids("other").unwrap(),
+            vec!["from-orb-mission"]
+        );
+        assert_eq!(
+            store.project_cron_ids("default").unwrap(),
+            vec!["unassigned-hermes"]
+        );
+        // Second sync is idempotent.
+        assert_eq!(
+            sync_hermes_jobs_with_list(&store, &jobs, &mission_projects).unwrap(),
+            0
         );
     }
 }

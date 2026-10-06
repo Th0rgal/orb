@@ -1098,7 +1098,7 @@ async fn list_hermes_assistant_skills(
     })
 }
 
-fn assistant_runtime_name(config: &crate::config::Config) -> &'static str {
+pub(crate) fn assistant_runtime_name(config: &crate::config::Config) -> &'static str {
     if config.port == 3002
         || std::env::var("SANDBOXED_ENV")
             .map(|v| v.eq_ignore_ascii_case("dev"))
@@ -1123,7 +1123,7 @@ fn assistant_runtime_candidates(config: &crate::config::Config) -> [&'static str
     [expected, fallback]
 }
 
-fn local_api_url(config: &crate::config::Config) -> String {
+pub(crate) fn local_api_url(config: &crate::config::Config) -> String {
     format!("http://127.0.0.1:{}", config.port)
 }
 
@@ -1474,7 +1474,7 @@ async fn ensure_hermes_installed(install_if_missing: bool) -> Result<bool, Strin
     Ok(true)
 }
 
-async fn write_private_file(path: &str, contents: &str) -> Result<(), String> {
+pub(crate) async fn write_private_file(path: &str, contents: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = format!("{path}.tmp");
@@ -1572,7 +1572,7 @@ pub(crate) fn hermes_api_server_url(config: &crate::config::Config) -> String {
     format!("http://127.0.0.1:{}", hermes_api_server_port(config))
 }
 
-fn hermes_env_paths(runtime_name: &str) -> [String; 2] {
+pub(crate) fn hermes_env_paths(runtime_name: &str) -> [String; 2] {
     [
         format!("/etc/sandboxed-sh/{runtime_name}.env"),
         format!("/var/lib/{runtime_name}/.env"),
@@ -1580,7 +1580,7 @@ fn hermes_env_paths(runtime_name: &str) -> [String; 2] {
 }
 
 /// Replace-or-append `KEY='value'` lines in an env file body.
-fn upsert_env_lines(contents: &str, updates: &[(&str, &str)]) -> String {
+pub(crate) fn upsert_env_lines(contents: &str, updates: &[(&str, &str)]) -> String {
     let mut out = String::new();
     for line in contents.lines() {
         let key = line
@@ -5035,7 +5035,7 @@ fn runtime_name_for_config(config: &crate::config::Config) -> &'static str {
     assistant_runtime_name(config)
 }
 
-async fn build_hermes_runtime_summary(state: &AppState) -> HermesRuntimeSummary {
+pub(crate) async fn build_hermes_runtime_summary(state: &AppState) -> HermesRuntimeSummary {
     let runtime_name = runtime_name_for_config(&state.config);
     let service_name = format!("{runtime_name}.service");
     let env_path = format!("/etc/sandboxed-sh/{runtime_name}.env");
@@ -5191,7 +5191,7 @@ fn failure_class(mission: &Mission) -> String {
         .unwrap_or_else(|| mission.status.to_string())
 }
 
-async fn read_hermes_session_rollup(runtime_name: &str) -> HermesSessionRollup {
+pub(crate) async fn read_hermes_session_rollup(runtime_name: &str) -> HermesSessionRollup {
     let since = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
     let db_path = std::path::PathBuf::from(format!("/var/lib/{runtime_name}/state.db"));
     tokio::task::spawn_blocking(move || {

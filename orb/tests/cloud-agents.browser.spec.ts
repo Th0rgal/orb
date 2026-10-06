@@ -294,3 +294,201 @@ test('Hermes cloud agent supports custom router model selection and image attach
  expect(followups[0].cloud_model).toBe('builtin/private');
  expect(followups[0].content).toContain('[Uploaded: /var/lib/sandboxed-sh/context/image-2.png]');
 });
+
+test('Hermes supports router catalog models, effort switching mid-mission without fork, thoughts and tool steps, arbitrary file uploads, Default crons, and Hermes settings',async({page})=>{
+ const id='dddddddd-dddd-4ddd-dddd-dddddddddddd';
+ const mission={id,title:'Hermes full flow',backend:'cloud_hermes',project:'default',workspace_id:'00000000-0000-0000-0000-000000000000',status:'awaiting_user',history:[],created_at:'',updated_at:''};
+ const launches:any[]=[],followups:any[]=[],settingsPuts:any[]=[],deletedCrons:string[]=[];
+ let currentModel='builtin/private';
+ let currentParams=[{id:'effort',value:'high'}];
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ await page.route('**/api/**',async route=>{
+  const request=route.request(),url=new URL(request.url()),path=url.pathname;
+  if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
+  if(path==='/api/uploads'&&request.method()==='POST'){
+   const body=request.postDataJSON();
+   const name=body?.name||'notes.txt';
+   return route.fulfill({json:{name,path:`/var/lib/sandboxed-sh/uploads/${name}`,size:23,sha256:'abc123'}});
+  }
+  if(path==='/api/fs/upload'&&request.method()==='POST'){
+   const name=url.searchParams.get('name')||'notes.txt';
+   return route.fulfill({json:{path:`/var/lib/sandboxed-sh/context/${name}`}});
+  }
+  if(path==='/api/control/missions'&&request.method()==='POST'){
+   const body=request.postDataJSON();
+   launches.push(body);
+   currentModel=body.cloud?.model??'';
+   currentParams=body.cloud?.model_params??[];
+   return route.fulfill({json:mission});
+  }
+  if(path==='/api/control/message'&&request.method()==='POST'){
+   const body=request.postDataJSON();
+   followups.push(body);
+   if(body.cloud_model!==undefined)currentModel=body.cloud_model;
+   if(body.cloud_model_params!==undefined)currentParams=body.cloud_model_params;
+   return route.fulfill({json:{message_accepted:true,queued:true,mission_id:id}});
+  }
+  if(path==='/api/cloud/hermes/settings'&&request.method()==='PUT'){
+   const body=request.postDataJSON();
+   settingsPuts.push(body);
+   return route.fulfill({json:{
+    runtime:{service_name:'hermes-gateway.service',service_state:'active',gateway_state:'active',api_server_healthy:true,active_runs:0},
+    sessions:{available:true,total_sessions:42,active_sessions_24h:5,total_tokens:125000},
+    home_dir:'/var/lib/hermes',
+    config_path:'/var/lib/hermes/config.yaml',
+    soul_path:'/var/lib/hermes/SOUL.md',
+    default_model:body.default_model??'builtin/smart',
+    provider:'custom',
+    base_url:'http://127.0.0.1:3000/v1',
+    use_sandboxed_router:true,
+    reasoning_effort:body.reasoning_effort??'high',
+    memory_enabled:true,
+    user_profile_enabled:true,
+    memory_char_limit:4000,
+    user_char_limit:2000,
+    compression_enabled:true,
+    compression_threshold:0.5,
+    telegram_tool_progress:'new',
+    telegram_cleanup_progress:false,
+    soul_markdown:body.soul_markdown??'# Soul\nHelpful assistant.',
+    models:[{id:'builtin/smart',name:'Smart (Default) · builtin/smart'},{id:'builtin/private',name:'Private · builtin/private'}],
+    efforts:[{id:'',name:'Default'},{id:'high',name:'High'}]
+   }});
+  }
+  if(path==='/api/projects/default/crons/cron_digest'&&request.method()==='DELETE'){
+   deletedCrons.push('cron_digest');
+   return route.fulfill({json:{deleted:true,id:'cron_digest'}});
+  }
+  let json:unknown={};
+  if(path==='/api/projects')json={projects:[{slug:'default',title:'Default'}]};
+  else if(path==='/api/cloud/accounts')json=[{id:'paloma',provider:'hermes',label:'Paloma',available:true,capabilities:{models:true,attachments:true,follow_up:true,cancel:true}}];
+  else if(path==='/api/cloud/hermes/options')json={
+   models:{items:[
+    {id:'',name:'Profile default'},
+    {id:'builtin/smart',name:'Smart (Default) · builtin/smart'},
+    {id:'builtin/private',name:'Private · builtin/private'},
+    {id:'anthropic/claude-opus-4-6',name:'Claude Opus 4.6 (Anthropic) · anthropic/claude-opus-4-6'}
+   ]},
+   efforts:[
+    {id:'',name:'Default'},
+    {id:'low',name:'Low'},
+    {id:'medium',name:'Medium'},
+    {id:'high',name:'High'},
+    {id:'xhigh',name:'Max'}
+   ]
+  };
+  else if(path==='/api/cloud/hermes/settings')json={
+   runtime:{service_name:'hermes-gateway.service',service_state:'active',gateway_state:'active',api_server_healthy:true,active_runs:0},
+   sessions:{available:true,total_sessions:42,active_sessions_24h:5,total_tokens:125000},
+   home_dir:'/var/lib/hermes',
+   config_path:'/var/lib/hermes/config.yaml',
+   soul_path:'/var/lib/hermes/SOUL.md',
+   default_model:'builtin/smart',
+   provider:'custom',
+   base_url:'http://127.0.0.1:3000/v1',
+   use_sandboxed_router:true,
+   reasoning_effort:'medium',
+   memory_enabled:true,
+   user_profile_enabled:true,
+   memory_char_limit:4000,
+   user_char_limit:2000,
+   compression_enabled:true,
+   compression_threshold:0.5,
+   telegram_tool_progress:'new',
+   telegram_cleanup_progress:false,
+   soul_markdown:'# Soul\nHelpful assistant.',
+   models:[{id:'builtin/smart',name:'Smart (Default) · builtin/smart'},{id:'builtin/private',name:'Private · builtin/private'}],
+   efforts:[{id:'',name:'Default'},{id:'medium',name:'Medium'},{id:'high',name:'High'}]
+  };
+  else if(path==='/api/control/missions')json=launches.length?[mission]:[];
+  else if(path===`/api/control/missions/${id}`)json=mission;
+  else if(path.endsWith('/cloud'))json={
+   mission_id:id,
+   external_id:`orb_${id}`,
+   selection:{provider:'hermes',account:'paloma',model:currentModel,model_params:currentParams},
+   turns:[{
+    key:'first',
+    prompt:launches[0]?.prompt ?? 'Analyze notes.txt',
+    phase:'response_complete',
+    external_id:'run_full',
+    result:'Summary ready.',
+    steps:[
+     {kind:'think',id:'think_1',text:'Inspecting the uploaded notes.txt and checking cron state.'},
+     {kind:'tool',id:'tool_1',name:'terminal',input:'cat /var/lib/sandboxed-sh/uploads/notes.txt',output:'Important project notes',status:'done'}
+    ],
+    artifacts:[],
+    branches:[]
+   }]
+  };
+  else if(path.endsWith('/cloud/children'))json={missions:[]};
+  else if(path==='/api/projects/default/crons')json={jobs:deletedCrons.length?[]:[{id:'cron_digest',name:'Daily Hermes Digest',schedule:'0 9 * * *',enabled:true,state:'scheduled',next_run_at:'2026-10-07T09:00:00Z',last_status:'ok',failure_streak:0,prompt:'Summarize daily progress'}]};
+  else if(path==='/api/projects/default/crons/cron_digest')json={
+   job:{id:'cron_digest',name:'Daily Hermes Digest',schedule:'0 9 * * *',enabled:true,state:'scheduled',next_run_at:'2026-10-07T09:00:00Z',last_status:'ok',failure_streak:0,prompt:'Summarize daily progress'},
+   runs:[{id:'run_cron_1',at:'2026-10-06T09:00:00Z',duration_secs:14,status:'completed',silent:false,report:'Digest delivered.'}]
+  };
+  else if(path.endsWith('/files'))json={entries:[]};
+  else if(path.includes('/controller'))json={job:null,runs:[]};
+  else if(path==='/api/control/queue'||path==='/api/backends')json=[];
+  else if(path==='/api/providers/backend-models')json={backends:{}};
+  return route.fulfill({json});
+ });
+
+ await page.goto('/');
+ // 1. Launch Hermes with Private router model, High effort, and an arbitrary text file upload
+ await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
+ const form=page.getByRole('region',{name:'Cloud agent'});
+ await form.getByLabel('Service',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await form.getByLabel('Model',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'Private · builtin/private'}).click();
+ await form.getByLabel('Effort',{exact:true}).click();
+ await form.getByRole('menuitemradio',{name:'High',exact:true}).click();
+ await form.getByLabel('Choose images').setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('Important project notes')});
+ await expect(form.getByText('notes.txt')).toBeVisible();
+ await form.getByLabel('Prompt',{exact:true}).fill('Analyze this file');
+ await form.getByRole('button',{name:'Create cloud agent'}).click();
+ await expect.poll(()=>launches.length).toBe(1);
+ expect(launches[0].cloud).toEqual({
+  provider:'hermes',
+  account:'paloma',
+  model:'builtin/private',
+  model_params:[{id:'effort',value:'high'}]
+ });
+ expect(launches[0].prompt).toContain('@/var/lib/sandboxed-sh/uploads/notes.txt');
+
+ // 2. Verify thoughts + tool steps render in the transcript
+ await expect(page.getByText('Summary ready.',{exact:true})).toBeVisible();
+ await page.getByRole('button',{name:'1 command'}).click();
+ await expect(page.getByText('Inspecting the uploaded notes.txt and checking cron state.')).toBeVisible();
+ await expect(page.getByText('cat /var/lib/sandboxed-sh/uploads/notes.txt')).toBeVisible();
+
+ // 3. Switch model to direct router catalog model and effort to Max mid-mission without forking
+ await page.getByLabel('Model',{exact:true}).click();
+ await page.getByRole('menuitemradio',{name:'Claude Opus 4.6 (Anthropic) · anthropic/claude-opus-4-6'}).click();
+ await page.getByLabel('Effort',{exact:true}).click();
+ await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();
+ await page.getByPlaceholder('Continue this conversation…').fill('Deep dive with Opus Max');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await expect.poll(()=>followups.length).toBe(1);
+ expect(followups[0].mission_id).toBe(id);
+ expect(followups[0].cloud_model).toBe('anthropic/claude-opus-4-6');
+ expect(followups[0].cloud_model_params).toEqual([{id:'effort',value:'xhigh'}]);
+
+ // 4. Verify Hermes cron under Default project in sidebar, view run history, and delete
+ const defaultBtn=page.getByRole('button',{name:'Default',exact:true});
+ if(await defaultBtn.getAttribute('aria-expanded')!=='true')await defaultBtn.click();
+ await page.locator('button.row.agent.cron').filter({hasText:'Daily Hermes Digest'}).click();
+ await expect(page.getByText('Digest delivered.')).toBeVisible();
+ await page.getByRole('button',{name:'Delete',exact:true}).click();
+ await expect.poll(()=>deletedCrons.length).toBe(1);
+ await expect(page.getByText('This cron was removed from Hermes.')).toBeVisible();
+
+ // 5. Open Hermes Settings page and save updated configuration
+ await page.getByRole('button',{name:'Settings',exact:true}).click();
+ await page.getByRole('button',{name:'Hermes',exact:true}).click();
+ await expect(page.getByText('Paloma · hermes-gateway.service')).toBeVisible();
+ await page.getByRole('button',{name:'Save',exact:true}).click();
+ await expect.poll(()=>settingsPuts.length).toBe(1);
+ expect(settingsPuts[0].default_model).toBe('builtin/smart');
+});
+

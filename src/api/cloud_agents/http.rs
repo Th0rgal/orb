@@ -145,8 +145,15 @@ pub async fn create(
     req: CreateMissionRequest,
     mut selection: Selection,
 ) -> Result<(axum::http::HeaderMap, Json<Value>), Error> {
-    if selection.provider != Provider::CursorCloud && !selection.model_params.is_empty() {
-        return Err(bad("Model parameters are only supported by Cursor"));
+    if !matches!(selection.provider, Provider::CursorCloud | Provider::Hermes)
+        && !selection.model_params.is_empty()
+    {
+        return Err(bad(
+            "Model parameters are only supported by Cursor and Hermes",
+        ));
+    }
+    if selection.provider == Provider::Hermes {
+        validate_hermes_model_params(&selection.model_params).map_err(bad)?;
     }
     if selection.provider != Provider::CursorCloud
         && (selection.repository.is_some() || selection.git_ref.is_some())
@@ -258,16 +265,19 @@ pub async fn create(
             .await
             .map_err(bad)?;
     }
+    let mut first_turn = Turn::new(key.clone(), prompt);
+    first_turn.model = selection.model.clone();
+    first_turn.model_params = selection.model_params.clone();
     let execution = Execution {
         parent_mission_id: req.parent_mission_id,
         mission_id: Uuid::new_v4(),
-        request_key: key.clone(),
+        request_key: key,
         request_signature,
         revision: 0,
         selection,
         external_id: None,
         external_url: None,
-        turns: vec![Turn::new(key, prompt)],
+        turns: vec![first_turn],
     };
     let execution = store
         .save_cloud_execution(
@@ -358,10 +368,20 @@ pub async fn follow_up(
         })
         .transpose()?
         .unwrap_or_default();
-    if !model_params.is_empty()
-        && (execution.selection.provider != Provider::CursorCloud || model.is_none())
-    {
-        return Err(bad("Model parameters require an explicit Cursor model"));
+    if !model_params.is_empty() {
+        match execution.selection.provider {
+            Provider::CursorCloud => {
+                if model.is_none() {
+                    return Err(bad("Model parameters require an explicit Cursor model"));
+                }
+            }
+            Provider::Hermes => validate_hermes_model_params(&model_params).map_err(bad)?,
+            _ => {
+                return Err(bad(
+                    "Model parameters are only supported by Cursor and Hermes",
+                ))
+            }
+        }
     }
     if let Some(value) = &model {
         match execution.selection.provider {
@@ -381,6 +401,14 @@ pub async fn follow_up(
         }
     }
     let revision = execution.revision;
+    if execution.selection.provider == Provider::Hermes {
+        if let Some(m) = &model {
+            execution.selection.model = (!m.is_empty()).then(|| m.clone());
+        }
+        if req.extra.contains_key("cloud_model_params") {
+            execution.selection.model_params = model_params.clone();
+        }
+    }
     execution
         .enqueue(key.to_string(), req.content.clone())
         .map_err(bad)?;
@@ -556,6 +584,29 @@ pub async fn artifact(
     ))
 }
 
+fn validate_hermes_model_params(params: &[ModelParam]) -> Result<(), String> {
+    for p in params {
+        if !matches!(p.id.as_str(), "effort" | "reasoning_effort") {
+            return Err(format!("Unsupported Hermes model parameter: {}", p.id));
+        }
+        if !matches!(
+            p.value.as_str(),
+            "" | "default"
+                | "none"
+                | "minimal"
+                | "low"
+                | "medium"
+                | "high"
+                | "xhigh"
+                | "max"
+                | "ultra"
+        ) {
+            return Err(format!("Unsupported Hermes reasoning effort: {}", p.value));
+        }
+    }
+    Ok(())
+}
+
 fn validate_chatgpt_model(model: &str) -> Result<(), String> {
     if [
         "gpt-6-instant",
@@ -696,5 +747,68 @@ mod follow_up_tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn hermes_follow_up_updates_model_and_effort_without_forking_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().into(), "hermes-followup")
+                .await
+                .unwrap(),
+        );
+        let mut first = Turn::new("first".into(), "hello".into());
+        first.phase = Phase::ResponseComplete;
+        first.model = Some("builtin/smart".into());
+        let e = Execution {
+            parent_mission_id: None,
+            mission_id: Uuid::new_v4(),
+            request_key: "launch".into(),
+            request_signature: "launch".into(),
+            revision: 0,
+            selection: Selection {
+                provider: Provider::Hermes,
+                account: "paloma".into(),
+                repository: None,
+                git_ref: None,
+                model: Some("builtin/smart".into()),
+                model_params: vec![],
+            },
+            external_id: Some("orb_existing_session".into()),
+            external_url: None,
+            turns: vec![first],
+        };
+        let e = store
+            .save_cloud_execution(e, None, None, None, vec![])
+            .await
+            .unwrap();
+        let req: ControlMessageRequest = serde_json::from_value(json!({
+            "mission_id": e.mission_id,
+            "content": "switch to private high effort",
+            "client_message_id": Uuid::new_v4(),
+            "cloud_model": "builtin/private",
+            "cloud_model_params": [{"id": "effort", "value": "high"}]
+        }))
+        .unwrap();
+        let _ = follow_up(store.clone(), &req).await.unwrap().unwrap();
+        let updated = store.cloud_executions().await.unwrap().remove(0);
+        assert_eq!(updated.external_id.as_deref(), Some("orb_existing_session"));
+        assert_eq!(updated.selection.model.as_deref(), Some("builtin/private"));
+        assert_eq!(
+            updated.selection.model_params,
+            vec![ModelParam {
+                id: "effort".into(),
+                value: "high".into()
+            }]
+        );
+        assert_eq!(updated.turns.len(), 2);
+        assert_eq!(updated.turns[1].model.as_deref(), Some("builtin/private"));
+        assert_eq!(
+            updated.turns[1].model_params,
+            vec![ModelParam {
+                id: "effort".into(),
+                value: "high".into()
+            }]
+        );
     }
 }

@@ -46,9 +46,9 @@ type Kind = "read" | "search" | "command" | "edit" | "other";
 export function workKind(name: string): Kind {
   switch (toolName(name)) {
     case "read": case "read_file": case "readfile": case "workspace_read_file": return "read";
-    case "grep": case "glob": case "search": case "websearch": case "web_search": case "list_files": return "search";
-    case "bash": case "shell": case "shell_command": case "exec_command": case "run_terminal_command": return "command";
-    case "edit": case "write": case "multiedit": case "apply_patch": case "write_file": case "edit_file": return "edit";
+    case "grep": case "glob": case "search": case "websearch": case "web_search": case "list_files": case "search_files": return "search";
+    case "bash": case "shell": case "shell_command": case "exec_command": case "run_terminal_command": case "terminal": return "command";
+    case "edit": case "write": case "multiedit": case "apply_patch": case "write_file": case "edit_file": case "patch": return "edit";
     default: return "other";
   }
 }

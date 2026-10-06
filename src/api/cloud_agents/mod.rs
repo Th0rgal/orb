@@ -95,6 +95,8 @@ pub struct Turn {
     pub model_params: Vec<ModelParam>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Value>,
     pub key: String,
     pub prompt: String,
     pub phase: Phase,
@@ -112,6 +114,7 @@ impl Turn {
             session_id: None,
             model: None,
             model_params: vec![],
+            steps: vec![],
             key,
             prompt,
             phase: Phase::Queued,
