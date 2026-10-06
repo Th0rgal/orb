@@ -3560,6 +3560,12 @@ impl MissionStore for SqliteMissionStore {
     async fn machine_transfers(&self, id: Uuid) -> Result<Vec<super::transfer::Transfer>, String> {
         machine_transfer::list(self, id).await
     }
+    async fn committed_machine_transfers(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, super::transfer::Transfer>, String> {
+        machine_transfer::committed(self, ids).await
+    }
     async fn save_machine_transfer(
         &self,
         action: super::transfer::Transfer,
@@ -3668,7 +3674,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn get_active_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.query_row(
@@ -3685,7 +3691,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn get_latest_mission_run(&self, mission_id: Uuid) -> Result<Option<MissionRun>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.query_row(
@@ -3702,7 +3708,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn list_active_mission_runs(&self) -> Result<Vec<MissionRun>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -7853,7 +7859,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn list_scheduled_deliveries(&self) -> Result<Vec<AutomationExecution>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn.prepare("SELECT id, automation_id, mission_id, triggered_at, trigger_source, status, webhook_payload, variables_used, completed_at, error, retry_count FROM automation_executions WHERE trigger_source = 'durable_schedule' AND status NOT IN ('cancelled', 'skipped') AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true') ORDER BY triggered_at, id").map_err(|e| e.to_string())?;
@@ -11994,7 +12000,7 @@ impl MissionStore for SqliteMissionStore {
     }
 
     async fn pending_client_delivery_ids(&self) -> Result<Vec<Uuid>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut statement = conn.prepare("SELECT id FROM board_outbox WHERE state != 'acknowledged' AND delivery_kind = 'client_message'").map_err(|e| e.to_string())?;

@@ -2309,6 +2309,9 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-panel .composer { font-size:13px; }
 
 .btw-thread .user { margin:0 0 20px; }
+.btw-thread article:not(:has(.md, .btw-transfer, .error-notice)) { padding-bottom:2px; }
+.btw-thread article:not(:has(.md, .btw-transfer, .error-notice)) > .user { margin-bottom:6px; }
+.btw-thread > .agent-activity .agent-activity-content { margin:2px 0 8px; }
 .btw-panel textarea.prompt-editor { max-height:none; font:inherit; line-height:inherit; }
 
 .plan-progress { border-top:1px solid var(--stroke-soft); padding-top:12px; margin:12px 0 0; color:var(--fg-2); font-size:12px; }

@@ -43,6 +43,22 @@ describe("thinking fold", () => {
     expect(body?.querySelector("code")?.textContent).toBe("src/styles.css");
     expect(body?.querySelector("strong")?.textContent).toBe("MissionDock");
   });
+
+  it("folds consecutive earlier thoughts into a collapsible count row while keeping the latest thought visible", () => {
+    const items = buildTranscript([
+      ev("thinking", { content: "First thought", done: true }),
+      ev("thinking", { content: "Second thought", done: true }),
+      ev("thinking", { content: "Current thought in progress", done: false }),
+    ]);
+    const { container } = render(() => <Transcript items={items} />);
+    const fold = container.querySelector<HTMLButtonElement>(".st-think-fold .st-work-head");
+    expect(fold?.textContent).toBe("2 thoughts");
+    expect(container.querySelectorAll(".st-think-head")).toHaveLength(1);
+    expect(container.querySelector(".st-think-body")?.textContent).toBe("Current thought in progress");
+
+    fold!.click();
+    expect(container.querySelectorAll(".st-think-head")).toHaveLength(3);
+  });
 });
 
 it("latest checklist is visible outside folded raw work, with real progress and no Plan/Build control",()=>{

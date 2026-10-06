@@ -11583,3 +11583,65 @@ async fn post_message_to_superseded_remote_side_mission_returns_conflict_and_lea
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn antigravity_remote_launch_sets_long_running_to_bypass_node_turn_timeout() {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let fixture = spawn_fixture_node(
+        "agy-long-running",
+        "REMOTE_AGY_LONG_RUNNING_TEST_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(crate::backend::antigravity::registry_entry());
+    h.state.fleet.record_heartbeat(
+        "agy-long-running",
+        serde_json::from_value(json!({
+            "node_id": "agy-long-running",
+            "online": true,
+            "capacity_total": 1,
+            "capacity_available": 1,
+            "active_leases": 0,
+            "version": "test",
+            "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            "managed_auth": ["antigravity"]
+        }))
+        .unwrap(),
+    );
+
+    let response = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "project": "lido",
+            "writer": false,
+            "backend": "antigravity",
+            "model_override": "gemini-4-argon",
+            "remote_node_id": "agy-long-running",
+            "prompt": "Coordinate subagents until all proof bricks compile"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 1);
+    let payload = &submissions[0]["payload"];
+    assert_eq!(
+        payload["long_running"], true,
+        "Antigravity remote jobs stay alive across subagent and background task wakeups and must set long_running=true"
+    );
+    assert_eq!(payload["managed_auth"], json!(["antigravity"]));
+}

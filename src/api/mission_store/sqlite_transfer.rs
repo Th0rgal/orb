@@ -33,6 +33,47 @@ pub(super) async fn list(store: &SqliteMissionStore, id: Uuid) -> Result<Vec<Tra
     .await
     .map_err(error)?
 }
+pub(super) async fn committed(
+    store: &SqliteMissionStore,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Transfer>, String> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let wanted: HashSet<Uuid> = ids.iter().copied().collect();
+    let conn = store.reader();
+    tokio::task::spawn_blocking(move || {
+        let c = conn.blocking_lock();
+        let exists: bool = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='machine_transfers')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            return Ok(HashMap::new());
+        }
+        let mut q = c
+            .prepare(
+                "SELECT data FROM machine_transfers WHERE phase='activated' ORDER BY created_at,id",
+            )
+            .map_err(error)?;
+        let rows = q
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(error)?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let t: Transfer = serde_json::from_str(&row.map_err(error)?).map_err(error)?;
+            if wanted.contains(&t.mission_id) {
+                out.insert(t.mission_id, t);
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(error)?
+}
 pub(super) async fn save(
     store: &SqliteMissionStore,
     mut action: Transfer,

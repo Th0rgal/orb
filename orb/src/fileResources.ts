@@ -139,7 +139,7 @@ export function createFileClient(scope: FileScope) {
     if (scope.mission) {
       try {
         const rows = await api<unknown>(
-          `/api/control/missions/${scope.mission.id}/events?limit=4000`,
+          `/api/control/missions/${scope.mission.id}/events?limit=4000&types=assistant_message&include_counts=false`,
         );
         const events = Array.isArray(rows)
           ? rows

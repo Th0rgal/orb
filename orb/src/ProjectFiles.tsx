@@ -778,7 +778,7 @@ export function LiveProjectsSection(p: {
         const merged = mergeById((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m));
         if (merged !== missions[slug]) setMissions(slug, merged);
         if (opts?.transcripts === false) return;
-        const live = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting"]);
+        const live = new Set(["active", "pending", "queued", "resuming", "running", "starting"]);
         const deleting = deletingIds();
         for (const m of merged) if (live.has(m.status) && !deleting.has(m.id)) prefetchTranscript(m.id);
       })

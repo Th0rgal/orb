@@ -2109,6 +2109,24 @@ pub trait MissionStore: Send + Sync {
     async fn machine_transfers(&self, _id: Uuid) -> Result<Vec<transfer::Transfer>, String> {
         Ok(vec![])
     }
+    async fn committed_machine_transfers(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, transfer::Transfer>, String> {
+        let mut out = std::collections::HashMap::new();
+        for &id in ids {
+            if let Some(t) = self
+                .machine_transfers(id)
+                .await?
+                .into_iter()
+                .rev()
+                .find(|a| a.phase == "activated")
+            {
+                out.insert(id, t);
+            }
+        }
+        Ok(out)
+    }
     async fn save_machine_transfer(
         &self,
         _action: transfer::Transfer,

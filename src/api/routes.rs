@@ -1473,7 +1473,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive().max_age(std::time::Duration::from_secs(86400)))
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::clone(&state));
 

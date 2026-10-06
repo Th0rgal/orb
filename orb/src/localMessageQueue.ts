@@ -157,7 +157,14 @@ export async function takeQueuedMessage(id:string){
 export async function retryQueuedMessage(id:string){
  const key=storageKey(),row=(await read(key)).find(row=>row.id===id);
  if(!row)return;
- if(row.interrupted||(row.state==='dispatching'&&row.error))await recoverLocalLaunch(row.mission);
+ if(row.interrupted||(row.state==='dispatching'&&row.error)){
+  try{await recoverLocalLaunch(row.mission);}
+  catch(recovery){
+   const detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;
+   if(key===storageKey())await update(key,id,stored=>{stored.error=detail;});
+   throw recovery;
+  }
+ }
  // Keep the previous attempt, including unsynced output, before a deliberate retry.
  if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
  if(key!==storageKey())return;
@@ -306,7 +313,10 @@ export function startLocalQueueWorker(){
       recordLocalFailure(row.mission,null);
       await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted){stored.state='error';stored.error=lostRun;}});
       again=true;
-     }catch{/* Still running or unreachable: the next periodic check tries again. */}
+     }catch(recovery){
+      const detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;
+      if(valid()&&row.error!==detail)await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted)stored.error=detail;});
+     }
      continue;
     }
     if(row.interrupted){

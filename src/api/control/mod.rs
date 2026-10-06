@@ -7026,6 +7026,15 @@ pub async fn list_missions(
             )
         })
         .collect();
+    let mission_ids: Vec<Uuid> = values
+        .iter()
+        .filter_map(|v| v["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()))
+        .collect();
+    let committed_transfers = control
+        .mission_store
+        .committed_machine_transfers(&mission_ids)
+        .await
+        .map_err(internal_error)?;
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
             if let Some(parent) = callback_parents.get(&id) {
@@ -7039,11 +7048,8 @@ pub async fn list_missions(
                 .get(&id)
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            if let Some(t) = machine_transfer::committed(&control.mission_store, id)
-                .await
-                .map_err(internal_error)?
-            {
-                machine_transfer::project(value, &t);
+            if let Some(t) = committed_transfers.get(&id) {
+                machine_transfer::project(value, t);
             }
         }
     }
@@ -14510,12 +14516,19 @@ async fn submit_leased_remote_job(
                 node.id, node.token_env
             )
         })?;
-    let long_running = mission.goal_mode && matches!(plan, RemoteHarnessPlan::Codex { .. });
+    let long_running = !matches!(plan, RemoteHarnessPlan::Raw { .. });
     if long_running {
-        let heartbeat = crate::remote_node::RemoteNodeClient::default()
-            .heartbeat(&node, &shared_token)
-            .await
-            .map_err(|error| format!("Cannot verify native goal lifetime support: {error}"))?;
+        let heartbeat = match state
+            .fleet
+            .get(&node.id)
+            .and_then(|cached| cached.last_heartbeat)
+        {
+            Some(heartbeat) => heartbeat,
+            None => crate::remote_node::RemoteNodeClient::default()
+                .heartbeat(&node, &shared_token)
+                .await
+                .map_err(|error| format!("Cannot verify native goal lifetime support: {error}"))?,
+        };
         if heartbeat.protocol_version < 5 {
             return Err(format!("Node '{}' requires protocol 5 for native goals; upgrade sandboxed-node before resuming", node.id));
         }
@@ -35530,6 +35543,76 @@ mod tests {
             .expect("mission lookup should succeed")
             .expect("mission should exist");
         assert_eq!(stored.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_active_missions_once_skips_client_placed_mission() {
+        let inner = Arc::new(mission_store::InMemoryMissionStore::new());
+        let store: Arc<dyn MissionStore> = inner.clone();
+        let mission = store
+            .create_mission(
+                Some("CTRL-G"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .expect("mission should be created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("mission should become active");
+        store
+            .update_mission_project(
+                mission.id,
+                mission_store::MissionProjectPatch {
+                    preserve_updated_at: false,
+                    tag_patch: None,
+                    title: None,
+                    project: None,
+                    track: None,
+                    intent: None,
+                    github_pr: None,
+                    tags: Some(vec!["placement:client".to_string()]),
+                    desired_state: None,
+                    next_check_at: None,
+                },
+            )
+            .await
+            .expect("tags should apply");
+        let run = store
+            .begin_mission_run(
+                mission.id,
+                "orb-client:3ca54946-9af5-4ee6-83a2-983bc4b946b0",
+                Some("orb-cwd:/Users/thomas/work"),
+            )
+            .await
+            .expect("client run should start");
+        let stale_at = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        inner
+            .test_set_updated_at(mission.id, stale_at)
+            .await
+            .expect("updated_at should backdate");
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        cleanup_stale_active_missions_once(&store, 2, &events_tx, &cmd_tx).await;
+
+        let stored = store
+            .get_mission(mission.id)
+            .await
+            .expect("mission lookup should succeed")
+            .expect("mission should exist");
+        assert_eq!(stored.status, MissionStatus::Active);
+        let active_run = store
+            .get_active_mission_run(mission.id)
+            .await
+            .expect("active run query should succeed")
+            .expect("client run must remain active until the client settles it");
+        assert_eq!(active_run.run_id, run.run_id);
     }
 
     #[tokio::test]

@@ -103,3 +103,39 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  pollSpy.mockRestore();
  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
 });
+
+it('replaces an edited remote queued message without leaving a duplicate Sending… row',async()=>{
+ const {getMission,sendMissionMessage}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'edit-remote-queued',status:'active',history:[],created_at:'',updated_at:''});
+ let rows=[{id:'orig-msg',mission_id:'edit-remote-queued',content:'Original queued text',source:'remote-queue'}];
+ vi.mocked(sendMissionMessage).mockImplementation(async(_id,text,_attachments,clientMessageId)=>{
+  const id=clientMessageId??'generated-id';
+  rows=[...rows,{id,mission_id:'edit-remote-queued',content:text,source:'remote-queue'}];
+  return {id,queued:true};
+ });
+ vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+  const u=String(url);
+  if(options?.method==='DELETE'){
+   const deletedId=decodeURIComponent(u.split('/').pop()??'');
+   rows=rows.filter(r=>r.id!==deletedId);
+   return Response.json({ok:true});
+  }
+  if(u.includes('/queue?'))return Response.json(rows);
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ const view=render(()=><NativeMissionView id="edit-remote-queued" initial={{id:'edit-remote-queued',status:'active',history:[],created_at:'',updated_at:''}}/>);
+ await waitFor(()=>expect(view.container.querySelector('.scroll .col')).not.toBeNull());
+ await waitFor(()=>expect(screen.getAllByText('Original queued text')).toHaveLength(1));
+ const {fireEvent}=await import('@solidjs/testing-library');
+ await fireEvent.click(screen.getByRole('button',{name:'Edit queued message: Original queued text'}));
+ const input=screen.getByPlaceholderText('Send follow-up') as HTMLTextAreaElement;
+ expect(input.value).toBe('Original queued text');
+ fireEvent.input(input,{target:{value:'Edited queued text'}});
+ fireEvent.keyDown(input,{key:'Enter'});
+ await waitFor(()=>{
+  expect(screen.getAllByText('Edited queued text')).toHaveLength(1);
+  expect(screen.queryByText('Sending…')).toBeNull();
+ });
+ expect(screen.queryByText('Original queued text')).toBeNull();
+});
+

@@ -2555,9 +2555,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
 
   // A terminal snapshot from either SSE or polling reconciles durable output.
-  createEffect(on(() => mission()?.status, status => {
-    if (p.id && status && !missionPhase({status} as Mission, false).moving) void resync(true);
-  }));
+  createEffect(on(() => mission()?.status, (status, prev) => {
+    if (p.id && status && prev && prev !== status && !missionPhase({status} as Mission, false).moving) void resync(true);
+  }, { defer: true }));
 
   let olderPending:Promise<void>|undefined;
   const loadOlder=()=>{
@@ -2737,7 +2737,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   let retryMessage: { key: string; id: string } | null = null;
   const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     setSendError(null);
-    const attemptId=explicitId??sendingId??crypto.randomUUID();if(!explicitId)sendingId=undefined;
+    const attemptId=explicitId??sendingId??crypto.randomUUID();
+    sendingId=undefined;
+    if(explicitId&&optimistic()&&optimistic()!.id!==explicitId)setOptimistic(null);
     if (clientPlaced()) {
       const sendVersion=connectionVersion(),sendMission=p.id;
       try {
@@ -3004,7 +3006,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               if(queuedEdit.editingRemote()&&remoteQueue){
                 const saved=await remoteQueue.replaceEdited(
                   id,
-                  ()=>sendMsg(text,images,followAttach(),crypto.randomUUID()),
+                  ()=>sendMsg(text,images,followAttach()),
                   async after=>{
                     const project=mission()?.project;
                     const attachItems=project?await loadAttachItems(project).catch(()=>[]):[];

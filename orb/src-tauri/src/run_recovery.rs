@@ -47,20 +47,77 @@ fn stopped(id: &str) -> Result<bool, String> {
         Err(e) => Err(e),
     }
 }
+fn nested_git_repo_between(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let mut cur = Some(path);
+    while let Some(dir) = cur {
+        if dir == root {
+            return false;
+        }
+        if dir.join(".git").exists() {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
 // Older Orb versions did not hold the file lock. Also catches an orphan CLI
 // which survived the desktop process. Unknown cwd is conservatively busy.
-fn process_blocks_workspace(name: &str, cwd: Option<&std::path::Path>, root: &std::path::Path) -> bool {
-    let harness = ["codex", "claude", "opencode", "grok", "agy"].iter().any(|n| name.contains(n));
-    cwd.is_some_and(|path| path.starts_with(root)) || (harness && cwd.is_none())
+fn process_blocks_workspace(
+    name: &str,
+    cwd: Option<&std::path::Path>,
+    root: &std::path::Path,
+) -> bool {
+    let harness = ["codex", "claude", "opencode", "grok", "agy"]
+        .iter()
+        .any(|n| name.contains(n));
+    cwd.is_some_and(|path| path.starts_with(root) && !nested_git_repo_between(path, root))
+        || (harness && cwd.is_none())
 }
 
 #[test]
 fn antigravity_orphan_blocks_unknown_workspace_recovery() {
     use std::path::Path;
     assert!(process_blocks_workspace("agy", None, Path::new("/work")));
-    assert!(process_blocks_workspace("agy.exe", None, Path::new("/work")));
-    assert!(!process_blocks_workspace("agy", Some(Path::new("/other")), Path::new("/work")));
-    assert!(process_blocks_workspace("tool", Some(Path::new("/work/sub")), Path::new("/work")));
+    assert!(process_blocks_workspace(
+        "agy.exe",
+        None,
+        Path::new("/work")
+    ));
+    assert!(!process_blocks_workspace(
+        "agy",
+        Some(Path::new("/other")),
+        Path::new("/work")
+    ));
+    assert!(process_blocks_workspace(
+        "tool",
+        Some(Path::new("/work/sub")),
+        Path::new("/work")
+    ));
+}
+
+#[test]
+fn child_git_repo_process_does_not_block_parent_workspace_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let sub_repo = root.path().join("paloma/sandboxed_sh");
+    std::fs::create_dir_all(sub_repo.join(".git")).unwrap();
+    let plain_sub = root.path().join("scratch");
+    std::fs::create_dir_all(&plain_sub).unwrap();
+    assert!(!process_blocks_workspace(
+        "agy",
+        Some(&sub_repo),
+        root.path()
+    ));
+    assert!(process_blocks_workspace(
+        "agy",
+        Some(&plain_sub),
+        root.path()
+    ));
+    assert!(process_blocks_workspace(
+        "agy",
+        Some(root.path()),
+        root.path()
+    ));
 }
 
 fn workspace_quiet(cwd: &str) -> Result<(), String> {
@@ -341,7 +398,8 @@ mod protocol_tests {
             ],
             Some((1, id.clone())),
         );
-        let request = local_agents::StartRequest { effort: None,
+        let request = local_agents::StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -376,7 +434,8 @@ mod protocol_tests {
                 format!("acknowledged mission {id} cannot acquire a non-terminal run"),
             ),
         ]);
-        let request = local_agents::StartRequest { effort: None,
+        let request = local_agents::StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -444,7 +503,8 @@ mod protocol_tests {
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
         ]);
-        let request = local_agents::StartRequest { effort: None,
+        let request = local_agents::StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -536,7 +596,8 @@ mod process_tests {
         std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        local_agents::local_agents_start(local_agents::StartRequest { effort: None,
+        local_agents::local_agents_start(local_agents::StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),
@@ -575,7 +636,8 @@ mod btw_smoke {
             api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
-        let request = local_agents::StartRequest { effort: None,
+        let request = local_agents::StartRequest {
+            effort: None,
             cyber_revision: None,
             cyber_access: None,
             id: id.clone(),

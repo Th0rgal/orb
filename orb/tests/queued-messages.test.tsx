@@ -48,3 +48,13 @@ it('shows one line per message with edit, send now and remove actions, and marks
  await fireEvent.click(screen.getByRole('button',{name:'Hide queued messages'}));
  expect(screen.queryByText('message 1')).toBeNull();
 });
+it('does not render a duplicate bottom alert when a row already shows the retry error',async()=>{
+ const reason='An agent process may still be using this workspace. Stop it before retrying.';
+ queue.rows=[{id:'interrupted',text:'resume turn',state:'accepted',interrupted:true,error:`Orb lost the local run. Retry will check that the previous agent stopped. ${reason}`}];
+ queue.retry.mockRejectedValue(new Error(reason));
+ render(()=><QueuedMessages mission="local"/>);
+ await fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ await waitFor(()=>expect(queue.retry).toHaveBeenCalledWith('interrupted'));
+ expect(screen.getAllByRole('alert')).toHaveLength(1);
+});
+

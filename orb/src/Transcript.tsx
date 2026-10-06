@@ -346,6 +346,39 @@ function WorkFold(p: { items: WorkItem[] }) {
   );
 }
 
+function ThinkFold(p: { items: Array<Extract<StreamItem, { kind: "think" }>> }) {
+  const [open, setOpen] = disclosure(`think-fold:${p.items[0]?.key}`, false);
+  const anchored = anchoredDisclosure();
+  let toggle!: HTMLButtonElement;
+  const label = () => `${p.items.length} ${p.items.length === 1 ? "thought" : "thoughts"}`;
+  return (
+    <div class={`st-work st-think-fold ${open() ? "open" : ""}`}>
+      <Show when={open()}>
+        <div class="st-work-body">
+          <For each={p.items}>{(t) => <ThinkBlock item={t} />}</For>
+        </div>
+      </Show>
+      <button class="st-work-head" ref={toggle} aria-expanded={open()} onClick={() => anchored(toggle, () => setOpen(!open()))}>
+        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
+        <span class="st-work-label">{label()}</span>
+      </button>
+    </div>
+  );
+}
+
+export function ThoughtSequence(p: { items: Array<Extract<StreamItem, { kind: "think" }>> }) {
+  const folded = () => (p.items.length > 1 ? p.items.slice(0, -1) : []);
+  const latest = () => p.items[p.items.length - 1];
+  return (
+    <>
+      <Show when={folded().length}>
+        <ThinkFold items={folded()} />
+      </Show>
+      <Show when={latest()}>{(t) => <ThinkBlock item={t()} />}</Show>
+    </>
+  );
+}
+
 export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
@@ -377,9 +410,9 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
             case "work":
               if (!item.items.some((t) => t.kind === "tool")) {
                 return (
-                  <For each={item.items}>
-                    {(t) => (t.kind === "think" ? <ThinkBlock item={t} /> : null)}
-                  </For>
+                  <ThoughtSequence
+                    items={item.items.filter((t): t is Extract<StreamItem, { kind: "think" }> => t.kind === "think")}
+                  />
                 );
               }
               return <WorkFold items={item.items} />;

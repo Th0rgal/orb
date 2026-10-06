@@ -366,6 +366,31 @@ pub(crate) async fn cleanup_stale_active_missions_once(
                     );
                     continue;
                 }
+                if super::control::client_placement::is_tagged(&mission.project.tags) {
+                    tracing::debug!(
+                        mission_id = %mission.id,
+                        "Stale cleanup: client-placed mission is reconciled by its owning Orb client — NOT auto-closing"
+                    );
+                    continue;
+                }
+                match mission_has_detached_durable_run(mission_store.as_ref(), mission.id).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            mission_id = %mission.id,
+                            "Stale cleanup: detached durable execution owns liveness — NOT auto-closing"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            mission_id = %mission.id,
+                            %error,
+                            "Stale cleanup: could not inspect active run; deferring auto-close"
+                        );
+                        continue;
+                    }
+                }
                 tracing::info!(
                     "Auto-closing stale mission {}: '{}' (inactive since {})",
                     mission.id,

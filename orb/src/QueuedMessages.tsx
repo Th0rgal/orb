@@ -32,6 +32,6 @@ export function QueuedMessages(p:{mission:string;editing?:string;onEdit?:(row:{i
     <Show when={row.error}><small role="alert">{row.error}</small><Show when={row.state==='error'||row.state==='dispatching'||row.interrupted}><button type="button" class="queue-send-now" disabled={working()} onClick={()=>void act(()=>retryQueuedMessage(row.id))}>Retry</button></Show></Show>
    </li>}</For>
   </ol></Show>
-  <Show when={error()}><p role="alert">{error()}</p></Show>
+  <Show when={error()&&!rows().some(row=>row.error?.includes(error()))}><p role="alert">{error()}</p></Show>
  </section></Show>;
 }

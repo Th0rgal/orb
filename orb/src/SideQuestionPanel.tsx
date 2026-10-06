@@ -11,7 +11,7 @@ import { useSidePanel } from './FilePanel';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion } from './api';
 import { readSideQuestion, writeSideQuestion, sideQuestionKey, type QueuedSideQuestion } from './sideQuestionStorage';
-import { UserTurn, ThinkBlock } from "./Transcript";
+import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
@@ -171,7 +171,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      const content=()=>remoteLog(exchange.answer);
      return <article data-side-turn={exchange.id}>
      <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>
-     <Show when={exchange.pending}><For each={btwThoughts(p.mission)}>{thought=><ThinkBlock item={thought}/>}</For></Show>
+     <Show when={exchange.pending}><ThoughtSequence items={btwThoughts(p.mission)}/></Show>
      <Show when={content().text}><MdView compact text={content().text}/></Show>
      <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
@@ -184,7 +184,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     </section></Show>
     <Show when={!history().length&&!question()}><p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p></Show>
     <Show when={busy() && runStatus()}><p class="dim" role="status">{runStatus()}</p></Show>
-    <AgentActivity items={btwActivities(p.mission)} running={busy()}/>
+    <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>
    <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>

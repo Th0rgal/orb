@@ -1,7 +1,7 @@
 /** In-memory LRU for page payloads. First paint reads here; network
  * refreshes in the background and joins in-flight work so open + prefetch
  * share one request. */
-const MAX = 32;
+const MAX = 64;
 const MAX_BYTES = 32 * 1024 * 1024;
 let bytes = 0;
 let generation = 0;
