@@ -25,40 +25,53 @@
 | --- | --- | --- |
 | **Your computer** | A local coding agent on your desktop | Choose **New Agent → This computer**, then a harness and model. Work with your local files and tools. |
 | **Your private cloud** | Your own servers and remote machines | Add machines to sandboxed.sh, then select one in Orb. Run agents in the configured host or isolated container workspace. |
-| **Cloud agents** | A provider-managed assistant | Choose **Cloud agent**, then ChatGPT, Grok Bot or Cursor Cloud. Continue the provider conversation from Orb. |
+| **Cloud agents** | A coordinator or provider-managed assistant | Choose **Cloud agent**, then Hermes, ChatGPT, Grok Bot or Cursor Cloud. Continue durable or provider conversations from Orb. |
 
-Use Claude Code, Codex and other supported harnesses for local and remote work.
-Cloud agents have their own connections: **ChatGPT** uses a signed-in browser
-profile and your available subscription modes; **Grok Bot** uses its connected
-account; **Cursor Cloud** uses its official API, with a repository, Git reference
-and available model. ChatGPT and Grok Bot connectors are experimental; available
-models and actions depend on the connected account and provider.
+Use **Claude Code**, **Codex**, **Antigravity**, **OpenCode** or **Grok** for
+local and remote work, with live model, effort and cyber-access controls where
+supported. Cloud agents have their own connections: **Hermes** binds to durable
+coordinator conversations and router chains; **ChatGPT** uses a signed-in
+browser profile and your available subscription modes; **Grok Bot** uses its
+connected account; **Cursor Cloud** uses its official API with a repository,
+Git reference and model.
 
 ![Creating an agent in Orb on macOS](screenshots/orb-setup.webp)
 
 ## Pick up the conversation anywhere
 
-Projects contain folders, conversations and shared context. Open a mission to
-follow its progress, send a follow-up, change supported model settings, or review
-its output. Markdown, code, tables, LaTeX, images and downloadable artifacts stay
-readable inside the conversation.
+Projects organize missions, per-project colors, skills and a synced local
+**Context** folder in Finder. Inside a conversation:
 
-Orb for **iOS** connects to the same sandboxed.sh server: browse projects, follow
-agents, start remote or cloud work, and view or edit shared Markdown files.
-Agents run on the selected computer or service, not on your phone. Local desktop
-execution still depends on the computer that owns the run.
+- **Follow and steer live runs**: collapsible `Worked — …` tool/thought folds,
+  nested subagents and callback reviews, inline prompt editing, and a
+  Cursor-style follow-up queue that sends on turn completion or immediately.
+- **Ask on the side**: open the docked `/btw` side-agent panel (`⌘⇧J`) to ask
+  questions with shared workspace context without interrupting the main turn.
+- **Keep long work moving**: schedule durable mission wake-ups, automatically
+  resume interrupted runs after restarts, and transfer workspaces across
+  machines (preserving symlinks while skipping build artifacts).
+- **Rich output**: Markdown, code, tables, LaTeX, quizzes, inline images and
+  clickable file links stay readable inside the transcript.
+
+Orb for **iOS** connects to the same sandboxed.sh server: browse projects with
+synced colors, inspect mission transcripts and activity folds, send follow-ups,
+view or edit shared Markdown context, and manage backend, machines (with a
+shared SSH address book) and providers.
 
 <p align="center">
-  <img src="screenshots/orb-ios.webp" width="280" alt="Orb on iOS showing code and downloadable files in a test conversation" /><br/>
-  <sub>iOS Simulator · ChatGPT rendering test with fixture data.</sub>
+  <img src="screenshots/orb-ios-projects.webp" width="260" alt="Orb on iOS showing the production projects list with synced project colors" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="screenshots/orb-ios.webp" width="260" alt="Orb on iOS showing the Pareto mission conversation in Verity" /><br/>
+  <sub>iOS Simulator · Connected to production (`Projects` list and `Verity / Pareto` mission).</sub>
 </p>
 
 ## Bring your subscriptions
 
-Connect supported subscription accounts through **CLIProxyAPI Plus**, then
-configure that endpoint as an inference provider in sandboxed.sh. The proxy
-handles account routing and rotation among configured, eligible accounts;
-Orb lets you choose the harness and model. Provider quotas still apply.
+Sign in to supported subscription accounts directly from **Providers** in Orb
+(macOS, web and iOS) or connect them through **CLIProxyAPI Plus**. You can
+authenticate via OAuth, renew tokens, enable or disable individual accounts,
+and inspect live plan/quota status; the proxy handles routing and rotation
+across eligible accounts while Orb lets you choose the harness and model.
 
 - [CLIProxyAPI Plus — maintained CCS fork](https://github.com/kaitranntt/CLIProxyAPIPlus)
 - [CLIProxyAPI — upstream](https://github.com/router-for-me/CLIProxyAPI)
