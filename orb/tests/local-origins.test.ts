@@ -129,3 +129,16 @@ it('learns about an archive the default list leaves out, and keeps an emptied ti
  vi.stubGlobal('fetch',offline());
  expect((await listMissions()).find(m=>m.id==='done')).toMatchObject({status:'acknowledged',title:''});
 });
+
+it('shares concurrent native scans and reads fresh rows after completion',async()=>{
+ setConnection('http://core.test','token');
+ let resolve!:(rows:any[])=>void;
+ const invoke=vi.fn(()=>new Promise<any[]>(done=>resolve=done));
+ (window as any).__TAURI_INTERNALS__={invoke};
+ const {localOrigins}=await import('../src/localOrigins');
+ const first=localOrigins('one'),second=localOrigins('two');
+ expect(invoke).toHaveBeenCalledTimes(1);
+ resolve([{id:'one'},{id:'two'}]);
+ expect(await first).toEqual([{id:'one'}]);expect(await second).toEqual([{id:'two'}]);
+ const next=localOrigins();expect(invoke).toHaveBeenCalledTimes(2);resolve([]);await next;
+});
