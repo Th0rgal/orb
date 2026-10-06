@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionTreeRows } from "../src/missionTree";
+import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed") => ({ id, parent_mission_id: parent, status });
 
@@ -35,4 +35,12 @@ test("archiving a parent does not turn its visible worker into a root conversati
  expect(roots.map(r=>r.mission.id)).toEqual(['parent']);
  expect(roots[0].children.map(r=>r.mission.id)).toEqual(['child']);
  expect(roots[0].mission.status).toBe('acknowledged');
+});
+
+test("an archived ancestor is shown once and returns to archives when its last child is archived",()=>{
+ const parent=m("parent",undefined,"acknowledged"), child=m("child","parent");
+ const rows=[parent,child,m("other",undefined,"acknowledged")];
+ expect(archiveOnlyRows(rows,missionTreeRows(rows,m=>m.status!=="acknowledged")).map(m=>m.id)).toEqual(["other"]);
+ child.status="acknowledged";
+ expect(archiveOnlyRows(rows,missionTreeRows(rows,m=>m.status!=="acknowledged")).map(m=>m.id)).toEqual(["parent","child","other"]);
 });

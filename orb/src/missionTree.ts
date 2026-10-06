@@ -50,3 +50,9 @@ export function missionTreeRows<M extends Linked>(missions:M[],visible:(mission:
  }
  return missions.filter(m=>retained.has(m.id));
 }
+
+/** A retained archived ancestor has one presentation row, in the main tree. */
+export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[],main:readonly {id:string}[]):M[]{
+ const visible=new Set(main.map(m=>m.id));
+ return archived.filter(m=>m.status==="acknowledged"&&!visible.has(m.id));
+}

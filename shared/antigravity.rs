@@ -15,6 +15,15 @@ pub fn validate_prompt(prompt: &str) -> Result<(), String> {
 }
 
 pub fn args(model: Option<&str>, session: Option<&str>, prompt: &str) -> Vec<String> {
+    args_with_effort(model, None, session, prompt)
+}
+
+pub fn args_with_effort(
+    model: Option<&str>,
+    effort: Option<&str>,
+    session: Option<&str>,
+    prompt: &str,
+) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -22,6 +31,13 @@ pub fn args(model: Option<&str>, session: Option<&str>, prompt: &str) -> Vec<Str
     ];
     if let Some(model) = model.filter(|s| !s.is_empty()) {
         args.extend(["--model".into(), model.into()]);
+    }
+    // agy-demo no longer supplies its own effort default. Preserve explicit choices.
+    if let Some(effort) = effort
+        .filter(|s| !s.is_empty())
+        .or_else(|| (model == Some("agy-demo")).then_some("high"))
+    {
+        args.extend(["--effort".into(), effort.into()]);
     }
     if let Some(session) = session.filter(|s| !s.is_empty()) {
         args.extend(["--conversation".into(), session.into()]);
@@ -72,10 +88,18 @@ impl Stream {
         if kind == "result" {
             self.success = body["status"] == "SUCCESS";
             if !self.success {
-                self.error = Some(format!(
-                    "Antigravity result: {}",
-                    body["status"].as_str().unwrap_or("missing status")
-                ));
+                self.error = Some(
+                    body["error"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "Antigravity result: {}",
+                                body["status"].as_str().unwrap_or("missing status")
+                            )
+                        }),
+                );
             }
             if let Some(response) = body["response"].as_str() {
                 if !response.is_empty() {
@@ -299,5 +323,25 @@ mod tests {
         assert!(a.windows(2).any(|p| p == ["--conversation", "abc"]));
         assert_eq!(a.last().unwrap(), "$(false)\nhello");
         assert!(!a.contains(&"--continue".into()));
+    }
+    #[test]
+    fn effort_default_and_explicit_choices_preserve_conversation() {
+        for effort in [None, Some("low"), Some("medium"), Some("high")] {
+            let args = args_with_effort(Some("agy-demo"), effort, Some("existing"), "resume");
+            assert!(args
+                .windows(2)
+                .any(|p| p == ["--effort", effort.unwrap_or("high")]));
+            assert!(args.windows(2).any(|p| p == ["--conversation", "existing"]));
+        }
+        assert!(!args(None, None, "hello").contains(&"--effort".into()));
+    }
+
+    #[test]
+    fn native_startup_error_is_preserved_without_conversation_id() {
+        let mut stream = Stream::default();
+        let error = "invalid model selection: agy-demo requires --effort";
+        stream.feed(&json!({"event":"result","result":{"conversation_id":"","status":"ERROR","error":error}}));
+        assert_eq!(stream.finish().unwrap_err(), error);
+        assert!(stream.session.is_none());
     }
 }

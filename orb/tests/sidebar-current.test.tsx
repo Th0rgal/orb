@@ -9,8 +9,16 @@ const mission = { id: "restored", title: "Open plan", project: "verity", status:
 let listed: Mission[] = [];
 beforeEach(() => {
   listed = [];
-  vi.stubGlobal("fetch", vi.fn(async (input: string) => {
-    const path = new URL(input).pathname;
+  vi.stubGlobal("fetch", vi.fn(async (input: string, init?:RequestInit) => {
+    const url = new URL(input), path = url.pathname;
+    const id=path.split("/").at(-1);
+    if(path.endsWith("/status") && init?.method === "POST") {
+      const mid=path.split("/").at(-2);
+      listed=listed.map(m=>m.id===mid?{...m,status:JSON.parse(String(init.body)).status}:m);
+      return new Response(JSON.stringify({ok:true}));
+    }
+    if(path.startsWith("/api/control/missions/") && listed.some(m=>m.id===id)) return new Response(JSON.stringify(listed.find(m=>m.id===id)));
+
     const body = path === "/api/projects" ? { projects: [{ slug: "verity", title: "Verity" }] }
       : path.endsWith("/files") ? { entries: [] }
       : path.endsWith("/controller") ? { job: null, runs: [] }
@@ -66,4 +74,23 @@ describe("open conversation in the sidebar", () => {
     expect(rows[1].getAttribute("aria-current")).toBeNull();
     expect(rows[1].getAttribute("aria-selected")).toBe("true");
   });
+});
+
+it("does not duplicate an archived parent around its visible child",async()=>{
+ const parent={...mission,id:"parent",title:"Archived parent",status:"acknowledged"};
+ const child={...mission,parent_mission_id:"parent"}; listed=[parent,child];
+ const view=render(()=><LiveProjectsSection currentMission={child} selected={()=>"m:restored"} harnessChoices={[]} onFork={()=>{}} open={()=>{}} onNewAgent={()=>{}} onNewProject={()=>{}}/>);
+ await view.findByRole("button",{name:"Archived parent",exact:true});
+ fireEvent.click(view.getByRole("button",{name:"Archived",exact:true}));
+ await waitFor(()=>expect(view.getAllByRole("button",{name:"Archived parent",exact:true})).toHaveLength(1));
+});
+
+it("shift selection exposes Archive and archives each selected idle conversation",async()=>{
+ const second={...mission,id:"second",title:"Other plan"};listed=[mission,second];
+ const view=render(()=><LiveProjectsSection currentMission={mission} selected={()=>"m:restored"} harnessChoices={[]} onFork={()=>{}} open={()=>{}} onNewAgent={()=>{}} onNewProject={()=>{}}/>);
+ const first=await view.findByRole("button",{name:"Open plan",exact:true}),other=await view.findByRole("button",{name:"Other plan",exact:true});
+ fireEvent.click(first);fireEvent.click(other,{shiftKey:true});fireEvent.contextMenu(other,{clientX:20,clientY:30});
+ fireEvent.click(await view.findByRole("menuitem",{name:"Archive 2 conversations",exact:true}));
+ await waitFor(()=>expect(listed.every(m=>m.status==="acknowledged")).toBe(true));
+ expect(vi.mocked(fetch).mock.calls.filter(([url,init])=>String(url).endsWith("/status")&&init?.method==="POST")).toHaveLength(2);
 });

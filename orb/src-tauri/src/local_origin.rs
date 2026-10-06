@@ -102,7 +102,7 @@ fn view(r: &Record) -> Value {
         .map(str::trim)
         .filter(|rest| !rest.is_empty());
     let (status, title) = confirmed::shown(r.confirmed.as_ref(), pending(r), &s.status, &o.title);
-    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"model_override":o.model,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
+    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"model_override":o.model,"model_effort":o.effort,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
 }
 fn workers() -> &'static Mutex<HashSet<PathBuf>> {
     static W: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -356,6 +356,7 @@ pub async fn local_origin_launch(
             || record.snapshot.origin.project != draft.project
             || record.snapshot.origin.backend != request.harness
             || record.snapshot.origin.model != request.model
+            || record.snapshot.origin.effort != request.effort
             || record.snapshot.origin.cwd != request.cwd
         {
             return Err("Draft identity already used".into());
@@ -399,6 +400,7 @@ pub async fn local_origin_launch(
             project: draft.project,
             backend: request.harness.clone(),
             model: request.model.clone(),
+            effort: request.effort.clone(),
             cwd: request.cwd.clone(),
             prompt: draft.prompt,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -422,7 +424,7 @@ pub async fn local_origin_launch(
     crate::local_bindings(
         Some(id.to_string()),
         Some(
-            json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model}),
+            json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model,"effort":request.effort}),
         ),
     )?;
     // Core must know the durable identity before it can issue this mission's
