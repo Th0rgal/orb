@@ -2,7 +2,7 @@
 #[path = "antigravity_thoughts.rs"]
 pub mod thoughts;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Bound the native argv and the remote shell's worst-case quote expansion.
 pub fn validate_prompt(prompt: &str) -> Result<(), String> {
@@ -59,6 +59,8 @@ pub fn args_with_effort(
 
 #[derive(Debug, Default)]
 pub struct Stream {
+    pub turn_id: String,
+    responses: BTreeMap<u64, (String, u64, bool)>,
     pub session: Option<String>,
     pub expected_session: Option<String>,
     pub text: String,
@@ -74,7 +76,40 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// Returns normalized tool events. Text remains an authoritative snapshot.
+    fn response_event(&mut self, step: u64, delta: &str, done: bool) -> Option<Value> {
+        let response = self.responses.entry(step).or_default();
+        if response.2 || (delta.is_empty() && (!done || response.0.is_empty())) {
+            return None;
+        }
+        response.0.push_str(delta);
+        response.1 += 1;
+        response.2 = done;
+        if self.turn_id.is_empty() {
+            self.turn_id = uuid::Uuid::new_v4().to_string();
+        }
+        let mut ops = vec![json!({"type":"snapshot","text":response.0,"revision":response.1})];
+        if done {
+            ops.push(json!({"type":"finalize"}));
+        }
+        Some(
+            json!({"type":"text_op","bubble_id":format!("antigravity:{}:{}:{step}",self.session.as_deref().unwrap_or("unknown"),self.turn_id),"ops":ops}),
+        )
+    }
+
+    fn close_responses(&mut self) -> Vec<Value> {
+        let steps: Vec<_> = self
+            .responses
+            .iter()
+            .filter(|(_, r)| !r.2)
+            .map(|(step, _)| *step)
+            .collect();
+        steps
+            .into_iter()
+            .filter_map(|step| self.response_event(step, "", true))
+            .collect()
+    }
+
+    /// Returns ordered response snapshots and tool events. Each native step is durable.
     pub fn feed(&mut self, value: &Value) -> Vec<Value> {
         let kind = value["event"].as_str().unwrap_or_default();
         let body = match kind {
@@ -112,14 +147,20 @@ impl Stream {
                         }),
                 );
             }
-            if let Some(response) = body["response"].as_str() {
-                if !response.is_empty() {
-                    self.text = response.into();
+            let mut events = self.close_responses();
+            if let Some(response) = body["response"].as_str().filter(|s| !s.is_empty()) {
+                // Some CLI versions return only the final response. Never erase
+                // the intermediate responses already displayed by a local client.
+                if response != self.text && !self.responses.values().any(|r| r.0 == response) {
+                    self.text.push_str(response);
+                    if let Some(event) = self.response_event(u64::MAX, response, true) {
+                        events.push(event);
+                    }
                 }
             }
             // result.usage is lifetime cumulative on resumed conversations.
             // Count only per-step usage so follow-ups are not charged twice.
-            return vec![];
+            return events;
         }
         if kind != "step_update" {
             return vec![];
@@ -139,15 +180,24 @@ impl Stream {
             }
             self.cache_read_tokens += body["usage"]["cache_read_tokens"].as_u64().unwrap_or(0);
         }
+        let mut events = vec![];
         if body["step_type"] == "agent_response" {
             self.agent_response_active = body["state"] == "ACTIVE";
             if let Some(delta) = body["text_delta"].as_str() {
                 self.text.push_str(delta);
             }
+            if let Some(event) = self.response_event(
+                step,
+                body["text_delta"].as_str().unwrap_or_default(),
+                matches!(body["state"].as_str(), Some("DONE" | "ERROR")),
+            ) {
+                events.push(event);
+            }
         }
         if body["step_type"] != "tool" {
-            return vec![];
+            return events;
         }
+        events.extend(self.close_responses());
         self.agent_response_active = false;
         let id = format!("{}:{step}", self.session.as_deref().unwrap_or("unknown"));
         let info = &body["tool_info"];
@@ -155,7 +205,6 @@ impl Stream {
             .as_str()
             .or_else(|| info["name"].as_str())
             .unwrap_or("tool");
-        let mut events = vec![];
         if self.tools.insert(id.clone()) {
             events.push(json!({"type":"tool_call","toolCallId":id,"name":name,"toolName":name,"rawInput":info["parameters"]}));
         }
@@ -163,6 +212,16 @@ impl Stream {
             events.push(json!({"type":"tool_call_update","toolCallId":id,"name":name,"toolName":name,"status":if body["state"] == "ERROR" || !info["error"].is_null() {"failed"} else {"completed"},"output":info["output"],"rawOutput":info["output"]}));
         }
         events
+    }
+
+    /// The terminal receipt repeats only the last response, not every update.
+    pub fn summary(&self) -> String {
+        self.responses
+            .values()
+            .rev()
+            .find(|r| !r.0.is_empty())
+            .map(|r| r.0.clone())
+            .unwrap_or_else(|| self.text.clone())
     }
 
     pub fn finish(&self) -> Result<(), String> {
@@ -277,6 +336,29 @@ pub fn group_models(models: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn responses_have_stable_step_ids_and_survive_tool_boundaries_and_short_final_receipts() {
+        let mut stream = Stream::default();
+        stream.turn_id = "turn".into();
+        stream.feed(&json!({"event":"init","conversation_id":"session"}));
+        let first = stream.feed(&json!({"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"First 🦀"}}));
+        assert_eq!(first[0]["bubble_id"], "antigravity:session:turn:1");
+        assert_eq!(first[0]["ops"][0]["revision"], 1);
+        let boundary = stream.feed(&json!({"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"bash"}}));
+        assert_eq!(boundary[0]["bubble_id"], first[0]["bubble_id"]);
+        assert_eq!(boundary[0]["ops"][0]["revision"], 2);
+        assert_eq!(boundary[0]["ops"][1]["type"], "finalize");
+        assert_eq!(boundary[1]["type"], "tool_call");
+        let second = stream.feed(&json!({"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"Second"}}));
+        assert_ne!(second[0]["bubble_id"], first[0]["bubble_id"]);
+        let final_event = stream
+            .feed(&json!({"event":"result","result":{"status":"SUCCESS","response":"Second"}}));
+        assert!(final_event.is_empty());
+        assert_eq!(stream.text, "First 🦀Second");
+        assert_eq!(stream.summary(), "Second");
+        assert!(stream.finish().is_ok());
+    }
+
     #[test]
     fn argon_variants_are_one_model_and_explicit_effort_overrides_old_variant() {
         let models = group_models(vec![

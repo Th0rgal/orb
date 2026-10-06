@@ -1,6 +1,8 @@
 /** Recover human text from remote terminal receipts. Raw diagnostics always
  * remain available in collapsed details, regardless of the harness format. */
 export function remoteLog(raw: string): { text: string; details?: string } {
+  const native = antigravityResponse(raw);
+  if (native !== null) return {text:native,details:raw};
   if (!/^Remote node '[^']+' job [0-9a-f-]{36} (?:finished with|reached) state '/.test(raw)) return { text: raw };
   const marker = raw.indexOf("\n\nlog tail:\n");
   if (marker < 0) return { text: raw };
@@ -9,6 +11,8 @@ export function remoteLog(raw: string): { text: string; details?: string } {
   const seen = new Set<string>();
   for (const line of log.split("\n")) {
     try {
+      const native = antigravityResponse(line);
+      if (native !== null) { parts.push(native); continue; }
       const event = JSON.parse(line);
       if (typeof event?.sessionID !== "string" || !event.sessionID.startsWith("ses_") || event.type !== "text" || typeof event.part?.text !== "string") continue;
       const id = event.part.id;
@@ -45,4 +49,16 @@ function structuredHarnessLog(log: string): boolean {
         : ["SUCCESS", "ERROR"].includes(payload.status) && typeof payload.duration_seconds === "number";
     } catch { return false; }
   });
+}
+
+/** Recognize the native result envelope, never arbitrary agent-authored JSON. */
+function antigravityResponse(raw:string):string|null {
+  try {
+    const value=JSON.parse(raw);
+    const result=value?.event==='result'?value.result:value;
+    if(!result || typeof result !== 'object' || typeof result.response !== 'string'
+      || !['SUCCESS','ERROR'].includes(result.status) || typeof result.duration_seconds !== 'number'
+      || typeof result.num_turns !== 'number') return null;
+    return result.response;
+  } catch { return null; }
 }

@@ -32,12 +32,29 @@ export class TranscriptReducer {
   private bubbles = new Map<string, number>();
   private seen = new Set<string>();
   private seq = new Map<string, number>();
+  private revisions = new Map<string, number>();
   private next = 0;
   private lastFinal: number | undefined;
   private identity:string|undefined;
   private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
   private nextForEvent=0;
   private put(index: number, item: StreamItem) { this.items[index] = item; }
+  private placeText(bubble:string,item:Extract<StreamItem,{kind:'text'}>):number {
+    let index=this.items.length;
+    if(bubble.startsWith('antigravity:')) {
+      const [,conversation,,step]=bubble.split(':');
+      const lastUser=this.items.reduce((last,item,i)=>item.kind==='user'&&!item.queued?i:last,-1);
+      const boundary=this.items.findIndex((item,i)=>i>lastUser&&item.kind==='tool'&&item.callId.startsWith(conversation+':')&&Number(item.callId.slice(conversation.length+1))>Number(step));
+      if(boundary>=0)index=boundary;
+      item={...item,key:`text:${bubble}`};
+    }
+    for(const map of [this.users,this.tools,this.bubbles])for(const [key,i] of map)if(i>=index)map.set(key,i+1);
+    if(this.lastFinal!=null&&this.lastFinal>=index)this.lastFinal++;
+    this.items.splice(index,0,item);
+    this.bubbles.set(bubble,index);
+    return index;
+  }
+
   private close() {
     for (const index of this.bubbles.values()) {
       const item = this.items[index];
@@ -141,7 +158,12 @@ export class TranscriptReducer {
             chars = undefined;
           };
           for (const op of (Array.isArray(d.ops) ? d.ops : []) as Record<string, unknown>[]) {
-            if (op.type === "insert") {
+            if (op.type === "snapshot") {
+              const revision = Number(op.revision);
+              if (!Number.isFinite(revision) || revision <= (this.revisions.get(bubble) ?? -1)) return;
+              this.revisions.set(bubble, revision);
+              text = str(op.text); chars = undefined; snapshot = text;
+            } else if (op.type === "insert") {
               // This synthetic bubble carries a full snapshot even on reconnect,
               // when a fresh producer buffer emits insert(0, accumulated_text).
               if (bubble === "text_delta_latest" && op.pos === 0) { snapshot = str(op.text); text = snapshot; chars = undefined; }
@@ -166,8 +188,7 @@ export class TranscriptReducer {
         }
         if (index == null) {
           if (!text) return;
-          index=this.items.length; this.bubbles.set(bubble,index);
-          this.items.push({kind:"text",key:this.key("text"),text,live});
+          index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live});
         } else if (previous?.kind === "text" && (previous.text !== text || previous.live !== live)) this.put(index,{...previous,text,live});
         return;
       }
@@ -175,18 +196,25 @@ export class TranscriptReducer {
         const text=str(d.content);
         const finalBubble=str(d.bubble_id)||"text_delta_latest";
         if(d.canonical===true){
+          if(typeof d.revision === 'number') {
+            if(d.revision < (this.revisions.get(finalBubble) ?? -1)) return;
+            this.revisions.set(finalBubble,d.revision);
+          }
           // Canonical rows finalize one identified bubble; other native bubbles
           // must remain distinct. Keep it available for the turn's final event.
           const index=this.bubbles.get(finalBubble) ?? (finalBubble==="text_delta_latest" ? this.lastFinal : undefined);
           const previous=index==null ? undefined : this.items[index];
           if(previous?.kind==="text"&&index!=null){this.put(index,{...previous,text:text||previous.text,live:false});this.bubbles.set(finalBubble,index);}
-          else if(text){this.bubbles.set(finalBubble,this.items.length);this.items.push({kind:"text",key:this.key("text"),text,live:false});}
+          else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false});}
           return;
         }
         const index=this.bubbles.get(finalBubble);
         const previous=index == null ? undefined : this.items[index];
+        const native = [...this.bubbles].filter(([id])=>id.startsWith('antigravity:')).sort((a,b)=>a[1]-b[1]).map(([,i])=>this.items[i]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
+        const isNativeReceipt = native.length > 0 && (text === native.map(i=>i.text).join('') || text === native.at(-1)!.text);
         this.close();
         if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
+        if(isNativeReceipt) return;
         if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false});this.lastFinal=index;}
  else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false});}
         return;

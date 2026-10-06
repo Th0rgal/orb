@@ -239,8 +239,19 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TextOp {
-    Insert { pos: usize, text: String },
-    Replace { range: (usize, usize), text: String },
+    /// Idempotent full snapshot of an independently identified native response.
+    Snapshot {
+        text: String,
+        revision: u64,
+    },
+    Insert {
+        pos: usize,
+        text: String,
+    },
+    Replace {
+        range: (usize, usize),
+        text: String,
+    },
     Finalize,
 }
 

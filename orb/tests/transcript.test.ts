@@ -139,3 +139,26 @@ it("accepts the stored snapshot row reused in the next user turn",()=>{
   expect(texts(items)).toMatchObject([{text:"First",live:false},{text:"Second",live:true}]);
   expect(new Set(texts(items).map(item=>item.key)).size).toBe(2);
 });
+
+it('a persisted tool cannot discard an unpersisted native response',()=>{
+ const live:StreamEvent={type:'text_op',data:{bubble_id:'antigravity:conversation:turn:1',ops:[{type:'snapshot',revision:1,text:'First update'}]}};
+ expect(heldAfterHistory([tool],[live,tool])).toEqual([live]);
+ const items=buildTranscript([tool,...heldAfterHistory([tool],[live,tool])]);
+ expect(texts(items).map(i=>i.text)).toEqual(['First update']);
+});
+it('native revisions survive stale replay, tools, canonicalization and the terminal receipt',()=>{
+ const bubble='antigravity:conversation:turn:1';
+ const snapshot=(revision:number,text:string):StreamEvent=>({type:'text_op',data:{bubble_id:bubble,ops:[{type:'snapshot',revision,text}]}});
+ const live=snapshot(2,'First update complete');
+ const history=[snapshot(1,'First update'),tool];
+ expect(heldAfterHistory(history,[live,tool])).toEqual([live]);
+ let items=buildTranscript([...history,...heldAfterHistory(history,[live,tool])]);
+ items=applyStreamEvent(items,snapshot(1,'First update'));
+ expect(texts(items)[0].text).toBe('First update complete');
+ items=applyStreamEvent(items,{type:'assistant_message',data:{canonical:true,bubble_id:bubble,revision:2,content:'First update complete'}});
+ items=applyStreamEvent(items,{type:'text_op',data:{bubble_id:'antigravity:conversation:turn:3',ops:[{type:'snapshot',revision:1,text:'Second update'},{type:'finalize'}]}});
+ items=applyStreamEvent(items,final('First update completeSecond update'));
+ expect(texts(items).map(i=>i.text)).toEqual(['First update complete','Second update']);
+ const canonical:StreamEvent={type:'assistant_message',data:{canonical:true,bubble_id:bubble,revision:2,content:'First update complete'}};
+ expect(heldAfterHistory([canonical],[live])).toEqual([]);
+});
