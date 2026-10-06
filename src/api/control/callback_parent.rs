@@ -7,9 +7,30 @@ use uuid::Uuid;
 
 const MARKER: &str = "A sandboxed.sh mission changed status. Mission: ";
 fn source_mission(content: &str) -> Option<Uuid> {
-    let callback = content.split_once(MARKER)?.1;
-    let id = callback.split_once(" (id: ")?.1.get(..36)?;
-    Uuid::parse_str(id).ok()
+    let mut found = None;
+    for (start, _) in content.match_indices(MARKER) {
+        let callback = content[start + MARKER.len()..].lines().next()?;
+        for (start, _) in callback.match_indices(" (id: ") {
+            let tail = &callback[start + " (id: ".len()..];
+            let Some(text) = tail.get(..36) else {
+                continue;
+            };
+            if !tail
+                .get(36..)
+                .is_some_and(|rest| rest.starts_with(", status: "))
+            {
+                continue;
+            }
+            let Ok(id) = Uuid::parse_str(text) else {
+                continue;
+            };
+            if found.is_some_and(|previous| previous != id) {
+                return None;
+            }
+            found = Some(id);
+        }
+    }
+    found
 }
 
 fn parent(connection: &Connection, session: &str) -> Option<Uuid> {
@@ -110,5 +131,18 @@ mod tests {
         .unwrap();
         assert_eq!(parent(&c, "callback"), None);
         assert_eq!(source_mission("random mission mention"), None);
+        assert_eq!(
+            source_mission(&format!(
+                "{MARKER}Title (id: {}, status: failed) (id: {id}, status: failed).",
+                Uuid::new_v4()
+            )),
+            None
+        );
+        assert_eq!(
+            source_mission(&format!(
+                "{MARKER}Title (id: not-an-id) (id: {id}, status: failed)."
+            )),
+            Some(id)
+        );
     }
 }
