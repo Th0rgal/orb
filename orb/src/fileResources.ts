@@ -228,6 +228,75 @@ export function createFileClient(scope: FileScope) {
         size: bytes.length,
       };
     }
+    if (op.action === "resolve" && op.paths?.length) {
+      const original = op.paths;
+      const mapped = original.map((reference) =>
+        source === "context" && project
+          ? (contextReferencePath(reference, project) ?? reference)
+          : root.path
+            ? stripRootPrefix(reference, root.path)
+            : reference,
+      );
+      const reply = await (root.local
+        ? (() => {
+            const invoke = (
+              window as unknown as {
+                __TAURI__?: {
+                  core?: {
+                    invoke: (name: string, args: unknown) => Promise<FileReply>;
+                  };
+                };
+              }
+            ).__TAURI__?.core?.invoke;
+            if (!invoke || !binding)
+              throw new Error(
+                "Open this mission on the computer that started it",
+              );
+            return invoke("browse_local_files", {
+              root: binding.cwd,
+              request: {
+                path: "",
+                query: "",
+                offset: 0,
+                ...op,
+                paths: mapped,
+              },
+            });
+          })()
+        : root.legacy && project
+          ? (async () => ({
+              results: await Promise.all(
+                mapped.map(async (reference) => {
+                  try {
+                    const slash = reference.lastIndexOf("/");
+                    const entries =
+                      (
+                        await call(source, {
+                          action: "list",
+                          path: slash < 0 ? "" : reference.slice(0, slash),
+                        })
+                      ).entries ?? [];
+                    return {
+                      reference,
+                      matches: entries.filter(
+                        (e) => e.kind === "file" && e.path === reference,
+                      ),
+                    };
+                  } catch {
+                    return { reference, matches: [] };
+                  }
+                }),
+              ),
+            }))()
+          : server(source, { ...op, paths: mapped }));
+      return {
+        ...reply,
+        results: (reply.results ?? []).map((row, index) => ({
+          ...row,
+          reference: original[index] ?? row.reference,
+        })),
+      };
+    }
     if (root.local) {
       const invoke = (
         window as unknown as {
@@ -265,31 +334,6 @@ export function createFileClient(scope: FileScope) {
           size: new TextEncoder().encode(content).length,
         };
       }
-      if (op.action === "resolve")
-        return {
-          results: await Promise.all(
-            (op.paths ?? []).map(async (reference) => {
-              try {
-                const slash = reference.lastIndexOf("/");
-                const entries =
-                  (
-                    await call(source, {
-                      action: "list",
-                      path: slash < 0 ? "" : reference.slice(0, slash),
-                    })
-                  ).entries ?? [];
-                return {
-                  reference,
-                  matches: entries.filter(
-                    (e) => e.kind === "file" && e.path === reference,
-                  ),
-                };
-              } catch {
-                return { reference, matches: [] };
-              }
-            }),
-          ),
-        };
       throw new Error(
         "Update the backend to search or download workspace files",
       );
@@ -336,10 +380,49 @@ export function createFileClient(scope: FileScope) {
   }
   return { roots, call, loadUploadedImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
 }
+function stripRootPrefix(reference: string, rootPath: string): string {
+  const normRoot = rootPath.replace(/\/+$/, "");
+  if (normRoot && reference.startsWith(normRoot + "/"))
+    return reference.slice(normRoot.length + 1);
+  return reference;
+}
+/** Map materialized project-context replica paths (local, node, or container) back to project-relative paths. */
+export function contextReferencePath(
+  raw: string,
+  project: string,
+): string | null {
+  const clean = raw.replace(/\\/g, "/");
+  for (const pattern of [
+    /(?:^|\/)\.orb\/project-context\/[0-9a-f]{64}\/[0-9a-f]{64}\/([^/]+)\/files\/(.+)$/i,
+    /(?:^|\/)project-context\/[0-9a-f]{64}\/([^/]+)\/files\/(.+)$/i,
+    /(?:^|\/)\.sandboxed-sh\/project-files\/([^/]+)\/(.+)$/,
+    /^\/run\/sandboxed-context\/([^/]+)\/(.+)$/,
+  ]) {
+    const m = pattern.exec(clean);
+    if (m && m[1] === project && m[2] && !m[2].split("/").includes(".."))
+      return m[2];
+  }
+  return null;
+}
+/** File URLs go through Orb's scoped file resolver, never webview navigation. */
+export function normalizeFileUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!/^file:/i.test(trimmed)) return trimmed;
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname && url.hostname !== "localhost") return trimmed;
+    return (
+      decodeURIComponent(url.pathname).replace(/^\/([a-z]:\/)/i, "$1") +
+      url.hash
+    );
+  } catch {
+    return trimmed;
+  }
+}
 export function parseFileTarget(
   raw: string,
 ): { path: string; line?: number } | null {
-  let path = raw.trim();
+  let path = normalizeFileUrl(raw);
   if (
     !path ||
     /^(https?:|mailto:|javascript:|data:|file:)/i.test(path) ||
@@ -348,11 +431,13 @@ export function parseFileTarget(
     /[\n\r\0]/.test(path)
   )
     return null;
-  const suffix = path.match(/(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)$/);
+  const suffix = path.match(
+    /(?::(\d+)(?:-\d+|:\d+(?:-\d+)?)?|#L(\d+)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/,
+  );
   const line = suffix ? Number(suffix[1] ?? suffix[2]) : undefined;
   if (suffix) path = path.slice(0, -suffix[0].length);
   if (
-    !/(?:^|\/)[\w. -]+\.[a-zA-Z0-9_-]{1,12}$/.test(path) ||
+    !/(?:^|\/)[\w. ()-]+\.[a-zA-Z0-9_-]{1,12}$/.test(path) ||
     /[<>|]/.test(path)
   )
     return null;
@@ -363,7 +448,7 @@ export function splitFileReferences(
   text: string,
 ): { text: string; target?: ReturnType<typeof parseFileTarget> }[] {
   const re =
-    /(?:\/?(?:[\w.@~-]+\/)+)?[\w@~-]+(?:\.[\w-]+)+(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?)?/g;
+    /(?:\/?(?:[\w.@~-]+\/)+)?[\w@~-]+(?:\.[\w-]+)+(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?|:\d+(?:-\d+|:\d+(?:-\d+)?)?)?/g;
   const urls = [...text.matchAll(/(?:https?:\/\/|mailto:)\S+/g)].map((m) => [
     m.index!,
     m.index! + m[0].length,
