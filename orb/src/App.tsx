@@ -2197,7 +2197,8 @@ function MissionDock(p: {
   const [modelOpen, setModelOpen] = createSignal(false);
   const [effortOpen, setEffortOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
-  const choice = () => harnessChoices(p.mission?.remote_node_id ?? "core").find((c) => c.backend.id === p.mission?.backend);
+  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : p.mission?.remote_node_id ?? "core";
+  const choice = () => harnessChoices(catalogMachine()).find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
   const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
   const modelLabel = () => {
@@ -2252,6 +2253,7 @@ function MissionDock(p: {
   // Warm the machine list once the conversation is idle so the menu opens filled.
   createEffect(on(() => p.mission?.id, id => {
     if (!id) return;
+    if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine());
     const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
     onCleanup(() => clearTimeout(timer));
   }));
@@ -2267,7 +2269,7 @@ function MissionDock(p: {
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
-        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(m().remote_node_id ?? "core")} onOpen={() => void refreshNodeAntigravityModels(m().remote_node_id ?? "core")} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
+        <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
           <Show
@@ -2718,7 +2720,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {

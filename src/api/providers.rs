@@ -2436,7 +2436,7 @@ async fn discover_workspace_antigravity_models(
         if models.is_empty() {
             return Err("No Antigravity models in the selected workspace");
         }
-        Ok(models)
+        Ok(crate::antigravity::group_models(models))
     })
     .await;
     let _ = child.kill().await;
