@@ -178,6 +178,8 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
     const bounds = bubble.getBoundingClientRect();
     bubble.style.setProperty("--editing-width", `${bounds.width}px`);
     bubble.style.setProperty("--editing-height", `${bounds.height}px`);
+    const text = bubble.querySelector<HTMLSpanElement>(":scope > span");
+    if (text) bubble.style.setProperty("--editing-text-height", `${text.getBoundingClientRect().height}px`);
     anchorEdit(bubble, () => {
       setDraft(images().text); setCopyState(""); setSendError(""); setEditing(true);
     });
@@ -203,7 +205,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
           <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={16} /></button>
           <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={15} /></button>
           <span role="status">{copyState()}</span>
-          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}>Send again</button></Show>
+          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={18}/></button></Show>
         </div>
         <Show when={sendError()}><ErrorNotice error={sendError()} /></Show>
       </Show>
