@@ -156,3 +156,74 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  await expect(page.getByText('No archived conversations.')).toBeVisible();
 });
 
+test('archiving or deleting a parent agent cascades to its spawned subagents and keeps them nested in archives',async({page})=>{
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ let missions:any[]=[
+  {id:'parent-archive',title:'Parent to archive',status:'awaiting_user',project:'verity',tags:['orb-folder:Context']},
+  {id:'sub-archive-1',title:'Spawned worker 1',status:'failed',project:'verity',parent_mission_id:'parent-archive',tags:[]},
+  {id:'sub-archive-2',title:'Spawned worker 2',status:'completed',project:'verity',parent_mission_id:'parent-archive',tags:[]},
+  {id:'parent-delete',title:'Parent to delete',status:'awaiting_user',project:'verity',tags:['orb-folder:Context']},
+  {id:'sub-delete-1',title:'Delete worker 1',status:'completed',project:'verity',parent_mission_id:'parent-delete',tags:[]},
+ ];
+ const statusWrites:string[]=[];
+ const deleted:string[]=[];
+ await page.route('**/api/**',async route=>{
+  const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+  if(req.method()==='POST'&&path.endsWith('/status')){
+   const status=req.postDataJSON().status;
+   statusWrites.push(`${id}:${status}`);
+   const target=missions.find(m=>m.id===id);
+   if(target)target.status=status;
+   return route.fulfill({json:{}});
+  }
+  if(req.method()==='DELETE'){
+   deleted.push(id);
+   missions=missions.filter(m=>m.id!==id&&m.parent_mission_id!==id);
+   return route.fulfill({json:{deleted_ids:[id]}});
+  }
+  const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'}]}
+   :path==='/api/control/missions'?missions.filter(m=>(!url.searchParams.has('project')||m.project===url.searchParams.get('project'))&&(!url.searchParams.has('status')||m.status===url.searchParams.get('status')))
+   :path.startsWith('/api/control/missions/')?missions.find(m=>m.id===id)??{}
+   :path.endsWith('/files')?{entries:[{name:'Context',kind:'dir'}]}:path.endsWith('/controller')?{job:null,runs:[]}:path.endsWith('/crons')?{jobs:[]}:[];
+  await route.fulfill({json});
+ });
+ await page.goto('/');
+ const projects=page.getByRole('tree',{name:'Projects',exact:true});
+ await projects.getByRole('button',{name:'Verity',exact:true}).click();
+ await projects.getByRole('button',{name:'Context',exact:true}).click();
+
+ // Archive the parent: neither the parent nor its subagents may remain in the project or pop out to root.
+ const parentArchiveRow=projects.getByRole('button',{name:'Parent to archive',exact:true});
+ await expect(parentArchiveRow).toBeVisible();
+ await parentArchiveRow.click({button:'right'});
+ await page.getByRole('menuitem',{name:'Archive',exact:true}).click();
+ await expect(parentArchiveRow).toHaveCount(0);
+ await expect(projects.getByRole('button',{name:/Spawned worker/})).toHaveCount(0);
+ await expect.poll(()=>statusWrites.slice().sort()).toEqual([
+  'parent-archive:acknowledged',
+  'sub-archive-1:acknowledged',
+  'sub-archive-2:acknowledged',
+ ]);
+
+ // In Archived, the subagents stay nested under the archived parent rather than flattened into the project.
+ await page.getByRole('button',{name:'Archived',exact:true}).click();
+ const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await archiveTree.getByRole('button',{name:'Verity',exact:true}).click();
+ await expect(archiveTree.getByRole('button',{name:'Parent to archive',exact:true})).toBeVisible();
+ await expect(archiveTree.getByRole('button',{name:/Spawned worker/})).toHaveCount(0);
+ await archiveTree.getByRole('button',{name:/Show the 2 missions launched by Parent to archive/}).click();
+ await expect(archiveTree.getByRole('button',{name:'Spawned worker 1',exact:true})).toBeVisible();
+ await expect(archiveTree.getByRole('button',{name:'Spawned worker 2',exact:true})).toBeVisible();
+
+ // Delete the other parent: its spawned subagent is removed with it and never pops out to the project root.
+ const parentDeleteRow=projects.getByRole('button',{name:'Parent to delete',exact:true});
+ await expect(parentDeleteRow).toBeVisible();
+ await parentDeleteRow.click({button:'right'});
+ await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
+ await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+ await expect(parentDeleteRow).toHaveCount(0);
+ await expect(projects.getByRole('button',{name:'Delete worker 1',exact:true})).toHaveCount(0);
+ expect(deleted).toEqual(['parent-delete']);
+});
+
+
