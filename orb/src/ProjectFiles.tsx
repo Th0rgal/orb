@@ -340,10 +340,9 @@ export function LiveProjectsSection(p: {
         try {
           const mission = await api<Mission>(`/api/control/missions/${id}`);
           if (version !== connectionVersion()) break;
-          // Only refuse statuses that mean a runner may be live; terminal and
-          // parked states (blocked, not_feasible, paused, awaiting_user, …) are
-          // deletable. DELETE still checks running agents and descendants on the server.
-          if (["active", "waiting_background"].includes(mission.status))
+          // Preserve live and explicitly paused agents. DELETE also checks
+          // all descendants against the current server runner registry.
+          if (["active", "waiting_background", "paused"].includes(mission.status))
             throw new Error("Stop or finish this agent before deleting it.");
           const result = await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
           if (version !== connectionVersion()) break;
