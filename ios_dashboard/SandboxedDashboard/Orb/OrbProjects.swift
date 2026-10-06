@@ -1,21 +1,218 @@
 import SwiftUI
+import UIKit
 
 enum OrbStyle {
     static let background = Color(white: 0.073)
     static let surface = Color(white: 0.105)
+    static let card = Color(white: 0.125)
+    static let elevated = Color(white: 0.155)
     static let icon = Color(red: 138 / 255, green: 138 / 255, blue: 138 / 255)
-    static func serviceName(_ value: String) -> String {
-        ["claudecode": "Claude Code", "codex": "Codex", "cloud_chatgpt": "ChatGPT", "cloud_cursor": "Cursor Cloud", "cloud_cursor_cloud": "Cursor Cloud", "cloud_grok_bot": "Grok Bot"][value] ?? value
-    }
+    static let textSecondary = Color(red: 155 / 255, green: 155 / 255, blue: 155 / 255)
+    static let textMuted = Color(red: 108 / 255, green: 108 / 255, blue: 108 / 255)
     static let border = Color.white.opacity(0.08)
+    static let borderStrong = Color.white.opacity(0.14)
+    static let success = Color(red: 115 / 255, green: 201 / 255, blue: 145 / 255)
+    static let warning = Color(red: 214 / 255, green: 161 / 255, blue: 106 / 255)
+    static let error = Color(red: 235 / 255, green: 111 / 255, blue: 111 / 255)
+
+    static func serviceName(_ value: String) -> String {
+        [
+            "claudecode": "Claude Code",
+            "codex": "Codex",
+            "opencode": "OpenCode",
+            "gemini": "Gemini",
+            "antigravity": "Antigravity",
+            "amp": "Amp",
+            "cloud_chatgpt": "ChatGPT",
+            "cloud_cursor": "Cursor Cloud",
+            "cloud_cursor_cloud": "Cursor Cloud",
+            "cloud_grok_bot": "Grok Bot",
+            "cloud_hermes": "Hermes",
+        ][value] ?? value
+    }
+
+    static func statusLabel(_ state: String) -> String {
+        switch state {
+        case "active", "running", "starting": return "Working"
+        case "pending", "queued": return "Queued"
+        case "completed", "succeeded": return "Completed"
+        case "awaiting_user", "waiting_user": return "Waiting for reply"
+        case "blocked": return "Blocked"
+        case "failed": return "Failed"
+        case "interrupted", "cancelled": return "Stopped"
+        case "acknowledged": return "Archived"
+        default: return state.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    static func relativeTime(_ raw: String, now: Date = Date()) -> String {
+        guard !raw.isEmpty else { return "" }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fallback = ISO8601DateFormatter()
+        guard let date = formatter.date(from: raw) ?? fallback.date(from: raw) else { return "" }
+        let delta = max(0, Int(now.timeIntervalSince(date)))
+        if delta < 45 { return "now" }
+        if delta < 3600 { return "\(delta / 60)m" }
+        if delta < 86_400 { return "\(delta / 3600)h" }
+        if delta < 604_800 { return "\(delta / 86_400)d" }
+        return "\(delta / 604_800)w"
+    }
 }
+
+@MainActor
+enum OrbHaptics {
+    static func selection() { UISelectionFeedbackGenerator().selectionChanged() }
+    static func light() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+}
+
+/// Cursor-style 3×3 animated dot matrix for running agents and tool folds.
+struct OrbRunningDots: View {
+    var size: CGFloat = 12
+    private static let delays: [Double] = [0.0, 0.15, 0.30, 0.20, 0.35, 0.50, 0.40, 0.55, 0.70]
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.12)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let dotSize = max(1.8, size / 5.2)
+            let step = (size - dotSize) / 2
+            Canvas { ctx, _ in
+                for index in 0..<9 {
+                    let row = CGFloat(index / 3)
+                    let col = CGFloat(index % 3)
+                    let phase = (t / 1.2 + Self.delays[index]).truncatingRemainder(dividingBy: 1.0)
+                    let wave = 0.5 - 0.5 * cos(phase * 2 * .pi)
+                    let alpha = 0.18 + 0.72 * wave
+                    let rect = CGRect(x: col * step, y: row * step, width: dotSize, height: dotSize)
+                    ctx.fill(Path(ellipseIn: rect), with: .color(.white.opacity(alpha)))
+                }
+            }
+            .frame(width: size, height: size)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Subtle metallic sweep matching Cursor's `.ui-collapsible-shimmer` and Orb desktop `.work-shimmer`.
+struct OrbShimmerModifier: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        if active {
+            TimelineView(.animation(minimumInterval: 0.05)) { context in
+                let phase = CGFloat((context.date.timeIntervalSinceReferenceDate / 1.9).truncatingRemainder(dividingBy: 1.0))
+                content.overlay {
+                    GeometryReader { geo in
+                        let width = max(1, geo.size.width)
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .white.opacity(0.26), location: 0.5),
+                                .init(color: .clear, location: 1),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: width * 0.65)
+                        .offset(x: (phase * 1.65 - 0.5) * width)
+                    }
+                    .mask(content)
+                    .allowsHitTesting(false)
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func orbShimmer(active: Bool) -> some View {
+        modifier(OrbShimmerModifier(active: active))
+    }
+}
+
+/// Structured error card with copy affordance and collapsible `log tail:` (parity with desktop `ErrorNotice`).
 struct OrbNotice: View {
     let message: String
-    var body: some View { Text(message).font(.subheadline).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading).padding().accessibilityIdentifier("orb.error") }
+    @State private var copied = false
+    @State private var showTail = false
+    private var parts: (head: String, tail: String?) {
+        let components = message.components(separatedBy: "\n\nlog tail:\n")
+        if components.count > 1 {
+            return (components[0], components.dropFirst().joined(separator: "\n\nlog tail:\n"))
+        }
+        return (message, nil)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(OrbStyle.warning)
+                    .padding(.top, 2)
+                Text(parts.head)
+                    .font(.footnote)
+                    .foregroundStyle(OrbStyle.warning)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    UIPasteboard.general.string = message
+                    OrbHaptics.light()
+                    copied = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        copied = false
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(copied ? OrbStyle.success : OrbStyle.textSecondary)
+                        .frame(width: 26, height: 26)
+                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(copied ? "Copied error" : "Copy error")
+            }
+            if let tail = parts.tail, !tail.isEmpty {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { showTail.toggle() }
+                    OrbHaptics.selection()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(showTail ? 90 : 0))
+                        Text("Log tail")
+                            .font(.caption2.weight(.medium))
+                    }
+                    .foregroundStyle(OrbStyle.textSecondary)
+                }
+                .buttonStyle(.plain)
+                if showTail {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(tail)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 160)
+                    .padding(8)
+                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(OrbStyle.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(OrbStyle.warning.opacity(0.24), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("orb.error")
+    }
 }
+
 struct OrbCircle: View {
     let symbol: String
-    var body: some View { Image(systemName: symbol).font(.system(size: 18, weight: .regular)).frame(width: 26, height: 26) }
+    var body: some View { Image(systemName: symbol).font(.system(size: 17, weight: .regular)).frame(width: 26, height: 26) }
 }
 
 /// Match desktop's neutral leading glyph; only a project's own color tints its folders.
@@ -24,9 +221,9 @@ struct OrbListIcon: View {
     var color: Color?
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: 18, weight: .regular))
+            .font(.system(size: 16, weight: .regular))
             .foregroundStyle(color ?? OrbStyle.icon)
-            .frame(width: 22, height: 24)
+            .frame(width: 20, height: 22)
             .accessibilityHidden(true)
     }
 }
@@ -48,24 +245,49 @@ struct OrbHome: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if !error.isEmpty { OrbNotice(message: error) }
+                    if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
                     ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
                         NavigationLink { OrbProjectPage(project: project) } label: {
-                            HStack(spacing: 16) {
+                            HStack(spacing: 14) {
                                 OrbListIcon(symbol: "folder", color: appearance.color(project.id))
-                                Text(project.name).font(.title3).foregroundStyle(.primary)
-                                Spacer(); Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                            }.padding(.vertical, 14).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 42) }
-                        }.accessibilityIdentifier("project.\(project.id)")
+                                Text(project.name)
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Spacer()
+                                if !project.updatedAt.isEmpty {
+                                    Text(OrbStyle.relativeTime(project.updatedAt))
+                                        .font(.caption)
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .monospacedDigit()
+                                }
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 12)
+                            .contentShape(Rectangle())
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                            }
+                        }
+                        .accessibilityIdentifier("project.\(project.id)")
                         .contextMenu {
                             Button("Rename") { renamedTitle = project.name; renaming = project }
                             OrbProjectColorMenu(project: project.id)
-                            Button("Archive") { Task { do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")])); await load() } catch { self.error = error.localizedDescription } } }
+                            Button("Archive") {
+                                Task {
+                                    do {
+                                        _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")]))
+                                        await load()
+                                    } catch { self.error = error.localizedDescription }
+                                }
+                            }
                         }
                     }
                     if loading && projects.isEmpty { ProgressView("Loading projects…").frame(maxWidth: .infinity).padding(.top, 32) }
                     if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
-                }.padding(.horizontal, 20)
+                }.padding(.horizontal, 18)
             }
             .background(OrbStyle.background).navigationTitle("Projects").navigationBarTitleDisplayMode(.inline).toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
@@ -147,14 +369,18 @@ struct OrbProjectPage: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if filter != "All" {
-                    HStack { Text(filter).font(.subheadline); Spacer(); Button("Clear filter") { filter = "All" }.font(.subheadline) }.frame(minHeight: 44)
+                    HStack {
+                        Text(filter).font(.footnote.weight(.medium)).foregroundStyle(OrbStyle.textSecondary)
+                        Spacer()
+                        Button("Clear filter") { withAnimation(.snappy(duration: 0.18)) { filter = "All" } }.font(.footnote)
+                    }.frame(minHeight: 38)
                 }
-                if !error.isEmpty { OrbNotice(message: error) }
+                if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
                 if loading && missions.isEmpty { conversationSkeletons }
                 ForEach(visible.filter { $0.folder.isEmpty }) { row in missionLink(row) }
                 folderRows
                 if !loading && visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
-            }.padding(.horizontal, 20)
+            }.padding(.horizontal, 18)
         }.background(OrbStyle.background).navigationTitle(project.name).navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, prompt: "Search conversations")
         .toolbar {
@@ -177,16 +403,16 @@ struct OrbProjectPage: View {
     private var conversationSkeletons: some View {
         VStack(spacing: 0) {
             ForEach(0..<5) { index in
-                HStack(alignment: .top, spacing: 14) {
-                    Circle().fill(Color.secondary.opacity(0.25)).frame(width: 8, height: 8).padding(.top, 9)
+                HStack(alignment: .top, spacing: 12) {
+                    Circle().fill(Color.secondary.opacity(0.25)).frame(width: 8, height: 8).padding(.top, 8)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(index.isMultiple(of: 2) ? "Conversation title placeholder" : "Conversation title")
-                            .font(.body)
-                        Text("Agent · Conversation status").font(.subheadline).foregroundStyle(.secondary)
+                            .font(.subheadline)
+                        Text("Agent · Conversation status").font(.caption).foregroundStyle(.secondary)
                     }.redacted(reason: .placeholder)
                     Spacer(minLength: 0)
-                }.padding(.vertical, 12)
-                    .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 36) }
+                }.padding(.vertical, 10)
+                    .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32) }
             }
         }.allowsHitTesting(false)
             .accessibilityElement(children: .ignore)
@@ -194,35 +420,96 @@ struct OrbProjectPage: View {
             .accessibilityIdentifier("conversations-loading")
     }
     private var folderRows: some View {
-                ForEach(paths.filter(shown), id: \.self) { folder in
-                    HStack {
-                        Button { if !collapsed.insert(folder).inserted { collapsed.remove(folder) } } label: {
-                            HStack(spacing: 10) {
-                                OrbListIcon(symbol: "folder", color: appearance.color(project.id))
-                                Text(folder.split(separator: "/").last.map(String.init) ?? folder).font(.headline)
-                                Spacer()
-                                Image(systemName: collapsed.contains(folder) ? "chevron.right" : "chevron.down").font(.system(size: 11)).foregroundStyle(OrbStyle.icon)
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }.accessibilityIdentifier("folder.\(folder)")
-                        NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: folder) } label: { Image(systemName: "plus").frame(width: 44, height: 44) }.accessibilityLabel("New agent in \(folder)")
-                    }.padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 4)
-                    if !collapsed.contains(folder) || !search.isEmpty { ForEach(visible.filter { $0.folder == folder }) { row in missionLink(row).padding(.leading, 18) } }
+        ForEach(paths.filter(shown), id: \.self) { folder in
+            HStack {
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        if !collapsed.insert(folder).inserted { collapsed.remove(folder) }
+                    }
+                    OrbHaptics.selection()
+                } label: {
+                    HStack(spacing: 10) {
+                        OrbListIcon(symbol: "folder", color: appearance.color(project.id))
+                        Text(folder.split(separator: "/").last.map(String.init) ?? folder)
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(OrbStyle.icon)
+                            .rotationEffect(.degrees(collapsed.contains(folder) ? 0 : 90))
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.accessibilityIdentifier("folder.\(folder)")
+                NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: folder) } label: { Image(systemName: "plus").font(.system(size: 14)).frame(width: 44, height: 44) }.accessibilityLabel("New agent in \(folder)")
+            }.padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 2)
+            if !collapsed.contains(folder) || !search.isEmpty {
+                ForEach(visible.filter { $0.folder == folder }) { row in
+                    missionLink(row).padding(.leading, 16)
                 }
+            }
+        }
+    }
+    @ViewBuilder
+    private func statusGlyph(for row: OrbRow) -> some View {
+        if row.active {
+            OrbRunningDots(size: 13)
+                .frame(width: 20, height: 22)
+        } else {
+            OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
+                .overlay(alignment: .bottomTrailing) {
+                    if ["failed", "blocked", "not_feasible"].contains(row.state) {
+                        Circle().fill(OrbStyle.warning).frame(width: 6, height: 6)
+                    } else if ["awaiting_user", "waiting_user"].contains(row.state) {
+                        Circle().fill(Color.blue).frame(width: 6, height: 6)
+                    }
+                }
+        }
     }
     private func missionLink(_ row: OrbRow) -> some View {
         NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
-            HStack(alignment: .top, spacing: 14) {
-                OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
-                    .overlay(alignment: .bottomTrailing) {
-                        if row.active { Circle().fill(Color.blue).frame(width: 6, height: 6) }
-                        else if ["failed", "blocked", "not_feasible"].contains(row.state) { Circle().fill(Color.orange).frame(width: 6, height: 6) }
+            HStack(alignment: .top, spacing: 12) {
+                statusGlyph(for: row)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(row.name)
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 4)
+                        let rel = OrbStyle.relativeTime(row.updatedAt)
+                        if !rel.isEmpty {
+                            Text(rel)
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .monospacedDigit()
+                        }
                     }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(row.name).font(.body).lineLimit(2).foregroundStyle(.primary)
-                    Text("\(OrbStyle.serviceName(row.backend)) · \(row.state.replacingOccurrences(of: "_", with: " "))").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                }; Spacer(minLength: 0)
-            }.padding(.vertical, 12).overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 36) }
-        }.accessibilityIdentifier("mission.\(row.id)")
+                    Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
+                        .font(.caption)
+                        .foregroundStyle(row.active ? OrbStyle.textSecondary : OrbStyle.textMuted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
+            }
+        }
+        .accessibilityIdentifier("mission.\(row.id)")
+        .contextMenu {
+            if !row.active && row.state != "acknowledged" {
+                Button("Archive") {
+                    Task {
+                        do {
+                            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("acknowledged")]))
+                            OrbReadCache.invalidate("project:\(project.id)")
+                            await load(force: true)
+                        } catch { self.error = error.localizedDescription }
+                    }
+                }
+            }
+        }
     }
     private func apply(_ value: OrbJSON) {
         missions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)

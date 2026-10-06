@@ -52,4 +52,32 @@ final class OrbDesktopParityTests: XCTestCase {
                        OrbMessageImages(text: "Look [Image #1]", paths: [data], references: [1]))
         XCTAssertEqual(OrbMessageImages.parse("[Uploaded: data:text/html;base64,aGVsbG8=]").text, "[Uploaded: data:text/html;base64,aGVsbG8=]")
     }
+
+    func testWorkModelPairsToolCallsExtractsThoughtsAndBuildsCursorSummary() {
+        let events: [StoredEvent] = [
+            StoredEvent(id: 1, missionId: "m1", sequence: 1, eventType: "thinking", timestamp: "2026-10-06T12:00:00Z", eventId: nil, toolCallId: nil, toolName: nil, content: "**Analyzing layout**\nChecking the conversation spacing and fold header.", metadata: [:]),
+            StoredEvent(id: 2, missionId: "m1", sequence: 2, eventType: "tool_call", timestamp: "2026-10-06T12:00:01Z", eventId: nil, toolCallId: "tc-1", toolName: "Read", content: #"{"file_path":"/workspace/src/OrbConversation.swift"}"#, metadata: [:]),
+            StoredEvent(id: 3, missionId: "m1", sequence: 3, eventType: "tool_result", timestamp: "2026-10-06T12:00:02Z", eventId: nil, toolCallId: "tc-1", toolName: "Read", content: "import SwiftUI", metadata: [:]),
+            StoredEvent(id: 4, missionId: "m1", sequence: 4, eventType: "tool_call", timestamp: "2026-10-06T12:00:03Z", eventId: nil, toolCallId: "tc-2", toolName: "Edit", content: #"{"file_path":"/workspace/src/OrbConversation.swift"}"#, metadata: [:]),
+            StoredEvent(id: 5, missionId: "m1", sequence: 5, eventType: "tool_result", timestamp: "2026-10-06T12:00:04Z", eventId: nil, toolCallId: "tc-2", toolName: "Edit", content: "Updated", metadata: [:]),
+            StoredEvent(id: 6, missionId: "m1", sequence: 6, eventType: "tool_call", timestamp: "2026-10-06T12:00:05Z", eventId: nil, toolCallId: "tc-3", toolName: "TodoWrite", content: #"{"todos":[{"id":"1","content":"Polish Activity fold","status":"completed"},{"id":"2","content":"Verify tests","status":"in_progress"}]}"#, metadata: [:]),
+            StoredEvent(id: 7, missionId: "m1", sequence: 7, eventType: "tool_call", timestamp: "2026-10-06T12:00:06Z", eventId: nil, toolCallId: "tc-4", toolName: "Bash", content: #"{"command":"cargo test -j 1"}"#, metadata: [:]),
+        ]
+
+        let runningModel = OrbWorkModel.build(from: events, working: true)
+        XCTAssertEqual(runningModel.thoughts.count, 1)
+        XCTAssertEqual(runningModel.thoughts[0].title, "Analyzing layout")
+        XCTAssertEqual(runningModel.thoughts[0].body, "Checking the conversation spacing and fold header.")
+        XCTAssertEqual(runningModel.tools.count, 3)
+        XCTAssertEqual(runningModel.tools[0].status, .done)
+        XCTAssertEqual(runningModel.tools[0].completedLabel, "Read")
+        XCTAssertEqual(runningModel.tools[0].target, "src/OrbConversation.swift")
+        XCTAssertEqual(runningModel.tools[2].status, .running)
+        XCTAssertEqual(runningModel.liveHeadline(fallback: "Working…").action, "Running")
+        XCTAssertEqual(runningModel.liveHeadline(fallback: "Working…").detail, "cargo test -j 1")
+        XCTAssertEqual(runningModel.todos.count, 2)
+
+        let settledModel = OrbWorkModel.build(from: events, working: false)
+        XCTAssertEqual(settledModel.completedSummary, "Worked — 1 read, 1 edit, 1 command")
+    }
 }

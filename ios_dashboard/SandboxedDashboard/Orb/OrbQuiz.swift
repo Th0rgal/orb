@@ -80,44 +80,94 @@ struct OrbQuiz: View {
     private var question: OrbQuizData.Question { quiz.questions[index] }
     private var locked: Bool { disabled || sending || sent }
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Question \(index + 1) / \(quiz.questions.count)").font(.footnote).foregroundStyle(.secondary)
+                Text("Question \(index + 1) / \(quiz.questions.count)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(OrbStyle.textSecondary)
+                    .monospacedDigit()
                 Spacer()
-                Button { index -= 1 } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }.disabled(index == 0 || sending).accessibilityLabel("Question précédente")
-                Button { index += 1 } label: { Image(systemName: "chevron.right").frame(width: 44, height: 44) }.disabled(index == quiz.questions.count - 1 || sending).accessibilityLabel("Question suivante")
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) { index -= 1 }
+                    OrbHaptics.selection()
+                } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold)).frame(width: 36, height: 36)
+                }
+                .disabled(index == 0 || sending)
+                .accessibilityLabel("Question précédente")
+
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) { index += 1 }
+                    OrbHaptics.selection()
+                } label: {
+                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).frame(width: 36, height: 36)
+                }
+                .disabled(index == quiz.questions.count - 1 || sending)
+                .accessibilityLabel("Question suivante")
             }
             OrbRichText(source: question.text)
             VStack(spacing: 6) {
                 ForEach(question.choices, id: \.letter) { choice in
                     let selected = answers[question.number] == choice.letter
-                    Button { answers[question.number] = choice.letter } label: {
-                        HStack(spacing: 14) {
-                            Text(choice.letter).frame(width: 34, height: 34).overlay(Circle().stroke(selected ? Color.primary : Color.secondary, lineWidth: 1))
-                            Text(choice.text).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
-                        }.padding(.vertical, 10).padding(.horizontal, 12).contentShape(Rectangle())
-                            .background(selected ? Color(white: 0.2) : .clear, in: RoundedRectangle(cornerRadius: 24))
-                    }.buttonStyle(.plain).disabled(locked)
-                        .accessibilityLabel("\(choice.letter). \(choice.text)").accessibilityAddTraits(selected ? .isSelected : [])
+                    Button {
+                        OrbHaptics.selection()
+                        withAnimation(.snappy(duration: 0.15)) {
+                            answers[question.number] = choice.letter
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Text(choice.letter)
+                                .font(.footnote.weight(.semibold))
+                                .frame(width: 28, height: 28)
+                                .background(selected ? Color.white.opacity(0.14) : Color.clear, in: Circle())
+                                .overlay(Circle().stroke(selected ? Color.primary : OrbStyle.borderStrong, lineWidth: 1))
+                            Text(choice.text)
+                                .font(.subheadline)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.vertical, 9)
+                        .padding(.horizontal, 12)
+                        .contentShape(Rectangle())
+                        .background(selected ? OrbStyle.elevated : Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? OrbStyle.borderStrong : OrbStyle.border))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(locked)
+                    .accessibilityLabel("\(choice.letter). \(choice.text)")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
             HStack {
-                Text(sent ? "Réponses envoyées" : "\(answers.count) / \(quiz.questions.count) réponses").font(.footnote).foregroundStyle(.secondary)
+                Text(sent ? "Réponses envoyées ✓" : "\(answers.count) / \(quiz.questions.count) réponses")
+                    .font(.caption)
+                    .foregroundStyle(sent ? OrbStyle.success : OrbStyle.textSecondary)
+                    .monospacedDigit()
                 Spacer()
                 if index < quiz.questions.count - 1 {
-                    Button("Suivant") { index += 1 }.disabled(answers[question.number] == nil || sending)
+                    Button("Suivant") {
+                        OrbHaptics.selection()
+                        withAnimation(.snappy(duration: 0.18)) { index += 1 }
+                    }
+                    .disabled(answers[question.number] == nil || sending)
                 } else {
-                    Button(sending ? "Envoi…" : "Envoyer mes réponses") { Task { await submit() } }
-                        .disabled(locked || answers.count != quiz.questions.count)
+                    Button(sending ? "Envoi…" : "Envoyer mes réponses") {
+                        OrbHaptics.light()
+                        Task { await submit() }
+                    }
+                    .disabled(locked || answers.count != quiz.questions.count)
                 }
-            }.buttonStyle(.bordered)
-            if !error.isEmpty { Text(error).font(.footnote).foregroundStyle(.orange) }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            if !error.isEmpty { OrbNotice(message: error) }
         }
         .tint(.primary)
-        .padding(20)
-        .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 26))
-        .overlay(RoundedRectangle(cornerRadius: 26).stroke(Color(white: 0.2)))
-        .accessibilityElement(children: .contain).accessibilityLabel("Quiz interactif")
+        .padding(16)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(OrbStyle.borderStrong))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Quiz interactif")
         .onChange(of: quiz) { _, _ in index = 0; answers = [:]; sent = false; error = "" }
     }
     private func submit() async {

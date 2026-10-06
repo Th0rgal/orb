@@ -49,6 +49,7 @@ struct OrbRow: Identifiable, Hashable {
     let folder: String
     let backend: String
     let cloud: Bool
+    let updatedAt: String
     let raw: OrbJSON
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.raw == rhs.raw }
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -60,6 +61,7 @@ struct OrbRow: Identifiable, Hashable {
         folder = value["tags"].items.map(\.text).first(where: { $0.hasPrefix("orb-folder:") }).map { String($0.dropFirst(11)) } ?? ""
         backend = value["backend"].text
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
+        updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
     }
     var mobile: Bool { !raw["tags"].items.contains(where: { $0.text == "placement:client" || $0.text.hasPrefix("btw-parent:") }) }
     var active: Bool { ["active", "pending", "running", "starting"].contains(state) }
