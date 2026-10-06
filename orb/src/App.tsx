@@ -64,7 +64,7 @@ import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscrip
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
-import { LiveProjectsSection, ProjectFileView } from "./ProjectFiles";
+import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
 import { insertAtCaret } from "./voice";
@@ -1201,13 +1201,13 @@ export default function App() {
   };
   const refreshMissions = async () => {
     try {
-      const fresh = await listMissions();
-      setMissions((prev) => mergeById(prev, fresh));
+      const fresh = (await listMissions()).filter(m => !isMissionDeleting(m.id));
+      setMissions((prev) => mergeById(prev.filter(m => !isMissionDeleting(m.id)), fresh));
       recordMissions(fresh);
       const live = new Set(["active", "running", "pending", "queued", "starting", "resuming"]);
       for (const m of fresh) if (live.has(m.status)) prefetchTranscript(m.id);
       for (const key of cacheRecents()) {
-        if (key.startsWith("m:")) prefetchTranscript(key.slice(2));
+        if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
     } catch {
       /* keep last good list */
@@ -1353,6 +1353,7 @@ export default function App() {
 
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
+    if (id?.startsWith("m:") && isMissionDeleting(id.slice(2))) return false;
     if(id===null){setLaunchPreview(null);setLaunchViewKey('');}
     if (id === "execution") id = "settings";
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
@@ -1567,7 +1568,7 @@ export default function App() {
         setSidebar(true);
         requestAnimationFrame(() => {
           const region = document.querySelector<HTMLElement>('[data-project-navigation]');
-          (region?.querySelector<HTMLElement>('button.row-main, button.row.agent') ?? region)?.focus();
+          (region?.querySelector<HTMLElement>('button.row-main, button.row.agent:not(:disabled)') ?? region)?.focus();
         });
       } else open(destination.id === 'new-agent' ? null : destination.id);
       return;
@@ -1682,7 +1683,7 @@ export default function App() {
                 >
                   <div data-project-navigation tabindex="-1" aria-label="Projects" title={`Projects (${shortcutLabel('projects')})`} onKeyDown={event => {
                     if (event.defaultPrevented || !['ArrowDown','ArrowUp','Home','End'].includes(event.key) || (event.target as HTMLElement).matches('input,textarea,[contenteditable]')) return;
-                    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent')).filter(row => row.getClientRects().length > 0);
+                    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent:not(:disabled)')).filter(row => row.getClientRects().length > 0);
                     if (!rows.length) return;
                     event.preventDefault();
                     const current = rows.indexOf(document.activeElement as HTMLButtonElement);
@@ -1698,9 +1699,10 @@ export default function App() {
                     onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
                     selected={selected}
                     onDeleted={ids => {
+                      const idSet = new Set(ids);
                       const removed = new Set(ids.map(id => `m:${id}`));
                       batch(() => {
-                        setMissions(rows => rows.filter(m => !ids.includes(m.id)));
+                        setMissions(rows => rows.filter(m => !idSet.has(m.id)));
                         if (removed.has(selected() ?? "")) setSelected(null);
                         // Back/forward must not reopen conversations that no longer exist.
                         setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));

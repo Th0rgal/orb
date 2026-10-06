@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge } from "../src/missionTree";
+import { countNested, holds, nestMissions, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed") => ({ id, parent_mission_id: parent, status });
 
@@ -58,3 +58,18 @@ test("filterArchivedMissionsByAge filters all, older than 1 day, and older than 
   expect(filterArchivedMissionsByAge(rows, ARCHIVE_WEEK_MS, now).map(r => r.id)).toEqual(["eight-days", "created-fallback"]);
 });
 
+test("expandMissionDescendants transitively includes known children and callback reviews", () => {
+  const rows = [
+    m("root"),
+    m("child-1", "root"),
+    m("grandchild", "child-1"),
+    { ...m("callback-child"), callback_parent_mission_id: "root" },
+    m("unrelated"),
+  ];
+  expect(expandMissionDescendants(["root"], rows)).toEqual([
+    "root",
+    "child-1",
+    "grandchild",
+    "callback-child",
+  ]);
+});

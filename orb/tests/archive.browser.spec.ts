@@ -156,3 +156,79 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  await expect(page.getByText('No archived conversations.')).toBeVisible();
 });
 
+test('confirming deletion closes the dialog immediately while deleting in the background and makes in-flight agents uninteractable',async({page})=>{
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ const now=Date.now(),day=24*60*60*1000;
+ let missions=[
+  {id:'slow-one',title:'Slow delete one',status:'acknowledged',project:'one',tags:[],updated_at:new Date(now-3*day).toISOString()},
+  {id:'fail-two',title:'Failed delete two',status:'acknowledged',project:'one',tags:[],updated_at:new Date(now-2*day).toISOString()},
+  {id:'keep-fresh',title:'Fresh conversation',status:'acknowledged',project:'one',tags:[],updated_at:new Date(now-60*1000).toISOString()},
+ ];
+ let releaseSlow!:()=>void;
+ const slowHold=new Promise<void>(r=>{releaseSlow=r;});
+ const deleteStarted:string[]=[];
+ await page.route('**/api/**',async route=>{
+  const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+  if(req.method()==='DELETE'){
+   deleteStarted.push(id);
+   if(id==='slow-one'){
+    await slowHold;
+    missions=missions.filter(m=>m.id!==id);
+    return route.fulfill({json:{deleted_ids:[id]}});
+   }
+   if(id==='fail-two'){
+    await slowHold;
+    return route.fulfill({status:409,body:'mission is busy'});
+   }
+   missions=missions.filter(m=>m.id!==id);
+   return route.fulfill({json:{deleted_ids:[id]}});
+  }
+  const json=path==='/api/projects'?{projects:[{slug:'one',title:'First project'}]}
+   :path==='/api/control/missions'?missions.filter(m=>(!url.searchParams.has('project')||m.project===url.searchParams.get('project'))&&(!url.searchParams.has('status')||m.status===url.searchParams.get('status')))
+   :path.startsWith('/api/control/missions/')?missions.find(m=>m.id===id)??{}
+   :path.endsWith('/files')?{entries:[]}:path.endsWith('/controller')?{job:null,runs:[]}:path.endsWith('/crons')?{jobs:[]}:[];
+  await route.fulfill({json});
+ });
+ await page.goto('/');
+ const archives=page.getByRole('button',{name:'Archived',exact:true});
+ await archives.click({button:'right'});
+ await page.getByRole('menuitem',{name:'Delete older than 1 day…',exact:true}).click();
+ const dialog=page.getByRole('dialog');
+ await expect(dialog).toContainText('Delete 2 agents?');
+ await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+
+ // Dialog closes immediately so the app remains usable while deletion runs in the background.
+ await expect(dialog).toHaveCount(0);
+ await expect.poll(()=>deleteStarted).toEqual(['fail-two']);
+
+ const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ const slowRow=archiveTree.getByRole('button',{name:'Slow delete one',exact:true});
+ const failRow=archiveTree.getByRole('button',{name:'Failed delete two',exact:true});
+ const freshRow=archiveTree.getByRole('button',{name:'Fresh conversation',exact:true});
+
+ // Both queued agents are disabled/uninteractable and cannot be opened or right-clicked for deletion again.
+ await expect(slowRow).toBeDisabled();
+ await expect(slowRow).toHaveAttribute('aria-busy','true');
+ await expect(failRow).toBeDisabled();
+ await expect(freshRow).toBeEnabled();
+
+ await slowRow.click({button:'right',force:true});
+ await expect(page.getByRole('menu')).toHaveCount(0);
+
+ // User can freely interact with other conversations while background deletion is in flight.
+ await freshRow.click();
+ await expect(freshRow).toHaveAttribute('aria-current','page');
+
+ // Bulk "Delete all…" skips the two agents already being deleted and only targets the remaining 1 agent.
+ await archiveTree.getByRole('button',{name:'First project',exact:true}).click({button:'right'});
+ await page.getByRole('menuitem',{name:'Delete all…',exact:true}).click();
+ await expect(page.getByRole('dialog')).toContainText('Delete 1 agent?');
+ await page.getByRole('dialog').getByRole('button',{name:'Cancel',exact:true}).click();
+
+ // Once the background requests finish, the deleted row disappears and the failed row becomes interactable again.
+ releaseSlow();
+ await expect(slowRow).toHaveCount(0);
+ await expect(failRow).toBeEnabled();
+ await expect(page.locator('.error-dialog')).toContainText('fail-two: Error: 409 mission is busy');
+});
+

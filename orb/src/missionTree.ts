@@ -75,3 +75,24 @@ export function filterArchivedMissionsByAge<M extends { updated_at?: string | nu
   });
 }
 
+/** Expand target mission IDs with any known descendants from loaded rows. */
+export function expandMissionDescendants<M extends Linked>(
+  ids: readonly string[],
+  rows: readonly M[],
+): string[] {
+  const out = new Set(ids);
+  if (!out.size || !rows.length) return [...out];
+  let added = true;
+  while (added) {
+    added = false;
+    for (const row of rows) {
+      if (out.has(row.id)) continue;
+      const parent = missionParent(row);
+      if (parent && out.has(parent)) {
+        out.add(row.id);
+        added = true;
+      }
+    }
+  }
+  return [...out];
+}

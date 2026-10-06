@@ -12,9 +12,10 @@ export function TreeConnectors(p: { row: TreeRow<unknown> }) {
   </span>;
 }
 
-export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selected: string | null; selectedIds?: string[]; render: (row: TreeRow<T>) => JSX.Element }) {
+export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selected: string | null; selectedIds?: ReadonlySet<string> | string[]; render: (row: TreeRow<T>) => JSX.Element }) {
   const [pointerFocus, setPointerFocus] = createSignal(false);
   const visible = createMemo(() => visibleTree(p.nodes));
+  const selectedSet = createMemo(() => p.selectedIds ? (p.selectedIds instanceof Set ? p.selectedIds : new Set(p.selectedIds)) : undefined);
   const [rows, setRows] = createStore<TreeRow<T>[]>([]);
   let element: HTMLDivElement | undefined;
   // Preserve the visible content when rows above it are inserted or removed.
@@ -24,12 +25,16 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     const scroller = element?.closest<HTMLElement>(".sb-scroll");
     const viewport = scroller?.getBoundingClientRect();
     const scroll = scroller?.scrollTop ?? 0;
-    const anchors = Array.from(scroller?.querySelectorAll<HTMLElement>(".tree-entry") ?? [])
-      .filter(row => {
+    const anchors: { row: HTMLElement; offset: number }[] = [];
+    if (scroller && viewport) {
+      for (const row of scroller.querySelectorAll<HTMLElement>(".tree-entry")) {
         const rect = row.getBoundingClientRect();
-        return viewport && rect.bottom > viewport.top && rect.top < viewport.bottom;
-      })
-      .map(row => ({ row, offset: row.getBoundingClientRect().top }));
+        if (rect.bottom <= viewport.top) continue;
+        if (rect.top >= viewport.bottom) break;
+        anchors.push({ row, offset: rect.top });
+        if (anchors.length >= 8) break;
+      }
+    }
     setRows(reconcile(next, { key: "id" }));
     queueMicrotask(() => {
       if (!scroller?.isConnected || scroller.scrollTop !== scroll) return;
@@ -59,9 +64,9 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     if (!entry || target !== entry.querySelector("button")) return;
     const all = [...e.currentTarget.querySelectorAll<HTMLElement>(".tree-entry")];
     const index = all.indexOf(entry), row = rows[index];
-    // Loading/empty notes have no interactive target. Skip them so an arrow
-    // key cannot trap focus before the next actionable row.
-    const focusable = all.filter(el => el.querySelector("button"));
+    // Loading/empty notes and disabled rows have no interactive target. Skip
+    // them so an arrow key cannot trap focus before the next actionable row.
+    const focusable = all.filter(el => el.querySelector("button:not(:disabled)"));
     const focusIndex = focusable.indexOf(entry);
     let next: HTMLElement | undefined;
     switch (e.key) {
@@ -80,7 +85,7 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
       default: return;
     }
     e.preventDefault();
-    next?.querySelector<HTMLButtonElement>("button")?.focus();
+    next?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   };
   return <div ref={element} class="sidebar-tree" role="tree" aria-multiselectable="true" aria-label={p.label} data-pointer-focus={pointerFocus() ? "true" : undefined}
     onPointerDown={() => setPointerFocus(true)}
@@ -88,12 +93,13 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
     onClick={e => {
       // WebKit on macOS does not focus buttons on click. Keep keyboard actions
       // (including cut/paste) attached to the row the user just selected.
-      const button = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-entry button");
+      const button = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-entry button:not(:disabled)");
       if (button && e.currentTarget.contains(button)) button.focus({ preventScroll: true });
     }}>
     <For each={rows}>{row => <div class="tree-entry" data-tree-id={row.id} data-depth={row.depth}
       role="treeitem" aria-current={p.selected === row.id ? "page" : undefined} aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.size}
-      aria-expanded={row.expanded} aria-selected={p.selectedIds ? p.selectedIds.includes(row.id) : p.selected === row.id}
+      aria-expanded={row.expanded} aria-selected={selectedSet() ? selectedSet()!.has(row.id) : p.selected === row.id}
+      onContextMenu={e => { if ((e.currentTarget as HTMLElement).querySelector("button:disabled")) { e.preventDefault(); e.stopPropagation(); } }}
       style={{ "--depth": row.depth }}>
       {p.render(row)}<TreeConnectors row={row} />
     </div>}</For>

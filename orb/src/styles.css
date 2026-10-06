@@ -207,8 +207,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   flex: none; width: 16px; height: 16px; display: grid; place-items: center;
   color: color-mix(in srgb, var(--fg) 62%, transparent);
 }
-.row:hover:not(.active) { background: var(--bg-hover); }
+.row:hover:not(.active):not(:disabled) { background: var(--bg-hover); }
 .row.active { background: var(--bg-active); color: var(--fg-strong); }
+.row.mission-deleting { opacity: .42; cursor: default; }
 .row.project.contains-current { color: var(--fg-strong); }
 .current-location-label { flex: none; font-size: 11px; color: var(--fg-2); }
 
@@ -2472,7 +2473,7 @@ select.orb-select-native:disabled { cursor: default; }
 
 .archive-project-row { width: 100%; }
 #sidebar-archives .row-machine { opacity: 0; transition: opacity 120ms ease; }
-#sidebar-archives .row:hover .row-machine, #sidebar-archives .row:focus-visible .row-machine { opacity: 1; }
+#sidebar-archives .row:hover:not(:disabled) .row-machine, #sidebar-archives .row:focus-visible .row-machine { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { #sidebar-archives .row-machine { transition: none; } }
 
 /* Archives are a secondary navigation surface, with no loading row to shift it. */
@@ -2482,8 +2483,8 @@ select.orb-select-native:disabled { cursor: default; }
 #sidebar-archives .row { min-height: 28px; height: 28px; font-size: 12px; color: var(--fg-2); }
 #sidebar-archives .row-ico { opacity: .65; }
 #sidebar-archives .row-ico > svg { width: 15px; height: 15px; }
-#sidebar-archives .row:hover, #sidebar-archives .row:focus-visible, #sidebar-archives .row.active { color: var(--fg); }
-#sidebar-archives .row:hover .row-ico, #sidebar-archives .row:focus-visible .row-ico, #sidebar-archives .row.active .row-ico { opacity: 1; }
+#sidebar-archives .row:hover:not(:disabled), #sidebar-archives .row:focus-visible, #sidebar-archives .row.active { color: var(--fg); }
+#sidebar-archives .row:hover:not(:disabled) .row-ico, #sidebar-archives .row:focus-visible .row-ico, #sidebar-archives .row.active .row-ico { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .archive-loading-icon { animation: none; opacity: .65; } }
 
 /* Unsupported files retain a clear destination instead of a metadata paragraph. */
@@ -2603,7 +2604,8 @@ select.orb-select-native:disabled { cursor: default; }
   display: inline-flex; align-items: center; gap: 2px;
   border-radius: var(--radius-xs); color: var(--fg-4); font-size: 11px; font-family: var(--mono);
 }
-.tree-entry > .launched-toggle:hover { background: var(--bg-active); color: var(--fg); }
+.tree-entry > .launched-toggle:hover:not(:disabled) { background: var(--bg-active); color: var(--fg); }
+.tree-entry > .launched-toggle:disabled { opacity: .42; cursor: default; }
 .tree-entry > .launched-toggle.live .launched-count { color: var(--fg-2); }
 .tree-entry:has(> .launched-toggle) > .row { padding-right: 52px; }
 .launched-chevron { transition: transform 140ms ease; }
