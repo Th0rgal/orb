@@ -13,6 +13,8 @@ import { connectionVersion } from './api';
 import { readSideQuestion, writeSideQuestion, sideQuestionKey, type QueuedSideQuestion } from './sideQuestionStorage';
 import { UserTurn, ThinkBlock } from "./Transcript";
 import { MdView } from './Markdown';
+import { ErrorNotice } from './ErrorNotice';
+import { remoteLog } from './remoteLog';
 import { askSide, sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
@@ -165,14 +167,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
    <header><div><strong>Side question</strong></div><div class="btw-actions"><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
    <div class="btw-thread" ref={scroll}>
-    <For each={turns}>{exchange=><article data-side-turn={exchange.id}>
+    <For each={turns}>{exchange=>{
+     const content=()=>remoteLog(exchange.answer);
+     return <article data-side-turn={exchange.id}>
      <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>
      <Show when={exchange.pending}><For each={btwThoughts(p.mission)}>{thought=><ThinkBlock item={thought}/>}</For></Show>
-     <Show when={exchange.answer}><MdView compact text={exchange.answer}/></Show>
+     <Show when={content().text}><MdView compact text={content().text}/></Show>
+     <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
-     <Show when={exchange.error}><p role="alert" class="error">{exchange.error}</p><button onClick={retry} disabled={busy()}>Retry</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></Show>
-     <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${exchange.answer}`)}>Use in agent draft ↗</button></Show>
-    </article>}</For>
+     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title="Couldn’t complete side question"><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
+     <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${content().text||exchange.answer}`)}>Use in agent draft ↗</button></Show>
+    </article>;}}</For>
     <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
      <header><span class="queue-count">{queue().length} Queued</span></header>
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
@@ -183,7 +188,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>
    <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
-   <div class="btw-composer-dock"><Composer sideQuestion onPending={prepareSend} picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span>/btw</span><span aria-hidden="true">·</span><span title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
+   <div class="btw-composer-dock"><Composer sideQuestion onPending={prepareSend} picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span class="btw-footer-tag">/btw</span><span class="under-sep" aria-hidden="true">·</span><span class="btw-footer-model" title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
   </section></Portal></Show>
  </>;
 }

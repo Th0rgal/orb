@@ -2273,16 +2273,16 @@ function MissionDock(p: {
   }));
   return (
     <div class="under">
-      <div class="fork-anchor">
-        <button class="under-loc fork-trigger" title="Change machine…" aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
+      <div class="fork-anchor under-loc-anchor">
+        <button class="under-loc fork-trigger" title={`Change machine (${p.destination})`} aria-label="Change machine" aria-haspopup="menu" aria-expanded={machineOpen()} disabled={!p.mission} onPointerEnter={() => p.mission && preloadMachineDestinations(p.mission.id)} onFocus={() => p.mission && preloadMachineDestinations(p.mission.id)} onClick={() => { setForkOpen(false); setMachineOpen(!machineOpen()); }}>
           <Show when={p.destination !== "Core" && p.destination !== "This computer"} fallback={<Ic.LaptopIcon size={13} />}><Ic.CloudIcon /></Show>
-          {p.destination} <Ic.ChevronDown size={10} />
+          <span class="under-label">{p.destination}</span> <Ic.ChevronDown size={10} />
         </button>
         <Show when={machineOpen() && p.mission}>{m => <ChangeMachine mission={m()} choices={harnessChoices()} choicesFor={machine => harnessChoices(machine.kind === "client" ? "local" : machine.kind === "node" ? machine.id : "core")} onDestination={machine => { if (machine.kind === "client") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(machine.kind === "node" ? machine.id : "core"); }} onClose={() => setMachineOpen(false)} onMoved={mission => p.onMission?.(mission)} />}</Show>
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
-        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
+        <div class="fork-anchor under-harness-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}><span class="under-label">{harnessName().endsWith(" CLI") ? <>{harnessName().slice(0, -4)}<span class="under-verbose-suffix">{" CLI"}</span></> : harnessName().endsWith(" Code") ? <>{harnessName().slice(0, -5)}<span class="under-verbose-suffix">{" Code"}</span></> : harnessName()}</span> <Ic.ChevronDown size={10} /></button>
         <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
@@ -2290,7 +2290,7 @@ function MissionDock(p: {
             when={canChangeModel()}
             fallback={
               <span class="under-model" title={idle() ? modelLabel() : "Stop the current turn to switch models"}>
-                {modelLabel()}
+                <span class="under-label">{modelLabel()}</span>
               </span>
             }
           >
@@ -2299,7 +2299,7 @@ function MissionDock(p: {
               title="Model for the next turn"
               onClick={() => setModelOpen(!modelOpen())}
             >
-              {modelLabel()} <Ic.ChevronDown size={10} />
+              <span class="under-label">{modelLabel()}</span> <Ic.ChevronDown size={10} />
             </button>
             <Show when={modelOpen()}>
               <div class="menu under-model-menu">
@@ -2325,7 +2325,7 @@ function MissionDock(p: {
               when={canChangeEffort()}
               fallback={
                 <span class="under-model" title={`Effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}>
-                  {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}
+                  <span class="under-label">{(() => { const l = effortLabel(effort(),p.mission?.backend,p.mission?.model_override); const m = /^Default \((.+)\)$/.exec(l); return m ? <><span class="under-verbose-prefix">{"Default ("}</span>{m[1]}<span class="under-verbose-suffix">{")"}</span></> : l; })()}</span>
                 </span>
               }
             >
@@ -2335,7 +2335,7 @@ function MissionDock(p: {
                 aria-label={`Reasoning effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}
                 onClick={() => setEffortOpen(!effortOpen())}
               >
-                {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)} <Ic.ChevronDown size={10} />
+                <span class="under-label">{(() => { const l = effortLabel(effort(),p.mission?.backend,p.mission?.model_override); const m = /^Default \((.+)\)$/.exec(l); return m ? <><span class="under-verbose-prefix">{"Default ("}</span>{m[1]}<span class="under-verbose-suffix">{")"}</span></> : l; })()}</span> <Ic.ChevronDown size={10} />
               </button>
               <Show when={effortOpen()}>
                 <div class="menu under-model-menu">
