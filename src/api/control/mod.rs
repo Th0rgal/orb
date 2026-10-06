@@ -8,6 +8,7 @@
 //! - supports persistent missions (goal-oriented sessions)
 
 pub(crate) mod btw_context;
+mod callback_parent;
 pub(crate) mod client_placement;
 pub(crate) mod continuations;
 pub mod cyber;
@@ -6975,6 +6976,7 @@ pub async fn list_missions(
     };
 
     populate_activity(&control, &mut missions).await;
+    let callback_parents = callback_parent::links(&missions, &control.mission_store).await;
     let active_runs: HashMap<Uuid, MissionRun> = control
         .mission_store
         .list_active_mission_runs()
@@ -7016,6 +7018,9 @@ pub async fn list_missions(
         .collect();
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            if let Some(parent) = callback_parents.get(&id) {
+                value["callback_parent_mission_id"] = serde_json::json!(parent);
+            }
             continuations::attach_capabilities(
                 value,
                 state.config.automations_enabled && control.mission_store.is_persistent(),
@@ -8031,6 +8036,9 @@ pub async fn get_mission(
             let mut one = [mission];
             populate_activity(&control, &mut one).await;
             let [mission] = one;
+            let callback_parents =
+                callback_parent::links(std::slice::from_ref(&mission), &control.mission_store)
+                    .await;
 
             // Serialize then attach the computed spark_offload block so Paloma
             // can route heavy builds without probing the host each time.
@@ -8049,6 +8057,9 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
+            if let Some(parent) = callback_parents.get(&id) {
+                value["callback_parent_mission_id"] = serde_json::json!(parent);
+            }
             continuations::attach_capabilities(
                 &mut value,
                 state.config.automations_enabled && control.mission_store.is_persistent(),

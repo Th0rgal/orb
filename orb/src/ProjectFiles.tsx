@@ -68,7 +68,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionTreeRows, type NestedMission } from "./missionTree";
 
 /** Sidebar section listing the core backend's projects with their missions
  * and hosted files. Replaces the demo projects when connected. */
@@ -254,11 +254,12 @@ export function LiveProjectsSection(p: {
   const RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
-    const rows = (missions[slug] ?? []).filter(m => !isArchived(m));
+    const rows = missions[slug] ?? [];
     const current = currentMission();
     // A paginated project list may not contain an older open conversation.
-    return current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
+    const withCurrent = current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
       ? [current, ...rows] : rows;
+    return missionTreeRows(withCurrent, m => !isArchived(m));
   };
   // Missions per project slug; file listings per `${slug}:${dirPath}`.
   const [missions, setMissions] = createStore<Record<string, Mission[]>>({});
@@ -1053,7 +1054,7 @@ export function LiveProjectsSection(p: {
   const rootMissions = (slug: string) => nestMissions(visibleMissions(slug));
   // A mission the project's controller created (a Hermes session, no parent
   // mission) is listed under the controller, like a child under its parent.
-  const controllerLaunched = (mission: Mission) => !mission.parent_mission_id && mission.origin === "hermes" && !!mission.origin_session_id;
+  const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
   const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
@@ -1188,12 +1189,12 @@ export function LiveProjectsSection(p: {
     if (!mission?.project || isArchived(mission)) return "";
     const parents: string[] = [], seen = new Set([mission.id]);
     const rows = missions[mission.project] ?? [];
-    let root = mission, parent = mission.parent_mission_id;
+    let root = mission, parent = missionParent(mission);
     while (parent && !seen.has(parent)) {
       seen.add(parent); parents.push(`m:${parent}`);
       const ancestor = rows.find(m => m.id === parent);
       if (ancestor) root = ancestor;
-      parent = ancestor?.parent_mission_id;
+      parent = ancestor ? missionParent(ancestor) : undefined;
     }
     if (controllerRow(mission.project) && controllerLaunched(root)) parents.push(`c:${mission.project}`);
     return JSON.stringify([mission.id, parents]);

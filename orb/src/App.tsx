@@ -1,3 +1,4 @@
+import { missionParent } from "./missionTree";
 import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
@@ -1308,8 +1309,8 @@ export default function App() {
     return { id, title: displayTitle(mission?.title) || "Mission", local,
       destination: local ? "This computer" : missionDestination(mission ?? null, recalledLaunch(id)),
       directory: binding?.cwd || mission?.working_directory,
-      parent: mission?.parent_mission_id ? missions().find(m => m.id === mission.parent_mission_id)?.title || mission.parent_mission_id : undefined,
-      children: missions().filter(m => m.parent_mission_id === id).length,
+      parent: mission && missionParent(mission) ? missions().find(m => m.id === missionParent(mission))?.title || missionParent(mission) : undefined,
+      children: missions().filter(m => missionParent(m) === id).length,
       project: liveProjects().find(p => p.slug === mission?.project)?.title || mission?.project,
       harness: choice?.backend.name || backend,
       model: modelLabel ? shortModelLabel(modelLabel) : model || undefined,

@@ -1,10 +1,21 @@
 import {getApiUrl,getJwt,connectionVersion,type Mission} from './api';
 import {nativeInvoke} from './clientRuns';
-export async function localOrigins():Promise<Mission[]>{
+// Concurrent list, queue and transcript reads share one native journal scan.
+// Never cache settled rows: launches and synchronization can change them immediately.
+const reads=new Map<number,Promise<Mission[]>>();
+export async function localOrigins(missionId?:string):Promise<Mission[]>{
  const invoke=nativeInvoke();if(!invoke||!getJwt())return [];
  const version=connectionVersion();
- try{const rows=await invoke('local_origin_list',{connection:{api_url:getApiUrl(),token:getJwt()}});if(version!==connectionVersion())throw new Error("Connection changed while reading local missions");return Array.isArray(rows)?rows as Mission[]:[];}
- catch(error){if(/unknown command|not found/i.test(String(error)))return [];throw error;}
+ let read=reads.get(version);
+ if(!read){
+  read=(async()=>{
+   try{const rows=await invoke('local_origin_list',{connection:{api_url:getApiUrl(),token:getJwt()}});if(version!==connectionVersion())throw new Error("Connection changed while reading local missions");return Array.isArray(rows)?rows as Mission[]:[];}
+   catch(error){if(/unknown command|not found/i.test(String(error)))return [];throw error;}
+  })().finally(()=>reads.delete(version));
+  reads.set(version,read);
+ }
+ const rows=await read;
+ return missionId?rows.filter(row=>row.id===missionId):rows;
 }
 /** Local work that Core has not accepted yet. It overrides what Core lists.
  * The shown status may be one Core confirmed, so only the journal's own run state counts;
