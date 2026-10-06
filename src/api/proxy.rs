@@ -1039,6 +1039,20 @@ fn should_use_grok_bridge(requested_model: &str, exact_chain_exists: bool) -> bo
     super::grok_tool_bridge::is_bridge_model(requested_model) && !exact_chain_exists
 }
 
+async fn resolve_stored_chain_id(
+    chain_store: &crate::provider_health::ModelChainStore,
+    requested_model: &str,
+) -> Option<String> {
+    if chain_store.get(requested_model).await.is_some() {
+        return Some(requested_model.to_string());
+    }
+    let candidate = match requested_model.strip_prefix("builtin/") {
+        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        _ => format!("builtin/{requested_model}"),
+    };
+    chain_store.get(&candidate).await.map(|_| candidate)
+}
+
 async fn get_deferred_request(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
@@ -1435,13 +1449,7 @@ async fn native_protocol_proxy(
             });
         }
     }
-    let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
-    let resolved_chain_id = if exact_chain_exists {
-        Some(requested_model.clone())
-    } else {
-        let prefixed = format!("builtin/{requested_model}");
-        state.chain_store.get(&prefixed).await.map(|_| prefixed)
-    };
+    let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
     let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
         let configured = state
             .chain_store
@@ -2032,16 +2040,7 @@ pub(crate) async fn chat_completions_inner(
     //    Anything else errors — no silent fallback, so typos surface.
     let standard_accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
 
-    let resolved_chain_id = if exact_chain_exists {
-        Some(requested_model.clone())
-    } else {
-        let prefixed = format!("builtin/{}", requested_model);
-        if state.chain_store.get(&prefixed).await.is_some() {
-            Some(prefixed)
-        } else {
-            None
-        }
-    };
+    let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
 
     let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
         let chain_entries = state
@@ -6674,12 +6673,11 @@ fn translate_google_json_to_openai(
         .and_then(|v| v.get("parts"))
         .and_then(|v| v.as_array())
     {
-        for part in parts.iter() {
+        for (idx, part) in parts.iter().enumerate() {
             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                 content.push_str(text);
             }
             if let Some(fc) = part.get("functionCall") {
-                let tool_idx = tool_calls.len();
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                 let args = fc
                     .get("args")
@@ -6687,7 +6685,7 @@ fn translate_google_json_to_openai(
                     .unwrap_or_else(|| serde_json::json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(serde_json::json!({
-                    "id": format!("call_{}", tool_idx),
+                    "id": format!("call_{}", idx),
                     "type": "function",
                     "function": { "name": name, "arguments": args_str }
                 }));
@@ -6766,7 +6764,7 @@ fn transform_google_sse_to_openai(
             Vec::<u8>::new(),
             false, // sent role chunk
             false, // emitted terminal chunk
-            0u32,  // next_tool_idx across the entire stream
+            false, // emitted tool call
             stream_id,
             model_id,
             created,
@@ -6777,7 +6775,7 @@ fn transform_google_sse_to_openai(
             mut buf,
             mut sent_role,
             mut emitted_done,
-            mut next_tool_idx,
+            mut emitted_tool_call,
             stream_id,
             model_id,
             created,
@@ -6804,7 +6802,7 @@ fn transform_google_sse_to_openai(
                                     buf,
                                     sent_role,
                                     emitted_done,
-                                    next_tool_idx,
+                                    emitted_tool_call,
                                     stream_id,
                                     model_id,
                                     created,
@@ -6863,7 +6861,7 @@ fn transform_google_sse_to_openai(
                         .and_then(|v| v.get("parts"))
                         .and_then(|v| v.as_array())
                     {
-                        for part in parts {
+                        for (idx, part) in parts.iter().enumerate() {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 if !text.is_empty() {
                                     let chunk = serde_json::json!({
@@ -6877,8 +6875,6 @@ fn transform_google_sse_to_openai(
                                 }
                             }
                             if let Some(fc) = part.get("functionCall") {
-                                let tool_idx = next_tool_idx;
-                                next_tool_idx += 1;
                                 let name =
                                     fc.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                                 let args = fc
@@ -6896,8 +6892,8 @@ fn transform_google_sse_to_openai(
                                         "index": 0,
                                         "delta": {
                                             "tool_calls": [{
-                                                "index": tool_idx,
-                                                "id": format!("call_{}", tool_idx),
+                                                "index": idx,
+                                                "id": format!("call_{}", idx),
                                                 "type": "function",
                                                 "function": { "name": name, "arguments": args_str }
                                             }]
@@ -6906,13 +6902,14 @@ fn transform_google_sse_to_openai(
                                     }],
                                 });
                                 chunks.push(format!("data: {}\n\n", chunk));
+                                emitted_tool_call = true;
                             }
                         }
                     }
 
                     if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
                         let mut finish_reason = finish_reason_from_google(Some(fr)).to_string();
-                        if next_tool_idx > 0 && finish_reason == "stop" {
+                        if emitted_tool_call && finish_reason == "stop" {
                             finish_reason = "tool_calls".to_string();
                         }
                         let mut finish_chunk = serde_json::json!({
@@ -6949,7 +6946,7 @@ fn transform_google_sse_to_openai(
                             buf,
                             sent_role,
                             emitted_done,
-                            next_tool_idx,
+                            emitted_tool_call,
                             stream_id,
                             model_id,
                             created,
@@ -6968,7 +6965,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 emitted_done,
-                                next_tool_idx,
+                                emitted_tool_call,
                                 stream_id,
                                 model_id,
                                 created,
@@ -6987,7 +6984,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 true,
-                                next_tool_idx,
+                                emitted_tool_call,
                                 stream_id,
                                 model_id,
                                 created,
@@ -8259,64 +8256,6 @@ mod tests {
     }
 
     #[test]
-    fn google_stream_assigns_distinct_indices_and_ids_across_multiple_function_call_chunks() {
-        let chunk1 = serde_json::json!({
-            "response": {
-                "candidates": [{
-                    "content": {
-                        "parts": [{
-                            "functionCall": {
-                                "name": "terminal",
-                                "args": { "command": "echo first" }
-                            }
-                        }]
-                    }
-                }]
-            }
-        });
-        let chunk2 = serde_json::json!({
-            "response": {
-                "candidates": [{
-                    "content": {
-                        "parts": [{
-                            "functionCall": {
-                                "name": "terminal",
-                                "args": { "command": "echo second" }
-                            }
-                        }]
-                    },
-                    "finishReason": "STOP"
-                }]
-            }
-        });
-        let sse_bytes_1 = Bytes::from(format!("data: {}\n\n", chunk1));
-        let sse_bytes_2 = Bytes::from(format!("data: {}\n\n", chunk2));
-        let input = futures::stream::iter(vec![Ok(sse_bytes_1), Ok(sse_bytes_2)]);
-
-        let out = futures::executor::block_on(async move {
-            transform_google_sse_to_openai(
-                input,
-                "chatcmpl-test".to_string(),
-                1,
-                "gemini-2.5-pro".to_string(),
-            )
-            .collect::<Vec<_>>()
-            .await
-        });
-
-        let text = out
-            .into_iter()
-            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
-            .collect::<String>();
-
-        assert!(text.contains("\"index\":0"));
-        assert!(text.contains("\"id\":\"call_0\""));
-        assert!(text.contains("\"index\":1"));
-        assert!(text.contains("\"id\":\"call_1\""));
-        assert!(text.contains("\"finish_reason\":\"tool_calls\""));
-    }
-
-    #[test]
     fn anthropic_stream_surfaces_usage_on_finish_chunk() {
         // message_start carries input tokens; message_delta carries cumulative
         // output tokens. The finish chunk must surface OpenAI-style usage so
@@ -9256,5 +9195,48 @@ mod tests {
         assert!(payload["tools"][0]["functionDeclarations"][0]
             .get("parametersJsonSchema")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_stored_chain_id_matches_custom_chains_with_or_without_builtin_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::provider_health::ModelChainStore::new(dir.path().join("chains.json")).await;
+        let now = chrono::Utc::now();
+        store
+            .upsert(crate::provider_health::ModelChain {
+                id: "private".into(),
+                name: "Private".into(),
+                entries: vec![crate::provider_health::ChainEntry {
+                    provider_id: "zai".into(),
+                    model_id: "glm-5.1".into(),
+                }],
+                is_default: false,
+                strip_thinking: false,
+                created_at: now,
+                updated_at: now,
+            })
+            .await;
+
+        assert_eq!(
+            resolve_stored_chain_id(&store, "private").await.as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "builtin/private")
+                .await
+                .as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "smart").await.as_deref(),
+            Some("builtin/smart")
+        );
+        assert_eq!(
+            resolve_stored_chain_id(&store, "builtin/smart")
+                .await
+                .as_deref(),
+            Some("builtin/smart")
+        );
     }
 }

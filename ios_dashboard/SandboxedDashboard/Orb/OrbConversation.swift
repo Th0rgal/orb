@@ -463,10 +463,10 @@ struct OrbSelection {
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
-    var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot"][provider] ?? provider : backend.isEmpty ? "Choose agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
+    var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Choose agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
     var wire: OrbJSON {
         var value: [String: OrbJSON] = ["provider": .string(provider), "account": .string(account)]
-        if !model.isEmpty { value["model"] = .string(model); value["model_params"] = params }
+        if !model.isEmpty { value["model"] = .string(model); if !params.items.isEmpty { value["model_params"] = params } }
         if !repository.isEmpty { value["repository"] = .string(repository) }
         if !gitRef.isEmpty { value["git_ref"] = .string(gitRef) }
         return .object(value)
@@ -495,7 +495,7 @@ struct OrbAgentPicker: View {
                 if !error.isEmpty { OrbNotice(message: error) }
                 if !existing {
                     Picker("Service", selection: $selection.provider) {
-                        Text("Agent").tag("agent"); Text("ChatGPT").tag("chatgpt"); Text("Cursor Cloud").tag("cursor_cloud"); Text("Grok Bot").tag("grok_bot")
+                        Text("Agent").tag("agent"); Text("Hermes").tag("hermes"); Text("ChatGPT").tag("chatgpt"); Text("Cursor Cloud").tag("cursor_cloud"); Text("Grok Bot").tag("grok_bot")
                     }.accessibilityIdentifier("picker.service")
                 }
                 if selection.cloud {
@@ -516,9 +516,11 @@ struct OrbAgentPicker: View {
                 }
                 if selection.provider != "grok_bot" { Picker("Model", selection: $selection.model) {
                     Text("Service default").tag("")
-                    ForEach(models.indices, id: \.self) { index in
-                        let model = models[index]
-                        Text(model["displayName"].text.isEmpty ? (model["label"].text.isEmpty ? model["id"].text : model["label"].text) : model["displayName"].text).tag(model["id"].text.isEmpty ? model["value"].text : model["id"].text)
+                    ForEach(models.filter { !($0["id"].text.isEmpty && $0["value"].text.isEmpty) }.indices, id: \.self) { index in
+                        let filtered = models.filter { !($0["id"].text.isEmpty && $0["value"].text.isEmpty) }
+                        let model = filtered[index]
+                        let display = !model["displayName"].text.isEmpty ? model["displayName"].text : (!model["name"].text.isEmpty ? model["name"].text : (!model["label"].text.isEmpty ? model["label"].text : model["id"].text))
+                        Text(display).tag(model["id"].text.isEmpty ? model["value"].text : model["id"].text)
                     }
                 }.accessibilityIdentifier("picker.model") }
                 if let model = models.first(where: { $0["id"].text == selection.model }), model["variants"].items.count > 1 {
@@ -560,7 +562,8 @@ struct OrbAgentPicker: View {
         do {
             if selection.cloud {
                 guard provider != "grok_bot" else { models = []; return }
-                let value = try await api.call("/api/cloud/\(provider == "chatgpt" ? "chatgpt" : "cursor")/options")
+                let endpoint = provider == "hermes" ? "hermes" : (provider == "chatgpt" ? "chatgpt" : "cursor")
+                let value = try await api.call("/api/cloud/\(endpoint)/options")
                 guard selection.provider == provider else { return }
                 models = value["models"]["items"].items; repos = value["repositories"]["items"].items
             } else {

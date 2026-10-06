@@ -113,6 +113,7 @@ pub async fn account(state: &AppState, user: &str) -> Account {
         reason: result.err(),
         capabilities: Capabilities {
             models: true,
+            attachments: true,
             follow_up: true,
             cancel: true,
             detailed_events: true,
@@ -129,15 +130,38 @@ pub async fn options(
         .map_err(bad)?;
     h.capabilities().await.map_err(bad)?;
     let models = h.get("/v1/models").await.map_err(bad)?;
+    let chains = state.chain_store.list().await;
+    Ok(Json(hermes_model_options(&chains, &models)))
+}
+fn hermes_model_options(chains: &[crate::provider_health::ModelChain], models: &Value) -> Value {
+    let mut seen = std::collections::HashSet::from([String::new(), "hermes-agent".to_string()]);
     let mut items = vec![json!({"id":"","name":"Profile default"})];
-    items.extend(
-        models["data"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|m| m["id"].as_str().map(|id| json!({"id":id,"name":id}))),
-    );
-    Ok(Json(json!({"models":{"items":items}})))
+    for chain in chains {
+        let id = if chain.id.starts_with("builtin/") {
+            chain.id.clone()
+        } else {
+            format!("builtin/{}", chain.id)
+        };
+        if seen.insert(id.clone()) {
+            let name = if chain.name.trim().is_empty() || chain.name == id {
+                id.clone()
+            } else {
+                format!("{} · {id}", chain.name.trim())
+            };
+            items.push(json!({"id":id,"name":name}));
+        }
+    }
+    for id in models["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str())
+    {
+        if seen.insert(id.to_string()) {
+            items.push(json!({"id":id,"name":id}));
+        }
+    }
+    json!({"models":{"items":items}})
 }
 fn bad(error: String) -> Error {
     (StatusCode::BAD_GATEWAY, error)
