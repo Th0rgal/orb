@@ -77,7 +77,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     <Show when={effortOpen() && supportedEfforts(backend()).length}>
       <div class="menu fork-effort-menu" role="menu" aria-label="Choose effort">
         <For each={["", ...supportedEfforts(backend())]}>{e => <button class="menu-item" role="menuitem" disabled={busy()}
-          onClick={() => { setEffort(e); void fork(); }}>{e ? effortLabel(e) : "Default"}</button>}</For>
+          onClick={() => { setEffort(e); void fork(); }}>{e ? effortLabel(e, backend(), model()) : effortLabel(undefined, backend(), model())}</button>}</For>
       </div>
     </Show>
     <div class="fork-feedback">
