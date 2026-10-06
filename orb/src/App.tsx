@@ -2423,7 +2423,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
 
   const scrollIfPinned = () => {
-    if (nearBottom && !scroller?.dataset.panelResizing) scroller?.scrollTo({ top: scroller.scrollHeight });
+    if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
   };
   // Resize notifications run after streaming Markdown has changed layout.
   onMount(() => {
@@ -2653,7 +2653,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const phase = missionPhase(mission(), activity());
     return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
-  const phaseLabel = () => "Working";
+  const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt);
