@@ -306,7 +306,7 @@ export function startLocalQueueWorker(){
      await update(key,row.id,stored=>{if(stored.state==='error'&&!stored.receipt){stored.state='queued';stored.resumes=(stored.resumes??0)+1;stored.error='Waiting for the connection to come back.';}});
      again=true;continue;
     }
-    if(row.interrupted&&row.state==='accepted'&&!row.autoResumed){
+    if(row.interrupted&&row.state==='accepted'){
      // The previous agent was still finishing when recovery was first tried. Look again.
      try{
       await recoverLocalLaunch(row.mission);if(!valid())return;
