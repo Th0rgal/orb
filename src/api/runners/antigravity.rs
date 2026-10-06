@@ -192,11 +192,17 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         if bound {
             thoughts.observe(&value);
         }
-        let _ = ctx.events_tx.send(AgentEvent::TextDelta {
-            content: stream.text.clone(),
-            mission_id: Some(ctx.mission_id),
-        });
         for tool in tools {
+            if tool["type"] == "text_op" {
+                if let Ok(ops) = serde_json::from_value(tool["ops"].clone()) {
+                    let _ = ctx.events_tx.send(AgentEvent::TextOp {
+                        mission_id: ctx.mission_id,
+                        bubble_id: tool["bubble_id"].as_str().unwrap_or_default().into(),
+                        ops,
+                    });
+                }
+                continue;
+            }
             let id = tool["toolCallId"].as_str().unwrap_or_default().to_string();
             let name = tool["name"].as_str().unwrap_or("tool").to_string();
             let event = if tool["type"] == "tool_call" {
@@ -224,9 +230,8 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
     drain.abort();
     let mut result = match stream.finish() {
-        Ok(()) if status.is_ok_and(|s| s.success()) => {
-            AgentResult::success(stream.text, 0).with_terminal_reason(TerminalReason::TurnComplete)
-        }
+        Ok(()) if status.is_ok_and(|s| s.success()) => AgentResult::success(stream.summary(), 0)
+            .with_terminal_reason(TerminalReason::TurnComplete),
         Ok(()) => AgentResult::failure("Antigravity process failed after its result", 0),
         Err(error) => AgentResult::failure(error, 0)
             .with_terminal_reason(TerminalReason::NativeContinuityRequired),

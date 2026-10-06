@@ -47,3 +47,10 @@ it("preserves diagnostics even for non-JSON failures and does not touch ordinary
  const prose='Here is a log tail:\n'+text;
  expect(remoteLog(prose)).toEqual({text:prose});
 });
+
+it('unwraps Antigravity result envelopes while preserving their diagnostics',()=>{
+ const raw=JSON.stringify({event:'result',result:{status:'ERROR',response:'## Update\n\nStill working.',error:'interrupted',duration_seconds:42,num_turns:3}});
+ expect(remoteLog(raw)).toEqual({text:'## Update\n\nStill working.',details:raw});
+ const requested=JSON.stringify({response:'User requested JSON',status:'SUCCESS'});
+ expect(remoteLog(requested)).toEqual({text:requested});
+});

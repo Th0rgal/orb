@@ -213,6 +213,7 @@ pub(crate) enum StreamUpdate {
     Text,
     Thinking,
     TextSnapshot(String),
+    NativeText(serde_json::Value),
     ThinkingSnapshot(String),
     SessionId(String),
     End,
@@ -338,9 +339,6 @@ impl GrokStream {
                     self.thinking = text.into();
                     self.progress = true;
                     updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
-                    if value["done"] == true {
-                        updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
-                    }
                 }
                 return;
             }
@@ -354,11 +352,14 @@ impl GrokStream {
                 }
             }
             self.text = stream.text.clone();
-            updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
             self.ended = stream.success;
             self.stop_reason = stream.success.then(|| "end_turn".into());
             self.error = stream.error.clone();
             for tool in tools {
+                if tool["type"] == "text_op" {
+                    updates.push(StreamUpdate::NativeText(tool));
+                    continue;
+                }
                 let completed = tool["type"] == "tool_call_update";
                 updates.push(StreamUpdate::Tool {
                     update: tool,
@@ -743,6 +744,7 @@ impl NativeGrokObserver {
                 antigravity: (mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = mission.session_id.clone();
+                    stream.turn_id = job_id.to_string();
                     stream
                 }),
                 ..Default::default()
@@ -847,6 +849,7 @@ impl NativeGrokObserver {
                 antigravity: (self.mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = self.session_persisted.clone();
+                    stream.turn_id = self.job_id.to_string();
                     stream
                 }),
                 ..Default::default()
@@ -941,6 +944,18 @@ impl NativeGrokObserver {
                         done: false,
                         mission_id: Some(self.mission_id),
                     });
+                }
+                StreamUpdate::NativeText(value) => {
+                    self.close_thinking();
+                    if let Ok(ops) = serde_json::from_value(value["ops"].clone()) {
+                        self.owner
+                            .publish_native(AgentEvent::TextOp {
+                                mission_id: self.mission_id,
+                                bubble_id: value["bubble_id"].as_str().unwrap_or_default().into(),
+                                ops,
+                            })
+                            .await;
+                    }
                 }
                 StreamUpdate::TextSnapshot(content) => {
                     self.close_thinking();
@@ -1138,7 +1153,14 @@ impl NativeGrokObserver {
         if self.stream.claude && !success {
             self.forget_unstarted_claude_session(allocated).await;
         }
-        let mut content = self.stream.text.trim().to_string();
+        let mut content = self
+            .stream
+            .antigravity
+            .as_ref()
+            .map(|s| s.summary())
+            .unwrap_or_else(|| self.stream.text.clone())
+            .trim()
+            .to_string();
         if legacy_claude && success {
             content = format!(
                 "Remote job {} on node '{}' finished with state 'succeeded'",
@@ -1953,10 +1975,7 @@ mod tests {
         let updates = stream.feed("{\"event\":\"thought_update\",\"conversation_id\":\"same\",\"text\":\"Checking the build.\",\"done\":true}\n");
         assert_eq!(
             updates,
-            vec![
-                StreamUpdate::ThinkingSnapshot("Checking the build.".into()),
-                StreamUpdate::TextSnapshot("".into())
-            ]
+            vec![StreamUpdate::ThinkingSnapshot("Checking the build.".into())]
         );
         assert!(stream.text.is_empty());
     }
