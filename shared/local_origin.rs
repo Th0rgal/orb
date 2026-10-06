@@ -11,6 +11,8 @@ pub struct Origin {
     pub backend: String,
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cyber_access: Option<crate::cyber_access::Mode>,
     pub cwd: String,
     pub prompt: String,
@@ -29,6 +31,18 @@ pub struct Snapshot {
 }
 impl Snapshot {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(effort) = self.origin.effort.as_deref() {
+            let accepted = match self.origin.backend.as_str() {
+                "antigravity" => matches!(effort, "low" | "medium" | "high"),
+                "codex" | "claudecode" => {
+                    matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+                }
+                _ => false,
+            };
+            if !accepted {
+                return Err("Invalid local reasoning effort for harness".into());
+            }
+        }
         if self.sequence == 0 || self.sequence > i64::MAX as u64 {
             return Err("Invalid sequence".into());
         }

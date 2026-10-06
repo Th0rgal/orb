@@ -63,7 +63,8 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     let cli = crate::api::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
-    let args = crate::antigravity::args(ctx.model, ctx.session_id, prompt);
+    let args =
+        crate::antigravity::args_with_effort(ctx.model, ctx.model_effort, ctx.session_id, prompt);
     let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
     let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
     let claim = uuid::Uuid::new_v4();

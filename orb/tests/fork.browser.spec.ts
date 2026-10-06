@@ -41,12 +41,18 @@ test(`fork dialog uses ${target.name} on the source destination without mutating
   const models = page.getByRole("menu", { name: "Choose a model" });
   await expect(models.getByRole("menuitem", { name: target.label })).toBeVisible();
   await models.getByRole("menuitem", { name: target.label }).click();
+  if (target.backend === "antigravity") {
+    const efforts = page.getByRole("menu", { name: "Choose effort" });
+    await expect(efforts.getByRole("menuitem", { name: "High", exact: true })).toBeVisible();
+    await efforts.getByRole("menuitem", { name: "High", exact: true }).click();
+  }
   await expect(menu).toHaveCount(0);
   await expect(page.locator(".under-harness")).toHaveText(target.name);
   await expect(page.locator(".row.agent.active")).toHaveCount(1);
   await expect(page.locator(".row.agent.active")).toContainText("Original work · fork");
   expect(mutations).toHaveLength(1);
   expect(mutations[0]).toMatchObject({ path: "/api/control/missions/original/fork", body: { backend: target.backend, model_override: target.model } });
+  if (target.backend === "antigravity") expect(mutations[0].body.model_effort).toBe("high");
   await expect(page.locator(".row.agent", { hasText: "Original work" }).first()).toBeVisible();
 });
 

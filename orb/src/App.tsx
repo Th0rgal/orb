@@ -58,7 +58,7 @@ import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
 import { latestChecklist } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
-import { DEFAULT_EFFORT_LABEL, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
+import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
@@ -840,23 +840,23 @@ export function Composer(p: {
               <button
                 class={`model ${which() === "effort" ? "on" : ""}`}
                 title="Reasoning effort"
-                aria-label={`Reasoning effort: ${effortLabel(pick()?.effort)}`}
+                aria-label={`Reasoning effort: ${effortLabel(pick()?.effort,pick()?.backend,pick()?.model)}`}
                 onClick={() => setWhich(which() === "effort" ? null : "effort")}
               >
-                {effortLabel(pick()?.effort)} <Ic.ChevronDown size={12} />
+                {effortLabel(pick()?.effort,pick()?.backend,pick()?.model)} <Ic.ChevronDown size={12} />
               </button>
               <Show when={which() === "effort"}>
                 <div class="menu">
                   <button
                     class={`menu-item ${!pick()?.effort ? "on" : ""}`}
-                    title="Let the harness choose — no model_effort is sent"
+                    title={pick()?.backend === "antigravity" && pick()?.model === "agy-demo" ? "Use High, the default for agy-demo" : "Let the harness choose"}
                     onClick={() => {
                       const cur = pick()!;
                       setHarnessPick({ backend: cur.backend, model: cur.model });
                       setWhich(null);
                     }}
                   >
-                    <span class="pick-name">{DEFAULT_EFFORT_LABEL}</span>
+                    <span class="pick-name">{defaultEffortLabel(pick()?.backend,pick()?.model)}</span>
                     <span class="pick-check">{!pick()?.effort ? "✓" : ""}</span>
                   </button>
                   <For each={supportedEfforts(pick()?.backend)}>
@@ -1444,7 +1444,7 @@ export default function App() {
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("standard");
     setAttachChips([]);
@@ -2199,7 +2199,7 @@ function MissionDock(p: {
   const [saving, setSaving] = createSignal(false);
   const choice = () => harnessChoices(p.mission?.remote_node_id ?? "core").find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
-  const modelId = () => p.mission?.model_override || "";
+  const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
   const modelLabel = () => {
     const id = modelId();
     const m = choice()?.models.find((x) => x.value === id);
@@ -2308,23 +2308,23 @@ function MissionDock(p: {
             <Show
               when={canChangeEffort()}
               fallback={
-                <span class="under-model" title={`Effort: ${effortLabel(effort())}`}>
-                  {effortLabel(effort())}
+                <span class="under-model" title={`Effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}>
+                  {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}
                 </span>
               }
             >
               <button
                 class={`under-model ${effortOpen() ? "on" : ""}`}
                 title={idle() ? "Reasoning effort for the next turn" : p.mission?.backend === "claudecode" ? "Reasoning effort · applies to the running session" : "Reasoning effort · applies from the next turn"}
-                aria-label={`Reasoning effort: ${effortLabel(effort())}`}
+                aria-label={`Reasoning effort: ${effortLabel(effort(),p.mission?.backend,p.mission?.model_override)}`}
                 onClick={() => setEffortOpen(!effortOpen())}
               >
-                {effortLabel(effort())} <Ic.ChevronDown size={10} />
+                {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)} <Ic.ChevronDown size={10} />
               </button>
               <Show when={effortOpen()}>
                 <div class="menu under-model-menu">
                   <button class={`menu-item ${!effort() ? "on" : ""}`} onClick={() => void pickEffort("")}>
-                    <span class="pick-name">{DEFAULT_EFFORT_LABEL}</span>
+                    <span class="pick-name">{defaultEffortLabel(p.mission?.backend,p.mission?.model_override)}</span>
                     <span class="pick-check">{!effort() ? "✓" : ""}</span>
                   </button>
                   <For each={efforts()}>
@@ -2718,7 +2718,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {

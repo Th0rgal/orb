@@ -28,7 +28,7 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
    // Plain INSERT is intentional: an offline record can NEVER adopt, replace,
    // or restart an existing mission, even when its UUID collides.
    let tags=serde_json::to_string(&o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect::<Vec<_>>()).map_err(err)?;
-   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin) VALUES (?1,'active',?2,?3,?4,?5,?6,?7,?8,0,?9,?10,'orb-client')",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags]).map_err(err)?;
+   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client')",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort]).map_err(err)?;
    if let Some(objective)=o.prompt.trim().strip_prefix("/goal").filter(|rest| rest.starts_with(char::is_whitespace)).map(str::trim).filter(|rest| !rest.is_empty()) {
     tx.execute("UPDATE missions SET goal_mode=1,goal_objective=?2 WHERE id=?1",params![id,objective]).map_err(err)?;
    }
@@ -63,6 +63,7 @@ mod tests {
                 project: "test".into(),
                 backend: "claudecode".into(),
                 model: None,
+                effort: None,
                 cwd: "/local/work".into(),
                 prompt: "Work locally".into(),
                 created_at: now_string(),
@@ -151,5 +152,29 @@ mod tests {
         let mut stale = s;
         stale.sequence += 1;
         assert!(sync(&store, stale).await.is_err());
+    }
+    #[tokio::test]
+    async fn local_origin_preserves_selected_antigravity_effort() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp.path().to_path_buf(), "origin-effort")
+            .await
+            .unwrap();
+        let mut s = snapshot();
+        s.origin.backend = "antigravity".into();
+        s.origin.model = Some("agy-demo".into());
+        s.origin.effort = Some("medium".into());
+        let id = s.origin.id;
+        sync(&store, s.clone()).await.unwrap();
+        sync(&store, s).await.unwrap();
+        assert_eq!(
+            store
+                .get_mission(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model_effort
+                .as_deref(),
+            Some("medium")
+        );
     }
 }

@@ -1101,6 +1101,7 @@ impl NativeGrokObserver {
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
         if self.stream.antigravity.is_some()
+            && self.stream.error.is_none()
             && (self.stream.session_id.is_none()
                 || self.session_persisted != self.stream.session_id)
         {
@@ -1809,6 +1810,7 @@ async fn continue_inner(
     };
     let plan = if mission.backend == "antigravity" {
         RemoteHarnessPlan::Antigravity {
+            effort: mission.model_effort.clone(),
             model: mission.model_override.clone(),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
@@ -1943,6 +1945,46 @@ mod tests {
         resumed.feed("{\"event\":\"init\",\"conversation_id\":\"wrong\"}\n");
         assert!(resumed.error.is_some());
         assert_ne!(resumed.session_id.as_deref(), Some("wrong"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_startup_error_survives_remote_verdict_without_identity() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "agy-startup")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("startup"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job_id = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job_id)
+            .await
+            .unwrap();
+        observer.streaming = LogStreaming::Supported;
+        observer.stream.feed(&format!("{}\n", serde_json::json!({"event":"result","result":{"conversation_id":"","status":"ERROR","error":"agy-demo requires --effort"}})));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission.id,"state":"failed","exit_code":1,"created_at":"2026-10-06T06:52:05Z"})).unwrap();
+        let verdict = observer.verdict(&status, "old-agent").await;
+        assert!(!verdict.success);
+        assert!(verdict.content.contains("agy-demo requires --effort"));
+        assert!(!verdict
+            .content
+            .contains("identity was not durably persisted"));
     }
 
     const SPARK_STREAM: &str =

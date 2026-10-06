@@ -8861,6 +8861,7 @@ fn normalize_model_effort(raw: &str) -> Option<String> {
 fn normalize_model_effort_for_backend(backend: Option<&str>, raw: &str) -> Option<String> {
     let normalized = normalize_model_effort(raw)?;
     match (backend, normalized.as_str()) {
+        (Some("antigravity"), "low" | "medium" | "high") => Some(normalized),
         (Some("claudecode"), "low" | "medium" | "high" | "xhigh" | "max") => Some(normalized),
         // Codex app-server accepts the GPT reasoning-effort values and passes
         // them through as `reasoningEffort`.
@@ -8871,6 +8872,7 @@ fn normalize_model_effort_for_backend(backend: Option<&str>, raw: &str) -> Optio
 
 fn supported_model_efforts_for_backend(backend: Option<&str>) -> &'static str {
     match backend {
+        Some("antigravity") => "low, medium, high",
         Some("claudecode") => "low, medium, high, xhigh, max",
         Some("codex") => "low, medium, high, xhigh, max, ultra",
         _ => "none",
@@ -11654,7 +11656,10 @@ pub(super) async fn create_mission_inner(
     }
 
     // Model effort is supported for Codex and Claude Code missions.
-    if !matches!(backend.as_deref(), Some("codex") | Some("claudecode")) {
+    if !matches!(
+        backend.as_deref(),
+        Some("codex") | Some("claudecode") | Some("antigravity")
+    ) {
         model_effort = None;
     } else if let Some(value) = model_effort.as_ref() {
         model_effort = normalize_model_effort_for_backend(backend.as_deref(), value);
@@ -11964,6 +11969,9 @@ pub(super) async fn create_mission_inner(
     {
         *effort = model_effort.clone();
         *fast_mode = req.fast_mode;
+    }
+    if let Some(RemoteHarnessPlan::Antigravity { effort, .. }) = remote_plan.as_mut() {
+        *effort = model_effort.clone();
     }
     if let Some(node_id) = remote_node_id.as_deref() {
         if remote_dispatch_is_scheduled_for_future(
@@ -12838,6 +12846,7 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
     Antigravity {
+        effort: Option<String>,
         model: Option<String>,
         prompt: String,
         resume_session_id: Option<String>,
@@ -12941,7 +12950,7 @@ pub(crate) fn plan_remote_harness(
             resume_session_id: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
-        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { model, prompt, resume_session_id: None }),
+        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { effort: None, model, prompt, resume_session_id: None }),
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
             // Claude Code expects bare model ids.
@@ -13175,12 +13184,17 @@ pub(crate) fn remote_execution_for_plan(
             label,
         ),
         RemoteHarnessPlan::Antigravity {
+            effort,
             model,
             prompt,
             resume_session_id,
         } => {
-            let args =
-                crate::antigravity::args(model.as_deref(), resume_session_id.as_deref(), prompt);
+            let args = crate::antigravity::args_with_effort(
+                model.as_deref(),
+                effort.as_deref(),
+                resume_session_id.as_deref(),
+                prompt,
+            );
             RemoteExecution {
                 managed_auth: vec!["antigravity".into()],
                 command: format!(
@@ -16511,7 +16525,10 @@ pub async fn update_mission_settings(
     if backend_changed && fast_mode.is_none() {
         fast_mode = Some(false);
     }
-    if !matches!(effective_backend.as_str(), "codex" | "claudecode") {
+    if !matches!(
+        effective_backend.as_str(),
+        "codex" | "claudecode" | "antigravity"
+    ) {
         model_effort = Some(None);
     }
 

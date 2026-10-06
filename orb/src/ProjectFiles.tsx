@@ -68,7 +68,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, missionParent, missionTreeRows, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionTreeRows, archiveOnlyRows, type NestedMission } from "./missionTree";
 
 /** Sidebar section listing the core backend's projects with their missions
  * and hosted files. Replaces the demo projects when connected. */
@@ -839,7 +839,7 @@ export function LiveProjectsSection(p: {
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
   };
   const changeArchiveState = async (mission: Mission, restore: boolean) => {
-    if (archiving.has(mission.id)) return;
+    if (archiving.has(mission.id)) return false;
     const id = mission.id, previousStatus = mission.status, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
     archiving.set(id, status); missionRevision++;
@@ -868,18 +868,37 @@ export function LiveProjectsSection(p: {
           }
         }
       }
+      return true;
     } catch (e) {
       if (currentConnection(version)) {
         updateStatus(previousStatus);
         setActionError(e instanceof Error ? e.message : String(e));
       }
+      return false;
     } finally { archiving.delete(id); missionRevision++; }
   };
   const archiveConversation = (mission: Mission) => changeArchiveState(mission, false);
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
+  const archiveSelection = async (id: string) => {
+    if (batchBusy()) return;
+    const ids = [...selectedFor(id)], version = connectionVersion();
+    const failures:string[]=[];
+    setBatchBusy(true);
+    try {
+      for (const selected of ids) {
+        if (!currentConnection(version)) break;
+        const row = Object.values(missions).flat().find(m => m.id === selected) ?? archivedMissions().find(m => m.id === selected);
+        if (!row || isArchived(row)) continue;
+        if (RUNNING.has(row.status)) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); continue; }
+        if (!await archiveConversation(row)) failures.push(`${selected.slice(0,8)}: ${actionError() ?? "archive failed"}`);
+      }
+      if (currentConnection(version) && failures.length) setActionError(failures.join("; "));
+    } finally { setBatchBusy(false); }
+  };
   /** Fork the clicked mission without changing the currently open conversation. */
   const missionMenuItems = (mission: Mission, x: number, y: number): MenuEntry[] => selectedFor(mission.id).length > 1 ? [
     {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
+    {kind: "item", label: `Archive ${selectedFor(mission.id).length} conversations`, icon: Ic.ArchiveIcon, onClick: () => void archiveSelection(mission.id)},
     {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
@@ -1092,7 +1111,9 @@ export function LiveProjectsSection(p: {
   const archiveNodes = (): Node[] => {
     const rows = new Map<string, Mission>();
     for (const mission of archivedMissions()) rows.set(mission.id, mission);
-    const nodes = [...rows.values()].filter(isArchived).sort((a,b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
+    // Archived ancestors already shown around visible children have one row.
+    const inMain = Object.keys(missions).flatMap(slug => visibleMissions(slug));
+    const nodes = archiveOnlyRows([...rows.values()], inMain).sort((a,b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
       .map(m => missionNode(m.project ?? "", { mission: m, children: [] }));
     for (const project of projects()) {
       const job = controllers[project.slug]?.job;
