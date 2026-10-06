@@ -5109,6 +5109,29 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
                     }
                 }
             }),
+        )
+        .route(
+            "/heartbeat",
+            axum::routing::get({
+                let node_id = id.to_string();
+                move || {
+                    let node_id = node_id.clone();
+                    async move {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "node_id": node_id,
+                                "online": true,
+                                "capacity_total": 1,
+                                "capacity_available": 1,
+                                "active_leases": 0,
+                                "version": "test",
+                                "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+                            })),
+                        )
+                    }
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let node = crate::remote_node::RemoteNodeConfig {
@@ -6468,7 +6491,10 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     let detail = refused.text().await.unwrap();
     assert!(detail.starts_with("REMOTE_AUTH_REQUIRED: "), "{detail}");
-    assert!(detail.contains("managed-auth"), "{detail}");
+    assert!(
+        detail.contains("managed-auth") || detail.contains("managed grok auth"),
+        "{detail}"
+    );
     let caps = remote_launch_capabilities();
     assert!(caps.typed && caps.raw_command && caps.proxy_url_configured);
     for harness in ["claudecode", "opencode", "grok", "codex", "antigravity"] {
@@ -6580,7 +6606,7 @@ async fn native_grok_auto_track_continuation(
         "native-grok",
         serde_json::from_value(json!({
             "node_id":"native-grok", "online":true, "capacity_total":1, "capacity_available":1,
-            "active_leases":0, "version":"test", "managed_auth":["grok"]
+            "active_leases":0, "version":"test", "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION, "managed_auth":["grok"]
         }))
         .unwrap(),
     );
@@ -9842,7 +9868,7 @@ async fn continuation_remote_node_terminal_receipt_settles_execution() {
         "scheduled-native",
         serde_json::from_value(json!({
             "node_id":"scheduled-native", "online":true, "capacity_total":1, "capacity_available":1,
-            "active_leases":0, "version":"test", "managed_auth":["grok"]
+            "active_leases":0, "version":"test", "protocol_version": crate::remote_node::protocol::NODE_PROTOCOL_VERSION, "managed_auth":["grok"]
         }))
         .unwrap(),
     );
