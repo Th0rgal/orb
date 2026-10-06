@@ -315,3 +315,49 @@ it('refreshes a missing cached binding before deciding it belongs to another com
     host.__TAURI_INTERNALS__=previousNative;host.__TAURI__=previousTauri;
   }
 });
+
+it('does not mark a local run settled when native recovery is blocked by a running workspace process', async () => {
+  vi.resetModules();
+  const host = window as any;
+  const previousNative = host.__TAURI_INTERNALS__, previousTauri = host.__TAURI__;
+  const binding = {harness:'antigravity',bin:'/bin/agy',cwd:'/work',sessionId:'ddd67091'};
+  let canRecover = false;
+  host.__TAURI__ = {core:{Channel:class {onmessage=(_value:any)=>{};}}};
+  host.__TAURI_INTERNALS__ = {invoke: vi.fn(async (cmd:string, args:any) => {
+    if (cmd === 'local_bindings_subscribe') { args.onEvent.onmessage({revision:1,bindings:{'ctrl-g':binding}}); return 1; }
+    if (cmd === 'local_agents_poll') throw new Error('no local run');
+    if (cmd === 'local_run_reconcile') {
+      if (!canRecover) throw new Error('An agent process may still be using this workspace. Stop it before retrying.');
+      return {};
+    }
+  })};
+  try {
+    const {restoreLocalBindings,reconcileLocalRun,localRunKnown,localRunActive,recordLocalFailure,localFailure} = await import('../src/localAgents');
+    await restoreLocalBindings();
+    recordLocalFailure('ctrl-g', 'Antigravity result: ERROR');
+    expect(localFailure('ctrl-g')).toBe('Antigravity result: ERROR');
+
+    await reconcileLocalRun('ctrl-g');
+    expect(localRunKnown('ctrl-g')).toBe(false);
+    expect(localRunActive('ctrl-g')).toBe(false);
+
+    let refreshed = 0;
+    const onRefresh = () => { refreshed++; };
+    window.addEventListener('orb:refresh', onRefresh);
+    try {
+      canRecover = true;
+      await reconcileLocalRun('ctrl-g');
+      expect(localRunKnown('ctrl-g')).toBe(true);
+      expect(localRunActive('ctrl-g')).toBe(false);
+      expect(localFailure('ctrl-g')).toBeUndefined();
+      expect(refreshed).toBe(1);
+    } finally {
+      window.removeEventListener('orb:refresh', onRefresh);
+    }
+  } finally {
+    window.dispatchEvent(new Event('pagehide'));
+    host.__TAURI_INTERNALS__=previousNative;host.__TAURI__=previousTauri;
+    localStorage.removeItem('orb.localFailures');
+  }
+});
+

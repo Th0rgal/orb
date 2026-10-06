@@ -259,9 +259,13 @@ export function LiveProjectsSection(p: {
   const visibleMissions = (slug: string) => {
     const rows = missions[slug] ?? [];
     const current = currentMission();
-    // A paginated project list may not contain an older open conversation.
-    const withCurrent = current?.project === slug && !isArchived(current) && !rows.some(m => m.id === current.id)
-      ? [current, ...rows] : rows;
+    // A paginated project list may not contain an older open conversation, and
+    // the open conversation's live status updates ahead of the project poll.
+    const withCurrent = current?.project === slug && !isArchived(current)
+      ? (rows.some(m => m.id === current.id)
+        ? rows.map(m => m.id === current.id ? { ...m, ...current, status: archiving.get(m.id) ?? current.status } : m)
+        : [current, ...rows])
+      : rows;
     const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !withCurrent.some(r => r.id === m.id));
     return missionTreeRows([...withCurrent, ...extraArchived], m => !isArchived(m));
   };
@@ -889,7 +893,7 @@ export function LiveProjectsSection(p: {
     setActionError(null);
     const updateStatus = (statusFor: (m: Mission) => string) => batch(() => {
       for (const slug of Object.keys(missions)) {
-        setMissions(slug, m => targetIds.has(m.id), "status", m => statusFor(m));
+        setMissions(slug, m => targetIds.has(m.id), m => ({ ...m, status: statusFor(m) }));
       }
       setArchivedMissions(rows => {
         const rest = rows.filter(m => !targetIds.has(m.id));
