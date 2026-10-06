@@ -230,12 +230,45 @@ it('stages context on the committed transfer destination rather than a stale rem
  expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[2]).toBe('new-node');
 });
 
-it('rejects generated empty-output status instead of claiming an answer',async()=>{
+it('rejects generated empty-output or remote cancellation status notes instead of claiming an answer',async()=>{
  const {getMissionEvents}=await import('../src/stream');
- vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:"Remote opencode job 00000000-0000-0000-0000-000000000000 on node 'old-agent' finished without assistant text (stop reason: unknown).",sequence:1,id:1,timestamp:''}]);
+ vi.mocked(getMissionEvents).mockResolvedValue([
+  {event_type:'assistant_message',content:"Remote opencode job 00000000-0000-0000-0000-000000000000 on node 'old-agent' finished without assistant text (stop reason: unknown).",sequence:1,id:1,timestamp:''},
+  {event_type:'assistant_message',content:"Remote node 'old-agent' job e7c48aba-3101-4c3b-b7ad-1e17dab704dd reached state 'cancelled' (exit None) after the mission left Active (paused); the mission status is preserved. error: cancelled",sequence:2,id:2,timestamp:''},
+ ]);
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='empty-status-parent'?'active':'completed',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'empty-status-child'});
  await expect(askBtwAgent('empty-status-parent','Q','latest',[],new AbortController().signal,()=>{})).rejects.toThrow('No response was captured');
+});
+
+it('creates a replacement side mission instead of messaging a failed or superseded-track side mission',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ const {sideQuestionKey}=await import('../src/sideQuestionStorage');
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Fresh answer',sequence:1,id:1,timestamp:''}]);
+ localStorage.setItem('agent:'+sideQuestionKey('dead-parent'),JSON.stringify({id:'dead-side',question:'First',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0,contextVersion:2,conversationCursor:{sequence:10,visibleHash:'hash'},placement:JSON.stringify([false,'old-agent','/work','ws-1'])}));
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='dead-parent'?'active':id==='dead-side'?'failed':'awaiting_user',
+  track:id==='dead-side'?'mission-old-side':undefined,
+  remote_node_id:'old-agent',
+  working_directory:'/work',
+  workspace_id:'ws-1',
+  history:[],
+  tags:[],
+  title:'Main',
+  created_at:'',
+  updated_at:'',
+ } as any));
+ vi.mocked(api).mockResolvedValueOnce({id:'fresh-side'});
+ const history=[{question:'First',answer:'Earlier answer'}];
+ const receive=vi.fn();
+ await askBtwAgent('dead-parent','Follow up','delta',history as any,new AbortController().signal,receive);
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+ expect(api).toHaveBeenCalledWith('/api/control/missions/dead-parent/btw/agent',expect.anything());
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(history);
+ expect(btwSession('dead-parent')?.id).toBe('fresh-side');
 });
 
 it('replaces an explicitly refused side session only through the btw route and rearchives side history',async()=>{

@@ -65,16 +65,16 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
     // Retain the source list for older backends and recovery. Only mark this backend imported.
     localStorage.setItem(importKey(), "1"); setLegacy([]);
   };
-  return <section>
-    <div class="page-head"><h3>SSH address book</h3><div>
+  return <section class="ssh-address-book">
+    <div class="ssh-address-head"><h3>SSH address book</h3><div class="ssh-address-actions">
       <button class="s-btn" disabled={busy()} onClick={() => void refresh()}>Refresh</button>
       <button class="s-btn" disabled={!ready() || busy()} onClick={() => start()}>Add address</button>
     </div></div>
-    <p class="s-lead">Shared with devices connected to this backend. Saving an address does not register an execution node.</p>
+    <p class="s-lead">Saved connections shared across your devices.</p>
     <Show when={error()}><ErrorNotice error={error()} /></Show>
     <Show when={ready() && legacy().length}><button class="s-btn" onClick={() => setImporting(true)}>Import {legacy().length} local addresses…</button></Show>
     <div class="s-card"><For each={hosts()}>{host => <div class="s-row"><div class="s-row-text"><div class="s-row-title">{host.name}</div><div class="s-row-desc">{host.user}@{host.host}:{host.port}{host.note ? ` · ${host.note}` : ""}</div></div><button class="s-btn" disabled={!ready() || busy()} onClick={() => start(host)}>Edit</button></div>}</For>
-    <Show when={ready() && !hosts().length}><p class="s-lead">No SSH addresses yet.</p></Show></div>
+    <Show when={ready() && !hosts().length}><p class="ssh-address-empty">No SSH addresses yet.</p></Show></div>
     <Show when={draft()}>{d => <Dialog title={editing() ? "Edit SSH address" : "Add SSH address"} busy={busy()} onClose={() => setDraft(undefined)} footer={<>
       <Show when={editing()}><DialogButton disabled={busy() || !ready()} onClick={() => { if (confirmDelete()) void mutate(() => deleteSshHost(editing()!)); else setConfirmDelete(true); }}>{confirmDelete() ? "Confirm removal" : "Remove"}</DialogButton></Show>
       <DialogButton disabled={busy()} onClick={() => setDraft(undefined)}>Cancel</DialogButton>

@@ -6674,11 +6674,12 @@ fn translate_google_json_to_openai(
         .and_then(|v| v.get("parts"))
         .and_then(|v| v.as_array())
     {
-        for (idx, part) in parts.iter().enumerate() {
+        for part in parts.iter() {
             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                 content.push_str(text);
             }
             if let Some(fc) = part.get("functionCall") {
+                let tool_idx = tool_calls.len();
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                 let args = fc
                     .get("args")
@@ -6686,7 +6687,7 @@ fn translate_google_json_to_openai(
                     .unwrap_or_else(|| serde_json::json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(serde_json::json!({
-                    "id": format!("call_{}", idx),
+                    "id": format!("call_{}", tool_idx),
                     "type": "function",
                     "function": { "name": name, "arguments": args_str }
                 }));
@@ -6765,7 +6766,7 @@ fn transform_google_sse_to_openai(
             Vec::<u8>::new(),
             false, // sent role chunk
             false, // emitted terminal chunk
-            false, // emitted tool call
+            0u32,  // next_tool_idx across the entire stream
             stream_id,
             model_id,
             created,
@@ -6776,7 +6777,7 @@ fn transform_google_sse_to_openai(
             mut buf,
             mut sent_role,
             mut emitted_done,
-            mut emitted_tool_call,
+            mut next_tool_idx,
             stream_id,
             model_id,
             created,
@@ -6803,7 +6804,7 @@ fn transform_google_sse_to_openai(
                                     buf,
                                     sent_role,
                                     emitted_done,
-                                    emitted_tool_call,
+                                    next_tool_idx,
                                     stream_id,
                                     model_id,
                                     created,
@@ -6862,7 +6863,7 @@ fn transform_google_sse_to_openai(
                         .and_then(|v| v.get("parts"))
                         .and_then(|v| v.as_array())
                     {
-                        for (idx, part) in parts.iter().enumerate() {
+                        for part in parts {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 if !text.is_empty() {
                                     let chunk = serde_json::json!({
@@ -6876,6 +6877,8 @@ fn transform_google_sse_to_openai(
                                 }
                             }
                             if let Some(fc) = part.get("functionCall") {
+                                let tool_idx = next_tool_idx;
+                                next_tool_idx += 1;
                                 let name =
                                     fc.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                                 let args = fc
@@ -6893,8 +6896,8 @@ fn transform_google_sse_to_openai(
                                         "index": 0,
                                         "delta": {
                                             "tool_calls": [{
-                                                "index": idx,
-                                                "id": format!("call_{}", idx),
+                                                "index": tool_idx,
+                                                "id": format!("call_{}", tool_idx),
                                                 "type": "function",
                                                 "function": { "name": name, "arguments": args_str }
                                             }]
@@ -6903,14 +6906,13 @@ fn transform_google_sse_to_openai(
                                     }],
                                 });
                                 chunks.push(format!("data: {}\n\n", chunk));
-                                emitted_tool_call = true;
                             }
                         }
                     }
 
                     if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
                         let mut finish_reason = finish_reason_from_google(Some(fr)).to_string();
-                        if emitted_tool_call && finish_reason == "stop" {
+                        if next_tool_idx > 0 && finish_reason == "stop" {
                             finish_reason = "tool_calls".to_string();
                         }
                         let mut finish_chunk = serde_json::json!({
@@ -6947,7 +6949,7 @@ fn transform_google_sse_to_openai(
                             buf,
                             sent_role,
                             emitted_done,
-                            emitted_tool_call,
+                            next_tool_idx,
                             stream_id,
                             model_id,
                             created,
@@ -6966,7 +6968,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 emitted_done,
-                                emitted_tool_call,
+                                next_tool_idx,
                                 stream_id,
                                 model_id,
                                 created,
@@ -6985,7 +6987,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 true,
-                                emitted_tool_call,
+                                next_tool_idx,
                                 stream_id,
                                 model_id,
                                 created,
@@ -8253,6 +8255,64 @@ mod tests {
             .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
             .collect::<String>();
 
+        assert!(text.contains("\"finish_reason\":\"tool_calls\""));
+    }
+
+    #[test]
+    fn google_stream_assigns_distinct_indices_and_ids_across_multiple_function_call_chunks() {
+        let chunk1 = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "name": "terminal",
+                                "args": { "command": "echo first" }
+                            }
+                        }]
+                    }
+                }]
+            }
+        });
+        let chunk2 = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "name": "terminal",
+                                "args": { "command": "echo second" }
+                            }
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        });
+        let sse_bytes_1 = Bytes::from(format!("data: {}\n\n", chunk1));
+        let sse_bytes_2 = Bytes::from(format!("data: {}\n\n", chunk2));
+        let input = futures::stream::iter(vec![Ok(sse_bytes_1), Ok(sse_bytes_2)]);
+
+        let out = futures::executor::block_on(async move {
+            transform_google_sse_to_openai(
+                input,
+                "chatcmpl-test".to_string(),
+                1,
+                "gemini-2.5-pro".to_string(),
+            )
+            .collect::<Vec<_>>()
+            .await
+        });
+
+        let text = out
+            .into_iter()
+            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        assert!(text.contains("\"index\":0"));
+        assert!(text.contains("\"id\":\"call_0\""));
+        assert!(text.contains("\"index\":1"));
+        assert!(text.contains("\"id\":\"call_1\""));
         assert!(text.contains("\"finish_reason\":\"tool_calls\""));
     }
 

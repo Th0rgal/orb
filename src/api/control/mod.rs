@@ -5546,10 +5546,20 @@ pub async fn post_message(
             .await?;
             // Idle continuations retain their immediate-delivery behavior.
             // A racing dispatch or temporary failure leaves the durable entry
-            // queued for the same-node retry loop.
+            // queued for the same-node retry loop; permanent continuation
+            // refusals withdraw the unsubmitted entry and surface immediately.
             if !placement.live {
-                let _ = remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
-                    .await;
+                if let Err((status, error)) =
+                    remote_grok::deliver_queued(&state, &control, &user.id, mid, placement, id)
+                        .await
+                {
+                    if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT)
+                        || error.starts_with(remote_grok::REMOTE_AUTH_REQUIRED)
+                    {
+                        let _ = remote_queue::finish(&state.projects, &user.id, id, "cancelled");
+                        return Err((status, error));
+                    }
+                }
             }
             let queued =
                 remote_queue::is_waiting(&state.projects, &user.id, id).map_err(internal_error)?;
@@ -12153,6 +12163,28 @@ pub(super) async fn create_mission_inner(
         ) {
             interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
             return Err(internal_error(error));
+        }
+    } else if let Some(prior_id) = req.supersedes_mission_id {
+        if let Some(prior_receipt) = fork::side_launch_receipt(&state.config.working_dir, prior_id)
+            .map_err(internal_error)?
+        {
+            if let Err(error) = fork::record_side_launch(
+                &state.config.working_dir,
+                mission.id,
+                req.idempotency_key.as_deref().unwrap_or(&prior_receipt.key),
+                &prior_receipt.fingerprint,
+            )
+            .and_then(|()| {
+                if prior_receipt.accepted {
+                    fork::accept_side_launch(&state.config.working_dir, mission.id)
+                } else {
+                    Ok(())
+                }
+            }) {
+                interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable")
+                    .await;
+                return Err(internal_error(error));
+            }
         }
     }
 

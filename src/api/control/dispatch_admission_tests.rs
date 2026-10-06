@@ -11458,3 +11458,128 @@ async fn btw_creation_never_coalesces_an_untrusted_project_lease() {
     assert_eq!(error.0, StatusCode::BAD_REQUEST);
     assert!(error.1.contains("Unknown backend"));
 }
+
+#[tokio::test]
+async fn superseding_side_mission_propagates_side_launch_receipt() {
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let parent = h.writer(MissionStatus::Active, None).await;
+    let side = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Side · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            side.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{}", parent.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        side.id,
+        &format!("btw:{}:orig", parent.id),
+        "fp-1",
+    )
+    .unwrap();
+    super::fork::accept_side_launch(&h.state.config.working_dir, side.id).unwrap();
+
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Side · btw (recovered)",
+        "backend": "claudecode",
+        "placement": "client",
+        "tags": [format!("btw-parent:{}", parent.id)],
+        "supersedes_mission_id": side.id,
+    }))
+    .unwrap();
+    let created = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let replacement_id = Uuid::parse_str(created.1 .0["id"].as_str().unwrap()).unwrap();
+    let receipt = super::fork::side_launch_receipt(&h.state.config.working_dir, replacement_id)
+        .unwrap()
+        .expect("replacement side mission must inherit side launch receipt");
+    assert!(receipt.accepted);
+}
+
+#[tokio::test]
+async fn post_message_to_superseded_remote_side_mission_returns_conflict_and_leaves_no_waiting_queue_entry(
+) {
+    let h = Harness::new().await;
+    let side = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Side · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let replacement_id = Uuid::new_v4();
+    h.control
+        .mission_store
+        .update_mission_project(
+            side.id,
+            MissionProjectPatch {
+                tags: Some(vec![
+                    "remote_node:old-agent".into(),
+                    format!("superseded_by:{replacement_id}"),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_mission_requires_local_disk(side.id, false)
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(side.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+
+    let req: super::ControlMessageRequest = serde_json::from_value(json!({
+        "content": "Follow-up question",
+        "target_mission_id": side.id,
+        "client_message_id": Uuid::new_v4(),
+    }))
+    .unwrap();
+    let err = super::post_message(State(h.state.clone()), Extension(h.user.clone()), Json(req))
+        .await
+        .unwrap_err();
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert!(err.1.starts_with("REMOTE_RESUME_REQUIRES_REPLACEMENT:"));
+    assert!(remote_queue::waiting(&h.state.projects, Some(&h.user.id))
+        .unwrap()
+        .is_empty());
+}

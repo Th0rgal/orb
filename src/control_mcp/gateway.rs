@@ -37,15 +37,39 @@ fn key(state: &AppState) -> Result<String, String> {
     ))
 }
 
+/// How long after expiry a still-live mission may renew its session. A remote
+/// job carries the credential minted at dispatch and may wait in a node queue
+/// for hours before its harness first contacts Core.
+pub const RENEWAL_GRACE_SECS: i64 = 24 * 3600;
+
 pub fn verify(state: &AppState, token: &str) -> Result<Principal, String> {
+    verify_with(state, token, false)
+}
+
+/// Accepts a signed, unrevoked session up to [`RENEWAL_GRACE_SECS`] after
+/// expiry. Only `/api/mcp/renew` uses this, and renewal also requires the
+/// bound mission to be live.
+pub fn verify_for_renewal(state: &AppState, token: &str) -> Result<Principal, String> {
+    verify_with(state, token, true)
+}
+
+fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal, String> {
     let token = token.strip_prefix("mcp1.").ok_or("Invalid MCP token")?;
+    let mut validation = jsonwebtoken::Validation::default();
+    if renewal {
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+    }
     let principal = jsonwebtoken::decode::<Principal>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(key(state)?.as_bytes()),
-        &jsonwebtoken::Validation::default(),
+        &validation,
     )
     .map(|v| v.claims)
     .map_err(|_| "Invalid or expired MCP session")?;
+    if renewal && (principal.exp as i64) + RENEWAL_GRACE_SECS < chrono::Utc::now().timestamp() {
+        return Err("Invalid or expired MCP session".into());
+    }
     let conn = state
         .projects
         .connection
@@ -856,7 +880,7 @@ async fn run_accepted(
     })
 }
 
-fn issue_session(state: &AppState, p: &Principal) -> Result<Value, String> {
+pub(crate) fn issue_session(state: &AppState, p: &Principal) -> Result<Value, String> {
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         p,

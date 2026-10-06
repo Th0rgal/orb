@@ -141,6 +141,15 @@ pub(super) async fn enqueue(
             "This remote harness cannot continue its session".into(),
         ));
     }
+    if crate::api::mission_horizon::superseded_by(&mission).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "{}: mission {mid} has been superseded",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            ),
+        ));
+    }
     if !placement.live
         && mission
             .session_id
@@ -336,6 +345,11 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
                 )
                 .await
                 {
+                    if error.starts_with(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT) {
+                        let _ = finish(&state.projects, &entry.user_id, entry.message.id, "cancelled");
+                        tracing::info!(mission_id=%mid,%error,"Withdrew unresumable remote queue entry");
+                        return;
+                    }
                     let detail = (!error.contains(remote_grok::REMOTE_JOB_STILL_RUNNING))
                         .then_some(error.as_str());
                     let _ = report_error(&state.projects, &entry.user_id, entry.message.id, detail);

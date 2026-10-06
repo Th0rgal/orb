@@ -2631,3 +2631,12 @@ select.orb-select-native:disabled { cursor: default; }
 .next-reminder { display:flex; gap:8px; color:var(--fg-3); font-size:12px; padding:10px; }
 
 .agent-progress-meta { color: var(--fg-3); font-size: 11px; line-height: 1.6; padding-top: 3px; overflow-wrap: anywhere; }
+
+/* Shared SSH connections use the same compact spacing as machine rows. */
+.ssh-address-book { margin: 22px 0; }
+.ssh-address-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 8px; }
+.ssh-address-head h3 { margin: 0; font-size: 13px; font-weight: 500; color: var(--fg-2); }
+.ssh-address-actions { display: flex; align-items: center; gap: 8px; }
+.ssh-address-book > .s-lead { margin-bottom: 12px; font-size: 12px; color: var(--fg-3); }
+.ssh-address-empty { margin: 0; padding: 16px 14px; font-size: 13px; line-height: 18px; color: var(--fg-3); }
+.ssh-address-book .s-row-desc { overflow-wrap: anywhere; }

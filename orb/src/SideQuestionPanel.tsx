@@ -1,6 +1,6 @@
 import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
-import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts} from "./btwAgent";
+import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
 import { Composer } from "./App";
@@ -58,18 +58,22 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let stale=false;onCleanup(()=>{stale=true;});
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
-  setHistory((saved?.history??[]).map(row=>({...row,id:row.id??crypto.randomUUID()})));setBusy(false);setOpen(saved?.open??false);
+  const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
+  setHistory(cleanHistory);setBusy(false);setOpen(saved?.open??false);
   setQuestion(saved?.pending?.question??'');
-  setAnswer(saved?.pending?.answer??'');
+  setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
   setError(saved?.pending ? saved.pending.error || 'Side question interrupted. Retry to request a complete answer.' : '');
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
   setLoadedKey(current);
   const agent=btwSession(p.mission);
-  const lastAnswer=saved?.history.at(-1)?.answer;
+  const lastSaved=saved?.history.at(-1);
+  const lastAnswer=lastSaved?.answer;
   const emptyReply=lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
-  if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(saved!.history.at(-1)!.question);setAnswer('');}
-  if(agent&&(agent.active||emptyReply||saved?.pending)){
+  const syntheticReply=lastAnswer!==undefined&&isSyntheticRemoteAssistantNote(lastAnswer)&&!saved?.pending;
+  if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');}
+  if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
+  if(agent&&(agent.active||emptyReply)){
    const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
    void watchBtw(p.mission,controller.signal,event=>{
     if(stale||controller.signal.aborted)return;
@@ -77,7 +81,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(event.type==='status')setRunStatus(event.text);
     if(event.type==='snapshot')setAnswer(event.text);
     if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
-   }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(String(e));setBusy(false);}});
+   }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
   }
   if(saved?.open)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
   });

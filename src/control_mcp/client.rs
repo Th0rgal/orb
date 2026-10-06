@@ -98,22 +98,26 @@ impl Client {
                 .send()
                 .await
                 .map_err(|_| "Core is unavailable")?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Core refused scoped session ({})",
-                    response.status()
-                ));
-            }
-            let caps: Value = response
-                .json()
-                .await
-                .map_err(|_| "Invalid capabilities response")?;
-            let expiry = caps["limits"]["session_expires_at"]
-                .as_i64()
-                .ok_or("Missing session expiry")?;
-            *session = Some((credential.clone(), expiry));
-            if expiry > chrono::Utc::now().timestamp() + 120 {
-                return Ok(credential);
+            // A queued remote job may start after its credential expired;
+            // renewal below still accepts it while the mission is live.
+            if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Core refused scoped session ({})",
+                        response.status()
+                    ));
+                }
+                let caps: Value = response
+                    .json()
+                    .await
+                    .map_err(|_| "Invalid capabilities response")?;
+                let expiry = caps["limits"]["session_expires_at"]
+                    .as_i64()
+                    .ok_or("Missing session expiry")?;
+                *session = Some((credential.clone(), expiry));
+                if expiry > chrono::Utc::now().timestamp() + 120 {
+                    return Ok(credential);
+                }
             }
         }
         let scoped = credential.starts_with("mcp1.");

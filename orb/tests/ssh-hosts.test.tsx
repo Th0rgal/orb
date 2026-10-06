@@ -61,4 +61,14 @@ describe("shared SSH address book", () => {
     expect((screen.getByText("Edit") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByText("Add address") as HTMLButtonElement).disabled).toBe(true);
   });
+  it("renders dedicated SSH address book header, action group, and padded empty state", async () => {
+    mocks.api.mockResolvedValue([]);
+    const { container } = render(() => <SshAddressBook onUnsupported={() => {}} />);
+    const empty = await screen.findByText("No SSH addresses yet.");
+    expect(empty.className).toBe("ssh-address-empty");
+    expect(container.querySelector(".ssh-address-book")).not.toBeNull();
+    expect(container.querySelector(".ssh-address-head h3")?.textContent).toBe("SSH address book");
+    expect(container.querySelector(".ssh-address-actions")?.querySelectorAll("button")).toHaveLength(2);
+    expect(container.querySelector(".ssh-address-book .page-head")).toBeNull();
+  });
 });

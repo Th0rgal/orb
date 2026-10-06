@@ -361,7 +361,12 @@ pub async fn require_auth(
             )
                 .into_response();
         }
-        return match crate::control_mcp::gateway::verify(&state, token) {
+        let verified = if req.uri().path() == "/api/mcp/renew" {
+            crate::control_mcp::gateway::verify_for_renewal(&state, token)
+        } else {
+            crate::control_mcp::gateway::verify(&state, token)
+        };
+        return match verified {
             Ok(principal) => {
                 req.extensions_mut().insert(principal);
                 next.run(req).await
