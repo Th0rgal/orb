@@ -40,8 +40,7 @@ header.nextra-navbar .nextra-navbar-blur {
 .orb-nav-logo-img {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
 }
 
 .orb-nav-title {
@@ -382,12 +381,12 @@ article div[class*="x:dark:bg-blue-"] {
 .orb-hero-banner {
   clear: both;
   width: 100%;
-  display: grid;
-  grid-template-columns: 1.35fr 0.75fr;
-  gap: 28px;
-  align-items: center;
-  padding: 8px 0 24px;
-  margin: 4px 0 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 4px 0 24px;
+  margin: 0 0 20px;
   border-bottom: 1px solid var(--orb-stroke-soft);
 }
 
@@ -467,18 +466,18 @@ article div[class*="x:dark:bg-blue-"] {
 
 .orb-hero-visual {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  margin-left: -14px;
 }
 
 .orb-shader-stage {
   position: relative;
-  width: 224px;
-  height: 224px;
+  width: 144px;
+  height: 144px;
   background: transparent;
   overflow: visible;
-  filter: drop-shadow(0 14px 32px rgba(0, 0, 0, 0.42));
+  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.38));
 }
 
 .orb-shader-fallback {
@@ -530,18 +529,9 @@ article div[class*="x:dark:bg-blue-"] {
 }
 
 @media (max-width: 860px) {
-  .orb-hero-banner {
-    grid-template-columns: 1fr;
-    padding: 12px 0 20px;
-  }
-
-  .orb-hero-visual {
-    order: -1;
-  }
-
   .orb-shader-stage {
-    width: 184px;
-    height: 184px;
+    width: 128px;
+    height: 128px;
   }
 }
 

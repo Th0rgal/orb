@@ -78,6 +78,27 @@ export function OrbHero() {
 
   return (
     <div className="orb-hero-banner">
+      <div className="orb-hero-visual" aria-hidden="true">
+        <div className="orb-shader-stage">
+          <img
+            src="/images/orb-icon.png"
+            alt="Orb App Icon"
+            className={`orb-shader-fallback ${shaderReady ? "is-hidden" : ""}`}
+          />
+          <canvas
+            ref={canvasRef}
+            width={512}
+            height={512}
+            className={`orb-shader-canvas ${shaderReady ? "is-ready" : ""}`}
+          />
+          <img
+            src="/images/orb-squircle-frame.png"
+            alt=""
+            className={`orb-shader-squircle-frame ${shaderReady ? "is-ready" : ""}`}
+          />
+        </div>
+      </div>
+
       <div className="orb-hero-copy">
         <h1 className="orb-hero-title">
           One native client for local, private-cloud, and cloud coding agents.
@@ -109,27 +130,6 @@ export function OrbHero() {
           <strong>Are you an AI?</strong> Read <a href="/llms.txt"><code>/llms.txt</code></a> or append{" "}
           <code>.md</code> to any page URL for raw Markdown.
         </p>
-      </div>
-
-      <div className="orb-hero-visual" aria-hidden="true">
-        <div className="orb-shader-stage">
-          <img
-            src="/images/orb-icon.png"
-            alt="Orb App Icon"
-            className={`orb-shader-fallback ${shaderReady ? "is-hidden" : ""}`}
-          />
-          <canvas
-            ref={canvasRef}
-            width={512}
-            height={512}
-            className={`orb-shader-canvas ${shaderReady ? "is-ready" : ""}`}
-          />
-          <img
-            src="/images/orb-squircle-frame.png"
-            alt=""
-            className={`orb-shader-squircle-frame ${shaderReady ? "is-ready" : ""}`}
-          />
-        </div>
       </div>
     </div>
   );

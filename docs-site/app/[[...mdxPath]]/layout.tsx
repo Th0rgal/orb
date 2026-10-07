@@ -8,7 +8,7 @@ function Logo() {
   return (
     <div className="orb-nav-brand">
       <img
-        src="/images/orb-icon.png"
+        src="/images/orb-mark.png"
         alt="Orb"
         width={22}
         height={22}
