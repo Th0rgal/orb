@@ -55,4 +55,29 @@ describe("literal project paths", () => {
   it("does not choose between identical paths owned by different roots", () => {
     expect(mentionedChips("@context/notes.md",[items[1],{...items[1],id:"other",project:"q"}])).toEqual([]);
   });
+
+  it("groups nested paths under their parent folder at the root and drills into subfolders", () => {
+    const nested: AttachItem[] = [
+      { id: "context:p:attachments/0ae513f9/ report.json", kind: "context", project: "p", section: "Folders", path: "attachments/0ae513f9", label: "attachments/0ae513f9/" },
+      { id: "context:p:attachments/0ae513f9/main.rs", kind: "context", project: "p", section: "Files", path: "attachments/0ae513f9/main.rs", label: "attachments/0ae513f9/main.rs" },
+      { id: "context:p:attachments/1c72d783/Cargo.toml", kind: "context", project: "p", section: "Files", path: "attachments/1c72d783/Cargo.toml", label: "attachments/1c72d783/Cargo.toml" },
+      { id: "context:p:context", kind: "context", project: "p", section: "Folders", path: "context", label: "context/" },
+      { id: "context:p:context/AGENTS.md", kind: "context", project: "p", section: "Files", path: "context/AGENTS.md", label: "context/AGENTS.md" },
+      { id: "context:p:README.md", kind: "context", project: "p", section: "Files", path: "README.md", label: "README.md" },
+    ];
+    // Root view shows only top-level folders (attachments/, context/) and top-level files (README.md).
+    expect(filterAttach(nested, "").map((i) => i.label)).toEqual(["attachments/", "context/", "README.md"]);
+    // Drilling into context/ shows its direct files.
+    expect(filterAttach(nested, "context/").map((i) => i.label)).toEqual(["context/AGENTS.md"]);
+    // Drilling into attachments/ shows its direct child folders, not nested leaf files yet.
+    expect(filterAttach(nested, "attachments/").map((i) => i.label)).toEqual([
+      "attachments/0ae513f9/",
+      "attachments/1c72d783/",
+    ]);
+    // Drilling into a specific attachment folder shows its files.
+    expect(filterAttach(nested, "attachments/0ae513f9/").map((i) => i.label)).toEqual([
+      "attachments/0ae513f9/main.rs",
+    ]);
+  });
 });
+

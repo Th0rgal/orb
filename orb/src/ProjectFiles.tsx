@@ -815,6 +815,10 @@ export function LiveProjectsSection(p: {
       }
     };
     window.addEventListener("orb:cron-changed", onCronChanged);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") pumpWarmup();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     // Mission statuses under expanded projects would otherwise freeze at
     // expand time (the flat "Sandboxed" list polls, this tree didn't).
     const stop = pollWhileVisible(() => {
@@ -833,6 +837,7 @@ export function LiveProjectsSection(p: {
     }, 10000);
     onCleanup(() => {
       stop();
+      document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("orb:cron-changed", onCronChanged);
     });
   });
@@ -860,6 +865,35 @@ export function LiveProjectsSection(p: {
         if (currentConnection(version) && !missions[slug]) setMissions(slug, []);
       });
   };
+
+  let prevActivityByProject = new Map<string, string>();
+  createEffect(on(() => p.activityMissions, (list) => {
+    if (!isConnected()) {
+      prevActivityByProject = new Map();
+      return;
+    }
+    const nextByProject = new Map<string, string[]>();
+    for (const m of list ?? []) {
+      const slug = m.project?.trim();
+      if (!slug) continue;
+      let entries = nextByProject.get(slug);
+      if (!entries) nextByProject.set(slug, entries = []);
+      entries.push(`${m.id}:${m.status}`);
+    }
+    const nextSignatures = new Map<string, string>();
+    for (const [slug, entries] of nextByProject) {
+      nextSignatures.set(slug, entries.sort().join("|"));
+    }
+    if (prevActivityByProject.size > 0) {
+      const slugs = new Set([...prevActivityByProject.keys(), ...nextSignatures.keys()]);
+      for (const slug of slugs) {
+        if (prevActivityByProject.get(slug) !== nextSignatures.get(slug) && warmed.has(slug)) {
+          void loadMissions(slug);
+        }
+      }
+    }
+    prevActivityByProject = nextSignatures;
+  }));
 
   const loadDir = (slug: string, path: string, force = false) => {
     if (!isConnected()) return Promise.resolve();

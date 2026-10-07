@@ -19,3 +19,27 @@ it('only opens context completion when matching results exist, including after a
   type('@file');
   expect(screen.getByRole('listbox', { name: 'Context' })).toBeTruthy();
 });
+
+it('shows only parent folders at the root of the + menu and drills into subfiles on click', async () => {
+  vi.mocked(loadAttachItems).mockResolvedValue([
+    { id: 'context:test:attachments/0ae513f9', kind: 'context', project: 'test', section: 'Folders', path: 'attachments/0ae513f9', label: 'attachments/0ae513f9/' },
+    { id: 'context:test:attachments/0ae513f9/main.rs', kind: 'context', project: 'test', section: 'Files', path: 'attachments/0ae513f9/main.rs', label: 'attachments/0ae513f9/main.rs' },
+    { id: 'context:test:context', kind: 'context', project: 'test', section: 'Folders', path: 'context', label: 'context/' },
+    { id: 'context:test:context/AGENTS.md', kind: 'context', project: 'test', section: 'Files', path: 'context/AGENTS.md', label: 'context/AGENTS.md' },
+  ]);
+  render(() => <Composer placeholder="Write" projectSlug="test" busy={false} onSend={() => {}} onStop={() => {}} onAttachments={() => {}} />);
+  await waitFor(() => expect(loadAttachItems).toHaveBeenCalledWith('test'));
+  fireEvent.click(screen.getByTitle('Add context'));
+  // Root shows parent folders (attachments/, context/) and no nested files.
+  await waitFor(() => expect(screen.getByText('context/')).toBeTruthy());
+  expect(screen.getByText('attachments/')).toBeTruthy();
+  expect(screen.queryByText('AGENTS.md')).toBeNull();
+  expect(screen.queryByText('context/AGENTS.md')).toBeNull();
+
+  // Clicking context/ drills into its subfiles.
+  fireEvent.click(screen.getByText('context/'));
+  expect(screen.getByText('AGENTS.md')).toBeTruthy();
+  fireEvent.click(screen.getByText('AGENTS.md'));
+  expect((screen.getByPlaceholderText('Write') as HTMLTextAreaElement).value).toBe('@context/AGENTS.md ');
+});
+

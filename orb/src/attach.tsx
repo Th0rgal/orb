@@ -33,10 +33,78 @@ export function atQuery(text: string, caret: number): { open: boolean; query: st
 
 export function filterAttach(items: AttachItem[], query: string): AttachItem[] {
   items = items.filter(item => item.kind !== "controller");
-  if (!query) return items.slice(0,100);
+  if (!query) return browseAttachItems(items, "");
   const q = query.replace(/^@/, "");
+  const prefix = folderPrefixFromQuery(items, q);
+  if (prefix !== null) return browseAttachItems(items, prefix);
   return items.filter((it) => it.label.toLowerCase().includes(q) || (it.path ?? "").toLowerCase().includes(q)).slice(0,100);
 }
+
+/** When a query is an exact folder prefix (e.g. `context/`), drill into that folder. */
+export function folderPrefixFromQuery(items: AttachItem[], query: string): string | null {
+  const raw = query.replace(/^@/, "").trim();
+  if (!raw.endsWith("/")) return null;
+  const folder = raw.replace(/\/+$/, "").toLowerCase();
+  if (!folder) return "";
+  const exists = items.some((it) => {
+    const p = (it.path ?? "").replace(/\/$/, "").toLowerCase();
+    return (it.section === "Folders" && p === folder) || p.startsWith(`${folder}/`);
+  });
+  return exists ? folder : null;
+}
+
+/**
+ * Group attachment items by direct children of `folder` ("" for root) so deep
+ * trees (like `attachments/<uuid>/<file>`) show only top-level parent folders
+ * until a folder is opened.
+ */
+export function browseAttachItems(items: AttachItem[], folder: string): AttachItem[] {
+  const clean = folder.replace(/\/+$/, "");
+  const prefix = clean ? `${clean}/` : "";
+  const prefixLower = prefix.toLowerCase();
+  const contextRows = clean ? [] : items.filter((it) => it.section === "Context");
+  const folders = new Map<string, AttachItem>();
+  const files: AttachItem[] = [];
+  for (const item of items) {
+    if (item.kind === "controller" || item.section === "Context") continue;
+    const rawPath = (item.path ?? item.label).replace(/\/$/, "");
+    if (!rawPath) continue;
+    if (prefix && !rawPath.toLowerCase().startsWith(prefixLower)) continue;
+    const rest = prefix ? rawPath.slice(prefix.length) : rawPath;
+    if (!rest) continue;
+    const slash = rest.indexOf("/");
+    if (slash >= 0) {
+      const childName = rest.slice(0, slash);
+      const childPath = `${prefix}${childName}`;
+      const key = childPath.toLowerCase();
+      if (!folders.has(key)) {
+        const exact = items.find((it) => it.section === "Folders" && (it.path ?? "").replace(/\/$/, "").toLowerCase() === key);
+        folders.set(
+          key,
+          exact ?? {
+            id: `${item.kind === "context" ? `context:${item.project ?? ""}:` : "folder:"}${childPath}`,
+            kind: item.kind === "context" ? "context" : "folder",
+            section: "Folders",
+            path: childPath,
+            label: `${childPath}/`,
+            ...(item.project ? { project: item.project } : {}),
+          },
+        );
+      }
+    } else if (item.section === "Folders" || item.kind === "folder") {
+      const key = rawPath.toLowerCase();
+      if (!folders.has(key)) {
+        folders.set(key, { ...item, section: "Folders", path: rawPath, label: `${rawPath}/` });
+      }
+    } else {
+      files.push(item);
+    }
+  }
+  const sortedFolders = [...folders.values()].sort((a, b) => (a.path ?? a.label).localeCompare(b.path ?? b.label));
+  const sortedFiles = [...files].sort((a, b) => (a.path ?? a.label).localeCompare(b.path ?? b.label));
+  return [...contextRows, ...sortedFolders, ...sortedFiles].slice(0, 100);
+}
+
 
 export function chipToAttachment(chip: AttachChip): MissionAttachment {
   return chip.kind === "controller" ? { kind: "controller" } : { kind: chip.kind === "context" ? "path" : chip.kind, path: chip.path };

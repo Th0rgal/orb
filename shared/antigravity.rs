@@ -356,7 +356,11 @@ fn parse_running_task_ids_from_list(output: &str) -> Option<Vec<String>> {
     let items = serde_json::from_str::<Vec<Value>>(&output[start..=end]).ok()?;
     let mut ids = Vec::new();
     for item in items {
-        if let Some(id) = item["taskId"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(id) = item["taskId"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             ids.push(id.to_owned());
         }
     }
