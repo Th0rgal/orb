@@ -72,6 +72,7 @@ export function InboxPage(p: {
   const [focusedId, setFocusedId] = createSignal<string | null>(null);
   const [replyingId, setReplyingId] = createSignal<string | null>(null);
   const [replyDraft, setReplyDraft] = createSignal("");
+  const [peekedIds, setPeekedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [undoItem, setUndoItem] = createSignal<{
@@ -210,12 +211,19 @@ export function InboxPage(p: {
     }
   });
 
+  const markItemAndChildrenRead = (item: InboxItem) => {
+    markMissionRead(item.mission);
+    if (item.childSummary?.failedChildren.length) {
+      markMissionsRead(item.childSummary.failedChildren.map((c) => c.mission));
+    }
+  };
+
   const toggleReadState = (item: InboxItem) => {
     if (item.unread) {
       const items = actionableItems();
       const idx = items.findIndex((x) => x.id === item.id);
       const nextFocus = items[idx + 1]?.id ?? items[idx - 1]?.id ?? null;
-      markMissionRead(item.mission);
+      markItemAndChildrenRead(item);
       if (viewMode() === "unread" && focusedId() === item.id) {
         setFocusedId(nextFocus);
       }
@@ -227,7 +235,63 @@ export function InboxPage(p: {
   const markAllUnreadAsRead = () => {
     const items = unreadItemsInScope();
     if (!items.length) return;
-    markMissionsRead(items.map((i) => i.mission));
+    const allMissions: Mission[] = [];
+    for (const item of items) {
+      allMissions.push(item.mission);
+      if (item.childSummary?.failedChildren.length) {
+        for (const c of item.childSummary.failedChildren) allMissions.push(c.mission);
+      }
+    }
+    markMissionsRead(allMissions);
+  };
+
+  const togglePeek = (item: InboxItem) => {
+    setFocusedId(item.id);
+    const open = !peekedIds().has(item.id);
+    setPeekedIds((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(item.id);
+      else next.delete(item.id);
+      return next;
+    });
+    if (open) {
+      if (!peekReadyTranscript(item.id)) {
+        void loadTranscript(item.id).catch(() => {});
+      } else {
+        void refreshTranscript(item.id).catch(() => {});
+      }
+    }
+  };
+
+  const retryMission = async (item: InboxItem) => {
+    if (busyIds().has(item.id)) return;
+    setError(null);
+    addBusy(item.id);
+    markItemAndChildrenRead(item);
+    try {
+      const result = await sendMissionMessage(
+        item.id,
+        "Continue from where you left off.",
+        [],
+        crypto.randomUUID(),
+      );
+      if (result.replacement) {
+        p.onMissionUpdated?.(result.replacement);
+      }
+      setDismissedIds((prev) => new Set(prev).add(item.id));
+      void p.onRefresh();
+      setTimeout(() => {
+        setDismissedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(item.id);
+          return next;
+        });
+      }, 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      removeBusy(item.id);
+    }
   };
 
   const markDone = async (item: InboxItem) => {
@@ -235,7 +299,7 @@ export function InboxPage(p: {
     setError(null);
     addBusy(item.id);
     const wasUnread = item.unread;
-    markMissionRead(item.mission);
+    markItemAndChildrenRead(item);
     // Optimistically hide and advance focus to the next row
     const items = actionableItems();
     const idx = items.findIndex((x) => x.id === item.id);
@@ -331,7 +395,7 @@ export function InboxPage(p: {
     if (!text || busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
-    markMissionRead(item.mission);
+    markItemAndChildrenRead(item);
     try {
       const result = await sendMissionMessage(item.id, text, [], crypto.randomUUID());
       setReplyingId(null);
@@ -447,8 +511,19 @@ export function InboxPage(p: {
       if (e.key === "Enter" && currentItem) {
         if (target?.closest("button:not(.inbox-row-main)")) return;
         e.preventDefault();
-        markMissionRead(currentItem.mission);
+        markItemAndChildrenRead(currentItem);
         p.onOpenMission(currentItem.id);
+        return;
+      }
+      if (e.key === " " && currentItem) {
+        if (target?.closest("button:not(.inbox-row-main)")) return;
+        e.preventDefault();
+        togglePeek(currentItem);
+        return;
+      }
+      if (e.key.toLowerCase() === "r" && currentItem && e.shiftKey && currentItem.canRetry) {
+        e.preventDefault();
+        void retryMission(currentItem);
         return;
       }
       if (e.key.toLowerCase() === "r" && currentItem && !e.shiftKey) {
@@ -486,12 +561,13 @@ export function InboxPage(p: {
   const renderRow = (item: InboxItem) => {
     const isFocused = () => focusedId() === item.id;
     const isReplying = () => replyingId() === item.id;
+    const isPeeked = () => peekedIds().has(item.id);
     const isBusy = () => busyIds().has(item.id);
     const color = () => projectColor(item.projectSlug);
 
     return (
       <article
-        class={`inbox-row ${item.unread ? "unread" : "read"} ${isFocused() ? "focused" : ""} ${isBusy() ? "busy" : ""}`}
+        class={`inbox-row ${item.unread ? "unread" : "read"} ${isFocused() ? "focused" : ""} ${isPeeked() ? "peeked" : ""} ${isBusy() ? "busy" : ""}`}
         data-inbox-id={item.id}
         data-inbox-tone={item.tone}
         data-inbox-unread={item.unread ? "true" : "false"}
@@ -500,51 +576,90 @@ export function InboxPage(p: {
         }}
       >
         <div class="inbox-row-body">
-          <button
-            type="button"
-            class="inbox-row-main"
-            onClick={() => {
-              markMissionRead(item.mission);
-              p.onOpenMission(item.id);
-            }}
-            aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${item.summary}`}
-          >
-            <div class="inbox-row-top">
-              <Show when={item.unread}>
-                <span
-                  class="inbox-unread-dot"
-                  title="Unread response"
-                  aria-hidden="true"
-                />
-              </Show>
-              <span class="inbox-project-pill">
-                <i
-                  class="inbox-project-dot"
-                  style={color() ? { background: color() } : undefined}
-                  aria-hidden="true"
-                />
-                <span class="inbox-project-name">{item.projectTitle}</span>
-              </span>
-              <span class="inbox-sep" aria-hidden="true">·</span>
-              <Show when={item.isGoal}>
-                <span class="goal-tag small" aria-hidden="true">
-                  <Ic.TargetIcon size={10} />
-                  <span class="goal-tag-label">Goal</span>
+          <div class="inbox-row-main-col">
+            <button
+              type="button"
+              class="inbox-row-main"
+              onClick={() => {
+                markItemAndChildrenRead(item);
+                p.onOpenMission(item.id);
+              }}
+              aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${item.summary}`}
+            >
+              <div class="inbox-row-top">
+                <Show when={item.unread}>
+                  <span
+                    class="inbox-unread-dot"
+                    title="Unread response"
+                    aria-hidden="true"
+                  />
+                </Show>
+                <span class="inbox-project-pill">
+                  <i
+                    class="inbox-project-dot"
+                    style={color() ? { background: color() } : undefined}
+                    aria-hidden="true"
+                  />
+                  <span class="inbox-project-name">{item.projectTitle}</span>
                 </span>
-              </Show>
-              <span class="inbox-headline">{item.headline}</span>
-              <span class={`inbox-badge ${item.tone}`}>{item.badge}</span>
-              <Show when={item.machine}>
-                <span class="inbox-machine">{item.machine}</span>
-              </Show>
-              <Show when={item.relativeTime}>
-                <time class="inbox-time">{item.relativeTime}</time>
-              </Show>
-            </div>
-            <div class="inbox-row-bottom">
-              <p class="inbox-summary">{item.summary}</p>
-            </div>
-          </button>
+                <span class="inbox-sep" aria-hidden="true">·</span>
+                <Show when={item.isGoal}>
+                  <span class="goal-tag small" aria-hidden="true">
+                    <Ic.TargetIcon size={10} />
+                    <span class="goal-tag-label">Goal</span>
+                  </span>
+                </Show>
+                <span class="inbox-headline">{item.headline}</span>
+                <span class={`inbox-badge ${item.tone}`}>{item.badge}</span>
+                <Show when={item.machine}>
+                  <span class="inbox-machine">{item.machine}</span>
+                </Show>
+                <Show when={item.relativeTime}>
+                  <time class="inbox-time">{item.relativeTime}</time>
+                </Show>
+              </div>
+              <div class="inbox-row-bottom">
+                <p class="inbox-summary">{item.summary}</p>
+              </div>
+            </button>
+
+            <Show when={item.childSummary && item.childSummary.total > 0}>
+              {(() => {
+                const cs = item.childSummary!;
+                const firstFailed = cs.failedChildren[0];
+                return (
+                  <div class="inbox-child-bar">
+                    <Show
+                      when={firstFailed}
+                      fallback={
+                        <span class="inbox-child-pill">
+                          {cs.total} {cs.total === 1 ? "track" : "tracks"} · {cs.completed} completed
+                          {cs.running > 0 ? ` · ${cs.running} running` : ""}
+                        </span>
+                      }
+                    >
+                      <button
+                        type="button"
+                        class="inbox-child-pill failed"
+                        title={`Open failed child track: ${firstFailed.title}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          markItemAndChildrenRead(item);
+                          p.onOpenMission(firstFailed.id);
+                        }}
+                      >
+                        <span class="inbox-child-dot" aria-hidden="true" />
+                        <span>
+                          {cs.failed} {cs.failed === 1 ? "track" : "tracks"} failed: {firstFailed.title}
+                        </span>
+                        <span aria-hidden="true">→</span>
+                      </button>
+                    </Show>
+                  </div>
+                );
+              })()}
+            </Show>
+          </div>
 
           <Show when={item.interaction?.options.length}>
             <div class="inbox-row-actions">
@@ -571,6 +686,38 @@ export function InboxPage(p: {
           </Show>
 
           <div class="inbox-triage-btns">
+            <Show when={item.canRetry}>
+              <button
+                type="button"
+                class="inbox-act-btn retry"
+                disabled={isBusy()}
+                title="Retry / resume mission (⇧R)"
+                aria-label={`Retry ${item.headline}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void retryMission(item);
+                }}
+              >
+                <span aria-hidden="true">↻</span>
+                <span>Retry</span>
+                <kbd aria-hidden="true">⇧R</kbd>
+              </button>
+            </Show>
+            <button
+              type="button"
+              class={`inbox-act-btn ${isPeeked() ? "on" : ""}`}
+              disabled={isBusy()}
+              title="Peek recent turns (Space)"
+              aria-label={`Peek ${item.headline}`}
+              aria-expanded={isPeeked()}
+              onClick={(e) => {
+                e.stopPropagation();
+                togglePeek(item);
+              }}
+            >
+              <span>Peek</span>
+              <kbd aria-hidden="true">Space</kbd>
+            </button>
             <Show when={item.unread}>
               <button
                 type="button"
@@ -623,6 +770,35 @@ export function InboxPage(p: {
 
         <Show when={item.interaction?.detail && item.interaction.kind === "permission"}>
           <pre class="inbox-perm-code">{item.interaction!.detail}</pre>
+        </Show>
+
+        <Show when={isPeeked()}>
+          <div class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${item.headline}`}>
+            <div class="inbox-peek-turns">
+              <For each={item.peekTurns}>
+                {(turn) => (
+                  <div class={`inbox-peek-turn ${turn.role}`}>
+                    <span class={`inbox-peek-role ${turn.role}`}>
+                      {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
+                    </span>
+                    <p class="inbox-peek-text">{turn.text}</p>
+                  </div>
+                )}
+              </For>
+            </div>
+            <div class="inbox-peek-foot">
+              <button
+                type="button"
+                class="inbox-peek-open"
+                onClick={() => {
+                  markItemAndChildrenRead(item);
+                  p.onOpenMission(item.id);
+                }}
+              >
+                Open full conversation →
+              </button>
+            </div>
+          </div>
         </Show>
 
         <Show when={isReplying()}>
@@ -709,8 +885,10 @@ export function InboxPage(p: {
           </Show>
           <div class="inbox-key-legend" aria-hidden="true">
             <span><kbd>J</kbd><kbd>K</kbd> navigate</span>
+            <span><kbd>Space</kbd> peek</span>
             <span><kbd>U</kbd> read</span>
             <span><kbd>R</kbd> reply</span>
+            <span><kbd>⇧R</kbd> retry</span>
             <span><kbd>E</kbd> done</span>
           </div>
         </div>

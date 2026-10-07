@@ -53,12 +53,23 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       updated_at: "2026-10-07T11:52:00Z",
     },
     {
+      id: "m-failed",
+      title: "CTRL-G Docker/Lean inspection",
+      status: "failed",
+      project: "paloma",
+      backend: "claudecode",
+      terminal_reason: "Docker daemon unreachable in host workspace.",
+      created_at: "2026-10-07T11:10:00Z",
+      updated_at: "2026-10-07T11:51:00Z",
+    },
+    {
       id: "m-done",
       title: "Fix sidebar scroll thumb",
       status: "completed",
       project: "paloma",
       backend: "claudecode",
       history: [
+        { role: "user", content: "Hide the sidebar scroll thumb until hover." },
         {
           role: "assistant",
           content:
@@ -67,6 +78,15 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       ],
       created_at: "2026-10-07T10:00:00Z",
       updated_at: "2026-10-07T11:30:00Z",
+    },
+    {
+      id: "m-child-fail",
+      title: "Track G-4 Proof Closure",
+      status: "failed",
+      project: "paloma",
+      parent_mission_id: "m-done",
+      created_at: "2026-10-07T11:25:00Z",
+      updated_at: "2026-10-07T11:32:00Z",
     },
   ];
 
@@ -183,10 +203,10 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   await page.goto("/");
 
-  // Sidebar shows Inbox with actionable badge count (3: m-perm, m-question, m-done; m-working is quiet)
+  // Sidebar shows Inbox with actionable badge count (4: m-perm, m-question, m-failed, m-done; m-working & m-child-fail are quiet/grouped)
   const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
   await expect(inboxNav).toBeVisible();
-  await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("3");
+  await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("4");
 
   // Open Inbox via ⌘I shortcut
   await page.keyboard.press("Meta+KeyI");
@@ -222,6 +242,18 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
     result: { action: "accept" },
   });
 
+  // Navigate to m-failed and press Shift+R to retry inline
+  const failedRow = page.locator('[data-inbox-id="m-failed"]');
+  await failedRow.hover();
+  await expect(failedRow.locator(".inbox-act-btn.retry")).toContainText("Retry");
+  await page.keyboard.press("Shift+KeyR");
+  await expect.poll(() => sentMessages.length).toBe(1);
+  expect(sentMessages[0]).toEqual({
+    id: "m-failed",
+    content: "Continue from where you left off.",
+  });
+  await expect(failedRow).toBeHidden();
+
   // Navigate to m-question and open inline quick reply with 'r'
   const questionRow = page.locator('[data-inbox-id="m-question"]');
   await questionRow.hover();
@@ -231,17 +263,29 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await replyInput.fill("Use swipe-right with an Undo toast.");
   await replyInput.press("Enter");
 
-  await expect.poll(() => sentMessages.length).toBe(1);
-  expect(sentMessages[0]).toEqual({
+  await expect.poll(() => sentMessages.length).toBe(2);
+  expect(sentMessages[1]).toEqual({
     id: "m-question",
     content: "Use swipe-right with an Undo toast.",
   });
   // Replied mission immediately leaves the actionable list
   await expect(questionRow).toBeHidden();
 
-  // Mark m-done as Done with 'e', then Undo with 'z'
+  // Verify m-done shows the grouped child track failure pill and supports Space peek preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
+  await expect(doneRow.locator(".inbox-child-pill.failed")).toContainText(
+    "1 track failed: Track G-4 Proof Closure",
+  );
   await doneRow.hover();
+  await page.keyboard.press("Space");
+  await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
+  await expect(doneRow.locator(".inbox-peek-drawer")).toContainText(
+    "Hide the sidebar scroll thumb until hover.",
+  );
+  await page.keyboard.press("Space");
+  await expect(doneRow.locator(".inbox-peek-drawer")).toBeHidden();
+
+  // Mark m-done as Done with 'e', then Undo with 'z'
   await page.keyboard.press("e");
   await expect(doneRow).toBeHidden();
   await expect(page.locator(".inbox-undo-toast")).toContainText("Fix sidebar scroll thumb");

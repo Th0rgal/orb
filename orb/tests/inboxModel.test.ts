@@ -249,5 +249,99 @@ describe("classifyInboxMission & buildInboxSections", () => {
     const errItem = sections.needsYou.find((i) => i.id === "m-rust-err")!;
     expect(errItem.summary).not.toContain("Some(1)");
   });
+
+  it("does not mark an active mission as read before it completes its turn", async () => {
+    const { isMissionUnread, markMissionRead } = await import("../src/missionUnread");
+    const activeMission = makeMission({
+      id: "d04c77b2-7028-4c03-b7c1-ab20b818e0f3",
+      title: "Pareto",
+      status: "active",
+      project: "verity-core",
+      first_viewed_at: null,
+      last_output_at: "2026-10-07T14:00:35Z",
+      updated_at: "2026-10-07T14:00:35Z",
+    });
+
+    // Opening the mission while it is still active should not consume its unread state
+    markMissionRead(activeMission);
+
+    const completedMission: Mission = {
+      ...activeMission,
+      status: "completed",
+      updated_at: "2026-10-07T14:30:35Z",
+      history: [
+        {
+          role: "assistant",
+          content: "I will wait for the background build task to notify me when it finishes.",
+        },
+      ],
+    };
+
+    expect(isMissionUnread(completedMission)).toBe(true);
+    markMissionRead(completedMission);
+    expect(isMissionUnread(completedMission)).toBe(false);
+  });
+
+  it("attaches childSummary to parent orchestrator missions and surfaces unread child track failures", () => {
+    const parentPareto = makeMission({
+      id: "d04c77b2-7028-4c03-b7c1-ab20b818e0f3",
+      title: "Pareto",
+      status: "completed",
+      project: "orb",
+      first_viewed_at: "2026-10-07T14:22:16Z",
+      updated_at: "2026-10-07T14:00:35Z",
+      history: [
+        { role: "user", content: "Launch the 3 verification tracks." },
+        { role: "assistant", content: "Dispatched Track INV-1, Track G-2, and Track G-4." },
+      ],
+    });
+    const childOk = makeMission({
+      id: "child-ok",
+      title: "Track INV-1",
+      status: "completed",
+      project: "orb",
+      parent_mission_id: parentPareto.id,
+      first_viewed_at: "2026-10-07T14:10:00Z",
+      updated_at: "2026-10-07T14:05:00Z",
+    });
+    const childFailedUnread = makeMission({
+      id: "child-fail",
+      title: "Track G-4 (CLAIM-1) Proof Closure",
+      status: "failed",
+      project: "orb",
+      parent_mission_id: parentPareto.id,
+      first_viewed_at: null,
+      updated_at: "2026-10-07T14:25:00Z",
+    });
+
+    const sections = buildInboxSections(
+      [parentPareto, childOk, childFailedUnread],
+      sampleProjects,
+      () => undefined,
+      () => undefined,
+      Date.parse("2026-10-07T14:30:00Z"),
+    );
+
+    // Child missions themselves are hidden from top-level rows, but grouped onto parentPareto
+    expect(sections.ready.map((i) => i.id)).toEqual([parentPareto.id]);
+    const parentItem = sections.ready[0];
+    expect(parentItem.childSummary).toBeDefined();
+    expect(parentItem.childSummary?.total).toBe(2);
+    expect(parentItem.childSummary?.completed).toBe(1);
+    expect(parentItem.childSummary?.failed).toBe(1);
+    expect(parentItem.childSummary?.failedChildren[0].title).toBe("Track G-4 (CLAIM-1) Proof Closure");
+    expect(parentItem.childSummary?.hasUnreadFailure).toBe(true);
+    // Parent surfaces in Unread and Attention because a child track failed unread
+    expect(parentItem.unread).toBe(true);
+    expect(parentItem.attention).toBe(true);
+    expect(sections.unreadCount).toBe(1);
+    expect(sections.attentionCount).toBe(1);
+    expect(parentItem.peekTurns.map((t) => `${t.role}:${t.text}`)).toEqual([
+      "user:Launch the 3 verification tracks.",
+      "assistant:Dispatched Track INV-1, Track G-2, and Track G-4.",
+    ]);
+  });
 });
+
+
 

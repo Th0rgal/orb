@@ -32,6 +32,26 @@ export type InboxTone = "amber" | "red" | "blue" | "green" | "muted";
 
 export type InboxCategory = "needs_you" | "ready" | "working" | "hidden";
 
+export type InboxPeekTurn = {
+  role: "user" | "assistant" | "error";
+  text: string;
+};
+
+export type InboxChildFailure = {
+  id: string;
+  title: string;
+  mission: Mission;
+};
+
+export type InboxChildSummary = {
+  total: number;
+  running: number;
+  failed: number;
+  completed: number;
+  failedChildren: InboxChildFailure[];
+  hasUnreadFailure: boolean;
+};
+
 export type InboxItem = {
   id: string;
   mission: Mission;
@@ -48,6 +68,9 @@ export type InboxItem = {
   isGoal: boolean;
   unread: boolean;
   attention: boolean;
+  canRetry: boolean;
+  peekTurns: InboxPeekTurn[];
+  childSummary?: InboxChildSummary;
   interaction?: InboxInteraction;
 };
 
@@ -496,6 +519,64 @@ function resolveMachine(mission: Mission): string | undefined {
   return undefined;
 }
 
+export function extractPeekTurns(
+  mission: Mission,
+  items?: StreamItem[],
+  summaryFallback?: string,
+): InboxPeekTurn[] {
+  const turns: InboxPeekTurn[] = [];
+  if (items && items.length > 0) {
+    for (let i = items.length - 1; i >= 0 && turns.length < 3; i--) {
+      const item = items[i];
+      if (item.kind === "user" && item.text.trim()) {
+        const clean = stripMarkdownToProse(item.text);
+        if (clean) turns.unshift({ role: "user", text: clipToSentence(clean, 240) });
+      } else if (item.kind === "text" && item.text.trim()) {
+        const clean = stripMarkdownToProse(humanizeStatusText(item.text) || item.text);
+        if (clean && turns.at(0)?.text !== clipToSentence(clean, 240)) {
+          turns.unshift({ role: "assistant", text: clipToSentence(clean, 240) });
+        }
+      } else if (item.kind === "error" && item.text.trim()) {
+        const clean = stripMarkdownToProse(humanizeStatusText(item.text) || item.text);
+        if (clean) turns.unshift({ role: "error", text: clipToSentence(clean, 240) });
+      }
+    }
+  } else if (Array.isArray(mission.history) && mission.history.length > 0) {
+    for (let i = mission.history.length - 1; i >= 0 && turns.length < 3; i--) {
+      const entry = mission.history[i];
+      if (!entry.content?.trim()) continue;
+      if (entry.role === "user" || entry.role === "assistant") {
+        const clean = stripMarkdownToProse(humanizeStatusText(entry.content) || entry.content);
+        if (clean && turns.at(0)?.text !== clipToSentence(clean, 240)) {
+          turns.unshift({ role: entry.role, text: clipToSentence(clean, 240) });
+        }
+      }
+    }
+  }
+
+  const errDetail =
+    humanizeStatusText(mission.remote_job?.error) ||
+    humanizeStatusText(mission.status_message) ||
+    humanizeStatusText(mission.terminal_reason);
+  if (
+    errDetail &&
+    (mission.status === "failed" || mission.status === "blocked" || mission.status === "not_feasible") &&
+    !turns.some((t) => t.role === "error")
+  ) {
+    turns.push({ role: "error", text: clipToSentence(errDetail, 240) });
+  }
+
+  if (turns.length === 0 && summaryFallback) {
+    turns.push({
+      role: mission.status === "failed" || mission.status === "blocked" ? "error" : "assistant",
+      text: summaryFallback,
+    });
+  }
+  return turns.slice(-3);
+}
+
+const RETRYABLE_STATUSES = new Set(["failed", "interrupted", "blocked", "not_feasible"]);
+
 export function buildInboxItem(
   mission: Mission,
   projects: ReadonlyArray<ProjectSummary>,
@@ -503,6 +584,7 @@ export function buildInboxItem(
   observed?: PendingInteraction,
   nowMs = Date.now(),
   selectedMissionId?: string | null,
+  childSummary?: InboxChildSummary,
 ): InboxItem | null {
   const interaction = extractInboxInteraction(mission, items, observed);
   const category = classifyInboxMission(mission, interaction);
@@ -542,12 +624,17 @@ export function buildInboxItem(
     updatedMs > 0
       ? new Date(updatedMs).toISOString()
       : mission.updated_at || mission.last_output_at || mission.created_at;
-  const unread = isMissionUnread(mission, selectedMissionId, Boolean(interaction));
+  const unread =
+    isMissionUnread(mission, selectedMissionId, Boolean(interaction)) ||
+    Boolean(childSummary?.hasUnreadFailure);
   const attention =
     Boolean(interaction) ||
     mission.status === "blocked" ||
     mission.status === "failed" ||
-    mission.status === "not_feasible";
+    mission.status === "not_feasible" ||
+    Boolean(childSummary && childSummary.failed > 0);
+  const canRetry = RETRYABLE_STATUSES.has(mission.status);
+  const peekTurns = extractPeekTurns(mission, items, summary);
 
   return {
     id: mission.id,
@@ -565,6 +652,9 @@ export function buildInboxItem(
     isGoal,
     unread,
     attention,
+    canRetry,
+    peekTurns,
+    childSummary,
     interaction,
   };
 }
@@ -579,6 +669,7 @@ function urgencyScore(item: InboxItem): number {
   if (item.mission.status === "awaiting_user" || item.mission.status === "waiting_user") {
     return item.summary.endsWith("?") ? 4 : 5;
   }
+  if (item.childSummary && item.childSummary.failed > 0) return 5.5;
   return 6;
 }
 
@@ -598,6 +689,41 @@ export function buildInboxSections(
       ? new Set([DEFAULT_PROJECT.slug, ...projects.map((p) => p.slug)])
       : null;
 
+  // Group child worker/track runs under their parent orchestrator mission so
+  // parent cards can surface a compact track summary badge (e.g. "1 track failed").
+  const childrenByParent = new Map<string, InboxChildSummary>();
+  for (const m of missions) {
+    if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
+    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded-by:"))) continue;
+    const parentId = m.parent_mission_id || m.callback_parent_mission_id;
+    if (!parentId) continue;
+    let group = childrenByParent.get(parentId);
+    if (!group) {
+      group = {
+        total: 0,
+        running: 0,
+        failed: 0,
+        completed: 0,
+        failedChildren: [],
+        hasUnreadFailure: false,
+      };
+      childrenByParent.set(parentId, group);
+    }
+    group.total++;
+    if (WORKING_STATUSES.has(m.status)) {
+      group.running++;
+    } else if (m.status === "failed" || m.status === "blocked" || m.status === "not_feasible") {
+      group.failed++;
+      const childTitle = clipToSentence(displayTitle(m.title) || "Worker track", 36);
+      group.failedChildren.push({ id: m.id, title: childTitle, mission: m });
+      if (isMissionUnread(m, selectedMissionId, false)) {
+        group.hasUnreadFailure = true;
+      }
+    } else if (m.status === "completed" || m.status === "succeeded") {
+      group.completed++;
+    }
+  }
+
   for (const mission of missions) {
     const rawSlug = mission.project?.trim();
     const observed = getInteraction?.(mission.id);
@@ -616,6 +742,7 @@ export function buildInboxSections(
       observed,
       nowMs,
       selectedMissionId,
+      childrenByParent.get(mission.id),
     );
     if (!item) continue;
     if (item.category === "needs_you") needsYou.push(item);
