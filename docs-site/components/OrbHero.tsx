@@ -53,11 +53,11 @@ export function OrbHero() {
         await loadScriptOnce("/orb_shader.js");
         if (cancelled || !canvasRef.current || !window.initOrbShaderCanvas) return;
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const size = Math.round(280 * dpr);
+        const size = Math.round(256 * dpr);
         instance = window.initOrbShaderCanvas(canvasRef.current, {
           width: size,
           height: size,
-          radius: 0.43,
+          radius: 0.308,
           speed: 1.15,
         });
         if (instance) {
@@ -116,15 +116,20 @@ export function OrbHero() {
       <div className="orb-hero-visual" aria-hidden="true">
         <div className="orb-shader-stage">
           <img
-            src="/images/orb.png"
-            alt="Orb Liquid Chrome"
+            src="/images/orb-icon.png"
+            alt="Orb App Icon"
             className={`orb-shader-fallback ${shaderReady ? "is-hidden" : ""}`}
           />
           <canvas
             ref={canvasRef}
-            width={520}
-            height={520}
+            width={512}
+            height={512}
             className={`orb-shader-canvas ${shaderReady ? "is-ready" : ""}`}
+          />
+          <img
+            src="/images/orb-squircle-frame.png"
+            alt=""
+            className={`orb-shader-squircle-frame ${shaderReady ? "is-ready" : ""}`}
           />
         </div>
         <span className="orb-shader-caption">
