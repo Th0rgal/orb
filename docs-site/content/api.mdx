@@ -1,366 +1,106 @@
 ---
-title: API Reference
-description: Complete API documentation for sandboxed.sh
+title: API & MCP Reference
+description: REST API, SSE streaming, and unified MCP reference for Orb and sandboxed.sh
 ---
 
-# API Reference
+# API & MCP Reference
 
-All endpoints require authentication via `Authorization: Bearer <token>` header.
-
-Get a token by logging in:
+All HTTP endpoints require `Authorization: Bearer <token>`. Obtain a JWT via `POST /api/auth/login`:
 
 ```bash
-curl -X POST "https://agent.yourdomain.com/api/auth/login" \
+curl -X POST "https://orb.thomas.md/api/auth/login" \
   -H "Content-Type: application/json" \
   -d '{"password": "your-password"}'
 ```
 
 ---
 
-## Missions
-
-Missions are agent tasks with conversation history.
+## 1. Missions & Streaming
 
 ### Create Mission
-
-```http
-POST /api/control/missions
-```
+`POST /api/control/missions`
 
 ```json
 {
-  "title": "My Mission",
+  "title": "Verify Pareto proof",
+  "project": "verity",
   "workspace_id": "uuid",
-  "agent": "code-reviewer",
-  "model_override": "gpt-5-codex",
-  "model_effort": "medium"
+  "backend": "antigravity",
+  "model_override": "agy-demo",
+  "model_effort": "high",
+  "placement": "client",
+  "remote_node_id": null
 }
 ```
+- `backend`: `"claudecode"`, `"codex"`, `"antigravity"`, `"opencode"`, `"grok"`, `"chatgpt_ui"`, or cloud adapters (`"hermes"`, `"cursor_cloud"`, `"grok_bot"`).
+- `placement`: Omit for server/fleet execution, or set `"client"` when Orb Desktop executes the CLI locally.
+- `model_effort`: `"low"`, `"medium"`, `"high"`, or `"xhigh"`.
 
-All fields optional. Returns `Mission` object.
-`model_effort` currently supports: `low`, `medium`, `high` (Codex backend).
-
-### Load Mission
-
-```http
-POST /api/control/missions/:id/load
-```
-
-Loads a mission into the active control session. Required before sending messages.
-
-### Send Message
-
-```http
-POST /api/control/message
-```
+### Send Message / Steer
+`POST /api/control/message`
 
 ```json
 {
-  "content": "Your message here",
-  "agent": "optional-agent-override"
+  "content": "Follow-up instruction",
+  "client_message_id": "uuid"
 }
 ```
 
-Returns `{"id": "uuid", "queued": false}`. If `queued: true`, another message is processing.
+### Snapshot & Cursor-Paginated Events
+- `GET /api/control/missions/:id/snapshot` — First-paint payload returning mission metadata, latest history events, counts, child missions, and running state.
+- `GET /api/control/missions/:id/events?view=history&limit=200&before_seq=1000` — Cursor-paginated event log (`view=transcript|trace|history|all`, `since_seq`, `before_seq`). Returns `X-Next-Cursor`, `X-Page-Max-Sequence`, `X-Max-Sequence`, and `X-Has-More` headers (`X-Orb-Events-Protocol: 1`).
+- `GET /api/control/stream?mission=<uuid>` — Real-time SSE stream (`status`, `stream_lagged`, `user_message`, `assistant_message`, `thinking`, `tool_call`, `tool_result`, `text_delta`, `error`, `mission_status_changed`).
 
-### Cancel
+### Advanced Mission Operations
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/control/missions/:id/load` | `POST` | Load mission into active control session |
+| `/api/control/missions/:id/cancel` | `POST` | Cancel running mission |
+| `/api/control/missions/:id/resume` | `POST` | Resume interrupted mission |
+| `/api/control/missions/:id/btw/agent` | `POST` | Launch or continue a `/btw` side-agent session |
+| `/api/control/missions/:id/machine-transfer` | `GET` / `POST` | Inspect inventory, stage blocks, and activate cross-machine mission transfer |
+| `/api/control/missions/:id/cyber` | `GET` / `PATCH` | Read or set Codex Cyber Access (`standard`, `daybreak`, `automatic`) |
+| `/api/control/missions/:id/continuations/cancel` | `POST` | Revoke scheduled mission wake-ups |
+| `/api/control/local-origins` | `POST` | Synchronize offline-started local Orb missions |
 
-```http
-POST /api/control/cancel           # Current mission
-POST /api/control/missions/:id/cancel   # Specific mission
-```
+---
 
-### Set Status
-
-```http
-POST /api/control/missions/:id/status
-```
-
-```json
-{"status": "completed"}
-```
-
-Statuses: `pending`, `active`, `completed`, `failed`, `interrupted`
-
-### Get Events
-
-```http
-GET /api/control/missions/:id/events?types=user_message,assistant_message&limit=100&offset=0
-```
-
-Returns stored events for replay/debugging.
-
-### Stream Events (SSE)
-
-```http
-GET /api/control/stream
-```
-
-Server-Sent Events for real-time updates:
-
-| Event | Description |
-|-------|-------------|
-| `status` | Control state changed |
-| `user_message` | User message received |
-| `assistant_message` | Agent response complete |
-| `thinking` | Agent reasoning |
-| `tool_call` | Tool invocation |
-| `tool_result` | Tool output |
-| `error` | Error occurred |
-
-### Other Mission Endpoints
+## 2. Projects, Situation & Context
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/control/missions` | GET | List all missions |
-| `/api/control/missions/:id` | GET | Get mission details |
-| `/api/control/missions/:id` | DELETE | Delete mission |
-| `/api/control/missions/:id/resume` | POST | Resume interrupted mission |
-| `/api/control/tree` | GET | Live agent tree |
-
-### Mission Object
-
-```json
-{
-  "id": "uuid",
-  "status": "active",
-  "title": "My Mission",
-  "workspace_id": "uuid",
-  "workspace_name": "my-workspace",
-  "agent": "code-reviewer",
-  "model_override": null,
-  "model_effort": null,
-  "created_at": "2025-01-13T10:00:00Z",
-  "updated_at": "2025-01-13T10:05:00Z"
-}
-```
+| --- | --- | --- |
+| `/api/projects/overview` | `GET` | Roster of all projects, active tracks, attention items, and colors |
+| `/api/projects/:slug` | `GET` / `PUT` | Read or update project metadata, color, and settings |
+| `/api/projects/:slug/situation` | `GET` | Canonical bounded read of project state, tracks, and active attempts |
+| `/api/projects/:slug/steers` | `POST` | Enqueue an operator steer for a project controller |
+| `/api/projects/:slug/grant` | `GET` / `POST` | Inspect or update autonomous controller grant |
+| `/api/projects/:slug/context/manifest` | `GET` | Synchronized `@context` file manifest and revisions |
+| `/api/file-resources` | `POST` | Confined workspace and project file reader for Orb's Files panel |
+| `/api/uploads` | `POST` | Authenticated 20 MiB file/image upload to Core or a target `node_id` |
 
 ---
 
-## Workspaces
+## 3. Machines, Providers & Routing
 
-Workspaces are isolated environments for agent execution.
-
-### List Workspaces
-
-```http
-GET /api/workspaces
-```
-
-### Create Workspace
-
-```http
-POST /api/workspaces
-```
-
-```json
-{
-  "name": "my-workspace",
-  "workspace_type": "host",
-  "path": "/path/to/workspace",
-  "skills": ["skill-name"],
-  "tools": ["tool-name"],
-  "template": "template-name",
-  "distro": "ubuntu-noble",
-  "env_vars": {"KEY": "VALUE"},
-  "init_script": "#!/bin/bash\napt install -y nodejs"
-}
-```
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Human-readable name |
-| `workspace_type` | No | `host` or `container` (default: `host`) |
-| `template` | No | Template name (forces `container`) |
-| `distro` | No | `ubuntu-noble`, `ubuntu-jammy`, `debian-bookworm`, `arch-linux` |
-| `skills` | No | Library skill names |
-| `init_script` | No | Script to run on container build |
-
-### Update Workspace
-
-```http
-PUT /api/workspaces/:id
-```
-
-### Delete Workspace
-
-```http
-DELETE /api/workspaces/:id
-```
-
-### Build Container
-
-```http
-POST /api/workspaces/:id/build
-```
-
-```json
-{"distro": "ubuntu-noble", "rebuild": true}
-```
-
-Build runs in background. Poll status to check completion.
-
-### Execute Command
-
-```http
-POST /api/workspaces/:id/exec
-```
-
-```json
-{
-  "command": "ls -la",
-  "cwd": "subdirectory",
-  "timeout_secs": 60,
-  "env": {"MY_VAR": "value"}
-}
-```
-
-Response:
-
-```json
-{
-  "exit_code": 0,
-  "stdout": "...",
-  "stderr": "",
-  "timed_out": false
-}
-```
-
-### Sync Skills
-
-```http
-POST /api/workspaces/:id/sync
-```
-
-Syncs skills/tools from Library to `.opencode/` directory.
-
-### Debug Endpoints
-
-For troubleshooting container builds:
-
-```http
-GET /api/workspaces/:id/debug      # Container state info
-GET /api/workspaces/:id/init-log   # Init script output
-POST /api/workspaces/:id/rerun-init # Re-run init without rebuild
-```
-
-### Workspace Object
-
-```json
-{
-  "id": "uuid",
-  "name": "my-workspace",
-  "workspace_type": "container",
-  "path": "/path/to/workspace",
-  "status": "ready",
-  "error_message": null,
-  "skills": ["skill-1"],
-  "distro": "ubuntu-noble",
-  "created_at": "2025-01-13T10:00:00Z"
-}
-```
-
-Status: `pending`, `building`, `ready`, `error`
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/remote-nodes` | `GET` | Fleet node roster, health, disk budgets, and `remote_launch` capabilities |
+| `/api/software` | `GET` | Host CLI versions across Core and `?node=<id>` |
+| `/api/software/updates` | `POST` | Trigger atomic managed CLI update on Core or a node |
+| `/api/settings/ssh-hosts` | `GET` / `POST` / `PUT` / `DELETE` | Shared non-secret SSH address book across Orb desktop and iOS |
+| `/api/ai/providers/cli-proxy-login` | `GET` / `POST` / `DELETE` | Start, complete, or cancel CLIProxyAPI OAuth subscription login |
+| `/api/providers/backend-models` | `GET` | Model catalog across configured backends |
+| `/api/providers/antigravity-models` | `GET` | Workspace-native `agy models` discovery |
+| `/api/model-routing` | `GET` / `POST` | Manage model routing fallback chains and inspect provider health |
+| `/api/cloud/accounts` | `GET` | List connected Cloud Agent accounts (Hermes, ChatGPT, Grok Bot, Cursor Cloud) |
 
 ---
 
-## Library
+## 4. Unified MCP (`sandboxed-mcp` & `/api/mcp`)
 
-Manage skills, commands, rules, agents, and templates.
+`sandboxed-mcp` is the unified stdio MCP binary used by **Hermes** (coordinator profile), **mission harnesses** (executor profile), and **operators** (operator profile). It talks to Core over `/api/mcp`:
 
-### List Items
-
-```http
-GET /api/library/skill
-GET /api/library/command
-GET /api/library/rule
-GET /api/library/agent
-GET /api/library/mcp
-GET /api/library/workspace-template
-```
-
-### Get Item
-
-```http
-GET /api/library/{type}/{name}
-```
-
-### Save Item
-
-```http
-PUT /api/library/{type}/{name}
-```
-
-### Delete Item
-
-```http
-DELETE /api/library/{type}/{name}
-```
-
-### Sync Library
-
-```http
-POST /api/library/sync
-```
-
-Pulls latest from git and updates workspaces.
-
----
-
-## System
-
-### Health Check
-
-```http
-GET /api/health
-```
-
-### System Stats
-
-```http
-GET /api/stats
-```
-
-Returns CPU, memory, disk, network usage.
-
-### AI Providers
-
-```http
-GET /api/providers              # List configured providers
-POST /api/providers/:id/auth    # Start OAuth flow
-DELETE /api/providers/:id/auth  # Remove auth
-```
-
----
-
-## Authentication
-
-### Login
-
-```http
-POST /api/auth/login
-```
-
-```json
-{"password": "your-password"}
-```
-
-Returns: `{"token": "jwt-token", "expires_at": "..."}`
-
-### Multi-user Login
-
-```http
-POST /api/auth/login
-```
-
-```json
-{"username": "alice", "password": "alice-password"}
-```
-
-### Verify Token
-
-```http
-GET /api/auth/verify
-```
-
-Returns `200` if valid, `401` if expired/invalid.
+- `POST /api/mcp/session` — Exchanges an owner/launcher credential for a 1-hour scoped `mcp1.` token.
+- `POST /api/mcp/renew` — Renews an active session token with identical privileges.
+- `GET /api/mcp/capabilities` — Lists tools permitted for the session's profile (`executor`, `coordinator`, or `operator`).
+- `POST /api/mcp/call` — Executes a tool call. All mutations require an `idempotency_key` and return a durable action receipt (`get_action`, `cancel_action`, `reconcile_action`).

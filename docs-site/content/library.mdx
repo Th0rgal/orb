@@ -1,206 +1,66 @@
 ---
-title: Library
-description: Git-backed configuration for agent behavior
+title: Skills, Context & Library
+description: Synchronized project skills, @context files, and the Git-backed Library
 ---
 
-# Library
+# Skills, Context & Library
 
-The Library is a git repository containing your agent's configuration. Everything that defines how your agent behaves lives here.
+Orb and sandboxed.sh provide two complementary ways to give agents domain knowledge, files, and tools:
 
-## Structure
+1. **Project Context & Project Skills** — Synchronized per-project files (`@context`) and skills (`skills/<name>/SKILL.md`) managed directly in Orb and Finder.
+2. **The Global Library** — A Git-backed repository of reusable workspace templates, global skills, rules, commands, agents, and MCP server definitions.
 
+---
+
+## 1. Shared Project Context (`@context`)
+
+Every project has a writable **Context** directory synchronized across Core, remote fleet nodes, and your Mac (`~/.orb/project-context/<server>/<account>/<project>`):
+
+- **Reference in prompts**: Type `@context`, `@context/notes.md`, or `@"context/research notes.md"`. Unlike one-off file attachments, `@context` resolves directly to the live synchronized directory on the execution host (mounted at `/run/sandboxed-context/<project>` inside Linux containers).
+- **Bidirectional sync & conflict resolution**: Edits made by an agent, in Orb's Markdown editor (`⌘/`), or in macOS Finder sync every two seconds with SHA-256 blob verification and version history (up to 10 MiB per file, 100 MiB per project). If concurrent edits conflict, Orb preserves both variants so you can compare and resolve them.
+
+## 2. Project Skills (`skills/<name>/SKILL.md`)
+
+Put project-specific skills inside the project's synchronized files under `skills/<name>/SKILL.md` (with optional supporting files alongside them):
+
+```markdown
+---
+name: review
+description: Review a proposed change using the project checklist.
+---
+Read references/checklist.md before reviewing the change.
 ```
+
+All missions in that project automatically inherit its skills. Before launching or resuming a turn, Orb / Core / `sandboxed-node` links or stages the project skills into the harness's native discovery path:
+
+| Harness | Native Project Discovery Path |
+| --- | --- |
+| **Codex** | `.agents/skills/<name>` |
+| **Claude Code** | `.claude/skills/<name>` |
+| **Antigravity (`agy`)** | `.agents/skills/<name>` |
+| **OpenCode** | `.opencode/skills/<name>` |
+| **Grok** | `.grok/skills/<name>` |
+
+---
+
+## 3. The Git-Backed Library
+
+The **Library** (`~/.sandboxed-sh/library`, configured via `LIBRARY_REMOTE`) is a Git repository for global, version-controlled configuration across all projects:
+
+```text
 library/
-├── skill/              # Reusable capabilities
-│   └── python-dev.md
-├── command/            # Slash commands (/deploy, /test)
-│   └── deploy.md
-├── rule/               # Behavior constraints
-│   └── no-production.md
-├── agent/              # Agent personalities
-│   └── code-reviewer.md
-├── mcp/                # MCP server configs
-│   └── playwright.json
-└── workspace-template/ # Container blueprints
-    └── nodejs.json
+├── skill/              # Global skills (<name>/SKILL.md)
+├── command/            # Slash commands
+├── rule/               # Global behavioral rules
+├── agent/              # Agent profiles
+├── mcp/                # MCP server definitions
+└── workspace-template/ # Container blueprints (distro, init_script, skills, env_vars)
 ```
 
-## Why Git-Backed?
+### MCP Security & Allowlists
 
-- **Version control**: Track changes to agent behavior like code
-- **Review workflow**: PRs for configuration changes
-- **Rollback**: Revert to working configs when something breaks
-- **Sharing**: Fork and customize other people's setups
+Workspace-scoped stdio MCP servers defined in the Library are launched via a mission-local `0700` wrapper script. The wrapper clears inherited environment variables and passes only:
+- The MCP server's own configured `env` map
+- Workspace environment variables explicitly listed in `workspace_env_allowlist`
 
-## Getting Started
-
-Fork the [template library](https://github.com/Th0rgal/sandboxed-library-template) and customize it:
-
-```bash
-git clone https://github.com/Th0rgal/sandboxed-library-template my-library
-cd my-library
-git remote set-url origin git@github.com:you/your-library.git
-git push -u origin main
-```
-
-Then configure your library in sandboxed.sh's **Settings** page (preferred) or set `LIBRARY_REMOTE` as an environment variable.
-
-## Skills
-
-Skills are markdown files that give the agent specialized knowledge and instructions for specific domains.
-
-**Example: `skill/python-dev.md`**
-
-```markdown
-# Python Development
-
-When working with Python code:
-
-- Use type hints for all function signatures
-- Prefer f-strings over .format() or %
-- Use pathlib instead of os.path
-- Run `ruff check` before committing
-- Use pytest for testing, not unittest
-
-Standard project structure:
-├── src/
-│   └── package_name/
-├── tests/
-├── pyproject.toml
-└── README.md
-```
-
-Skills are synced to workspaces based on configuration. A workspace can have multiple skills.
-
-## Commands
-
-Commands are slash-triggered actions (like `/deploy` or `/test`).
-
-**Example: `command/deploy.md`**
-
-```markdown
-# /deploy
-
-Deploy the current project to production.
-
-Steps:
-1. Run tests: `pytest`
-2. If tests pass, run: `./scripts/deploy.sh`
-3. Verify deployment at the production URL
-4. Report success or failure
-```
-
-Commands appear in the dashboard's command palette.
-
-## Rules
-
-Rules constrain agent behavior. They define things the agent should always or never do.
-
-**Example: `rule/no-production.md`**
-
-```markdown
-# No Production Changes
-
-NEVER:
-- Modify files in /var/www/production
-- Run commands with `--production` flag
-- Access the production database directly
-
-ALWAYS:
-- Use staging/dev environments for testing
-- Ask for confirmation before any production-adjacent operation
-```
-
-Rules are global and apply to all missions.
-
-## Agents
-
-Agents are personalities with specific behaviors and defaults.
-
-**Example: `agent/code-reviewer.md`**
-
-```markdown
-# Code Reviewer
-
-You are a senior code reviewer focused on:
-- Security vulnerabilities
-- Performance issues
-- Code clarity and maintainability
-- Test coverage
-
-For each file, provide:
-1. Summary of changes
-2. Issues found (if any)
-3. Suggestions for improvement
-
-Be constructive. Praise good patterns. Flag serious issues clearly.
-```
-
-Select an agent when starting a mission.
-
-## MCP Servers
-
-MCP (Model Context Protocol) servers provide tools and resources to agents.
-
-**Example: `mcp/playwright.json`**
-
-```json
-{
-  "name": "playwright",
-  "description": "Browser automation",
-  "command": "bunx",
-  "args": ["@anthropic/mcp-playwright"],
-  "env": {}
-}
-```
-
-Workspace-scoped MCP servers run beside the harness in the selected host or
-container workspace. Stdio servers receive a clean, explicitly allowlisted
-environment; they do not inherit every workspace credential.
-
-## Workspace Templates
-
-Templates define pre-configured container environments.
-
-**Example: `workspace-template/nodejs.json`**
-
-```json
-{
-  "name": "nodejs",
-  "description": "Node.js development environment",
-  "distro": "ubuntu-noble",
-  "skills": ["typescript-dev"],
-  "env_vars": {
-    "NODE_ENV": "development"
-  },
-  "init_script": "#!/bin/bash\napt update\napt install -y nodejs npm\nnpm install -g typescript"
-}
-```
-
-Create workspaces from templates for consistent, reproducible environments.
-
-## Scoping
-
-| Type | Scope | Applied To |
-|------|-------|------------|
-| Skills | Per-workspace | Synced to `.opencode/skill/` |
-| Commands | Global | Available everywhere |
-| Rules | Global | All missions |
-| Agents | Global | Selectable per-mission |
-| MCP definitions | Global registry | Selected per workspace; run in its execution context |
-| Templates | Per-workspace | Container creation |
-
-## Syncing
-
-sandboxed.sh automatically syncs your Library:
-
-1. Pulls latest changes from `LIBRARY_REMOTE`
-2. Copies relevant files to workspace `.opencode/` directories
-3. Updates OpenCode's global config
-
-Force a sync via the dashboard: **Library → Sync**
-
-## Next Steps
-
-- **[Workspaces](/workspaces)**: Create isolated environments that use your skills
-- **[API Reference](/api)**: Programmatic access to Library management
+Secret values never appear in generated harness config files (`opencode.json`, `.claude/settings.local.json`, `.codex/config.toml`) or process arguments.

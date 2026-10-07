@@ -1,252 +1,50 @@
 ---
-title: Workspaces
-description: Isolated environments for agent tasks
+title: Machines & Workspaces
+description: Local desktop execution, Core host/container workspaces, remote fleet nodes, and mission transfers
 ---
 
-# Workspaces
+# Machines & Workspaces
 
-Workspaces are reusable execution environments where agents run missions. A
-workspace owns the filesystem, installed software, toolchains, network policy,
-and intentionally shared project paths. Each mission still receives its own
-working directory and generated harness configuration.
+Orb and sandboxed.sh execute agent missions across three machine tiers while keeping all project state, transcripts, and `@context` files unified on the Core server.
 
-## Types
+## 1. Execution Placements
+
+| Placement | Target | How it runs |
+| --- | --- | --- |
+| **This computer** (`placement: "client"`) | Your macOS desktop running Orb | Orb's Tauri runner spawns your locally installed CLI (`claude`, `codex`, `agy`, `opencode`, `grok`) in `~/.orb/local-runs/<mission-id>` (or a chosen checkout). Uses your local credentials and streams events back to Core. Supports offline starts (`POST /api/control/local-origins`). |
+| **Core** (`core`) | The main `sandboxed-sh` Linux server | Runs in a per-mission directory inside either a **Host workspace** or an isolated **Container workspace** (`systemd-nspawn`). |
+| **Remote Fleet Nodes** (`remote_node_id`) | Dedicated Linux / GPU / ARM servers running `sandboxed-node` | Core dispatches leased jobs over HTTPS (port `3088`) using per-mission lease tokens signed with the node's secret. Nodes stream events back to Core and synchronize `@context` replicas. |
+| **Cloud Agents** | Hermes, ChatGPT, Grok Bot, Cursor Cloud | Core's cloud adapters drive external coordinator or provider sessions and record durable turn receipts in the same project database. |
+
+## 2. Core & Node Workspace Types
 
 ### Host Workspace
+Commands run directly on the server or node inside a per-mission working directory (`workspaces/mission-<short-id>` or `MISSION_WORKSPACE_ROOT`). Built-in bash (`bash` / `Bash`) executes natively inside that directory.
 
-The default workspace. Runs directly on your server.
+### Container Workspace (`systemd-nspawn`)
+Isolated Linux rootfs built with `debootstrap` (Ubuntu 24.04 `ubuntu-noble`, Ubuntu 22.04 `ubuntu-jammy`, Debian 12 `debian-bookworm`, or Arch Linux `arch-linux`).
+- **Native execution**: Harnesses and their stdio MCP launchers run *inside* the container via `systemd-nspawn`, so file edits, Git operations, and bash commands never touch the host.
+- **Shared project context**: Container workspaces bind-mount only their project's live context directory at `/run/sandboxed-context/<project>`.
+- **Disk-backed `/tmp`**: Stock `systemd-nspawn` mounts `/tmp` as a 10%-RAM tmpfs. Set `SANDBOXED_SH_CONTAINER_TMP_ROOT` on the host to back each container's `/tmp` with a persistent disk directory and avoid silent `ENOSPC` failures on large builds.
 
-- Full access to the host file system
-- Uses globally installed tools
-- No isolation (agent can affect system state)
-- Zero setup required
+## 3. Resource Isolation (`missions.slice` cgroups)
 
-Good for: trusted tasks, system administration, quick experiments.
+To prevent heavy builds (such as parallel Rust or Lean proof compilation) from starving the API or SSE stream, every server mission runs in a transient systemd scope under `missions.slice`—a sibling of `system.slice`:
 
-### Container Workspace
+- **Slice-level protection**: `missions.slice` runs at a lower `CPUWeight` than the API service and enforces aggregate memory ceilings.
+- **Per-mission caps**: Configure `MISSION_MEMORY_MAX`, `MISSION_MEMORY_HIGH`, `MISSION_MEMORY_SWAP_MAX`, `MISSION_CPU_WEIGHT`, and `MISSION_CPU_QUOTA`, or adjust them live via `POST /api/workspaces/:id/resources`.
 
-Isolated Linux environment using systemd-nspawn.
+## 4. Remote Fleet Nodes & Spark Build Offload
 
-- Separate file system (can't see host files)
-- Own installed packages
-- Destroyed and recreated cleanly
-- Template-based setup
+Fleet nodes run the `sandboxed-node` binary and advertise their installed harnesses, protocol capabilities (`remote_launch`), and disk budgets via `GET /api/remote-nodes`.
 
-Good for: untrusted code, experiments, reproducible environments.
+- **Managed Fleet Harnesses**: Nodes maintain atomic, integrity-checked CLI installations under `/opt/sandboxed-tools/<harness>/<version>/` via `update-node-harnesses.py`, viewable and updatable from **Orb → Machines → Agent software** (`GET /api/software`, `POST /api/software/updates`).
+- **DGX Spark Offload (`spark-build`)**: For memory-intensive Lean 4 / proof builds, harnesses invoke `spark-build`, which routes through `/api/spark/offload` to `dgx-spark-arbiter` without exposing node SSH keys inside the workspace.
 
-## Creating Workspaces
+## 5. Moving a Mission Across Machines (`Change machine…`)
 
-### Via Dashboard
+You can move an existing idle mission between **This computer**, **Core**, and any online **Fleet node** from the mission footer (**Change machine…** → `GET/POST /api/control/missions/:id/machine-transfer`):
 
-1. Go to **Workspaces** in sidebar
-2. Click **New Workspace**
-3. Choose:
-   - **Host**: Direct execution on server
-   - **Container**: Isolated environment
-4. If container:
-   - Select a **template** or configure manually
-   - Choose **distro** (Ubuntu Noble, Jammy, Debian, Arch)
-   - Add **skills** and **tools** from your Library
-5. Click **Create**
-
-For containers, click **Build** to create the environment (takes 1-3 minutes).
-
-### Via API
-
-```bash
-curl -X POST "https://agent.yourdomain.com/api/workspaces" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "python-project",
-    "workspace_type": "container",
-    "distro": "ubuntu-noble",
-    "skills": ["python-dev"],
-    "init_script": "#!/bin/bash\napt install -y python3 python3-pip"
-  }'
-```
-
-## Container Lifecycle
-
-```
-pending → building → ready → (in use) → (destroyed)
-           ↑                    ↓
-           └── rebuild ←───────┘
-```
-
-| Status | Meaning |
-|--------|---------|
-| `pending` | Created but not built |
-| `building` | debootstrap + init script running |
-| `ready` | Available for missions |
-| `error` | Build failed (check logs) |
-
-## Multiple Missions
-
-Several missions can target the same workspace. Sandboxed.sh creates
-`workspaces/mission-<short-id>` for each mission, so their default file effects
-and OpenCode/Claude/Codex configuration remain separate. They reuse the
-workspace's container, installed toolchain, and explicit shared paths such as a
-canonical repository or read-only cache.
-
-For concurrent writers, create a clone or worktree per mission. Sharing a
-workspace is intended to avoid repeated provisioning, not to make agents write
-to the same checkout.
-
-## Configuration
-
-### Skills and Tools
-
-Workspaces can have skills and tools from your Library:
-
-```json
-{
-  "skills": ["python-dev", "docker"],
-  "tools": ["custom-linter"]
-}
-```
-
-These are synced to the backend-specific directory inside each mission:
-`.opencode`, `.claude`, or `.codex`.
-
-### Environment Variables
-
-Set environment variables available to all commands:
-
-```json
-{
-  "env_vars": {
-    "NODE_ENV": "development",
-    "DATABASE_URL": "postgres://localhost/dev"
-  }
-}
-```
-
-### Init Script
-
-For containers, the init script runs during build:
-
-```bash
-#!/bin/bash
-apt update
-apt install -y nodejs npm python3 python3-pip
-pip3 install poetry
-npm install -g typescript
-```
-
-## Templates
-
-Templates are reusable workspace configurations stored in your Library.
-
-**Create a template:**
-
-```json
-// library/workspace-template/fullstack.json
-{
-  "name": "fullstack",
-  "description": "Node + Python development",
-  "distro": "ubuntu-noble",
-  "skills": ["typescript-dev", "python-dev"],
-  "env_vars": {
-    "NODE_ENV": "development"
-  },
-  "init_script": "#!/bin/bash\napt install -y nodejs npm python3 python3-pip"
-}
-```
-
-**Use a template:**
-
-```bash
-curl -X POST "https://agent.yourdomain.com/api/workspaces" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"name": "my-project", "template": "fullstack"}'
-```
-
-Applying an updated template replaces the fields controlled by that template;
-rebuilding then recreates the container. Assistant-facing template reads redact
-all environment values. If an encrypted value cannot be decrypted, Sandboxed.sh
-refuses to apply or patch-save the template instead of persisting a placeholder.
-
-## MCP Security
-
-Stdio MCP servers run in the selected workspace through a mission-local launcher
-with mode `0700`. The launcher clears inherited variables and restores only the
-MCP's own environment plus workspace keys explicitly named in
-`workspace_env_allowlist`. Secret values do not appear in generated harness
-configuration or process arguments.
-
-The wildcard `"*"` is reserved for the built-in `workspace-mcp` compatibility
-proxy. Third-party MCPs should receive the smallest practical allowlist, such as
-`PATH`, `ELAN_HOME`, and `LEAN_PROJECT_PATH` for a Lean language server.
-
-## Executing Commands
-
-Run commands in a workspace:
-
-```bash
-curl -X POST "https://agent.yourdomain.com/api/workspaces/$ID/exec" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"command": "python3 --version"}'
-```
-
-Response:
-
-```json
-{
-  "exit_code": 0,
-  "stdout": "Python 3.12.0\n",
-  "stderr": "",
-  "timed_out": false
-}
-```
-
-## Debugging Container Builds
-
-If a container build fails:
-
-1. **Check status**:
-   ```bash
-   GET /api/workspaces/$ID
-   # Look at error_message field
-   ```
-
-2. **View init log**:
-   ```bash
-   GET /api/workspaces/$ID/init-log
-   # Returns stdout/stderr from init script
-   ```
-
-3. **Get debug info**:
-   ```bash
-   GET /api/workspaces/$ID/debug
-   # Container state, directory structure, etc.
-   ```
-
-4. **Re-run init** (without full rebuild):
-   ```bash
-   POST /api/workspaces/$ID/rerun-init
-   # Faster iteration on init script fixes
-   ```
-
-## Distros
-
-| Distro | ID | Notes |
-|--------|-----|-------|
-| Ubuntu 24.04 | `ubuntu-noble` | Recommended |
-| Ubuntu 22.04 | `ubuntu-jammy` | LTS |
-| Debian 12 | `debian-bookworm` | Stable |
-| Arch Linux | `arch-linux` | Rolling release |
-
-## Best Practices
-
-1. **Use containers for untrusted code.** Never run unknown code in host workspace.
-2. **Create templates for repeated setups.** Don't rebuild the same environment.
-3. **Keep init scripts idempotent.** Should work on re-run.
-4. **Version your templates.** They're in your Library git repo.
-5. **Pin external tools and use absolute helper paths.** Template init runs
-   before generic harness bootstrap and runtime launchers use a clean environment.
-
-## Next Steps
-
-- **[API Reference](/api)**: Full workspace API documentation
-- **[Desktop Automation](/desktop)**: Run browsers in workspaces
+1. **Inventory & Selection**: Orb previews the workspace size and files. Build artifacts (`target/`, `node_modules/`, `.lake/`), toolchains, and credentials are excluded by default (you can toggle ignored folders if needed).
+2. **Verified Checkpoint Transfer**: Files transfer in 1 MiB blocks with a SHA-256 manifest (up to 10 GiB / 50,000 files). Git repositories travel as Git bundles with uncommitted working-tree overlays, and internal relative symlinks are preserved.
+3. **Generation Fence**: Activation commits the new placement in SQLite under a compare-and-swap generation fence. The mission keeps its UUID, project, and transcript, and starts a fresh native harness session on the destination machine with portable conversation history.

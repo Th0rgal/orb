@@ -1,111 +1,58 @@
 ---
 title: First Mission
-description: Run your first agent task and learn the basics
+description: Steer live runs, use /plan and /goal, ask /btw side questions, and transfer machines
 ---
 
 # Your First Mission
 
-You've got sandboxed.sh running. Now let's use it.
+Once your backend and Orb client are connected, a **mission** is a single agent conversation and execution attempt inside a project.
 
-## Start a Mission
+## Launching a Mission
 
-1. Open your dashboard at `https://agent.yourdomain.com`
-2. Log in with your password
-3. Click **New Mission** (or press `N`)
-4. Type a simple task:
+1. Open **Orb** and press `⌘N` (**New Agent**).
+2. Select a **Project** (or keep `Default`) and choose where the agent runs:
+   - **This computer** for local files and tools on your Mac
+   - **Core** or a **Fleet machine** for remote host/container execution
+   - **Cloud agent** (`⌘2`) for Hermes, ChatGPT, Grok Bot, or Cursor Cloud
+3. Pick your **Harness** (`Claude Code`, `Codex`, `Antigravity`, `OpenCode`, or `Grok`), **Model**, and **Effort**.
+4. Enter your prompt and press `Enter`:
 
-```
-List the files in /root and tell me what you see.
-```
-
-5. Press Enter and watch
-
-## What You'll See
-
-The mission view shows:
-
-- **Message stream**: Your messages and the agent's responses
-- **Tool calls**: Every command the agent runs (with expandable output)
-- **Thinking**: The agent's reasoning (if the model supports it)
-- **Cost**: Running total of API usage
-
-The agent will execute `ls -la /root`, read the output, and explain what it found.
-
-## Try Something More Interesting
-
-Here are good first tasks to understand capabilities:
-
-**Code exploration:**
-```
-Clone https://github.com/Th0rgal/sandboxed.sh and summarize
-what the main components do. Focus on src/api/.
+```text
+Inspect src/api/control and summarize how mission events are streamed and paginated.
 ```
 
-**System administration:**
-```
-Check disk usage, memory, and running services on this server.
-Highlight anything that looks unusual.
-```
+## Following and Steering Live Runs
 
-**File operations:**
-```
-Create a Python script in /tmp that fetches weather for Paris
-and prints it. Use the wttr.in API. Then run it.
-```
+While the agent works, Orb streams structured events over SSE (`GET /api/control/stream`) and reconciles pages via `GET /api/control/missions/:id/snapshot` and `/events`:
 
-## Understanding the Output
+- **Activity Folds (`Worked — …`)**: Consecutive tool calls, file reads/edits, shell commands, and reasoning deltas collapse into a compact summary row. Click to expand individual tool inputs and outputs.
+- **Live Follow-Up Queue**: Type a follow-up while a turn is running. By default it queues above the composer and dispatches automatically when the current turn finishes, or click **Send now** to steer immediately.
+- **Mid-Mission Switching**: Change the model or effort level between turns from the footer picker.
+- **Files Panel (`⌘J` / `⌘P`)**: Click any verified file path in the assistant's response to preview it in the split Files panel, or browse the mission workspace and `@context` tree.
 
-### Tool Calls
+## Native Modes: `/plan` and `/goal`
 
-Every action the agent takes appears as a tool call:
+### Interactive Planning (`/plan`)
 
-```
-[Tool: bash]
-Input: ls -la /root
-Output: total 48
-drwx------ 8 root root 4096 Jan 15 10:30 .
-...
-```
+Start your draft with `/plan` on supported harnesses (**Claude Code** and **Codex**) to enter native planning mode:
 
-Click to expand and see full input/output.
+1. The agent explores the codebase read-only and can ask structured multiple-choice questions via native interactive cards.
+2. When the plan is ready, Orb displays **Request changes** or **Implement plan**.
+3. Approving the plan starts an implementation turn on the same native session and tracks checklist progress (`TodoWrite` / `update_plan`) below the composer.
 
-### Mission Status
+### Autonomous Goals (`/goal`)
 
-Missions have these states:
+Start your draft with `/goal <objective>` to run a multi-turn autonomous loop until the objective is verified or budget-limited.
 
-| Status | Meaning |
-|--------|---------|
-| `active` | Agent is working |
-| `completed` | Agent finished successfully |
-| `failed` | Something went wrong |
-| `interrupted` | You cancelled it |
+## Side Agents (`/btw`)
 
-## Canceling a Mission
+Need to ask a quick question or inspect another file without derailing an active turn?
 
-If the agent goes off track or you want to stop it:
+- Type `/btw <question>` in the composer or press `⌘⇧J` to open the docked **Side Agent** panel.
+- The side agent runs in an independent session on the same machine and working directory, with incremental transcript excerpts and a full `@conversation` archive staged in `.paloma/conversation/`.
+- Side questions never enter the main agent's prompt or interrupt its running tools.
 
-1. Click **Cancel** in the top right
-2. Or press `Esc`
+## Durable Wake-Ups & Machine Transfer
 
-The agent will stop after its current tool call completes.
-
-## Workspaces
-
-By default, missions run in the **host workspace**, directly on your server with full access.
-
-For isolation, create a **container workspace**:
-
-1. Go to **Workspaces** in the sidebar
-2. Click **New Workspace**
-3. Choose a template or configure manually
-4. Select the workspace when starting a new mission
-
-Container workspaces run in isolated Linux environments (systemd-nspawn). The agent can't affect your host system.
-
-→ Learn more in [Workspaces](/workspaces)
-
-## Next Steps
-
-- **[Library](/library)**: Customize agent behavior with skills and rules
-- **[Workspaces](/workspaces)**: Create isolated environments for different projects
-- **[API Reference](/api)**: Integrate sandboxed.sh into your own tools
+- **Scheduled Continuations**: Agents can schedule their own durable wake-ups (`schedule_wakeup` / `schedule_job_wakeup` via MCP) to check back on long builds or external jobs. Missions with a pending wake-up display a ticking clock indicator.
+- **Change Machine**: Click the machine name in the mission footer and select **Change machine…** to move an idle mission between **This computer**, **Core**, and **Remote nodes**. Orb transfers the workspace (preserving symlinks and Git history as a bundle while skipping build caches like `target/` and `node_modules/`) and resumes with portable conversation history under a new execution generation fence.

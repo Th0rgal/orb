@@ -1,87 +1,59 @@
-# sandboxed.sh Documentation
+# Orb (sandboxed.sh) Documentation
 # For AI Agents and LLMs
-# https://sandboxed.sh
+# https://orb.thomas.md (formerly https://sandboxed.sh)
 
-> sandboxed.sh is a self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok).
-> Isolated Linux workspaces, git-backed configuration, remote mission control.
+> Orb (sandboxed.sh) is a unified client (macOS Tauri + SolidJS, iOS SwiftUI, Web) and self-hosted Rust control plane for AI coding agents (Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok) plus cloud agents (Hermes, ChatGPT, Grok Bot, Cursor Cloud).
+> Note: The entire project is being renamed from sandboxed.sh (formerly Open Agent) to Orb, hosted at https://orb.thomas.md.
 
-## How to Access Documentation
+## How to Access Documentation as Raw Markdown
 
-All docs are available as raw markdown:
-
-1. **Automatic**: If your User-Agent is a known LLM (ChatGPT, GPTBot, PerplexityBot, ClaudeBot, etc.), you automatically get raw markdown
-2. **Add .md extension**: `/setup.md` returns raw markdown
+All pages are available as raw markdown:
+1. **Automatic**: Known LLM User-Agents (`ChatGPT-User`, `GPTBot`, `Claude-Web`, `ClaudeBot`, `PerplexityBot`, `Applebot`, `cohere-ai`, `anthropic-ai`, `Google-Extended`, `CCBot`) automatically receive `text/markdown`.
+2. **Add `.md` extension**: e.g. `/getting-started.md`, `/workspaces.md`, `/api.md`
 3. **Accept header**: `Accept: text/markdown`
-4. **Query param**: `/setup?format=md`
-5. **API directly**: `/api/docs/setup`
-
-Known LLM User-Agents that get markdown automatically:
-ChatGPT-User, GPTBot, Claude-Web, ClaudeBot, PerplexityBot, Applebot, cohere-ai, anthropic-ai, Google-Extended, CCBot
+4. **Query param**: `?format=md`
+5. **Direct API**: `/api/docs/_index` (JSON list) or `/api/docs/_all` (all docs concatenated)
 
 ## Documentation Index
 
 ### Getting Started
-- /index.md - Overview: what sandboxed.sh is and why
-- /setup.md - Installation guide (AI-assisted and manual)
-- /first-mission.md - Your first 10 minutes after setup
+- `/index.md` — Overview of Orb + sandboxed.sh, the three execution modes, and architecture
+- `/getting-started.md` — Connecting Orb on macOS and iOS, scanning local agents, and configuring CLIProxyAPI subscriptions
+- `/setup.md` — Native Ubuntu 24.04 and Docker server deployment
+- `/install-docker.md` — Docker Compose quick start and `systemd-nspawn` container setup
+- `/first-mission.md` — Live mission steering, `/plan`, `/goal`, `/btw` side agents, wake-ups, and machine transfer
 
-### Core Concepts
-- /library.md - Git-backed config: skills, commands, rules, MCPs
-- /workspaces.md - Isolated environments (host and containers)
+### Architecture & Concepts
+- `/workspaces.md` — Execution placements (`placement: "client"`, `core`, `remote_node_id`), host vs `systemd-nspawn` containers, `missions.slice` cgroups, DGX Spark build offload, and cross-machine mission transfer
+- `/library.md` — Shared project `@context`, synchronized project skills (`skills/<name>/SKILL.md`), and the Git-backed global Library
 
 ### Reference
-- /api.md - Complete API reference (missions, workspaces, library)
-- /desktop.md - Headless browser and GUI automation (optional)
+- `/api.md` — REST API, cursor-paginated events, SSE streaming, and unified MCP (`sandboxed-mcp` / `/api/mcp`)
+- `/desktop.md` — Headless Wayland/Sway (and Xvfb fallback) browser & GUI automation
 
-### Special Endpoints
-- /api/docs/_index - JSON index of all documents
-- /api/docs/_all - All documentation concatenated (for full context loading)
+## Quick Architecture Reference
 
-## Quick Reference
-
-### Architecture
-```
-Your Devices (Dashboard, iOS, CLI)
-        │
-        ▼ HTTPS
-┌───────────────────────────┐
-│      Your Server          │
-│  ┌─────────────────────┐  │
-│  │    sandboxed.sh       │  │  ← Orchestration, workspaces, library
-│  └──────────┬──────────┘  │
-│             ▼             │
-│  ┌─────────────────────┐  │
-│  │ Claude Code/OpenCode/Codex/agy/Grok │  │  ← Model inference, tool execution
-│  └─────────────────────┘  │
-└───────────────────────────┘
-```
-
-### Scoping Model
-| Scope | Components |
-|-------|------------|
-| Global | Auth, providers, MCPs, agents, commands, rules |
-| Per-Workspace | Skills, tools, plugins, installed software |
-| Per-Mission | Agent selection, workspace, conversation |
+### Three Execution Modes
+1. **Your computer (`placement: "client"`)**: Orb Desktop spawns local CLIs (`claude`, `codex`, `agy`, `opencode`, `grok`) on macOS in `~/.orb/local-runs/<mission-id>` while syncing transcripts and `@context` to Core.
+2. **Your private cloud (`core` or `remote_node_id`)**: Core or leased `sandboxed-node` machines run harnesses inside per-mission host directories or `systemd-nspawn` containers under `missions.slice` cgroups.
+3. **Cloud agents**: Core adapters connect to durable **Hermes** coordinator sessions, **ChatGPT** web profiles, **Grok Bot**, or **Cursor Cloud**.
 
 ### Key API Endpoints
+```http
+POST /api/control/missions                      # Create local, Core, node, or cloud mission
+GET  /api/control/missions/:id/snapshot         # First-paint mission snapshot
+GET  /api/control/missions/:id/events           # Cursor-paginated event history (X-Orb-Events-Protocol: 1)
+GET  /api/control/stream?mission=<id>           # Real-time SSE stream
+POST /api/control/message                       # Send or queue follow-up message
+POST /api/control/missions/:id/btw/agent        # Launch/continue /btw side agent
+POST /api/control/missions/:id/machine-transfer # Move mission between local, Core, and fleet nodes
+GET  /api/projects/overview                     # Project roster and attention items
+GET  /api/projects/:slug/situation              # Bounded project state read
+GET  /api/remote-nodes                          # Fleet nodes and remote_launch capabilities
+POST /api/mcp/call                              # Unified MCP tool invocation (executor/coordinator/operator)
 ```
-POST /api/control/missions        # Create mission
-POST /api/control/missions/:id/load  # Load mission
-POST /api/control/message         # Send message to agent
-GET  /api/control/stream          # SSE event stream
-POST /api/workspaces              # Create workspace
-POST /api/workspaces/:id/exec     # Execute command
-```
-
-## For AI Agents Deploying sandboxed.sh
-
-1. Ask user for: server IP, domain, SSH access
-2. Read `/api/docs/_all` for complete installation context
-3. Or read `/setup.md` for condensed instructions
-4. Full manual: INSTALL.md in the repository
 
 ## Source
-
 - Repository: https://github.com/Th0rgal/sandboxed.sh
 - Library Template: https://github.com/Th0rgal/sandboxed-library-template
-- Docs: https://sandboxed.sh
+- Website & Docs: https://orb.thomas.md (https://sandboxed.sh)

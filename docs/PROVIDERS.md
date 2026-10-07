@@ -5,33 +5,31 @@ This guide explains how to configure and use alternative AI providers with Sandb
 ## Supported Providers
 
 ### Tested & Recommended
-- **Anthropic** (Claude models) - OAuth + API key
-- **OpenAI** (GPT models) - OAuth + API key
-- **Google** (Gemini models) - API key
-- **Cerebras** (Llama models) - API key ⚡ Ultra-fast inference
-- **Z.AI** (GLM models) - API key
-- **DeepInfra** - API key
-- **Cohere** - API key
-- **Together AI** - API key
-- **Perplexity** - API key
+- **Anthropic** (Claude models) — CLIProxyAPI OAuth (`claude-login`) or API key
+- **OpenAI** (GPT / Codex models) — CLIProxyAPI OAuth (`codex-login`), API key, or ChatGPT UI pool
+- **Google / Antigravity** (`agy` models) — CLIProxyAPI OAuth (`antigravity-login`) or API key
+- **xAI** (Grok models) — API key (`XAI_API_KEY`) or Grok CLI login
+- **Cerebras** (Llama models) — API key
+- **Z.AI** (GLM models) — API key
+- **MiniMax** (MiniMax-M3 / M2.7) — API key
+- **DeepInfra**, **Cohere**, **Together AI**, **Perplexity**, **OpenRouter** — API key
 
 ### Custom Providers
-- **Custom** - Any OpenAI-compatible API
+- **Custom** — Any OpenAI-compatible API (`base_url` + custom `models`)
 
 ## Quick Start
 
-### 1. Add Provider via Dashboard
+### 1. Connect Subscriptions or API Keys in Orb
 
-1. Navigate to Settings → Providers
-2. Click "Add Provider"
-3. Select provider type
-4. Enter API key or authenticate via OAuth
-5. Enable for desired backends (OpenCode, Claude Code)
+1. Open **Settings → Subscriptions & API Keys** (or run `/login` in the composer).
+2. Click **Sign in** next to Claude, Codex, or Antigravity to trigger `/api/ai/providers/cli-proxy-login`, or add an API key provider directly.
+3. Enable the provider for your desired harnesses (`claudecode`, `codex`, `opencode`, `grok`, `antigravity`).
 
 ### 2. Add Provider via API
 
 ```bash
 curl -X POST https://YOUR-BACKEND/api/ai/providers \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "provider_type": "cerebras",
@@ -155,7 +153,8 @@ OpenCode model defaults are configured in `opencode.json` or through per-mission
 ### Via API
 
 ```bash
-curl -X POST https://YOUR-BACKEND/api/missions \
+curl -X POST https://YOUR-BACKEND/api/control/missions \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "workspace_id": "...",

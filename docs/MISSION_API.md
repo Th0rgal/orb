@@ -19,9 +19,11 @@ POST /api/control/missions
 }
 ```
 
-`backend` can be `"opencode"`, `"claudecode"`, `"codex"`, `"antigravity"`, or
-`"grok"`. If omitted, the server uses `DEFAULT_BACKEND` or the first detected
-CLI in priority order: Claude Code, OpenCode, Grok, Codex, then Antigravity.
+`backend` can be `"opencode"`, `"claudecode"`, `"codex"`, `"antigravity"`,
+`"grok"`, or `"chatgpt_ui"`. If omitted, the server uses `DEFAULT_BACKEND` or the
+first detected CLI in priority order: Claude Code, OpenCode, Grok, Codex, then
+Antigravity. You can also pass `"mode"` (`"build"`, `"plan"`, or `"goal"`),
+`"model_effort"`, `"project_id"`, and `"track"`.
 
 **Response**: `Mission` object (see below).
 
@@ -169,8 +171,9 @@ GET /api/control/missions/:id/events?view=history&since_seq=0&limit=200
 ```
 
 `/events` supports `view=transcript|trace|history|all`, explicit `types`,
-`limit`, `since_seq`, and `before_seq`, and includes
-`X-Total-Events` / `X-Max-Sequence` headers.
+`limit`, `since_seq`, `before_seq`, `cursor` (opaque pagination cursor), and
+`compact=true`, and includes `X-Total-Events`, `X-Max-Sequence`,
+`X-Orb-Events-Protocol: 1`, and `X-Next-Cursor` headers.
 
 ## Stream Events (SSE)
 
@@ -200,14 +203,20 @@ data: {"id":"uuid","content":"Done!","success":true,"cost_cents":5,"model":"clau
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/control/missions` | GET | List missions |
+| `/api/control/missions` | GET | List missions (`limit`, `offset`) |
+| `/api/control/missions/search` | GET | Full-text search across missions (`q`, `limit`, `status`) |
 | `/api/control/missions/:id` | GET | Get mission details |
 | `/api/control/missions/:id` | DELETE | Delete mission |
 | `/api/control/missions/:id/snapshot` | GET | Get first-paint mission payload |
-| `/api/control/missions/:id/events` | GET | Get historical mission events and pagination |
+| `/api/control/missions/:id/events` | GET | Get historical mission events and cursor pagination |
 | `/api/control/missions/:id/tree` | GET | Get agent tree for mission |
 | `/api/control/missions/current` | GET | Get current active mission |
 | `/api/control/missions/:id/resume` | POST | Resume interrupted mission |
+| `/api/control/missions/:id/parallel` | POST | Start mission in parallel execution queue |
+| `/api/control/missions/:id/btw/agent` | POST | Spawn a read-only `/btw` side-question child mission |
+| `/api/control/missions/:id/machine-transfer` | POST | Transfer mission and workspace bundle to another machine |
+| `/api/control/missions/:id/cyber` | GET / POST | Inspect or update autonomous `/goal` (Cyber) runtime state |
+| `/api/control/local-origins` | GET / POST | Inspect or mirror local desktop missions (`placement: "client"`) |
 | `/api/control/progress` | GET | Get execution progress |
 
 ## Automations

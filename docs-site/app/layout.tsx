@@ -16,54 +16,57 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://sandboxed.sh"),
+  metadataBase: new URL("https://orb.thomas.md"),
   title: {
-    default: "sandboxed.sh | Cloud Orchestrator for AI Coding Agents",
-    template: "%s | sandboxed.sh",
+    default: "Orb (sandboxed.sh) | Your agents, machines and subscriptions",
+    template: "%s | Orb (sandboxed.sh)",
   },
   description:
-    "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
-  applicationName: "sandboxed.sh",
+    "Run and orchestrate AI coding agents across your computer, your private cloud, and managed cloud services. Built for Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, ChatGPT, and Cursor Cloud.",
+  applicationName: "Orb",
   generator: "Next.js",
   keywords: [
+    "orb",
+    "sandboxed.sh",
     "ai agent",
+    "claude code",
+    "codex",
+    "antigravity",
     "opencode",
-    "claude",
-    "automation",
-    "orchestration",
-    "workspace",
+    "grok",
+    "hermes",
     "mcp",
     "model context protocol",
   ],
   authors: [{ name: "Thomas Marchand", url: "https://thomas.md" }],
   creator: "Thomas Marchand",
-  publisher: "sandboxed.sh",
+  publisher: "Orb",
   robots: {
     index: true,
     follow: true,
   },
   twitter: {
     card: "summary_large_image",
-    title: "sandboxed.sh",
+    title: "Orb (sandboxed.sh)",
     description:
-      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
+      "Your agents, machines and subscriptions. One place to work on macOS and iOS.",
     creator: "@music_music_yo",
     images: ["/og-image.png"],
   },
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://sandboxed.sh",
-    siteName: "sandboxed.sh",
-    title: "sandboxed.sh",
+    url: "https://orb.thomas.md",
+    siteName: "Orb",
+    title: "Orb (sandboxed.sh)",
     description:
-      "Self-hosted cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex, Antigravity (agy), and Grok). Mission orchestration, workspace management, and library sync.",
+      "Your agents, machines and subscriptions. One place to work on macOS and iOS.",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "sandboxed.sh - Cloud Orchestrator for AI Coding Agents",
+        alt: "Orb (sandboxed.sh) - Your agents, machines and subscriptions",
       },
     ],
   },
@@ -74,7 +77,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "sandboxed.sh",
+    title: "Orb",
   },
   other: {
     "msapplication-TileColor": "#0c0b0a",

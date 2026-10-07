@@ -1,325 +1,96 @@
-# Getting Started with sandboxed.sh
+---
+title: Getting Started
+description: Connect Orb on macOS or iOS, configure providers, and launch your first agent
+---
 
-This guide will walk you through setting up and using sandboxed.sh for the first time, from configuring your backend connection to creating your first AI-powered mission.
+# Getting Started with Orb & sandboxed.sh
 
-## What is sandboxed.sh?
+This guide walks you through connecting **Orb** (macOS and iOS) to your **sandboxed.sh** backend, configuring your subscriptions and harnesses, and launching your first coding agent.
 
-sandboxed.sh is a powerful AI agent orchestration platform that manages multiple AI coding assistants (OpenCode, Claude Code, Codex, Antigravity (agy), and Grok) through a unified dashboard. It provides:
+> **Upcoming rename:** The entire project is transitioning to **Orb** (`orb.thomas.md`). Current binaries and environment variables continue to use `sandboxed-sh` during the transition.
 
-- **Git-backed configuration library** - Store and version control your skills, agents, commands, and tools
-- **Multiple workspace support** - Isolated containers for different projects
-- **Config profiles** - Manage different configurations for each AI harness
-- **Mission control** - Queue and manage AI tasks with real-time monitoring
+## 1. Prerequisites
 
-## Prerequisites
+1. **A running backend (`sandboxed-sh`)**:
+   - **Docker**: `http://localhost:3000` (see [Docker Install](/install-docker))
+   - **Remote Linux server**: e.g., `https://orb.thomas.md` or `https://agent-backend.example.com` (see [Server Setup](/setup))
+2. **Orb Client**:
+   - **macOS Desktop (`orb/`)**: Tauri v2 + SolidJS native app (`pnpm install && pnpm tauri dev`)
+   - **iOS App (`ios_dashboard/`)**: SwiftUI app generated via XcodeGen (`xcodegen generate && open SandboxedDashboard.xcodeproj`)
+   - **Web Admin Console (`dashboard/`)**: Bundled in Docker on port 3000 or deployed separately
 
-Before starting, you need:
+![Orb on macOS](/images/orb-desktop.webp)
 
-1. **sandboxed.sh Backend** running (locally or remote)
-   - Local: `http://localhost:3000` (default)
-   - Remote: Your server URL (e.g., `https://agent-backend.example.com`)
+## 2. Connect to Your Backend
 
-2. **Dashboard Access**
-   - Web: `http://localhost:3001` (local development)
-   - iOS app: Available from the App Store
+### On macOS (Orb Desktop)
 
-## Step 1: Initial Dashboard View
+1. Open **Settings** (`⌘,`) → **Client**.
+2. Under **Backend**, enter your server URL and dashboard password (or username + password in multi-user mode).
+3. Click **Connect**. Orb stores the connection in local storage and synchronizes your projects, machines, and model catalog.
 
-When you first access the sandboxed.sh dashboard, you'll see the global monitor overview:
+### On iOS (Orb iOS)
 
-![Initial Dashboard](/images/getting-started/01-dashboard-initial.webp)
+1. Launch **Orb** on your iPhone or iPad.
+2. Enter your **Server URL** and **Password** in the connection sheet, then tap **Connect**.
+3. Tap the profile icon in the top bar at any time to switch servers or inspect **Backend**, **Providers**, and **Machines**.
 
-The dashboard shows:
-- **Navigation sidebar** - Access different sections (Overview, Mission, Workspaces, Library, Settings)
-- **Global Monitor** - Real-time view of running missions
-- **Recent Missions** - History of completed tasks
-- **Agent Status** - Current state (Ready, Busy, etc.)
+<p align="center">
+  <img src="/images/orb-ios-projects.webp" width="240" alt="Orb on iOS Projects" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="/images/orb-ios.webp" width="240" alt="Orb on iOS Conversation" />
+</p>
 
-## Step 2: Configure Backend Connection
+## 3. Configure Harnesses & Subscriptions
 
-### 2.1 Open Settings Menu
+### Local Harnesses (macOS)
 
-Click the **Settings** button in the left sidebar to expand the settings menu:
+Open **Settings** (`⌘,`) → **Client** → **Local agents** and click **Scan**. Orb checks your local `PATH` (or custom binary overrides) for installed coding CLIs:
 
-![Settings Menu](/images/getting-started/02-settings-menu.webp)
+- **Claude Code** (`claude`)
+- **Codex** (`codex`)
+- **Antigravity** (`agy` — discovers account models via `agy models`)
+- **OpenCode** (`opencode`)
+- **Grok** (`grok`)
 
-You'll see several settings categories:
-- **System** - Server connection and components
-- **Backends** - AI harness configurations
-- **Providers** - API keys for AI models
-- **Data** - Library and backup management
-- **Monitoring** - Logging and diagnostics
-- **Secrets** - Encrypted credential storage
+Local runs use the credentials and sessions already configured on your Mac without copying server tokens onto your laptop.
 
-### 2.2 Access System Settings
+### Subscriptions & Inference Providers
 
-Click on **System** to configure your backend connection:
+Open **Providers** (`⌘4` on macOS, or **Settings → Providers** on iOS) to manage model inference for server and fleet runs:
 
-![System Settings](/images/getting-started/03-system-settings-initial.webp)
+- **OAuth Subscriptions (CLIProxyAPI Plus)**: Sign in to Anthropic (Claude), OpenAI (Codex/ChatGPT), xAI, Kimi, or Google Antigravity. When `SANDBOXED_OAUTH_OWNER=cli-proxy` is active, CLIProxyAPI owns token refresh and multi-account rotation so parallel missions never race on refresh tokens.
+- **API Keys**: Add standard API keys for OpenRouter, Anthropic, OpenAI, xAI, MiniMax, Z.AI, or Google.
+- **Model Routing (`Settings → Routing`)**: Define ordered fallback chains (`builtin/smart`, `builtin/fast`, or custom chains) and inspect live account health and fallback events.
 
-The System page shows:
-- **API URL** - Backend endpoint (currently connected status)
-- **System Components** - Installed harnesses and versions
-  - sandboxed.sh (v0.5.1)
-  - OpenCode (with update notifications)
-  - Claude Code (with update notifications)
-  - Codex where installed
+## 4. Create a Project and Launch an Agent
 
-### 2.3 Change Backend URL
+![Creating an agent in Orb](/images/orb-setup.webp)
 
-If you need to connect to a different backend (e.g., a remote server):
+1. Press `⌘5` (or click **Projects** in the sidebar) to create a project with a custom color.
+2. Press `⌘N` (or `⌘1`) to open the **New Agent** composer, or `⌘2` for **Cloud agent**:
+   - **This computer**: Runs a local CLI on your Mac in `~/.orb/local-runs/<mission-id>` (or a custom directory) while syncing the transcript and `@context` to the server.
+   - **Core / Remote machine**: Runs in a host workspace or isolated `systemd-nspawn` container on your server or a registered `sandboxed-node` machine.
+   - **Cloud agent**: Starts a durable **Hermes** coordinator conversation, **ChatGPT** web session, **Grok Bot** run, or **Cursor Cloud** repository agent.
+3. Choose the **Harness**, **Model**, **Effort** (`low`, `medium`, `high`, `xhigh`), and optional **Cyber Access** (`Standard`, `Daybreak`, `Automatic` for Codex).
+4. Optional prefixes in the composer:
+   - `/goal <objective>` — Launches a multi-turn autonomous goal run.
+   - `/plan <task>` — Launches native interactive planning mode (supported on Claude Code and Codex).
+   - `@context/<file>` — References shared project context files synchronized in Finder.
 
-1. Click on the **API URL** field
-2. Enter your backend URL (e.g., `https://agent-backend-dev.thomas.md`)
+## 5. Desktop Keyboard Shortcuts
 
-![Backend URL Changed](/images/getting-started/04-backend-url-changed.webp)
-
-3. Click **Save Changes**
-
-![Settings Saved](/images/getting-started/05-settings-saved.webp)
-
-The dashboard will reconnect to the new backend and display a success message.
-
-## Step 3: Configure Your Library
-
-The sandboxed.sh Library is a Git-backed repository that stores all your reusable configurations:
-
-- **Skills** - Specialized knowledge and procedures
-- **Agents** - AI assistant configurations
-- **Commands** - Quick task templates
-- **Tools** - Custom functions and utilities
-- **Rules** - Behavioral guidelines
-- **MCPs** - Model Context Protocol servers
-- **Workspace Templates** - Preconfigured environments
-
-### 3.1 Access Library Settings
-
-1. Click **Settings** > **Data** to access library configuration:
-
-![Data Settings](/images/getting-started/08-data-settings.webp)
-
-The Data page shows:
-- **Library Remote** - Git repository URL (SSH or HTTPS)
-- **Backup & Restore** - Export/import your complete configuration
-
-### 3.2 Change Library Repository (Optional)
-
-The default library uses the sandboxed.sh template repository. To use your own:
-
-1. Create a new Git repository (GitHub, GitLab, etc.)
-2. Click on the **Library Remote** field:
-
-![Library Remote Edit](/images/getting-started/09-library-remote-edit.webp)
-
-3. Enter your repository URL:
-   - SSH: `git@github.com:your-username/your-library.git`
-   - HTTPS: `https://github.com/your-username/your-library.git`
-
-4. Click **Save**
-
-**Note**: The backend will clone your repository on first use. If it's empty, consider forking the [sandboxed-library-template](https://github.com/Th0rgal/sandboxed-library-template) as a starting point.
-
-### 3.3 Sync Library
-
-After changing the library remote, click **Sync** in the Library > Configs section to pull the latest changes.
-
-## Step 4: Explore Library Skills
-
-### 4.1 View Installed Skills
-
-Click **Library** > **Skills** to see all available skills:
-
-![Skills List](/images/getting-started/10-skills-list.webp)
-
-The default library includes several useful skills:
-- **agent-browser** - Web automation and testing
-- **bitwarden-secrets** - Secure credential management
-- **github-cli** - GitHub operations (PRs, issues)
-- **library-management** - Library API tools
-- **sandboxed-sh-dev** - sandboxed.sh development guide
-
-### 4.2 Edit a Skill
-
-Click on any skill to view and edit its content:
-
-![Skill Editor](/images/getting-started/11-skill-editor.webp)
-
-The skill editor shows:
-- **Frontmatter** - Metadata (description, license, compatibility)
-- **Body Content** - Markdown documentation with instructions
-- **Files** - Additional reference files within the skill folder
-
-You can modify the content directly and click **Save** to update the library.
-
-## Step 5: Configure AI Harness Settings
-
-sandboxed.sh supports multiple AI coding harnesses (OpenCode, Claude Code, Codex, Antigravity (agy), and Grok). OpenCode, Claude Code, Codex, and sandboxed.sh settings can be managed through configuration profiles.
-
-### 5.1 Access Config Editor
-
-Click **Library** > **Configs** to access the file-based config editor:
-
-![Config Editor](/images/getting-started/07-config-editor.webp)
-
-The config editor shows:
-- **Harness tabs** - Switch between OpenCode, Claude Code, Codex, and sandboxed.sh settings
-- **Profile selector** - Choose or create config profiles (default, custom)
-- **Git status** - Branch and sync state
-- **File browser** - Navigate config files (`.opencode/`, `.claudecode/`, etc.)
-- **JSON editor** - Edit configuration directly
-
-### 5.2 Edit Configuration Files
-
-For OpenCode, you'll typically edit:
-
-1. **opencode.json** - Main configuration:
-```json
-{
-  "agent": {
-    "reviewer": {
-      "description": "Focused code review",
-      "mode": "subagent",
-      "model": "anthropic/claude-sonnet-4-20250514"
-    }
-  }
-}
-```
-
-After editing, click **Save** to commit changes to the library.
-
-## Step 6: Create Your First Mission
-
-### 6.1 Open Mission Control
-
-Click **Mission** in the sidebar to access the control interface:
-
-![Mission Control Empty](/images/getting-started/12-mission-control-empty.webp)
-
-The Mission Control page shows:
-- **Mission selector** - Switch between active missions
-- **New Mission** - Create a new task
-- **Status indicators** - Thinking, Idle, Queue
-- **Message area** - Chat interface with the agent
-
-### 6.2 Create a New Mission
-
-Click **+ New Mission** to open the creation dialog:
-
-![New Mission Dialog](/images/getting-started/13-new-mission-dialog.webp)
-
-Configure your mission:
-
-1. **Workspace** - Select where the mission runs:
-   - **Host (default)** - Direct access to your system
-   - **Isolated containers** - Sandboxed environments for projects
-
-2. **Agent** - Choose the AI model:
-   - **OpenCode build** - Default implementation agent
-   - **OpenCode plan** - Read-only planning agent
-   - **Custom agents** - Native agents configured in `.opencode/agents/`
-
-3. **Config Profile** - Override settings (optional):
-   - **Default** - Use workspace configuration
-   - **Custom profiles** - Specific model/mode overrides
-
-4. Click **Create here** to start the mission in the current tab, or **New Tab** to open in a new window
-
-### 6.3 Interact with Your Agent
-
-Once created, you can:
-
-- **Send messages** - Type tasks in the message box
-- **Upload files** - Drag and drop or paste files directly
-- **Monitor progress** - Watch real-time output and thinking process
-- **Queue messages** - Send multiple tasks while the agent is busy
-
-Example first message:
-```
-Please help me understand the structure of this codebase and create a README documenting the main components.
-```
-
-## Next Steps
-
-Now that you're set up, explore these features:
-
-### Workspace Management
-- Create isolated workspaces for different projects
-- Configure workspace templates with pre-installed tools
-- Use containers for safe experimentation
-
-### Library Customization
-- Create custom skills for your workflows
-- Add project-specific commands
-- Define reusable tools and functions
-- Set up behavioral rules for agents
-
-### Advanced Configuration
-- Configure multiple config profiles for different scenarios
-- Set up MCP servers for extended functionality
-- Create custom agents with specific capabilities
-- Configure AI provider API keys securely
-
-### Monitoring and Debugging
-- View mission logs and outputs
-- Monitor resource usage
-- Track agent thinking process
-- Review mission history
-
-## Troubleshooting
-
-### Backend Connection Issues
-
-**Problem**: "Failed to connect to backend"
-
-**Solutions**:
-1. Verify the backend is running: `curl http://localhost:3000/api/health`
-2. Check the API URL in Settings > System
-3. Ensure no firewall is blocking the connection
-4. For remote backends, verify HTTPS/SSL certificates
-
-### Library Sync Errors
-
-**Problem**: "Failed to sync library"
-
-**Solutions**:
-1. Check Git credentials (SSH keys or HTTPS tokens)
-2. Verify repository permissions
-3. Use `Sync` button to force refresh
-4. Check Settings > Data > Library Remote URL
-
-### Mission Creation Fails
-
-**Problem**: "Failed to create mission"
-
-**Solutions**:
-1. Verify AI provider API keys (Settings > Providers)
-2. Check workspace exists and is accessible
-3. Ensure backend has sufficient resources
-4. Review backend logs for error details
-
-### Configuration Not Applied
-
-**Problem**: Changes to config files don't take effect
-
-**Solutions**:
-1. Ensure you clicked **Save** in the config editor
-2. Check Git status shows "Clean" (changes committed)
-3. Restart the mission or create a new one
-4. Verify the correct config profile is selected
-
-## Getting Help
-
-- **Documentation**: [https://github.com/Th0rgal/sandboxed.sh/tree/master/docs](https://github.com/Th0rgal/sandboxed.sh/tree/master/docs)
-- **Issues**: [https://github.com/Th0rgal/sandboxed.sh/issues](https://github.com/Th0rgal/sandboxed.sh/issues)
-- **Discussions**: [https://github.com/Th0rgal/sandboxed.sh/discussions](https://github.com/Th0rgal/sandboxed.sh/discussions)
-
-## Summary
-
-You've learned how to:
-- ✅ Configure backend connection
-- ✅ Set up your library repository
-- ✅ Browse and edit skills
-- ✅ Configure AI harness settings
-- ✅ Create and manage missions
-
-Start experimenting with your first mission and explore the powerful features sandboxed.sh offers for AI-powered development workflows!
+| Shortcut | Action |
+| --- | --- |
+| `⌘1` / `⌘N` | New agent |
+| `⌘2` | Cloud agent |
+| `⌘3` | Machines |
+| `⌘4` | Providers |
+| `⌘5` | Focus projects tree (`↑`/`↓` navigate, `Enter` opens) |
+| `⌘B` | Toggle sidebar |
+| `⌘J` | Toggle workspace & context Files panel |
+| `⌘⇧J` | Toggle `/btw` side-agent panel |
+| `⌘P` | Quick file palette |
+| `⌘F` / `⌘⇧F` | Find in transcript / Search in files |
+| `⌘/` | Switch Markdown preview / source |
+| `⌘,` | Settings (Client & Routing) |

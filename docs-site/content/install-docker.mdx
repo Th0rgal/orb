@@ -1,11 +1,11 @@
 ---
 title: Docker Install
-description: Run sandboxed.sh locally or on a server using Docker Compose
+description: Run the sandboxed.sh (Orb) backend and web console with Docker Compose
 ---
 
 # Docker Install
 
-Docker is the fastest way to run sandboxed.sh locally or on a server. The Docker image bundles the backend, dashboard, and required CLIs in a single container.
+Docker is the fastest way to run the **sandboxed.sh** (upcoming **Orb**) backend and web admin console on Linux, macOS, or Windows. The image bundles the Rust backend (`sandboxed-sh`), MCP companions (`sandboxed-mcp`, `workspace-mcp`, `desktop-mcp`), the Next.js web console, Caddy, and primary agent CLIs.
 
 ## Quick Start
 
@@ -17,28 +17,27 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open `http://localhost:3000` in your browser.
+- **Web Console & API**: `http://localhost:3000`
+- **Orb Desktop / iOS**: Connect to `http://localhost:3000` (or your TLS domain) using `DASHBOARD_PASSWORD`.
 
-## Configuration
+## Essential Configuration (`.env`)
 
-At minimum, set these in `.env`:
+| Variable | Description |
+| --- | --- |
+| `DEV_MODE` | Set to `false` in production to enforce password/JWT authentication |
+| `DASHBOARD_PASSWORD` | Password for Orb and web login |
+| `JWT_SECRET` | Long random secret used to sign JWT tokens |
+| `SANDBOXED_SH_USERS` | Optional JSON array for multi-user authentication |
+| `LIBRARY_REMOTE` | Git URL for your shared Library repository |
+| `MAX_PARALLEL_MISSIONS` | Maximum concurrent server missions |
 
-- `DASHBOARD_PASSWORD`
-- `JWT_SECRET`
-- `DEV_MODE=false` for production
+## Container Workspaces (`systemd-nspawn`)
 
-Optional but common:
-
-- `LIBRARY_REMOTE` for a shared agent library
-- `MAX_PARALLEL_MISSIONS` to cap concurrency
-
-## Container Workspaces (systemd-nspawn)
-
-To enable isolated container workspaces, uncomment the privileged settings in `docker-compose.yml`:
+By default, workspaces inside Docker execute in host/fallback mode inside the container. To enable full per-workspace `systemd-nspawn` container isolation, uncomment the privileged settings in `docker-compose.yml`:
 
 ```yaml
 services:
-  sandboxed.sh:
+  sandboxed-sh:
     privileged: true
     cgroup: host
 ```
@@ -49,16 +48,8 @@ Then restart:
 docker compose down && docker compose up -d
 ```
 
-## Production Notes
+## Persistent Volumes
 
-- The container exposes port **80** internally and maps it to **3000** on the host.
-- Use a reverse proxy (Caddy/Nginx) if you want TLS or a custom domain.
-- Keep `/root/.sandboxed.sh` and `/root/.claude` on persistent volumes (already in `docker-compose.yml`).
-
-## Dashboard Access
-
-The Docker image includes the dashboard. If you prefer a separate frontend, deploy `dashboard/` to Vercel and set `NEXT_PUBLIC_API_URL` to your backend URL.
-
-## Next Step
-
-Head to [First Mission](/first-mission) to run your first task.
+- `sandboxed-data` (`/root/.sandboxed-sh`): SQLite databases (`missions.db`, `projects.db`, `ask.db`), Library checkout, synchronized `@context` files, and container rootfs trees.
+- `claude-auth` (`/root/.claude`): Legacy Claude credentials when not using CLIProxyAPI.
+- `~/.ssh:/root/.ssh:ro`: Read-only mount of host SSH keys (copied to a writable key dir at startup for private Git repositories).

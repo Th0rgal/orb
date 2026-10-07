@@ -4,7 +4,6 @@ import { getPageMap } from "nextra/page-map";
 import "nextra-theme-docs/style.css";
 import "./docs.css";
 
-// Custom logo component
 function Logo() {
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
@@ -15,7 +14,7 @@ function Logo() {
           color: "rgb(var(--foreground))",
         }}
       >
-        🏝️ sandboxed.sh
+        Orb <span style={{ opacity: 0.6, fontWeight: 400 }}>· sandboxed.sh</span>
       </span>
     </div>
   );
@@ -33,13 +32,12 @@ export default async function DocsLayout({
       projectLink="https://github.com/Th0rgal/sandboxed.sh"
     />
   );
-  // Get the full page map
   const pageMap = await getPageMap("/");
   return (
     <Layout
       navbar={navbar}
       editLink="Edit this page on GitHub"
-      docsRepositoryBase="https://github.com/Th0rgal/sandboxed.sh/blob/main/docs-site"
+      docsRepositoryBase="https://github.com/Th0rgal/sandboxed.sh/blob/master/docs-site"
       sidebar={{ defaultMenuCollapseLevel: 1 }}
       pageMap={pageMap}
       footer={null}

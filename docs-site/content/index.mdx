@@ -1,100 +1,90 @@
 ---
-title: sandboxed.sh
-description: Self-hosted cloud orchestrator for AI coding agents
+title: Orb (sandboxed.sh)
+description: Your agents, machines and subscriptions. One place to work.
 ---
 
 import { Callout } from 'nextra/components'
 
-# sandboxed.sh
+# Orb (sandboxed.sh)
 
-Run AI coding agents on your own server. Start a task, close your laptop, check back tomorrow.
+**Your agents, machines and subscriptions. One place to work.**
+
+Use **Orb** on macOS or iOS—and **sandboxed.sh** as the self-hosted execution and persistence layer—to organize projects, launch coding agents, and continue their conversations anywhere.
 
 <Callout type="info">
-**Are you an AI?** Check [/llms.txt](/llms.txt) or add `.md` to any page URL to get raw markdown and save tokens.
+**Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is unifying under the name **Orb**, with web and documentation moving to [`orb.thomas.md`](https://orb.thomas.md). Systemd units, binaries (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`), and API routes remain compatible during the transition.
+
+**Are you an AI?** Check [`/llms.txt`](/llms.txt) or add `.md` to any page URL to get raw markdown.
 </Callout>
 
-## The Problem
+![Orb on macOS, following a Verity coding mission](/images/orb-desktop.webp)
 
-You're using Claude Code or Cursor. It's good. But:
+## Three execution modes
 
-- **Sessions time out.** That 4-hour refactor? Dead at 80%.
-- **Your code goes somewhere.** Fine for side projects. Not fine for work.
-- **You can't customize it.** Same generic behavior for every project.
+Orb decouples **where you read and steer** from **where the agent executes**:
 
-sandboxed.sh fixes all three.
+| Mode | Where it runs | How you use it |
+| --- | --- | --- |
+| **Your computer** (`placement: "client"`) | Locally on your Mac via Orb's Tauri runner | Choose **New Agent → This computer**, then a local CLI (**Claude Code**, **Codex**, **Antigravity**, **OpenCode**, or **Grok**). Uses your local files, tools, and existing CLI logins while keeping project records and mission transcripts synced to your server. |
+| **Your private cloud** (`core` or `remote_node_id`) | Your own Linux servers and fleet nodes | Run agents on the Core server or leased `sandboxed-node` machines in host directories or isolated `systemd-nspawn` containers with cgroup resource caps. |
+| **Cloud agents** | Coordinator or provider-managed services | Choose **Cloud agent**, then **Hermes**, **ChatGPT**, **Grok Bot**, or **Cursor Cloud**. Continue durable coordinator sessions or provider conversations directly from Orb. |
 
-## What It Actually Does
+![Creating an agent in Orb on macOS](/images/orb-setup.webp)
 
-sandboxed.sh is a cloud orchestrator that runs on your server. You connect to it from a web dashboard, iOS app, or CLI. You tell an agent what to do. It works until it's done, whether that takes 10 minutes or 10 hours.
+## Pick up the conversation anywhere
 
-Your code stays on your machine. You define how the agent behaves through a git repo of skills, commands, and rules. Each project gets its own isolated container.
+Projects organize missions, per-project colors, native skills (`skills/<name>/SKILL.md`), and a bi-directionally synchronized **Context** folder (`@context`). Inside a conversation:
 
-Under the hood, it runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), Codex, Antigravity (agy), or Grok for the actual agent work. sandboxed.sh handles everything around it: starting tasks, streaming progress, managing environments, syncing configuration.
+- **Follow and steer live runs**: collapsible `Worked — …` tool and thought folds, nested subagents, `/plan` mode with native question/approval cards, `/goal` mode for autonomous multi-turn execution, and a durable follow-up queue that sends on turn completion or immediately.
+- **Ask on the side (`/btw`)**: open the docked side-agent panel (`⌘⇧J`) to ask questions with shared workspace context and `@conversation` snapshots without interrupting the main agent turn.
+- **Keep long work moving**: schedule durable mission wake-ups (`schedule_wakeup`), automatically recover interrupted runs, and **transfer missions across machines** (`Change machine…`) with SHA-256 verified file manifests and Git bundles.
+- **Rich output**: Markdown, syntax-highlighted code, tables, KaTeX math, interactive quizzes, inline images, and clickable workspace file links (`⌘J` / `⌘P`).
 
-## When To Use This
+Orb for **iOS** connects to the same server: browse projects with synced colors, inspect mission transcripts and activity folds, send follow-ups, edit shared Markdown context, and manage your backend, machines (with a shared SSH address book), and providers.
 
-**You have a task that takes hours.**
-Point an agent at a GitHub issue before bed. Wake up to a PR. Review the diff, not the process.
+<p align="center">
+  <img src="/images/orb-ios-projects.webp" width="260" alt="Orb on iOS showing the production projects list with synced project colors" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="/images/orb-ios.webp" width="260" alt="Orb on iOS showing the Pareto mission conversation in Verity" />
+</p>
 
-**Your code can't leave your machines.**
-Healthcare, finance, defense, or just "my company said no." Run local inference or route API calls through your own infrastructure.
-
-**You want agents that know your codebase.**
-Write skills that encode your team's patterns. "When touching the payments module, always run the fraud detection tests." The agent follows them.
-
-**You run multiple projects with different needs.**
-Container workspaces isolate everything. Your Node project doesn't see your Python project. Different tools, different rules, no cross-contamination.
-
-## How It Works
+## Architecture at a glance
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Your Devices                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
-│  │ Web Dashboard│  │  iOS App   │  │       CLI       │  │
-│  └──────┬──────┘  └──────┬──────┘  └────────┬────────┘  │
-└─────────┼────────────────┼──────────────────┼───────────┘
-          │                │                  │
-          └────────────────┼──────────────────┘
-                           │ HTTPS
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│                   Your Server (~$30/mo)                  │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │              sandboxed.sh                          │    │
-│  │  • Starts and monitors agent tasks               │    │
-│  │  • Manages isolated container workspaces         │    │
-│  │  • Syncs skills and rules from your git repo     │    │
-│  └──────────────────────┬──────────────────────────┘    │
-│                         │                                │
-│  ┌──────────────────────▼──────────────────────────┐    │
-│  │   Claude Code / OpenCode / Codex / agy / Grok    │    │
-│  │  • Runs the actual agent logic                   │    │
-│  │  • Executes tools, writes code                   │    │
-│  │  • Talks to Claude/GPT/local models              │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              Clients                                     │
+│   Orb Desktop (macOS · Tauri + SolidJS)   ·   Orb iOS (SwiftUI)          │
+│   Web Admin Console (Next.js)             ·   Hermes Coordinator (MCP)   │
+└───────────────┬──────────────────────────────────────────┬───────────────┘
+                │ Local CLI spawn (placement: "client")    │ HTTPS / SSE / WS
+                ▼                                          ▼
+┌───────────────────────────────┐        ┌─────────────────────────────────┐
+│         Your Computer         │        │     Core Server (sandboxed-sh)  │
+│  • Local Claude / Codex /     │        │  • SQLite projects & missions   │
+│    agy / OpenCode / Grok      │        │  • Unified MCP (/api/mcp)       │
+│  • Synced ~/.orb/ context     │        │  • CLIProxyAPI OAuth routing    │
+│  • Durable client outbox      │        │  • Cloud adapters (Hermes,      │
+└───────────────────────────────┘        │    ChatGPT, Grok Bot, Cursor)   │
+                                         └────────┬───────────────┬────────┘
+                                                  │               │ Lease JWT
+                                                  ▼               ▼
+                                         ┌────────────────┐ ┌──────────────┐
+                                         │ Core Workspaces│ │ Remote Nodes │
+                                         │ • Host or      │ │ • sandboxed- │
+                                         │   nspawn       │ │   node (:3088│
+                                         │ • missions.    │ │ • Spark Lean │
+                                         │   slice cgroups│ │   offload    │
+                                         └────────────────┘ └──────────────┘
 ```
 
-sandboxed.sh doesn't do AI. It manages the infrastructure around AI. The selected runtime does the thinking. sandboxed.sh makes sure it has somewhere to run, something to work on, and a way for you to watch.
+## Bring your subscriptions
 
-**Note**: The setup guide installs the **backend** on your server. For the dashboard, you have options:
-- **Vercel**: Host the Next.js dashboard for free
-- **Local**: Run `bun dev` in the dashboard folder on your machine
-- **iOS**: Download the app and enter your server URL
+Sign in to supported subscription accounts directly from **Providers** in Orb (macOS, web, and iOS) or connect them through **CLIProxyAPI Plus**. When `SANDBOXED_OAUTH_OWNER=cli-proxy` is enabled, CLIProxyAPI owns OAuth token refresh for Anthropic, OpenAI, xAI, Kimi, and Google Antigravity—preventing refresh-token race conditions across processes while Orb lets you inspect live plan/quota status and route model inference.
 
-## Setup Takes 5 Minutes
+## Next steps
 
-If you have a server and a domain, tell Claude or Cursor:
-
-> "Deploy sandboxed.sh on my server at `1.2.3.4` with domain `agent.example.com`. Read INSTALL.md for the full guide."
-
-It handles systemd, nginx, SSL, everything. Or [do it manually](/setup) if you prefer.
-
-Don't have a server? Get one from [Hetzner](https://www.hetzner.com/) or DigitalOcean for ~$30/month.
-
-## Next
-
-1. **[Setup](/setup)** to get sandboxed.sh running on your server
-2. **[First Mission](/first-mission)** to run your first agent task
-3. **[Library](/library)** to customize how your agents behave
+1. **[Getting Started](/getting-started)** — Connect Orb on macOS and iOS, configure providers, and launch your first agent.
+2. **[Server Setup](/setup)** or **[Docker Install](/install-docker)** — Deploy the backend on Linux or Docker.
+3. **[Machines & Workspaces](/workspaces)** — Understand local runs, remote fleet nodes, `systemd-nspawn` containers, and mission transfers.
+4. **[Skills, Context & Library](/library)** — Synchronize project skills, `@context` files, and the Git-backed Library.
+5. **[API & MCP Reference](/api)** — Integrate with the REST API, SSE stream, and unified `sandboxed-mcp` server.

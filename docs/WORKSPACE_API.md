@@ -52,6 +52,8 @@ POST /api/workspaces
 | `mcps_replace_defaults` | boolean | No | When true, do not add default-enabled MCPs |
 | `config_profile` | string/null | No | Default backend config profile |
 | `init_script` | string | No | Script to run on container build |
+| `placement` | string | No | `"core"`, `"client"` (local Orb machine), or `"node"` |
+| `remote_node_id` | string/null | No | Target fleet node ID when running on a remote `sandboxed-node` |
 
 **Distro options**: `ubuntu-noble`, `ubuntu-jammy`, `debian-bookworm`, `arch-linux`
 

@@ -1,22 +1,23 @@
-# Orb
+# Orb Desktop
 
-Desktop client for sandboxed.sh (Tauri 2 + SolidJS): projects and their files,
-running missions with live transcripts, machines (the remote-node fleet plus
-Paloma SSH hosts), providers (CLIProxyAPI-owned OAuth vs API keys) and a New
-Agent composer. Connect a backend in Settings → Backend (dashboard password);
-the URL and JWT are kept in localStorage.
+Desktop client for **Orb** (`sandboxed.sh`, built with Tauri 2 + SolidJS): projects and their synchronized `@context` files, running missions with live transcripts, local and remote machines (the `sandboxed-node` fleet plus shared SSH hosts), providers (CLIProxyAPI-owned OAuth subscriptions and API keys), and a unified **New Agent** / **Cloud Agent** composer. Connect a backend in **Settings → Client → Backend** (dashboard password); the URL and JWT are kept in localStorage.
 
-```
+> **Upcoming rename:** The entire `sandboxed.sh` project is unifying under the name **Orb** at **[`orb.thomas.md`](https://orb.thomas.md)**.
+
+![Orb on macOS](../screenshots/orb-desktop.webp)
+
+```bash
 pnpm install
-pnpm tauri dev      # run the app
+pnpm tauri dev      # run the app (builds sandboxed-mcp sidecar first)
 pnpm tauri build    # release binary
 ```
 
-Shortcuts: ⌘N new agent · ⌘B sidebar · ⌘[ / ⌘] history · ⌘, settings · Esc back · ⌘/ markdown source.
+Shortcuts (`src/keyboardShortcuts.ts` & `docs/KEYBOARD_SHORTCUTS.md`):
+- `⌘1` / `⌘N` new agent · `⌘2` cloud agent · `⌘3` machines · `⌘4` providers · `⌘5` projects
+- `⌘B` sidebar · `⌘J` files panel · `⌘⇧J` `/btw` side agent · `⌘P` file palette
+- `⌘[` / `⌘]` history · `⌘F` / `⌘⇧F` find · `⌘/` markdown source/preview · `⌘,` settings · `Esc` back
 
-Start a draft with `/goal <objective>` to launch a goal-mode mission: the composer
-shows a Goal tag, the objective becomes the title, and the backend receives the
-canonical `/goal` prompt it already understands. Remote launches follow the
+Start a draft with `/goal <objective>` for autonomous multi-turn goal execution, `/plan <task>` for native interactive planning (Claude Code and Codex), or `/btw <question>` to ask a side agent in the same workspace without interrupting the main run. Remote launches follow the
 `remote_launch` capability advertised by `GET /api/remote-nodes`; harnesses the
 server has not confirmed for a node are refused before any request is sent.
 

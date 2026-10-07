@@ -1,19 +1,19 @@
 export default {
   index: "Overview",
   "getting-started": "Getting Started",
-  setup: "Setup",
+  setup: "Server Setup",
   "install-docker": "Docker Install",
   "first-mission": "First Mission",
-  "-- Concepts": {
+  "-- Architecture": {
     type: "separator",
-    title: "Concepts",
+    title: "Architecture & Concepts",
   },
-  library: "Library",
-  workspaces: "Workspaces",
+  workspaces: "Machines & Workspaces",
+  library: "Skills, Context & Library",
   "-- Reference": {
     type: "separator",
     title: "Reference",
   },
-  api: "API Reference",
-  desktop: "Desktop Automation",
+  api: "API & MCP Reference",
+  desktop: "Desktop & Browser Automation",
 };

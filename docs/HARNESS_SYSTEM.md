@@ -95,14 +95,16 @@ Claude Code is executed **per workspace** using the CLI:
 
 ### OAuth credentials for long-running missions
 
-For container workspaces using OAuth authentication, Sandboxed.sh writes Claude Code's
-credentials file to enable automatic token refresh during long-running missions:
+When `SANDBOXED_OAUTH_OWNER=cli-proxy` (the default on hosts running CLIProxyAPI),
+OAuth token refresh is owned centrally by CLIProxyAPI (`/var/lib/cli-proxy-api/auth`)
+and Sandboxed.sh deletes any stale `.credentials.json` inside the workspace so two
+processes never race to consume a single-use refresh token.
+
+When direct backend OAuth ownership is used instead (`SANDBOXED_OAUTH_OWNER=backend`),
+Sandboxed.sh writes Claude Code's credentials file for automatic token refresh:
 
 - **Container workspaces**: `/root/.claude/.credentials.json` inside the container
 - **Host workspaces**: `$HOME/.claude/.credentials.json` on the host
-
-This allows Claude Code to refresh expired access tokens automatically instead of
-failing mid-mission. The credentials file includes the refresh token and expiry time.
 
 ## Codex harness
 
@@ -214,11 +216,9 @@ generic `toolCall` items. The driver translates both lifecycle forms into the
 unified tool stream so tool-required missions are not retried or marked stalled
 after a successful MCP call.
 
-Desktop streaming note:
-- The UI streams X11 from the **host** (Xvfb + MJPEG).
-- Container-local X servers are not visible to the host unless `/tmp/.X11-unix`
-  is bind-mounted and `DISPLAY` is set. Sandboxed.sh only does this for
-  interactive shells, not for harness/MCP execution by default.
+Desktop session note:
+- Desktop MCP (`desktop-mcp`) launches isolated **Wayland** sessions (`sway` + `wayvnc` + `grim` + `wtype` + `wl-clipboard`) under `.sandboxed-sh/wayland/<display>/` by default, falling back to X11 (`Xvfb` + `i3` + `scrot` + `xdotool`) only if Wayland binaries are unavailable.
+- The UI streams the active display session as MJPEG via `/api/desktop/stream`.
 
 ## Adding a new backend
 

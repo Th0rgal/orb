@@ -1,19 +1,21 @@
 <p align="center">
-  <img src="dashboard/public/favicon.svg" width="80" alt="sandboxed.sh" />
+  <img src="dashboard/public/favicon.svg" width="80" alt="Orb · sandboxed.sh" />
 </p>
 
-<h1 align="center">sandboxed.sh + Orb</h1>
+<h1 align="center">Orb (sandboxed.sh)</h1>
 
 <p align="center">
   <strong>Your agents, machines and subscriptions. One place to work.</strong><br/>
-  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.
+  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.<br/>
+  <sub><i>Note: The entire project is unifying under the name <strong>Orb</strong> and will be available at <a href="https://orb.thomas.md">orb.thomas.md</a> (formerly sandboxed.sh / Open Agent).</i></sub>
 </p>
 
 <p align="center">
   <a href="#get-started">Get started</a> ·
+  <a href="docs/README.md">Documentation</a> ·
   <a href="orb/README.md">Desktop</a> ·
   <a href="ios_dashboard/README.md">iOS</a> ·
-  <a href="https://sandboxed.sh">Website</a> ·
+  <a href="https://orb.thomas.md">Website</a> ·
   <a href="https://relens.ai/community">Discord</a>
 </p>
 
@@ -105,6 +107,7 @@ The same control plane is available over MCP for coordinators such as
 [Hermes](https://github.com/Th0rgal/hermes-agent). Automation uses the same project
 and mission records as Orb.
 
+[Documentation index](docs/README.md) ·
 [Execution architecture](AGENTS.md) ·
 [Workspaces](docs/WORKSPACES.md) ·
 [MCP and Hermes](docs/HERMES_ORCHESTRATION.md) ·
@@ -112,4 +115,4 @@ and mission records as Orb.
 
 ---
 
-Formerly Open Agent.
+Transitioning to **Orb** (`orb.thomas.md`) · Formerly `sandboxed.sh` / Open Agent.

@@ -1,8 +1,9 @@
 # Unified MCP implementation and validation
 
-This work is in progress. The backend and suffixed companion are deployed to
-development only. Production cutover and the complete live harness/provider
-matrix remain unvalidated.
+Core/Hermes production cutover and fleet `sandboxed-mcp` rollout are active in
+production (`agent-core`), with suffixed `-dev` companions on development.
+Packaged Orb rollout and retirement of legacy companion binaries remain the final
+release gates tracked below.
 
 `sandboxed-mcp` is the stdio client. Core owns the catalogue, authorization and
 execution under `/api/mcp`. Profiles are executor, coordinator and operator.

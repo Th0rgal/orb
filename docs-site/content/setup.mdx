@@ -1,51 +1,37 @@
 ---
-title: Setup
-description: Get sandboxed.sh running on your server
+title: Server Setup
+description: Deploy the sandboxed.sh (Orb) backend on Ubuntu 24.04 or Docker
 ---
 
-# Setup
+# Server Setup
 
-Choose your path based on comfort level. All paths end up with the same result.
+Choose between **Docker** (fastest on any OS) or a **Native Linux** installation on Ubuntu 24.04 LTS for production servers with native `systemd-nspawn` isolation and cgroup slices.
 
-## Quick Path: Docker (recommended)
+> **Upcoming rename:** As the project rebrands to **Orb** (`orb.thomas.md`), existing binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) and systemd units remain supported.
 
-Docker is the fastest way to get sandboxed.sh running on any machine (including macOS).
-Follow the [Docker Install](/install-docker) guide and you’ll have the backend and dashboard up in minutes.
+## Option 1: Docker (5 minutes)
 
-## Quick Path: AI-Assisted (5 min)
+Docker bundles the Rust backend, web admin console, Caddy reverse proxy, and core CLIs in one container. See the [Docker Install](/install-docker) guide:
 
-Have an AI agent deploy for you. Open Claude, Cursor, or any coding assistant with terminal access and say:
-
-```
-Deploy sandboxed.sh on my server.
-- Server IP: YOUR_IP
-- Domain: agent.yourdomain.com
-- I have SSH access as root
-
-Read INSTALL.md from the sandboxed.sh repo for the full guide.
+```bash
+git clone https://github.com/Th0rgal/sandboxed.sh.git
+cd sandboxed.sh
+cp .env.example .env
+# Edit .env — set DASHBOARD_PASSWORD and JWT_SECRET
+docker compose up -d
 ```
 
-The AI will handle systemd services, nginx/Caddy, SSL certificates, and everything else.
+## Option 2: Native Ubuntu 24.04 LTS (Production)
 
-**Requirements:**
-- A dedicated server ([~$30/month from Hetzner](https://www.hetzner.com/), DigitalOcean, Vultr, etc.)
-- Ubuntu 24.04 LTS
-- A domain pointed to your server IP
-- SSH key access to the server
-
-## Standard Path: Manual (20 min)
-
-If you prefer doing it yourself, here's the condensed version.
-
-### 1. Install dependencies
+### 1. Install system dependencies
 
 ```bash
 apt update && apt install -y \
-  ca-certificates curl git jq unzip tar \
+  ca-certificates curl git jq unzip tar python3 python3-yaml \
   build-essential pkg-config libssl-dev \
   systemd-container debootstrap
 
-# Install Bun (for OpenCode plugins)
+# Install Bun & Node.js 20+
 curl -fsSL https://bun.sh/install | bash
 install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun
 
@@ -54,81 +40,64 @@ curl -fsSL https://sh.rustup.rs | sh -s -- -y
 source /root/.cargo/env
 ```
 
-### 2. Install OpenCode (optional server backend)
+### 2. Install coding-agent harnesses
 
-OpenCode server is optional for mission execution. sandboxed.sh runs OpenCode per-workspace via the CLI. Install the server if you want centralized provider/auth management or health checks.
+Missions run coding-agent CLIs **per workspace** (no central OpenCode server is required). Install the harnesses you plan to use on the host or via the managed fleet updater (`scripts/update-node-harnesses.py`):
 
-```bash
-curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
-install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode
-```
+- **Claude Code**: `npm install -g @anthropic-ai/claude-code`
+- **Codex**: `npm install -g @openai/codex`
+- **Antigravity (`agy`)**: Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install/) and sign in as the execution user (`agy` / `agy models`)
+- **OpenCode**: `curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path && install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode`
+- **Grok**: Install the Grok CLI and authenticate (`grok login --device-auth`)
 
-### 3. Clone and build sandboxed.sh
+### 3. Build the backend and unified MCP companion
+
+Always use debug `cargo build` (not `--release`) for the I/O-bound control plane:
 
 ```bash
 mkdir -p /opt/sandboxed_sh
 cd /opt/sandboxed_sh
-git clone https://github.com/Th0rgal/sandboxed.sh.git vaduz-v1
-cd vaduz-v1
+git clone https://github.com/Th0rgal/sandboxed.sh.git repo
+cd repo
 
-cargo build --bin sandboxed-sh
+cargo build --bin sandboxed-sh --bin sandboxed-mcp --bin sandboxed-node --bin palomactl
 install -m 0755 target/debug/sandboxed-sh /usr/local/bin/sandboxed-sh
-
-# Optional: legacy MCP helpers
-# cargo build --bin workspace-mcp --bin desktop-mcp
-# install -m 0755 target/debug/workspace-mcp /usr/local/bin/workspace-mcp
-# install -m 0755 target/debug/desktop-mcp /usr/local/bin/desktop-mcp
+install -m 0755 target/debug/sandboxed-mcp /usr/local/bin/sandboxed-mcp
+install -m 0755 target/debug/sandboxed-node /usr/local/bin/sandboxed-node
+install -m 0755 target/debug/palomactl /usr/local/bin/palomactl
 ```
 
-### 4. Configure
+### 4. Configure environment
 
-Create `/etc/sandboxed_sh/sandboxed_sh.env`:
+Create `/etc/sandboxed-sh/sandboxed-sh.env` (the backend also probes `/etc/open_agent/open_agent.env` for legacy installs):
 
 ```bash
-mkdir -p /etc/sandboxed_sh
-cat > /etc/sandboxed_sh/sandboxed_sh.env << 'EOF'
-OPENCODE_BASE_URL=http://127.0.0.1:4096  # optional when using per-workspace CLI
-OPENCODE_PERMISSIVE=true
-HOST=0.0.0.0
+mkdir -p /etc/sandboxed-sh
+cat > /etc/sandboxed-sh/sandboxed-sh.env << 'EOF'
+HOST=127.0.0.1
 PORT=3000
 WORKING_DIR=/root
 DEV_MODE=false
 DASHBOARD_PASSWORD=change-me-to-something-strong
 JWT_SECRET=change-me-to-a-long-random-string
+SANDBOXED_OAUTH_OWNER=cli-proxy
 EOF
+chmod 0600 /etc/sandboxed-sh/sandboxed-sh.env
 ```
 
-### 5. Create systemd services
+### 5. Create the systemd service and resource slice
 
-**OpenCode** (`/etc/systemd/system/opencode.service`, optional):
+Create `/etc/systemd/system/sandboxed-sh.service`:
 
 ```ini
 [Unit]
-Description=OpenCode Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/opencode serve --port 4096 --hostname 127.0.0.1
-WorkingDirectory=/root
-Restart=always
-Environment=HOME=/root
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**sandboxed.sh** (`/etc/systemd/system/sandboxed_sh.service`):
-
-```ini
-[Unit]
-Description=sandboxed.sh
+Description=sandboxed.sh (Orb) Control Plane
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/sandboxed_sh/sandboxed_sh.env
+EnvironmentFile=/etc/sandboxed-sh/sandboxed-sh.env
 ExecStart=/usr/local/bin/sandboxed-sh
 WorkingDirectory=/root
 Restart=on-failure
@@ -137,49 +106,22 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-### 6. Start services
+Enable and start:
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now opencode.service
-systemctl enable --now sandboxed_sh.service
+systemctl enable --now sandboxed-sh.service
 ```
 
-### 7. Set up reverse proxy (Caddy)
+Put Nginx or Caddy in front of `127.0.0.1:3000` with TLS (for example at `https://orb.thomas.md` or `https://agent-backend.example.com`).
 
-```bash
-apt install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt update && apt install caddy
+## Connecting Clients
 
-echo 'agent.yourdomain.com {
-    reverse_proxy localhost:3000
-}' > /etc/caddy/Caddyfile
+| Client | How to connect |
+| --- | --- |
+| **Orb Desktop (macOS)** | Run `pnpm install && pnpm tauri dev` in `orb/`, then enter your server URL in **Settings → Client → Backend** |
+| **Orb iOS** | Build `ios_dashboard/` via XcodeGen (`SandboxedDashboard` scheme, product name `Orb`) and sign in to your server URL |
+| **Web Admin Console** | Deploy `dashboard/` to Vercel (`NEXT_PUBLIC_API_URL`) or run `bun dev` locally |
+| **Hermes Coordinator** | Point Hermes's MCP server config at `/usr/local/bin/sandboxed-mcp` |
 
-systemctl enable --now caddy
-```
-
-### 8. Test
-
-Open `https://agent.yourdomain.com` in your browser. Log in with your dashboard password.
-
-## Accessing the Dashboard
-
-This guide installs the **backend** on your server. The dashboard (frontend) is separate:
-
-| Option | How | Best For |
-|--------|-----|----------|
-| **Vercel** | Deploy `dashboard/` folder to Vercel, set `NEXT_PUBLIC_API_URL` to your backend | Production, always accessible |
-| **Local** | Run `bun dev` in `dashboard/` folder | Development, quick testing |
-| **iOS App** | Enter your backend URL in the app settings | Mobile access |
-
-The backend URL is your server domain (e.g., `https://agent.yourdomain.com`). All dashboard options connect to the same backend.
-
-## Full Documentation
-
-For advanced options (container workspaces, desktop automation, Tailscale exit nodes, multi-user auth), see the complete [INSTALL.md](https://github.com/Th0rgal/sandboxed.sh/blob/master/INSTALL.md) in the repository.
-
-## Next: Your First Mission
-
-Once you're logged into the dashboard, head to [First Mission](/first-mission) to run your first agent task.
+For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and Tailscale), see [`docs/install-native.md`](https://github.com/Th0rgal/sandboxed.sh/blob/master/docs/install-native.md).
