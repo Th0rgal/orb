@@ -37,7 +37,7 @@ pub mod disk_watch;
 pub mod durable_jobs;
 pub mod evidence_watch;
 pub mod fido;
-mod fs;
+pub mod fs;
 mod github_auth;
 pub mod github_integration;
 pub(crate) mod grok_goal;

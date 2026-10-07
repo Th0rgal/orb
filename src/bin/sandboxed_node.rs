@@ -1404,7 +1404,11 @@ async fn node_fs_list(
         )
     })?;
     let mut entries = Vec::new();
-    while let Some(entry) = dir.next_entry().await.map_err(internal_error)? {
+    while let Some(entry) = dir
+        .next_entry()
+        .await
+        .map_err(|e| internal_error(e.into()))?
+    {
         let Ok(sym_meta) = tokio::fs::symlink_metadata(entry.path()).await else {
             continue;
         };
