@@ -5,11 +5,7 @@ description: Your agents, machines and subscriptions. One place to work.
 
 import { Callout } from 'nextra/components'
 
-# Orb (sandboxed.sh)
-
-**Your agents, machines and subscriptions. One place to work.**
-
-Use **Orb** on macOS or iOS—and **sandboxed.sh** as the self-hosted execution and persistence layer—to organize projects, launch coding agents, and continue their conversations anywhere.
+<OrbHero />
 
 <Callout type="info">
 **Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is unifying under the name **Orb**, with web and documentation moving to [`orb.thomas.md`](https://orb.thomas.md). Systemd units, binaries (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`), and API routes remain compatible during the transition.
@@ -17,7 +13,11 @@ Use **Orb** on macOS or iOS—and **sandboxed.sh** as the self-hosted execution 
 **Are you an AI?** Check [`/llms.txt`](/llms.txt) or add `.md` to any page URL to get raw markdown.
 </Callout>
 
-![Orb on macOS, following a Verity coding mission](/images/orb-desktop.webp)
+<DesktopShowcase
+  src="/images/orb-desktop.webp"
+  alt="Orb on macOS, following a Verity coding mission"
+  caption="Orb on macOS — live Verity proof mission with collapsible tool folds, side questions, and synchronized project files."
+/>
 
 ## Three execution modes
 
@@ -29,7 +29,11 @@ Orb decouples **where you read and steer** from **where the agent executes**:
 | **Your private cloud** (`core` or `remote_node_id`) | Your own Linux servers and fleet nodes | Run agents on the Core server or leased `sandboxed-node` machines in host directories or isolated `systemd-nspawn` containers with cgroup resource caps. |
 | **Cloud agents** | Coordinator or provider-managed services | Choose **Cloud agent**, then **Hermes**, **ChatGPT**, **Grok Bot**, or **Cursor Cloud**. Continue durable coordinator sessions or provider conversations directly from Orb. |
 
-![Creating an agent in Orb on macOS](/images/orb-setup.webp)
+<DesktopShowcase
+  src="/images/orb-setup.webp"
+  alt="Creating an agent in Orb on macOS"
+  caption="Launch an agent on your Mac, a private Linux node, or a cloud coordinator from one unified composer."
+/>
 
 ## Pick up the conversation anywhere
 
@@ -42,40 +46,11 @@ Projects organize missions, per-project colors, native skills (`skills/<name>/SK
 
 Orb for **iOS** connects to the same server: browse projects with synced colors, inspect mission transcripts and activity folds, send follow-ups, edit shared Markdown context, and manage your backend, machines (with a shared SSH address book), and providers.
 
-<p align="center">
-  <img src="/images/orb-ios-projects.webp" width="260" alt="Orb on iOS showing the production projects list with synced project colors" />
-  &nbsp;&nbsp;&nbsp;
-  <img src="/images/orb-ios.webp" width="260" alt="Orb on iOS showing the Pareto mission conversation in Verity" />
-</p>
+<IosShowcase />
 
 ## Architecture at a glance
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              Clients                                     │
-│   Orb Desktop (macOS · Tauri + SolidJS)   ·   Orb iOS (SwiftUI)          │
-│   Web Admin Console (Next.js)             ·   Hermes Coordinator (MCP)   │
-└───────────────┬──────────────────────────────────────────┬───────────────┘
-                │ Local CLI spawn (placement: "client")    │ HTTPS / SSE / WS
-                ▼                                          ▼
-┌───────────────────────────────┐        ┌─────────────────────────────────┐
-│         Your Computer         │        │     Core Server (sandboxed-sh)  │
-│  • Local Claude / Codex /     │        │  • SQLite projects & missions   │
-│    agy / OpenCode / Grok      │        │  • Unified MCP (/api/mcp)       │
-│  • Synced ~/.orb/ context     │        │  • CLIProxyAPI OAuth routing    │
-│  • Durable client outbox      │        │  • Cloud adapters (Hermes,      │
-└───────────────────────────────┘        │    ChatGPT, Grok Bot, Cursor)   │
-                                         └────────┬───────────────┬────────┘
-                                                  │               │ Lease JWT
-                                                  ▼               ▼
-                                         ┌────────────────┐ ┌──────────────┐
-                                         │ Core Workspaces│ │ Remote Nodes │
-                                         │ • Host or      │ │ • sandboxed- │
-                                         │   nspawn       │ │   node (:3088│
-                                         │ • missions.    │ │ • Spark Lean │
-                                         │   slice cgroups│ │   offload    │
-                                         └────────────────┘ └──────────────┘
-```
+<ArchitectureDiagram />
 
 ## Bring your subscriptions
 

@@ -6,15 +6,16 @@ import "./docs.css";
 
 function Logo() {
   return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-      <span
-        style={{
-          fontWeight: 600,
-          fontSize: 16,
-          color: "rgb(var(--foreground))",
-        }}
-      >
-        Orb <span style={{ opacity: 0.6, fontWeight: 400 }}>· sandboxed.sh</span>
+    <div className="orb-nav-brand">
+      <img
+        src="/images/orb-icon.png"
+        alt="Orb"
+        width={22}
+        height={22}
+        className="orb-nav-logo-img"
+      />
+      <span className="orb-nav-title">
+        Orb <span className="orb-nav-subtitle">· sandboxed.sh</span>
       </span>
     </div>
   );

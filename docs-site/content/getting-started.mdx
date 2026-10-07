@@ -19,7 +19,11 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **sandbo
    - **iOS App (`ios_dashboard/`)**: SwiftUI app generated via XcodeGen (`xcodegen generate && open SandboxedDashboard.xcodeproj`)
    - **Web Admin Console (`dashboard/`)**: Bundled in Docker on port 3000 or deployed separately
 
-![Orb on macOS](/images/orb-desktop.webp)
+<DesktopShowcase
+  src="/images/orb-desktop.webp"
+  alt="Orb on macOS"
+  caption="Orb Desktop on macOS — projects sidebar, live agent transcript, and synchronized project files."
+/>
 
 ## 2. Connect to Your Backend
 
@@ -35,11 +39,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **sandbo
 2. Enter your **Server URL** and **Password** in the connection sheet, then tap **Connect**.
 3. Tap the profile icon in the top bar at any time to switch servers or inspect **Backend**, **Providers**, and **Machines**.
 
-<p align="center">
-  <img src="/images/orb-ios-projects.webp" width="240" alt="Orb on iOS Projects" />
-  &nbsp;&nbsp;&nbsp;
-  <img src="/images/orb-ios.webp" width="240" alt="Orb on iOS Conversation" />
-</p>
+<IosShowcase />
 
 ## 3. Configure Harnesses & Subscriptions
 
@@ -65,7 +65,11 @@ Open **Providers** (`⌘4` on macOS, or **Settings → Providers** on iOS) to ma
 
 ## 4. Create a Project and Launch an Agent
 
-![Creating an agent in Orb](/images/orb-setup.webp)
+<DesktopShowcase
+  src="/images/orb-setup.webp"
+  alt="Creating an agent in Orb"
+  caption="Configuring a new agent run in Orb with placement, harness, model, and effort controls."
+/>
 
 1. Press `⌘5` (or click **Projects** in the sidebar) to create a project with a custom color.
 2. Press `⌘N` (or `⌘1`) to open the **New Agent** composer, or `⌘2` for **Cloud agent**:
