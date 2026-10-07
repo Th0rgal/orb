@@ -7,8 +7,6 @@ description: Connect Orb on macOS or iOS, configure providers, and launch your f
 
 This guide walks you through connecting **Orb** (macOS and iOS) to your **sandboxed.sh** backend, configuring your subscriptions and harnesses, and launching your first coding agent.
 
-> **Upcoming rename:** The entire project is transitioning to **Orb** (`orb.thomas.md`). Current binaries and environment variables continue to use `sandboxed-sh` during the transition.
-
 ## 1. Prerequisites
 
 1. **A running backend (`sandboxed-sh`)**:
@@ -22,7 +20,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **sandbo
 <DesktopShowcase
   src="/images/orb-desktop.webp"
   alt="Orb on macOS"
-  caption="Orb Desktop on macOS — projects sidebar, live agent transcript, and synchronized project files."
+  caption="Orb Desktop on macOS: projects sidebar, live agent transcript, and synchronized project files."
 />
 
 ## 2. Connect to Your Backend
@@ -49,7 +47,7 @@ Open **Settings** (`⌘,`) → **Client** → **Local agents** and click **Scan*
 
 - **Claude Code** (`claude`)
 - **Codex** (`codex`)
-- **Antigravity** (`agy` — discovers account models via `agy models`)
+- **Antigravity** (`agy`, discovers account models via `agy models`)
 - **OpenCode** (`opencode`)
 - **Grok** (`grok`)
 
@@ -78,9 +76,9 @@ Open **Providers** (`⌘4` on macOS, or **Settings → Providers** on iOS) to ma
    - **Cloud agent**: Starts a durable **Hermes** coordinator conversation, **ChatGPT** web session, **Grok Bot** run, or **Cursor Cloud** repository agent.
 3. Choose the **Harness**, **Model**, **Effort** (`low`, `medium`, `high`, `xhigh`), and optional **Cyber Access** (`Standard`, `Daybreak`, `Automatic` for Codex).
 4. Optional prefixes in the composer:
-   - `/goal <objective>` — Launches a multi-turn autonomous goal run.
-   - `/plan <task>` — Launches native interactive planning mode (supported on Claude Code and Codex).
-   - `@context/<file>` — References shared project context files synchronized in Finder.
+   - `/goal <objective>`: Launches a multi-turn autonomous goal run.
+   - `/plan <task>`: Launches native interactive planning mode (supported on Claude Code and Codex).
+   - `@context/<file>`: References shared project context files synchronized in Finder.
 
 ## 5. Desktop Keyboard Shortcuts
 

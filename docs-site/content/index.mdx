@@ -3,20 +3,12 @@ title: Orb (sandboxed.sh)
 description: Your agents, machines and subscriptions. One place to work.
 ---
 
-import { Callout } from 'nextra/components'
-
 <OrbHero />
-
-<Callout type="info">
-**Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is unifying under the name **Orb**, with web and documentation moving to [`orb.thomas.md`](https://orb.thomas.md). Systemd units, binaries (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`), and API routes remain compatible during the transition.
-
-**Are you an AI?** Check [`/llms.txt`](/llms.txt) or add `.md` to any page URL to get raw markdown.
-</Callout>
 
 <DesktopShowcase
   src="/images/orb-desktop.webp"
   alt="Orb on macOS, following a Verity coding mission"
-  caption="Orb on macOS — live Verity proof mission with collapsible tool folds, side questions, and synchronized project files."
+  caption="Orb on macOS: live Verity proof mission with collapsible tool folds, side questions, and synchronized project files."
 />
 
 ## Three execution modes
@@ -39,7 +31,7 @@ Orb decouples **where you read and steer** from **where the agent executes**:
 
 Projects organize missions, per-project colors, native skills (`skills/<name>/SKILL.md`), and a bi-directionally synchronized **Context** folder (`@context`). Inside a conversation:
 
-- **Follow and steer live runs**: collapsible `Worked — …` tool and thought folds, nested subagents, `/plan` mode with native question/approval cards, `/goal` mode for autonomous multi-turn execution, and a durable follow-up queue that sends on turn completion or immediately.
+- **Follow and steer live runs**: collapsible activity and thought folds, nested subagents, `/plan` mode with native question and approval cards, `/goal` mode for autonomous multi-turn execution, and a durable follow-up queue that sends on turn completion or immediately.
 - **Ask on the side (`/btw`)**: open the docked side-agent panel (`⌘⇧J`) to ask questions with shared workspace context and `@conversation` snapshots without interrupting the main agent turn.
 - **Keep long work moving**: schedule durable mission wake-ups (`schedule_wakeup`), automatically recover interrupted runs, and **transfer missions across machines** (`Change machine…`) with SHA-256 verified file manifests and Git bundles.
 - **Rich output**: Markdown, syntax-highlighted code, tables, KaTeX math, interactive quizzes, inline images, and clickable workspace file links (`⌘J` / `⌘P`).
@@ -54,12 +46,12 @@ Orb for **iOS** connects to the same server: browse projects with synced colors,
 
 ## Bring your subscriptions
 
-Sign in to supported subscription accounts directly from **Providers** in Orb (macOS, web, and iOS) or connect them through **CLIProxyAPI Plus**. When `SANDBOXED_OAUTH_OWNER=cli-proxy` is enabled, CLIProxyAPI owns OAuth token refresh for Anthropic, OpenAI, xAI, Kimi, and Google Antigravity—preventing refresh-token race conditions across processes while Orb lets you inspect live plan/quota status and route model inference.
+Sign in to supported subscription accounts directly from **Providers** in Orb (macOS, web, and iOS) or connect them through **CLIProxyAPI Plus**. When `SANDBOXED_OAUTH_OWNER=cli-proxy` is enabled, CLIProxyAPI owns OAuth token refresh for Anthropic, OpenAI, xAI, Kimi, and Google Antigravity, preventing refresh-token race conditions across processes while Orb lets you inspect live plan and quota status and route model inference.
 
 ## Next steps
 
-1. **[Getting Started](/getting-started)** — Connect Orb on macOS and iOS, configure providers, and launch your first agent.
-2. **[Server Setup](/setup)** or **[Docker Install](/install-docker)** — Deploy the backend on Linux or Docker.
-3. **[Machines & Workspaces](/workspaces)** — Understand local runs, remote fleet nodes, `systemd-nspawn` containers, and mission transfers.
-4. **[Skills, Context & Library](/library)** — Synchronize project skills, `@context` files, and the Git-backed Library.
-5. **[API & MCP Reference](/api)** — Integrate with the REST API, SSE stream, and unified `sandboxed-mcp` server.
+1. **[Getting Started](/getting-started)**: Connect Orb on macOS and iOS, configure providers, and launch your first agent.
+2. **[Server Setup](/setup)** or **[Docker Install](/install-docker)**: Deploy the backend on Linux or Docker.
+3. **[Machines & Workspaces](/workspaces)**: Understand local runs, remote fleet nodes, `systemd-nspawn` containers, and mission transfers.
+4. **[Skills, Context & Library](/library)**: Synchronize project skills, `@context` files, and the Git-backed Library.
+5. **[API & MCP Reference](/api)**: Integrate with the REST API, SSE stream, and unified `sandboxed-mcp` server.

@@ -65,6 +65,7 @@ aside.nextra-sidebar {
   border-right: 1px solid var(--orb-stroke-soft) !important;
   display: flex !important;
   flex-direction: column !important;
+  width: 244px !important;
 }
 
 /* Remove any artificial scroll fade masks that cause bottom gap artifacts */
@@ -77,14 +78,20 @@ aside.nextra-sidebar .nextra-mask,
 /* Sidebar menu scroll area */
 aside.nextra-sidebar > div:first-child {
   flex: 1 1 auto !important;
-  padding: 14px 12px !important;
+  padding: 12px 10px !important;
   background: transparent !important;
+}
+
+aside.nextra-sidebar ul {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
 }
 
 /* Sidebar bottom footer (Theme switch + Collapse button) */
 aside.nextra-sidebar .nextra-sidebar-footer {
   margin: 0 !important;
-  padding: 10px 12px !important;
+  padding: 8px 10px !important;
   background-color: var(--orb-bg-sidebar) !important;
   border-top: 1px solid var(--orb-stroke-soft) !important;
   border-radius: 0 !important;
@@ -92,27 +99,36 @@ aside.nextra-sidebar .nextra-sidebar-footer {
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
-  gap: 8px !important;
+  gap: 6px !important;
 }
 
 /* Section headers in sidebar */
 aside.nextra-sidebar li:not(:has(a)):not(:has(button)) {
   color: var(--orb-fg-3) !important;
-  font-size: 11px !important;
+  font-size: 10.5px !important;
   font-weight: 600 !important;
   text-transform: uppercase !important;
   letter-spacing: 0.06em !important;
   padding: 14px 10px 4px !important;
-  margin-top: 4px !important;
+  margin: 4px 0 0 !important;
+}
+
+aside.nextra-sidebar li:not(:has(a)):not(:has(button)):first-child {
+  padding-top: 4px !important;
+  margin-top: 0 !important;
 }
 
 /* Sidebar links */
 aside.nextra-sidebar a {
   color: var(--orb-fg-2) !important;
-  font-size: 13.5px !important;
+  font-size: 13px !important;
   font-weight: 450 !important;
+  line-height: 1.35 !important;
   padding: 6px 10px !important;
   border-radius: 7px !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
   transition: background-color 120ms ease, color 120ms ease !important;
 }
 
@@ -125,15 +141,18 @@ aside.nextra-sidebar a[aria-current="page"],
 aside.nextra-sidebar li.active > a {
   color: var(--orb-fg-strong) !important;
   background-color: var(--orb-bg-active) !important;
-  font-weight: 550 !important;
-  box-shadow: inset 2px 0 0 var(--orb-blue);
+  font-weight: 560 !important;
+  border-color: var(--orb-stroke-soft) !important;
+  box-shadow: none !important;
 }
 
 /* Theme switch & collapse button inside sidebar footer */
 aside.nextra-sidebar .nextra-sidebar-footer button {
   color: var(--orb-fg-2) !important;
   border-radius: 6px !important;
-  font-size: 12.5px !important;
+  font-size: 12px !important;
+  height: 28px !important;
+  padding: 0 8px !important;
 }
 
 aside.nextra-sidebar .nextra-sidebar-footer button:hover {
@@ -354,56 +373,16 @@ article div[class*="x:dark:bg-blue-"] {
   clear: both;
   width: 100%;
   display: grid;
-  grid-template-columns: 1.25fr 0.9fr;
+  grid-template-columns: 1.35fr 0.75fr;
   gap: 28px;
   align-items: center;
-  padding: 28px 30px;
-  margin: 12px 0 28px;
-  border-radius: 16px;
-  background: radial-gradient(
-      circle at 82% 45%,
-      rgba(134, 174, 228, 0.09) 0%,
-      transparent 58%
-    ),
-    var(--orb-bg-inset);
-  border: 1px solid var(--orb-stroke);
-  box-shadow: var(--orb-shadow);
-}
-
-.orb-hero-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 11px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 550;
-  color: var(--orb-fg-strong);
-  background: var(--orb-bg-elev);
-  border: 1px solid var(--orb-stroke);
-  margin-bottom: 14px;
-}
-
-.orb-hero-pill-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--orb-blue);
-  box-shadow: 0 0 8px var(--orb-blue);
-}
-
-.orb-hero-pill-sep {
-  color: var(--orb-fg-4);
-}
-
-.orb-hero-pill-muted {
-  color: var(--orb-blue);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  padding: 8px 0 24px;
+  margin: 4px 0 20px;
+  border-bottom: 1px solid var(--orb-stroke-soft);
 }
 
 .orb-hero-title {
-  font-size: 1.85rem !important;
+  font-size: 1.9rem !important;
   line-height: 1.18 !important;
   font-weight: 650 !important;
   letter-spacing: -0.026em !important;
@@ -415,13 +394,20 @@ article div[class*="x:dark:bg-blue-"] {
   font-size: 0.95rem !important;
   line-height: 1.65 !important;
   color: var(--orb-fg-2) !important;
-  margin: 0 0 20px !important;
+  margin: 0 0 18px !important;
 }
 
 .orb-hero-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.orb-hero-ai-note {
+  margin: 14px 0 0 !important;
+  font-size: 12.5px !important;
+  line-height: 1.5 !important;
+  color: var(--orb-fg-3) !important;
 }
 
 .orb-btn {
@@ -474,16 +460,15 @@ article div[class*="x:dark:bg-blue-"] {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
 }
 
 .orb-shader-stage {
   position: relative;
-  width: 244px;
-  height: 244px;
+  width: 224px;
+  height: 224px;
   background: transparent;
   overflow: visible;
-  filter: drop-shadow(0 16px 36px rgba(0, 0, 0, 0.5));
+  filter: drop-shadow(0 14px 32px rgba(0, 0, 0, 0.42));
 }
 
 .orb-shader-fallback {
@@ -534,17 +519,10 @@ article div[class*="x:dark:bg-blue-"] {
   opacity: 1;
 }
 
-.orb-shader-caption {
-  font-size: 11px;
-  color: var(--orb-fg-3);
-  text-align: center;
-  font-family: var(--font-mono);
-}
-
 @media (max-width: 860px) {
   .orb-hero-banner {
     grid-template-columns: 1fr;
-    padding: 22px;
+    padding: 12px 0 20px;
   }
 
   .orb-hero-visual {
@@ -552,8 +530,8 @@ article div[class*="x:dark:bg-blue-"] {
   }
 
   .orb-shader-stage {
-    width: 196px;
-    height: 196px;
+    width: 184px;
+    height: 184px;
   }
 }
 

@@ -47,9 +47,9 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
 ```
 
 ### Snapshot & Cursor-Paginated Events
-- `GET /api/control/missions/:id/snapshot` — First-paint payload returning mission metadata, latest history events, counts, child missions, and running state.
-- `GET /api/control/missions/:id/events?view=history&limit=200&before_seq=1000` — Cursor-paginated event log (`view=transcript|trace|history|all`, `since_seq`, `before_seq`). Returns `X-Next-Cursor`, `X-Page-Max-Sequence`, `X-Max-Sequence`, and `X-Has-More` headers (`X-Orb-Events-Protocol: 1`).
-- `GET /api/control/stream?mission=<uuid>` — Real-time SSE stream (`status`, `stream_lagged`, `user_message`, `assistant_message`, `thinking`, `tool_call`, `tool_result`, `text_delta`, `error`, `mission_status_changed`).
+- `GET /api/control/missions/:id/snapshot`: First-paint payload returning mission metadata, latest history events, counts, child missions, and running state.
+- `GET /api/control/missions/:id/events?view=history&limit=200&before_seq=1000`: Cursor-paginated event log (`view=transcript|trace|history|all`, `since_seq`, `before_seq`). Returns `X-Next-Cursor`, `X-Page-Max-Sequence`, `X-Max-Sequence`, and `X-Has-More` headers (`X-Orb-Events-Protocol: 1`).
+- `GET /api/control/stream?mission=<uuid>`: Real-time SSE stream (`status`, `stream_lagged`, `user_message`, `assistant_message`, `thinking`, `tool_call`, `tool_result`, `text_delta`, `error`, `mission_status_changed`).
 
 ### Advanced Mission Operations
 | Endpoint | Method | Description |
@@ -100,7 +100,7 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
 
 `sandboxed-mcp` is the unified stdio MCP binary used by **Hermes** (coordinator profile), **mission harnesses** (executor profile), and **operators** (operator profile). It talks to Core over `/api/mcp`:
 
-- `POST /api/mcp/session` — Exchanges an owner/launcher credential for a 1-hour scoped `mcp1.` token.
-- `POST /api/mcp/renew` — Renews an active session token with identical privileges.
-- `GET /api/mcp/capabilities` — Lists tools permitted for the session's profile (`executor`, `coordinator`, or `operator`).
-- `POST /api/mcp/call` — Executes a tool call. All mutations require an `idempotency_key` and return a durable action receipt (`get_action`, `cancel_action`, `reconcile_action`).
+- `POST /api/mcp/session`: Exchanges an owner/launcher credential for a 1-hour scoped `mcp1.` token.
+- `POST /api/mcp/renew`: Renews an active session token with identical privileges.
+- `GET /api/mcp/capabilities`: Lists tools permitted for the session's profile (`executor`, `coordinator`, or `operator`).
+- `POST /api/mcp/call`: Executes a tool call. All mutations require an `idempotency_key` and return a durable action receipt (`get_action`, `cancel_action`, `reconcile_action`).

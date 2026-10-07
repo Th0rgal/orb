@@ -5,7 +5,7 @@ description: Run the sandboxed.sh (Orb) backend and web console with Docker Comp
 
 # Docker Install
 
-Docker is the fastest way to run the **sandboxed.sh** (upcoming **Orb**) backend and web admin console on Linux, macOS, or Windows. The image bundles the Rust backend (`sandboxed-sh`), MCP companions (`sandboxed-mcp`, `workspace-mcp`, `desktop-mcp`), the Next.js web console, Caddy, and primary agent CLIs.
+Docker is the fastest way to run the **Orb** (`sandboxed.sh`) backend and web admin console on Linux, macOS, or Windows. The image bundles the Rust backend (`sandboxed-sh`), MCP companions (`sandboxed-mcp`, `workspace-mcp`, `desktop-mcp`), the Next.js web console, Caddy, and primary agent CLIs.
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ Docker is the fastest way to run the **sandboxed.sh** (upcoming **Orb**) backend
 git clone https://github.com/Th0rgal/sandboxed.sh.git
 cd sandboxed.sh
 cp .env.example .env
-# Edit .env — set DASHBOARD_PASSWORD and JWT_SECRET
+# Edit .env: set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d
 ```
 

@@ -29,7 +29,7 @@ Isolated Linux rootfs built with `debootstrap` (Ubuntu 24.04 `ubuntu-noble`, Ubu
 
 ## 3. Resource Isolation (`missions.slice` cgroups)
 
-To prevent heavy builds (such as parallel Rust or Lean proof compilation) from starving the API or SSE stream, every server mission runs in a transient systemd scope under `missions.slice`—a sibling of `system.slice`:
+To prevent heavy builds (such as parallel Rust or Lean proof compilation) from starving the API or SSE stream, every server mission runs in a transient systemd scope under `missions.slice`, a sibling of `system.slice`:
 
 - **Slice-level protection**: `missions.slice` runs at a lower `CPUWeight` than the API service and enforces aggregate memory ceilings.
 - **Per-mission caps**: Configure `MISSION_MEMORY_MAX`, `MISSION_MEMORY_HIGH`, `MISSION_MEMORY_SWAP_MAX`, `MISSION_CPU_WEIGHT`, and `MISSION_CPU_QUOTA`, or adjust them live via `POST /api/workspaces/:id/resources`.

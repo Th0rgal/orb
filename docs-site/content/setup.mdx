@@ -7,8 +7,6 @@ description: Deploy the sandboxed.sh (Orb) backend on Ubuntu 24.04 or Docker
 
 Choose between **Docker** (fastest on any OS) or a **Native Linux** installation on Ubuntu 24.04 LTS for production servers with native `systemd-nspawn` isolation and cgroup slices.
 
-> **Upcoming rename:** As the project rebrands to **Orb** (`orb.thomas.md`), existing binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) and systemd units remain supported.
-
 ## Option 1: Docker (5 minutes)
 
 Docker bundles the Rust backend, web admin console, Caddy reverse proxy, and core CLIs in one container. See the [Docker Install](/install-docker) guide:
@@ -17,7 +15,7 @@ Docker bundles the Rust backend, web admin console, Caddy reverse proxy, and cor
 git clone https://github.com/Th0rgal/sandboxed.sh.git
 cd sandboxed.sh
 cp .env.example .env
-# Edit .env — set DASHBOARD_PASSWORD and JWT_SECRET
+# Edit .env: set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d
 ```
 

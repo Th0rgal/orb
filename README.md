@@ -1,13 +1,12 @@
 <p align="center">
-  <img src="orb/src-tauri/icons/icon.svg" width="80" alt="Orb · sandboxed.sh" />
+  <img src="orb/src-tauri/icons/icon.png" width="96" alt="Orb · sandboxed.sh" />
 </p>
 
 <h1 align="center">Orb (sandboxed.sh)</h1>
 
 <p align="center">
   <strong>Your agents, machines and subscriptions. One place to work.</strong><br/>
-  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.<br/>
-  <sub><i>Note: The entire project is unifying under the name <strong>Orb</strong> and will be available at <a href="https://orb.thomas.md">orb.thomas.md</a> (formerly sandboxed.sh / Open Agent).</i></sub>
+  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.
 </p>
 
 <p align="center">

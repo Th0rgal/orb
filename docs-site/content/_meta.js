@@ -1,12 +1,16 @@
 export default {
+  "-- Getting Started": {
+    type: "separator",
+    title: "Getting Started",
+  },
   index: "Overview",
-  "getting-started": "Getting Started",
+  "getting-started": "Quickstart",
   setup: "Server Setup",
   "install-docker": "Docker Install",
   "first-mission": "First Mission",
   "-- Architecture": {
     type: "separator",
-    title: "Architecture & Concepts",
+    title: "Architecture",
   },
   workspaces: "Machines & Workspaces",
   library: "Skills, Context & Library",

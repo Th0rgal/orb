@@ -25,7 +25,7 @@ Inspect src/api/control and summarize how mission events are streamed and pagina
 
 While the agent works, Orb streams structured events over SSE (`GET /api/control/stream`) and reconciles pages via `GET /api/control/missions/:id/snapshot` and `/events`:
 
-- **Activity Folds (`Worked — …`)**: Consecutive tool calls, file reads/edits, shell commands, and reasoning deltas collapse into a compact summary row. Click to expand individual tool inputs and outputs.
+- **Activity Folds**: Consecutive tool calls, file reads/edits, shell commands, and reasoning deltas collapse into a compact summary row. Click to expand individual tool inputs and outputs.
 - **Live Follow-Up Queue**: Type a follow-up while a turn is running. By default it queues above the composer and dispatches automatically when the current turn finishes, or click **Send now** to steer immediately.
 - **Mid-Mission Switching**: Change the model or effort level between turns from the footer picker.
 - **Files Panel (`⌘J` / `⌘P`)**: Click any verified file path in the assistant's response to preview it in the split Files panel, or browse the mission workspace and `@context` tree.

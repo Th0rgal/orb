@@ -79,12 +79,6 @@ export function OrbHero() {
   return (
     <div className="orb-hero-banner">
       <div className="orb-hero-copy">
-        <div className="orb-hero-pill">
-          <span className="orb-hero-pill-dot" />
-          <span>Orb · sandboxed.sh</span>
-          <span className="orb-hero-pill-sep">·</span>
-          <span className="orb-hero-pill-muted">orb.thomas.md</span>
-        </div>
         <h1 className="orb-hero-title">
           One native client for local, private-cloud, and cloud coding agents.
         </h1>
@@ -93,7 +87,7 @@ export function OrbHero() {
           <strong>Antigravity (<code>agy</code>)</strong>, <strong>OpenCode</strong>, and{" "}
           <strong>Grok</strong> locally on your Mac, inside isolated{" "}
           <code>systemd-nspawn</code> workspaces on your Linux fleet, or through cloud
-          coordinators—and pick up every thread from macOS or iOS.
+          coordinators, and pick up every thread from macOS or iOS.
         </p>
         <div className="orb-hero-actions">
           <Link href="/getting-started" className="orb-btn orb-btn-primary">
@@ -111,6 +105,10 @@ export function OrbHero() {
             GitHub ↗
           </a>
         </div>
+        <p className="orb-hero-ai-note">
+          <strong>Are you an AI?</strong> Read <a href="/llms.txt"><code>/llms.txt</code></a> or append{" "}
+          <code>.md</code> to any page URL for raw Markdown.
+        </p>
       </div>
 
       <div className="orb-hero-visual" aria-hidden="true">
@@ -132,9 +130,6 @@ export function OrbHero() {
             className={`orb-shader-squircle-frame ${shaderReady ? "is-ready" : ""}`}
           />
         </div>
-        <span className="orb-shader-caption">
-          Real-time WebGL2 Fourier-Chebyshev liquid-chrome shader
-        </span>
       </div>
     </div>
   );

@@ -17,19 +17,19 @@ All pages are available as raw markdown:
 ## Documentation Index
 
 ### Getting Started
-- `/index.md` — Overview of Orb + sandboxed.sh, the three execution modes, and architecture
-- `/getting-started.md` — Connecting Orb on macOS and iOS, scanning local agents, and configuring CLIProxyAPI subscriptions
-- `/setup.md` — Native Ubuntu 24.04 and Docker server deployment
-- `/install-docker.md` — Docker Compose quick start and `systemd-nspawn` container setup
-- `/first-mission.md` — Live mission steering, `/plan`, `/goal`, `/btw` side agents, wake-ups, and machine transfer
+- `/index.md`: Overview of Orb + sandboxed.sh, the three execution modes, and architecture
+- `/getting-started.md`: Connecting Orb on macOS and iOS, scanning local agents, and configuring CLIProxyAPI subscriptions
+- `/setup.md`: Native Ubuntu 24.04 and Docker server deployment
+- `/install-docker.md`: Docker Compose quick start and `systemd-nspawn` container setup
+- `/first-mission.md`: Live mission steering, `/plan`, `/goal`, `/btw` side agents, wake-ups, and machine transfer
 
 ### Architecture & Concepts
-- `/workspaces.md` — Execution placements (`placement: "client"`, `core`, `remote_node_id`), host vs `systemd-nspawn` containers, `missions.slice` cgroups, DGX Spark build offload, and cross-machine mission transfer
-- `/library.md` — Shared project `@context`, synchronized project skills (`skills/<name>/SKILL.md`), and the Git-backed global Library
+- `/workspaces.md`: Execution placements (`placement: "client"`, `core`, `remote_node_id`), host vs `systemd-nspawn` containers, `missions.slice` cgroups, DGX Spark build offload, and cross-machine mission transfer
+- `/library.md`: Shared project `@context`, synchronized project skills (`skills/<name>/SKILL.md`), and the Git-backed global Library
 
 ### Reference
-- `/api.md` — REST API, cursor-paginated events, SSE streaming, and unified MCP (`sandboxed-mcp` / `/api/mcp`)
-- `/desktop.md` — Headless Wayland/Sway (and Xvfb fallback) browser & GUI automation
+- `/api.md`: REST API, cursor-paginated events, SSE streaming, and unified MCP (`sandboxed-mcp` / `/api/mcp`)
+- `/desktop.md`: Headless Wayland/Sway (and Xvfb fallback) browser & GUI automation
 
 ## Quick Architecture Reference
 
