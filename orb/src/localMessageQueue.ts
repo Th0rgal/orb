@@ -350,13 +350,28 @@ export function startLocalQueueWorker(){
       again=true;
       continue;
      }
-     // If a newer run generation has already executed on this mission since this interrupted row's receipt,
+     // If a follow-up/resume is already queued behind this interrupted row (or a newer run generation executed),
      // retire the superseded interrupted row to the recovery archive so it never head-of-line blocks.
-     if(row.state==='error'&&row.receipt?.generation!=null&&rows.some(r=>r.mission===row.mission&&r.id!==row.id&&r.state==='queued')){
-      const currentMission=await getMission(row.mission).catch(()=>undefined);
-      if(currentMission?.execution?.generation!=null&&currentMission.execution.generation>row.receipt.generation){
+     const queuedBehind=rows.filter(r=>r.mission===row.mission&&r.id!==row.id&&r.state==='queued');
+     if(row.state==='error'&&queuedBehind.length>0){
+      let superseded=queuedBehind.some(r=>(!r.delegated&&!r.scheduled)||!!row.userSynced);
+      if(!superseded&&row.receipt?.generation!=null){
+       const currentMission=await getMission(row.mission).catch(()=>undefined);
+       superseded=currentMission?.execution?.generation!=null&&currentMission.execution.generation>row.receipt.generation;
+      }
+      if(superseded){
        if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
-       await locked(key,async()=>{const current=await read(key);await write(key,current.filter(r=>r.id!==row.id));});
+       await locked(key,async()=>{
+        const current=await read(key);
+        const remainingMissionQueued=current.filter(r=>r.mission===row.mission&&r.id!==row.id&&r.state==='queued');
+        const isGenericResume=(t:string)=>t.trim()===row.text.trim()||/^resume$/i.test(t.trim());
+        const hasSpecificPrompt=remainingMissionQueued.some(r=>!isGenericResume(r.text));
+        await write(key,current.filter(r=>{
+         if(r.id===row.id)return false;
+         if(r.mission===row.mission&&r.state==='queued'&&hasSpecificPrompt&&isGenericResume(r.text))return false;
+         return true;
+        }));
+       });
        again=true;
       }
      }
