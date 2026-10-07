@@ -4,7 +4,8 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/App';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+const serverReconcile=vi.hoisted(()=>({fn:async(_parent:string,local:any[])=>({history:local})}));
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{},reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -13,7 +14,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -190,3 +191,27 @@ it('strips synthetic remote cancellation notes from saved side history on mount'
  expect(screen.queryByText(/reached state 'cancelled'/)).toBeNull();
  expect(screen.getByText('Analyze status')).toBeTruthy();
 });
+
+it('restores missing server /btw turns and clears stale interrupted notice when reopening a mission',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('d04c77b2-7028-4c03-b7c1-ab20b818e0f3'),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'what’s the status? What’s left to do?',answer:'',error:'Side question interrupted. Retry to request a complete answer.'},
+ });
+ serverReconcile.fn=async()=>({
+  history:[
+   {id:'s1',question:'Où en es-tu ? Tu travailles sur quoi ?',answer:'Validation en cours sur Slice 1.'},
+   {id:'s2',question:'what’s the status? What’s left to do?',answer:'Slices 1-3 pushed; Slice 4 validating.'},
+  ],
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="d04c77b2-7028-4c03-b7c1-ab20b818e0f3" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Validation en cours sur Slice 1.')).toBeTruthy();
+ expect(await screen.findByText('Slices 1-3 pushed; Slice 4 validating.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+});
+

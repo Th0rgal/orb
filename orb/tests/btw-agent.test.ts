@@ -438,3 +438,62 @@ it('recovers a failed native launch before retrying its pending Core mission',as
  expect(setClientMissionStatus).toHaveBeenCalledWith('failed-launch-child','interrupted');
  expect(btwSession('failed-launch-parent')?.id).toBe('retry-launch-child');
 });
+
+it('reuses a completed side session whose generated track uses the 8-char mission prefix',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ const childId='eee849c1-e696-4ea2-b1af-041f8d239739';
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='verity-parent'?'active':'completed',
+  track:id===childId?'mission-eee849c1':'mission-668f26f8',
+  tags:id===childId?['btw-parent:verity-parent']:[],
+  history:[],
+  title:'Verity',
+  created_at:'',
+  updated_at:'',
+ }));
+ vi.mocked(api).mockResolvedValueOnce({id:childId});
+ vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'First answer',sequence:1,id:1,timestamp:''}]);
+ await askBtwAgent('verity-parent','First question','ctx1',[],new AbortController().signal,()=>{});
+ expect(btwSession('verity-parent')?.id).toBe(childId);
+ vi.mocked(api).mockClear();
+ vi.mocked(getMissionEvents)
+  .mockResolvedValueOnce([{event_type:'assistant_message',content:'First answer',sequence:1,id:1,timestamp:''}])
+  .mockResolvedValueOnce([{event_type:'user_message',content:'Second question',sequence:2,id:2,timestamp:''},{event_type:'assistant_message',content:'Second answer',sequence:3,id:3,timestamp:''}]);
+ vi.mocked(sendMissionMessage).mockResolvedValueOnce({id:'m2',queued:false});
+ const events:any[]=[];
+ await askBtwAgent('verity-parent','Second question','ctx2',[{question:'First question',answer:'First answer'}],new AbortController().signal,e=>events.push(e));
+ expect(sendMissionMessage).toHaveBeenCalledWith(childId,expect.stringContaining('Second question'));
+ expect(api).not.toHaveBeenCalled();
+ expect(events.at(-1)).toEqual({type:'done',answer:'Second answer'});
+});
+
+it('reconciles missing completed and active /btw turns from server btw-parent missions',async()=>{
+ const {reconcileBtwServerHistory,extractBtwUserQuestion}=await import('../src/btwAgent');
+ const {getMissionEvents}=await import('../src/stream');
+ expect(extractBtwUserQuestion('<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\nwhat’s the status?\nAttachment: /tmp/a.png\n')).toBe('what’s the status?');
+ vi.mocked(api).mockImplementation(async(path:string)=>{
+  if(path.startsWith('/api/control/missions?tag=')){
+   return [
+    {id:'m1',status:'completed',created_at:'2026-10-07T12:22:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:p1'],history:[],title:null,updated_at:''},
+    {id:'m2',status:'completed',created_at:'2026-10-07T14:11:14Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:p1'],history:[],title:null,updated_at:''},
+    {id:'m3',status:'completed',created_at:'2026-10-07T14:13:46Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:p1'],history:[],title:null,updated_at:''},
+   ] as any;
+  }
+  return [] as any;
+ });
+ vi.mocked(getMissionEvents).mockImplementation(async(id:string)=>{
+  if(id==='m1')return [{id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nOù en es-tu ?',timestamp:''},{id:2,sequence:2,event_type:'assistant_message',content:'Slice 1 en cours.',timestamp:''}];
+  if(id==='m2')return [{id:3,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nwhat’s the status? What’s left to do?',timestamp:''},{id:4,sequence:2,event_type:'assistant_message',content:'Slices 1-3 done, Slice 4 validating.',timestamp:''}];
+  if(id==='m3')return [{id:5,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nand it reused what was already started for morpho midnight, right?',timestamp:''},{id:6,sequence:2,event_type:'assistant_message',content:'Yes — branched directly on top of Midnight.',timestamp:''}];
+  return [];
+ });
+ const result=await reconcileBtwServerHistory('p1',[{id:'local-1',question:'Où en es-tu ?',answer:'Slice 1 en cours.'}]);
+ expect(result.history.map(h=>h.question)).toEqual([
+  'Où en es-tu ?',
+  'what’s the status? What’s left to do?',
+  'and it reused what was already started for morpho midnight, right?',
+ ]);
+ expect(btwSession('p1')?.id).toBe('m3');
+});
+

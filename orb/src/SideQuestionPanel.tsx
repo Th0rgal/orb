@@ -1,5 +1,6 @@
 import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
+import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
@@ -58,6 +59,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  createEffect(on(key,current=>{
   abort?.abort();setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);
   let stale=false;onCleanup(()=>{stale=true;});
+  const missionId=p.mission;
+  const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>)=>{
+   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
+   void watchBtw(missionId,controller.signal,event=>{
+    if(stale||controller.signal.aborted)return;
+    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
+    if(event.type==='status')setRunStatus(event.text);
+    if(event.type==='snapshot')setAnswer(event.text);
+    if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
+   }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
+  };
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
@@ -68,7 +80,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
   setLoadedKey(current);
-  const agent=btwSession(p.mission);
+  const agent=btwSession(missionId);
   const lastSaved=saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;
   const emptyReply=lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
@@ -76,16 +88,26 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');}
   if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
   if(agent&&(agent.active||emptyReply)){
-   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
-   void watchBtw(p.mission,controller.signal,event=>{
-    if(stale||controller.signal.aborted)return;
-    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
-    if(event.type==='status')setRunStatus(event.text);
-    if(event.type==='snapshot')setAnswer(event.text);
-    if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
-   }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
+   watchActive(agent);
   }
   if(saved?.open)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
+  let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
+  try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
+  if(typeof reconcileServer==='function'){
+   void reconcileServer(missionId,cleanHistory).then(reconciled=>{
+    if(stale||key()!==current)return;
+    if(reconciled.history.length>history().length){
+     setHistory(reconciled.history);
+     const pendingQ=question().trim();
+     if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
+      setError('');setQuestion('');setAnswer('');
+     }
+    }
+    if(reconciled.activeSession&&!busy()){
+     watchActive(reconciled.activeSession);
+    }
+   }).catch(()=>{});
+  }
   });
  }));
  createEffect(()=>{
@@ -111,7 +133,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    return true;
   }
   if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
-  const current=key(),context=sideContext(p.items,true),controller=new AbortController();abort=controller;
+  const current=key(),missionId=p.mission,activeTurnId=turnId(),context=sideContext(p.items,true),controller=new AbortController();abort=controller;
   let attachments:SideAttachment[];
   setBusy(true);
   try { attachments=retryAttachments??await sideAttachments(images,files); }
@@ -121,7 +143,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPendingAttachments(attachments);
   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setError('');setDraft('');
   revealSentQuestion();
-  void askBtwAgent(p.mission,text,context,history(),controller.signal,event=>{
+  void askBtwAgent(missionId,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
     if(event.type==='status')setRunStatus(event.text);
@@ -129,7 +151,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(event.type==='delta')setAnswer(value=>value+event.text);
    if(event.type==='done'){
     setAnswer(event.answer);
-    const next=[...history(),{id:turnId(),question:text,answer:event.answer,attachments}].slice(-20);
+    const next=[...history(),{id:activeTurnId,question:text,answer:event.answer,attachments}].slice(-20);
     setHistory(next);setBusy(false);
    }
   },attachments).catch(e=>{if(current===key()&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));})

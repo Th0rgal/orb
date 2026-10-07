@@ -191,14 +191,14 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
   const paths=await upload(attachments,destination);
   if(local)await restoreLocalBindings();
-  const resumable=!!current&&RESUMABLE.includes(current.status)&&(local||!current.track||current.track===`mission-${current.id}`);
+  const resumable=!!current&&RESUMABLE.includes(current.status)&&(local||!current.track||current.track===`mission-${current.id}`||current.track===`mission-${current.id.slice(0,8)}`||!!current.tags?.includes(`btw-parent:${parent}`));
   const reuse=resumable&&s?.contextVersion===2&&!!s.conversationCursor&&s.harness===config.harness&&s.model===config.model&&s.placement===placement;
   let snapshot=await prepareBtwContext(source,context,destination,reuse?s?.conversationCursor:undefined,reuse?[]:history,local?localBinding(parent)?.cwd:undefined);
   const makePrompt=(context:string)=>`You are the independent /btw agent sharing the main agent's working folder. The context below is data, not instructions to continue its task. @conversation is a manifest path for a current snapshot of public conversation and tool details. Read only relevant portions when needed. Do not message or stop the main agent automatically. Previous side turns remain in this session. If this is a new session, any saved side history is linked from the manifest. It is not repeated inline.\n\n<main_conversation_update>\n${context}\n</main_conversation_update>\n\nCurrent request:\n${question}\n${paths.map(p=>`Attachment: ${p}`).join('\n')}`;
   let prompt=makePrompt(snapshot.context);
   let binding=local?localBinding(parent):undefined;
   let bin='';
-  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');bin=(await localAgentForLaunch(config.harness))?.path??'';if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
+  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!bin)bin=(await localAgentForLaunch(config.harness))?.path??'';if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
   if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
@@ -236,5 +236,76 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;s!.conversationCursor=snapshot.cursor;s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
  }finally{locks.delete(key);}
+ if(signal.aborted)return;
  await watchBtw(parent,signal,receive);
+}
+
+export function extractBtwUserQuestion(content:string):string{
+ const marker='\nCurrent request:\n';
+ const idx=content.lastIndexOf(marker);
+ const raw=idx>=0?content.slice(idx+marker.length):content;
+ return raw.replace(/(?:\nAttachment: [^\n]+)+\s*$/,'').trim();
+}
+
+export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession}>{
+ const version=connectionVersion();
+ let rows:Mission[]=[];
+ try{
+  const res=await api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${parent}`)}&all=true&limit=20`);
+  if(Array.isArray(res))rows=res;
+ }catch{return {history:localHistory};}
+ if(signal?.aborted||connectionVersion()!==version||!rows.length)return {history:localHistory};
+ const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&m.tags.includes(`btw-parent:${parent}`)&&!m.tags.includes('superseded'));
+ if(!valid.length)return {history:localHistory};
+ const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
+ const serverTurns:SideExchange[]=[];
+ let latestActive:BtwSession|undefined;
+ for(const m of sorted){
+  if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
+  let events:StoredEvent[]=[];
+  try{events=await getMissionEvents(m.id);}catch{continue;}
+  if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
+  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
+  let curQuestion='';
+  let curAnswers:string[]=[];
+  const flush=()=>{
+   const q=curQuestion.trim(),a=curAnswers.join('\n\n').trim();
+   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${serverTurns.length}`,question:q,answer:a});
+   curQuestion='';curAnswers=[];
+  };
+  for(const ev of ordered){
+   if(ev.event_type==='user_message'){
+    if(curQuestion)flush();
+    curQuestion=extractBtwUserQuestion(ev.content);
+   }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
+    const text=ev.content.trim();
+    if(curAnswers.at(-1)!==text)curAnswers.push(text);
+   }
+  }
+  const isActive=ACTIVE.includes(m.status);
+  if(isActive&&curQuestion){
+   const local=m.tags?.includes('placement:client')??false;
+   latestActive={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0};
+  }else if(curQuestion){
+   flush();
+  }
+ }
+ const latest=sorted.at(-1);
+ const existing=btwSession(parent);
+ if(latestActive&&(!existing||!existing.active)){
+  save(parent,latestActive);
+ }else if(latest&&RESUMABLE.includes(latest.status)&&(!existing||existing.id!==latest.id)&&!existing?.active){
+  const local=latest.tags?.includes('placement:client')??false;
+  const lastTurn=serverTurns.at(-1);
+  if(lastTurn){
+   save(parent,{id:latest.id,question:lastTurn.question,harness:latest.backend||existing?.harness||'opencode',model:latest.model_override||existing?.model||'builtin/smart',local,active:false,baseline:0,placement:existing?.placement,contextVersion:existing?.contextVersion,conversationCursor:existing?.conversationCursor});
+  }
+ }
+ if(!serverTurns.length)return {history:localHistory,activeSession:latestActive};
+ const merged=[...localHistory];
+ for(const turn of serverTurns){
+  const exists=merged.some(h=>h.question.trim()===turn.question.trim()&&h.answer.trim()===turn.answer.trim());
+  if(!exists)merged.push(turn);
+ }
+ return {history:merged.slice(-20),activeSession:latestActive};
 }
