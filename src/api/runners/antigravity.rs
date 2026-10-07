@@ -89,6 +89,21 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         }
         Err(error) => return AgentResult::failure(error, 0),
     }
+    let thought_home = match ctx.workspace.env_vars.get("HOME") {
+        Some(home)
+            if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
+                && !crate::workspace::is_container_fallback(ctx.workspace) =>
+        {
+            ctx.workspace.path.join(home.trim_start_matches('/'))
+        }
+        Some(home) => std::path::PathBuf::from(home),
+        None => crate::workspace::resolve_workspace_home_root(
+            &ctx.workspace.path,
+            ctx.workspace.workspace_type,
+            &ctx.workspace.env_vars,
+        ),
+    };
+    crate::antigravity::clear_historical_error_steps(&thought_home, ctx.session_id);
     let mut child = match exec
         .spawn_streaming(&cwd, &cli, &args, Default::default())
         .await
@@ -146,20 +161,6 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         });
         last_goal_iteration = 1;
     }
-    let thought_home = match ctx.workspace.env_vars.get("HOME") {
-        Some(home)
-            if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
-                && !crate::workspace::is_container_fallback(ctx.workspace) =>
-        {
-            ctx.workspace.path.join(home.trim_start_matches('/'))
-        }
-        Some(home) => std::path::PathBuf::from(home),
-        None => crate::workspace::resolve_workspace_home_root(
-            &ctx.workspace.path,
-            ctx.workspace.workspace_type,
-            &ctx.workspace.env_vars,
-        ),
-    };
     let mut thoughts = crate::antigravity::thoughts::Reader::new(&thought_home);
     let mut thought_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
@@ -194,6 +195,9 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             continue;
         };
         let tools = stream.feed(&value);
+        if value["event"].as_str() == Some("result") && stream.error.is_some() {
+            stream.reconcile_transcript_background_tasks(&thought_home);
+        }
         if let Some(objective) = &goal_objective {
             if stream.goal_iterations > last_goal_iteration {
                 last_goal_iteration = stream.goal_iterations;
@@ -289,8 +293,10 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     stream.reconcile_transcript_background_tasks(&thought_home);
     let mut result = match stream.finish() {
-        Ok(()) if status.is_ok_and(|s| s.success()) => AgentResult::success(stream.summary(), 0)
-            .with_terminal_reason(TerminalReason::TurnComplete),
+        Ok(()) if status.is_ok_and(|s| s.success()) || stream.reconciled_post_response_failure => {
+            AgentResult::success(stream.summary(), 0)
+                .with_terminal_reason(TerminalReason::TurnComplete)
+        }
         Ok(()) => AgentResult::failure("Antigravity process failed after its result", 0),
         Err(error) => AgentResult::failure(error, 0)
             .with_terminal_reason(TerminalReason::NativeContinuityRequired),

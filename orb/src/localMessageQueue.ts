@@ -7,7 +7,7 @@ import {sideQuestionKey} from './sideQuestionStorage';
 import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;cut?:'restart'|'connection';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;lastSyncedText?:string;cut?:'restart'|'connection';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -42,7 +42,7 @@ export function cutByConnection(result:Pick<PollLocal,'text'|'error'|'retryable'
 }
 /** Orb continues a cut turn by itself this many times; after that it waits for the user. */
 const RESUME_LIMIT=3;
-const CONNECTION_BACKOFF_MS=[1_000,5_000,15_000];
+const CONNECTION_BACKOFF_MS=[1_000,5_000,15_000,30_000];
 export function connectionRetryDelayMs(resumes:number){
  return CONNECTION_BACKOFF_MS[Math.min(Math.max(resumes-1,0),CONNECTION_BACKOFF_MS.length-1)];
 }
@@ -255,7 +255,12 @@ export function startLocalQueueWorker(){
    await update(key,row.id,stored=>{stored.userSynced=true;});
   }
   if(row.result){
-   if(row.result.text.trim())await appendClientTranscript(row.mission,'assistant',row.result.text,row.resultId,row.receipt);
+   const trimmed=row.result.text.trim();
+   if(trimmed&&trimmed!==row.lastSyncedText){
+    await appendClientTranscript(row.mission,'assistant',row.result.text,row.resultId,row.receipt);
+    row.lastSyncedText=trimmed;
+    await update(key,row.id,stored=>{stored.lastSyncedText=trimmed;});
+   }
    const failed=(row.result.exit_code!=null&&row.result.exit_code!==0)||!!row.result.error;
    // A turn cut by the connection is continued once the connection is back.
    const resume=!row.resultStatus&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;

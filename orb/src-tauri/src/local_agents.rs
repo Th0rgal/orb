@@ -421,9 +421,14 @@ fn watch_exit(
             *slot = status.and_then(|status| status.code());
         }
         output.wait_drained(None);
-        if strict_terminal && error.lock().is_ok_and(|error| error.is_some()) {
+        if strict_terminal {
+            let failed = error.lock().is_ok_and(|error| error.is_some());
             if let Ok(mut slot) = exit_code.lock() {
-                *slot = Some(1);
+                if failed {
+                    *slot = Some(1);
+                } else if *slot != Some(0) {
+                    *slot = Some(0);
+                }
             }
         }
         done.store(true, Ordering::SeqCst);
@@ -623,6 +628,10 @@ fn spawn_antigravity(
 ) -> Result<Child, String> {
     crate::antigravity::validate_prompt(&request.prompt)?;
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    crate::antigravity::clear_historical_error_steps(
+        std::path::Path::new(&home),
+        request.session_id.as_deref(),
+    );
     let mut claim_root = PathBuf::from(&home).join(".orb/antigravity-attempts");
     if request
         .session_id
@@ -727,6 +736,9 @@ fn spawn_antigravity(
             };
             for tool in stream.feed(&value) {
                 output.native_activity(&tool);
+            }
+            if value["event"].as_str() == Some("result") && stream.error.is_some() {
+                stream.reconcile_transcript_background_tasks(&transcript_home);
             }
             if stream.error.is_none() {
                 thoughts.lock().unwrap().observe(&value);

@@ -2,7 +2,7 @@
 #[path = "antigravity_thoughts.rs"]
 pub mod thoughts;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Bound the native argv and the remote shell's worst-case quote expansion.
 pub fn validate_prompt(prompt: &str) -> Result<(), String> {
@@ -111,6 +111,189 @@ impl ErrorMarker {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CompletedStep {
+    step_type: String,
+    state: String,
+    text_len: usize,
+}
+
+/// Antigravity CLI 1.2.10 / 1.3.1 records `initialStepIndex` in `runTurn` before
+/// `StreamConversation` has finished loading the resumed conversation's steps into memory,
+/// so `initialStepIndex` is 0 and `postResponseFailure(turnSteps)` scans the entire
+/// historical conversation (`steps[0..lastResponseIdx]`) for any prior `CortexStepErrorMessage`
+/// (`step_type = 17`) whose `CortexErrorDetails.is_benign` (field 4) is false.
+///
+/// Before spawning `agy --conversation <id>`, mark existing `step_type = 17` rows in the
+/// conversation SQLite DB as `is_benign = true` so historical transient errors from earlier
+/// turns cannot false-fail a newly resumed turn.
+pub fn clear_historical_error_steps(home: &std::path::Path, session: Option<&str>) {
+    let Some(session) = session.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let db_path = home
+        .join(".gemini/antigravity-cli/conversations")
+        .join(format!("{session}.db"));
+    if !db_path.is_file() {
+        return;
+    }
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+        return;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
+    let Ok(mut stmt) = conn.prepare("SELECT idx, step_payload FROM steps WHERE step_type = 17")
+    else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    }) else {
+        return;
+    };
+    let updates: Vec<(i64, Vec<u8>)> = rows
+        .flatten()
+        .filter_map(|(idx, payload)| {
+            mark_step_error_payload_benign(&payload).map(|updated| (idx, updated))
+        })
+        .collect();
+    drop(stmt);
+    for (idx, payload) in updates {
+        let _ = conn.execute(
+            "UPDATE steps SET step_payload = ?1 WHERE idx = ?2",
+            rusqlite::params![payload, idx],
+        );
+    }
+}
+
+fn decode_varint(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
+    let mut val = 0u64;
+    let mut shift = 0u32;
+    while pos < buf.len() {
+        let byte = buf[pos];
+        pos += 1;
+        val |= u64::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some((val, pos));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn encode_varint(mut val: u64, out: &mut Vec<u8>) {
+    while val >= 0x80 {
+        out.push((val as u8 & 0x7f) | 0x80);
+        val >>= 7;
+    }
+    out.push(val as u8);
+}
+
+fn skip_proto_field(buf: &[u8], pos: usize, wire_type: u64) -> Option<usize> {
+    match wire_type {
+        0 => decode_varint(buf, pos).map(|(_, next)| next),
+        1 => pos.checked_add(8).filter(|&next| next <= buf.len()),
+        2 => {
+            let (len, next) = decode_varint(buf, pos)?;
+            next.checked_add(usize::try_from(len).ok()?)
+                .filter(|&end| end <= buf.len())
+        }
+        5 => pos.checked_add(4).filter(|&next| next <= buf.len()),
+        _ => None,
+    }
+}
+
+/// Sets `CortexErrorDetails.is_benign = true` (field 4, varint 1) inside
+/// `CortexStep.error_message` (field 24) -> `CortexStepErrorMessage.error` (field 3).
+/// Returns `Some(updated_bytes)` only if the payload was modified.
+fn mark_step_error_payload_benign(step_payload: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    let mut out = Vec::with_capacity(step_payload.len() + 4);
+    let mut changed = false;
+    while pos < step_payload.len() {
+        let start = pos;
+        let (tag, next) = decode_varint(step_payload, pos)?;
+        let field_num = tag >> 3;
+        let wire_type = tag & 7;
+        if field_num == 24 && wire_type == 2 {
+            let (len, sub_start) = decode_varint(step_payload, next)?;
+            let sub_end = sub_start.checked_add(usize::try_from(len).ok()?)?;
+            if sub_end > step_payload.len() {
+                return None;
+            }
+            if let Some(updated_24) = mark_error_message_benign(&step_payload[sub_start..sub_end]) {
+                encode_varint((24 << 3) | 2, &mut out);
+                encode_varint(updated_24.len() as u64, &mut out);
+                out.extend_from_slice(&updated_24);
+                changed = true;
+                pos = sub_end;
+                continue;
+            }
+            pos = sub_end;
+        } else {
+            pos = skip_proto_field(step_payload, next, wire_type)?;
+        }
+        out.extend_from_slice(&step_payload[start..pos]);
+    }
+    changed.then_some(out)
+}
+
+fn mark_error_message_benign(buf: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    let mut out = Vec::with_capacity(buf.len() + 4);
+    let mut changed = false;
+    while pos < buf.len() {
+        let start = pos;
+        let (tag, next) = decode_varint(buf, pos)?;
+        let field_num = tag >> 3;
+        let wire_type = tag & 7;
+        if field_num == 3 && wire_type == 2 {
+            let (len, sub_start) = decode_varint(buf, next)?;
+            let sub_end = sub_start.checked_add(usize::try_from(len).ok()?)?;
+            if sub_end > buf.len() {
+                return None;
+            }
+            if let Some(updated_3) = mark_error_details_benign(&buf[sub_start..sub_end]) {
+                encode_varint((3 << 3) | 2, &mut out);
+                encode_varint(updated_3.len() as u64, &mut out);
+                out.extend_from_slice(&updated_3);
+                changed = true;
+                pos = sub_end;
+                continue;
+            }
+            pos = sub_end;
+        } else {
+            pos = skip_proto_field(buf, next, wire_type)?;
+        }
+        out.extend_from_slice(&buf[start..pos]);
+    }
+    changed.then_some(out)
+}
+
+fn mark_error_details_benign(buf: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let (tag, next) = decode_varint(buf, pos)?;
+        let field_num = tag >> 3;
+        let wire_type = tag & 7;
+        if field_num == 4 && wire_type == 0 {
+            let (val, end) = decode_varint(buf, next)?;
+            if val != 0 {
+                return None;
+            }
+            pos = end;
+        } else {
+            pos = skip_proto_field(buf, next, wire_type)?;
+        }
+    }
+    let mut out = Vec::with_capacity(buf.len() + 2);
+    out.extend_from_slice(buf);
+    out.extend_from_slice(&[0x20, 0x01]);
+    Some(out)
+}
+
 #[derive(Debug, Default)]
 pub struct Stream {
     pub turn_id: String,
@@ -130,15 +313,59 @@ pub struct Stream {
     pub goal_mode: bool,
     pub goal_iterations: u32,
     pub goal_status: Option<&'static str>,
-    completed_steps: HashSet<u64>,
+    pub reconciled_post_response_failure: bool,
+    completed_steps: BTreeMap<u64, CompletedStep>,
     tools: HashSet<String>,
+    active_command_steps: BTreeSet<u64>,
     pub background_tasks: BTreeMap<String, bool>,
 }
 
 fn parse_background_task_started(output: &str) -> Option<String> {
-    let (_, rest) = output.split_once("Tool is running as a background task with task id:")?;
-    let id = rest.lines().next()?.trim();
-    (!id.is_empty()).then(|| id.to_owned())
+    for line in output.lines() {
+        let Some(rest) = line
+            .trim_start()
+            .strip_prefix("Tool is running as a background task with task id:")
+        else {
+            continue;
+        };
+        let rest = rest.split("\\n").next().unwrap_or(rest).trim_start();
+        let id = rest
+            .split(|c: char| c.is_whitespace() || c == '"' || c == '\\')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !id.is_empty() {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+fn parse_running_task_ids_from_list(output: &str) -> Option<Vec<String>> {
+    if output
+        .to_ascii_lowercase()
+        .contains("no background tasks are currently running")
+    {
+        return Some(vec![]);
+    }
+    let start = output.find('[')?;
+    let end = output.rfind(']')?;
+    if end < start {
+        return None;
+    }
+    let items = serde_json::from_str::<Vec<Value>>(&output[start..=end]).ok()?;
+    let mut ids = Vec::new();
+    for item in items {
+        if let Some(id) = item["taskId"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            ids.push(id.to_owned());
+        }
+    }
+    Some(ids)
+}
+
+fn strip_task_step_index(task_id: &str) -> Option<u64> {
+    let (_, step) = task_id.rsplit_once("/task-")?;
+    step.parse::<u64>().ok()
 }
 
 fn strip_goal_sentinels(text: &str) -> (String, Option<&'static str>) {
@@ -235,7 +462,15 @@ impl Stream {
         }
         if kind == "result" {
             self.success = body["status"] == "SUCCESS";
-            if !self.success {
+            if self.success {
+                if let Some(session) = self.session.as_deref() {
+                    for &step in &self.active_command_steps {
+                        self.background_tasks
+                            .entry(format!("{session}/task-{step}"))
+                            .or_insert(true);
+                    }
+                }
+            } else {
                 self.error = Some(
                     body["error"]
                         .as_str()
@@ -289,11 +524,10 @@ impl Stream {
         let Some(step) = body["step_index"].as_u64() else {
             return vec![];
         };
-        if self.completed_steps.contains(&step) {
+        if self.completed_steps.contains_key(&step) {
             return vec![];
         }
         if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
-            self.completed_steps.insert(step);
             self.input_tokens += body["usage"]["input_tokens"].as_u64().unwrap_or(0);
             self.output_tokens += body["usage"]["output_tokens"].as_u64().unwrap_or(0);
             if let Some(tokens) = body["usage"]["thinking_tokens"].as_u64() {
@@ -325,6 +559,17 @@ impl Stream {
                 events.push(event);
             }
         }
+        if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
+            let text_len = self.responses.get(&step).map_or(0, |(t, _, _)| t.len());
+            self.completed_steps.insert(
+                step,
+                CompletedStep {
+                    step_type: body["step_type"].as_str().unwrap_or_default().to_owned(),
+                    state: body["state"].as_str().unwrap_or_default().to_owned(),
+                    text_len,
+                },
+            );
+        }
         if body["step_type"] != "tool" {
             return events;
         }
@@ -339,34 +584,76 @@ impl Stream {
         if self.tools.insert(id.clone()) {
             events.push(json!({"type":"tool_call","toolCallId":id,"name":name,"toolName":name,"rawInput":info["parameters"]}));
         }
+        if name == "run_command" && body["state"] == "ACTIVE" {
+            self.active_command_steps.insert(step);
+        }
         if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
+            if name == "run_command" {
+                self.active_command_steps.remove(&step);
+            }
             if let Some(output) = info["output"].as_str() {
                 if let Some(task_id) = parse_background_task_started(output) {
                     self.background_tasks.insert(task_id, true);
-                } else if name == "manage_task" {
-                    let action = info["parameters"]["Action"].as_str().unwrap_or_default();
-                    let task_id = info["parameters"]["TaskId"]
-                        .as_str()
-                        .map(|s| s.trim_matches('"'));
-                    let lower = output.to_ascii_lowercase();
-                    if action == "kill" {
-                        if let Some(task_id) = task_id {
-                            self.background_tasks.insert(task_id.to_owned(), false);
+                } else {
+                    if name == "run_command" {
+                        if let Some(session) = self.session.as_deref() {
+                            let task_id = format!("{session}/task-{step}");
+                            if let Some(running) = self.background_tasks.get_mut(&task_id) {
+                                *running = false;
+                            }
                         }
-                    } else if action == "kill_all" {
-                        for running in self.background_tasks.values_mut() {
-                            *running = false;
-                        }
-                    } else if action == "status"
-                        && (lower.contains("not running")
-                            || lower.contains("completed")
-                            || lower.contains("finished")
-                            || lower.contains("exited")
-                            || lower.contains("killed")
-                            || lower.contains("terminated"))
-                    {
-                        if let Some(task_id) = task_id {
-                            self.background_tasks.insert(task_id.to_owned(), false);
+                    }
+                    if name == "manage_task" {
+                        let action = info["parameters"]["Action"].as_str().unwrap_or_default();
+                        let task_id = info["parameters"]["TaskId"]
+                            .as_str()
+                            .map(|s| s.trim_matches('"'));
+                        let lower = output.to_ascii_lowercase();
+                        if action == "kill" {
+                            if let Some(task_id) = task_id {
+                                self.background_tasks.insert(task_id.to_owned(), false);
+                                if let Some(idx) = strip_task_step_index(task_id) {
+                                    self.active_command_steps.remove(&idx);
+                                }
+                            }
+                        } else if action == "kill_all" {
+                            for running in self.background_tasks.values_mut() {
+                                *running = false;
+                            }
+                            self.active_command_steps.clear();
+                        } else if action == "list" {
+                            if let Some(running_ids) = parse_running_task_ids_from_list(output) {
+                                for running in self.background_tasks.values_mut() {
+                                    *running = false;
+                                }
+                                self.active_command_steps.clear();
+                                for id in running_ids {
+                                    self.background_tasks.insert(id, true);
+                                }
+                            }
+                        } else if action == "status" {
+                            if lower.contains("not running")
+                                || lower.contains("completed")
+                                || lower.contains("finished")
+                                || lower.contains("exited")
+                                || lower.contains("killed")
+                                || lower.contains("terminated")
+                                || lower.contains("status: done")
+                                || lower.contains("status: error")
+                                || lower.contains("status: canceled")
+                                || lower.contains("status: cancelled")
+                            {
+                                if let Some(task_id) = task_id {
+                                    self.background_tasks.insert(task_id.to_owned(), false);
+                                    if let Some(idx) = strip_task_step_index(task_id) {
+                                        self.active_command_steps.remove(&idx);
+                                    }
+                                }
+                            } else if lower.contains("status: running") {
+                                if let Some(task_id) = task_id {
+                                    self.background_tasks.insert(task_id.to_owned(), true);
+                                }
+                            }
                         }
                     }
                 }
@@ -390,33 +677,51 @@ impl Stream {
     }
 
     pub fn reconcile_transcript_background_tasks(&mut self, home: &std::path::Path) {
-        let Some(session) = self.session.as_deref() else {
+        let Some(session) = self.session.clone() else {
             return;
         };
-        if self.background_tasks.values().all(|running| !*running) {
-            return;
-        }
+        self.reconcile_false_post_response_failure(home, &session);
         let path = home
             .join(".gemini/antigravity-cli/brain")
-            .join(session)
+            .join(&session)
             .join(".system_generated/logs/transcript.jsonl");
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
+        let min_turn_step = self
+            .completed_steps
+            .keys()
+            .next()
+            .copied()
+            .into_iter()
+            .chain(self.active_command_steps.iter().copied())
+            .min();
         for line in content.lines() {
             let Ok(entry) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            let step_idx = entry["step_index"].as_u64();
             let Some(text) = entry["content"].as_str() else {
                 continue;
             };
+            if entry["type"] == "GENERIC"
+                && entry["status"] == "RUNNING"
+                && min_turn_step.is_none_or(|min_idx| step_idx.is_some_and(|idx| idx >= min_idx))
+            {
+                if let Some(task_id) = parse_background_task_started(text) {
+                    self.background_tasks.entry(task_id).or_insert(true);
+                }
+            }
             for (task_id, running) in &mut self.background_tasks {
                 if *running
                     && (text.contains(&format!("Task id \"{task_id}\" finished with result:"))
                         || text.contains(&format!("Task id \"{task_id}\" was canceled"))
                         || text.contains(&format!("Task id \"{task_id}\" was cancelled"))
                         || text.contains(&format!("Task id \"{task_id}\" was killed"))
-                        || text.contains(&format!("Task id \"{task_id}\" was terminated")))
+                        || text.contains(&format!("Task id \"{task_id}\" was terminated"))
+                        || text.contains(&format!(
+                            "<background_task_notification>\nTask ID: {task_id}\n"
+                        )))
                 {
                     *running = false;
                 }
@@ -424,8 +729,86 @@ impl Stream {
         }
     }
 
+    /// Reconcile a false `postResponseFailure` emitted by `agy` 1.2.10 / 1.3.1 when a
+    /// resumed conversation had a historical `CortexStepErrorMessage` (`step_type = 17`)
+    /// from an earlier turn.
+    ///
+    /// In `agy`, `postResponseFailure` always appends `" (response may be truncated)"` to
+    /// `result.error`. If the current turn's final step in `completed_steps` is a `DONE`
+    /// `agent_response` with non-empty text, no `error_message` step occurred during this
+    /// turn, and the native `transcript.jsonl` confirms that final step is `PLANNER_RESPONSE`
+    /// with status `DONE` and no subsequent `ERROR_MESSAGE` step, then the turn completed
+    /// cleanly and the historical error step is neutralized.
+    fn reconcile_false_post_response_failure(&mut self, home: &std::path::Path, session: &str) {
+        if self.reconciled_post_response_failure {
+            self.error_marker = None;
+            return;
+        }
+        if self.identity_error || self.success || self.agent_response_active {
+            return;
+        }
+        let Some(err) = self.error.as_deref() else {
+            return;
+        };
+        if !err.ends_with("(response may be truncated)")
+            && !err.contains("There was a network issue connecting to the server")
+        {
+            return;
+        }
+        let Some((&last_step_idx, last_step)) = self.completed_steps.last_key_value() else {
+            return;
+        };
+        if last_step.step_type != "agent_response"
+            || last_step.state != "DONE"
+            || last_step.text_len == 0
+            || self
+                .completed_steps
+                .values()
+                .any(|step| step.step_type == "error_message")
+        {
+            return;
+        }
+        let Some(&first_step_idx) = self.completed_steps.keys().next() else {
+            return;
+        };
+        let path = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs/transcript.jsonl");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let mut last_step_confirmed_done = false;
+        for line in content.lines() {
+            let Ok(entry) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(idx) = entry["step_index"].as_u64() else {
+                continue;
+            };
+            if idx < first_step_idx {
+                continue;
+            };
+            if entry["type"] == "ERROR_MESSAGE" || idx > last_step_idx {
+                return;
+            }
+            if idx == last_step_idx {
+                last_step_confirmed_done =
+                    entry["type"] == "PLANNER_RESPONSE" && entry["status"] == "DONE";
+            }
+        }
+        if last_step_confirmed_done {
+            self.reconciled_post_response_failure = true;
+            self.success = true;
+            self.error = None;
+            self.error_marker = None;
+            clear_historical_error_steps(home, Some(session));
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
         !self.identity_error
+            && !self.success
             && self.session.is_some()
             && self
                 .error_marker
@@ -921,6 +1304,313 @@ mod tests {
         assert_eq!(stream.goal_status, Some("complete"));
         assert_eq!(stream.summary(), "Verified!");
         assert!(!stream.text.contains("GOAL_COMPLETE"));
+        assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn clear_historical_error_steps_marks_cortex_error_details_benign_idempotently() {
+        let home = tempfile::tempdir().unwrap();
+        let session = "ddd67091-4a2f-4fba-b905-7a8144dee4eb";
+        let conv_dir = home.path().join(".gemini/antigravity-cli/conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        let db_path = conv_dir.join(format!("{session}.db"));
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, step_payload BLOB NOT NULL)",
+            [],
+        )
+        .unwrap();
+        // Minimal CortexStep protobuf with field 1 = 17, field 4 = 7, and field 24 (CortexStepErrorMessage)
+        // containing field 3 (CortexErrorDetails) with field 1 ("err") and field 6 (retryable = 1).
+        let error_details = b"\x0a\x03err\x30\x01";
+        let mut error_msg = Vec::new();
+        error_msg.push(0x1a);
+        error_msg.push(error_details.len() as u8);
+        error_msg.extend_from_slice(error_details);
+        let mut step_payload = vec![0x08, 0x11, 0x20, 0x07, 0xc2, 0x01, error_msg.len() as u8];
+        step_payload.extend_from_slice(&error_msg);
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, step_payload) VALUES (1081, 17, ?1)",
+            [&step_payload],
+        )
+        .unwrap();
+        drop(conn);
+
+        clear_historical_error_steps(home.path(), Some(session));
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let updated: Vec<u8> = conn
+            .query_row(
+                "SELECT step_payload FROM steps WHERE idx = 1081",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated.len(), step_payload.len() + 2);
+        assert!(updated.ends_with(&[0x20, 0x01]));
+        assert!(mark_step_error_payload_benign(&updated).is_none());
+    }
+
+    #[test]
+    fn reconciles_false_post_response_failure_from_historical_error_step_but_keeps_live_turn_error()
+    {
+        let home = tempfile::tempdir().unwrap();
+        let session = "ddd67091-4a2f-4fba-b905-7a8144dee4eb";
+        let logs_dir = home
+            .path()
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            [
+                json!({
+                    "step_index": 1081,
+                    "source": "CORTEX_STEP_SOURCE_SYSTEM",
+                    "type": "ERROR_MESSAGE",
+                    "status": "ERROR"
+                }),
+                json!({
+                    "step_index": 2540,
+                    "source": "CORTEX_STEP_SOURCE_USER_EXPLICIT",
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": "Check status"
+                }),
+                json!({
+                    "step_index": 2542,
+                    "source": "CORTEX_STEP_SOURCE_MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Tout est déjà terminé, signé et poussé."
+                }),
+            ]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":session}));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2542,
+                "state":"DONE",
+                "step_type":"agent_response",
+                "text_delta":"Tout est déjà terminé, signé et poussé."
+            }
+        }));
+        stream.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":session,
+                "status":"ERROR",
+                "error":"There was a network issue connecting to the server, please try again. (response may be truncated)"
+            }
+        }));
+        stream.reconcile_transcript_background_tasks(home.path());
+        stream.observe_stderr(
+            r#"AGY_ERROR: {"short_error":"read: no route to host","status":"UNKNOWN","retryable":true}"#,
+        );
+        stream.reconcile_transcript_background_tasks(home.path());
+        assert!(stream.reconciled_post_response_failure);
+        assert!(stream.finish().is_ok());
+        assert!(!stream.is_retryable());
+        assert_eq!(stream.summary(), "Tout est déjà terminé, signé et poussé.");
+
+        // Also reconciles when agy emits the bare network issue error without "(response may be truncated)".
+        let mut bare_stream = Stream::default();
+        bare_stream.feed(&json!({"event":"init","conversation_id":session}));
+        bare_stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2542,
+                "state":"DONE",
+                "step_type":"agent_response",
+                "text_delta":"Tout est déjà terminé, signé et poussé."
+            }
+        }));
+        bare_stream.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":session,
+                "status":"ERROR",
+                "error":"There was a network issue connecting to the server, please try again."
+            }
+        }));
+        bare_stream.reconcile_transcript_background_tasks(home.path());
+        assert!(bare_stream.reconciled_post_response_failure);
+        assert!(bare_stream.finish().is_ok());
+
+        // If an ERROR_MESSAGE actually occurred during the current turn, do not reconcile.
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            [
+                json!({
+                    "step_index": 2542,
+                    "source": "CORTEX_STEP_SOURCE_MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Partial answer"
+                }),
+                json!({
+                    "step_index": 2543,
+                    "source": "CORTEX_STEP_SOURCE_SYSTEM",
+                    "type": "ERROR_MESSAGE",
+                    "status": "ERROR"
+                }),
+            ]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut live_err = Stream::default();
+        live_err.feed(&json!({"event":"init","conversation_id":session}));
+        live_err.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2542,
+                "state":"DONE",
+                "step_type":"agent_response",
+                "text_delta":"Partial answer"
+            }
+        }));
+        live_err.observe_stderr(
+            r#"AGY_ERROR: {"short_error":"read: no route to host","status":"UNKNOWN","retryable":true}"#,
+        );
+        live_err.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":session,
+                "status":"ERROR",
+                "error":"There was a network issue connecting to the server, please try again. (response may be truncated)"
+            }
+        }));
+        live_err.reconcile_transcript_background_tasks(home.path());
+        assert!(!live_err.reconciled_post_response_failure);
+        assert!(live_err.finish().is_err());
+        assert!(live_err.is_retryable());
+    }
+
+    #[test]
+    fn tracks_active_background_run_command_and_manage_task_list_and_status() {
+        let session = "869fd922-78ac-4a06-8994-2bda1baed391";
+        let task_id = format!("{session}/task-2065");
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":session}));
+
+        // Tailing a historical transcript.jsonl line must not register a bogus background task.
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2060,
+                "state":"DONE",
+                "step_type":"tool",
+                "tool_name":"run_command",
+                "tool_info":{
+                    "name":"run_command",
+                    "parameters":{"CommandLine":"tail -n 30 transcript.jsonl"},
+                    "output":r#"{"step_index":587,"content":"Tool is running as a background task with task id: 92989fb6-86ef-4642-81c9-0eb8060354f2/task-587\nCommand: lake build"}"#
+                }
+            }
+        }));
+        assert!(stream.unfinished_background_tasks().is_empty());
+
+        // In stream-json, a backgrounded run_command emits state: "ACTIVE" and stays active
+        // while the agent inspects it via manage_task(list/status) and waits for wakeup.
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2065,
+                "state":"ACTIVE",
+                "step_type":"tool",
+                "tool_name":"run_command",
+                "tool_info":{
+                    "name":"run_command",
+                    "parameters":{"CommandLine":"lake build","WaitMsBeforeAsync":10000}
+                }
+            }
+        }));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2067,
+                "state":"DONE",
+                "step_type":"tool",
+                "tool_name":"manage_task",
+                "tool_info":{
+                    "name":"manage_task",
+                    "parameters":{"Action":"list"},
+                    "output":format!("Currently running background tasks (1):\n[\n  {{\n    \"taskId\": \"{task_id}\",\n    \"title\": \"Running InvStop Lean build\"\n  }}\n]")
+                }
+            }
+        }));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2069,
+                "state":"DONE",
+                "step_type":"tool",
+                "tool_name":"manage_task",
+                "tool_info":{
+                    "name":"manage_task",
+                    "parameters":{"Action":"status","TaskId":&task_id},
+                    "output":format!("Task ID: {task_id}\nStatus: RUNNING\nLog URI: file:///tmp/task-2065.log")
+                }
+            }
+        }));
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2072,
+                "state":"DONE",
+                "step_type":"agent_response",
+                "text_delta":"I will wait for the background build task to notify me when it finishes.\n\n"
+            }
+        }));
+        stream.feed(&json!({
+            "event":"result",
+            "result":{
+                "conversation_id":session,
+                "status":"SUCCESS",
+                "response":"I will wait for the background build task to notify me when it finishes.\n\n"
+            }
+        }));
+        let err = stream.finish().unwrap_err();
+        assert!(err.contains(&task_id), "unexpected err: {err}");
+        assert!(err.contains("while background task(s)"));
+
+        // If manage_task(list) later confirms no tasks are running, finish() succeeds.
+        stream.feed(&json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,
+                "step_index":2073,
+                "state":"DONE",
+                "step_type":"tool",
+                "tool_name":"manage_task",
+                "tool_info":{
+                    "name":"manage_task",
+                    "parameters":{"Action":"list"},
+                    "output":"No background tasks are currently running."
+                }
+            }
+        }));
         assert!(stream.finish().is_ok());
     }
 }

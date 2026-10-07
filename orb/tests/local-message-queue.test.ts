@@ -487,3 +487,30 @@ it('recognizes Antigravity network and transient high-traffic errors and backs o
  expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
 
+it('does not append duplicate identical assistant bubbles when an auto-resumed turn repeats its summary',async()=>{
+ mocks.active=false;
+ mocks.follow
+  .mockResolvedValueOnce({
+   text:'Tout est déjà terminé, signé et poussé.',
+   done:true,
+   exit_code:1,
+   error:'There was a network issue connecting to the server, please try again.',
+   retryable:true,
+   resumed:true,
+  })
+  .mockResolvedValueOnce({
+   text:'Tout est déjà terminé, signé et poussé.',
+   done:true,
+   exit_code:0,
+   resumed:true,
+  });
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage({...request,harness:'antigravity',bin:'agy'},'first');
+ await vi.advanceTimersByTimeAsync(2500);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ const assistantAppends=mocks.append.mock.calls.filter(c=>c[1]==='assistant');
+ expect(assistantAppends).toHaveLength(1);
+ expect(assistantAppends[0][2]).toBe('Tout est déjà terminé, signé et poussé.');
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+
