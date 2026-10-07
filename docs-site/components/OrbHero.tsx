@@ -108,21 +108,21 @@ export function OrbHero() {
 
       <div className="orb-hero-copy">
         <h1 className="orb-hero-title">
-          One native client for local, private-cloud, and cloud coding agents.
+          Your agents, machines and subscriptions. One place to work.
         </h1>
         <p className="orb-hero-lead">
-          Run <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
-          <strong>Antigravity (<code>agy</code>)</strong>, <strong>OpenCode</strong>, and{" "}
-          <strong>Grok</strong> locally on your Mac, inside isolated{" "}
-          <code>systemd-nspawn</code> workspaces on your Linux fleet, or through cloud
-          coordinators, and pick up every thread from macOS or iOS.
+          Use Orb on macOS and iOS to organize projects, launch{" "}
+          <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
+          <strong>Antigravity</strong>, <strong>OpenCode</strong>, and{" "}
+          <strong>Grok</strong> on your computer or your private cloud, and continue every
+          conversation anywhere.
         </p>
         <div className="orb-hero-actions">
           <Link href="/getting-started" className="orb-btn orb-btn-primary">
             Get Started
           </Link>
           <Link href="/workspaces" className="orb-btn orb-btn-secondary">
-            Architecture &amp; Workspaces
+            Workspaces
           </Link>
           <a
             href="https://github.com/Th0rgal/sandboxed.sh"
@@ -134,8 +134,8 @@ export function OrbHero() {
           </a>
         </div>
         <p className="orb-hero-ai-note">
-          <strong>Are you an AI?</strong> Read <a href="/llms.txt"><code>/llms.txt</code></a> or append{" "}
-          <code>.md</code> to any page URL for raw Markdown.
+          AI agent? Read <a href="/llms.txt"><code>/llms.txt</code></a> or append{" "}
+          <code>.md</code> to any URL.
         </p>
       </div>
     </div>

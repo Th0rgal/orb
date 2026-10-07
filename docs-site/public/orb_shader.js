@@ -911,16 +911,15 @@ const vsFbo = `#version 300 es
     window.addEventListener("pointermove", onMove, { passive: true });
     canvasShader.addEventListener("pointerleave", onLeave, { passive: true });
 
-    // Optional animated favicon & navbar mark synced with the shader loop
+    // Optional 60 FPS animated favicon & navbar mark synced with the shader loop
     let favCanvas = null;
     let favCtx = null;
     let favLink = null;
-    let lastFavTs = 0;
 
     if (opts.animateFavicon && typeof document !== "undefined") {
       favCanvas = document.createElement("canvas");
-      favCanvas.width = 64;
-      favCanvas.height = 64;
+      favCanvas.width = 48;
+      favCanvas.height = 48;
       favCtx = favCanvas.getContext("2d");
       favLink = document.querySelector("link[rel*='icon']");
       if (!favLink) {
@@ -931,28 +930,25 @@ const vsFbo = `#version 300 es
       }
     }
 
-    function updateFaviconFromShader(now) {
-      if (!favCtx || !favCanvas || now - lastFavTs < 120) return;
-      if (document.hidden) return;
-      lastFavTs = now;
+    function updateFaviconFromShader() {
+      if (!favCtx || !favCanvas || document.hidden) return;
       try {
         const w = canvasShader.width;
         const h = canvasShader.height;
         const rad = customRad !== null ? customRad : 0.382;
-        // Crop tightly to the sphere rim (r = 1.0 in normalized orb space -> rad * w in pixel space)
         const cropHalf = rad * w * 1.015;
         const sx = Math.max(0, w * 0.5 - cropHalf);
         const sy = Math.max(0, h * 0.5 - cropHalf);
         const sw = Math.min(w - sx, cropHalf * 2.0);
         const sh = Math.min(h - sy, cropHalf * 2.0);
 
-        favCtx.clearRect(0, 0, 64, 64);
+        favCtx.clearRect(0, 0, 48, 48);
         favCtx.save();
         favCtx.beginPath();
-        favCtx.arc(32, 32, 31, 0, Math.PI * 2);
+        favCtx.arc(24, 24, 23, 0, Math.PI * 2);
         favCtx.closePath();
         favCtx.clip();
-        favCtx.drawImage(canvasShader, sx, sy, sw, sh, 1, 1, 62, 62);
+        favCtx.drawImage(canvasShader, sx, sy, sw, sh, 1, 1, 46, 46);
         favCtx.restore();
 
         const dataUrl = favCanvas.toDataURL("image/png");
@@ -978,12 +974,12 @@ const vsFbo = `#version 300 es
       state.pointerX += (state.targetPointerX - state.pointerX) * 0.08;
       state.pointerY += (state.targetPointerY - state.pointerY) * 0.08;
       drawShaderFrame();
-      updateFaviconFromShader(now);
+      updateFaviconFromShader();
       rafId = requestAnimationFrame(renderFrame);
     }
 
     drawShaderFrame();
-    updateFaviconFromShader(lastTs);
+    updateFaviconFromShader();
     rafId = requestAnimationFrame(renderFrame);
 
     return {

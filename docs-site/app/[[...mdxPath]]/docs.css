@@ -383,38 +383,48 @@ article div[class*="x:dark:bg-blue-"] {
   width: 100%;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 14px;
-  padding: 4px 0 24px;
-  margin: 0 0 20px;
+  align-items: center;
+  text-align: center;
+  gap: 18px;
+  padding: 12px 0 28px;
+  margin: 0 0 24px;
   border-bottom: 1px solid var(--orb-stroke-soft);
 }
 
+.orb-hero-copy {
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
 .orb-hero-title {
-  font-size: 1.9rem !important;
-  line-height: 1.18 !important;
+  font-size: 1.95rem !important;
+  line-height: 1.2 !important;
   font-weight: 650 !important;
-  letter-spacing: -0.026em !important;
+  letter-spacing: -0.028em !important;
   color: var(--orb-fg-strong) !important;
-  margin: 0 0 12px !important;
+  margin: 0 0 10px !important;
 }
 
 .orb-hero-lead {
-  font-size: 0.95rem !important;
-  line-height: 1.65 !important;
+  font-size: 0.96rem !important;
+  line-height: 1.62 !important;
   color: var(--orb-fg-2) !important;
-  margin: 0 0 18px !important;
+  margin: 0 0 20px !important;
 }
 
 .orb-hero-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
   gap: 10px;
 }
 
 .orb-hero-ai-note {
   margin: 14px 0 0 !important;
-  font-size: 12.5px !important;
+  font-size: 12px !important;
   line-height: 1.5 !important;
   color: var(--orb-fg-3) !important;
 }
@@ -474,11 +484,11 @@ article div[class*="x:dark:bg-blue-"] {
 
 .orb-shader-stage {
   position: relative;
-  width: 156px;
-  height: 156px;
+  width: 220px;
+  height: 220px;
   background: transparent;
   overflow: visible;
-  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.38));
+  filter: drop-shadow(0 16px 34px rgba(0, 0, 0, 0.44));
 }
 
 .orb-shader-fallback {
@@ -531,8 +541,8 @@ article div[class*="x:dark:bg-blue-"] {
 
 @media (max-width: 860px) {
   .orb-shader-stage {
-    width: 128px;
-    height: 128px;
+    width: 176px;
+    height: 176px;
   }
 }
 
