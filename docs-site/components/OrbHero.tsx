@@ -8,7 +8,13 @@ declare global {
     ORB_SPEC_F32_B64?: string;
     initOrbShaderCanvas?: (
       canvas: HTMLCanvasElement,
-      opts?: { width?: number; height?: number; radius?: number; speed?: number }
+      opts?: {
+        width?: number;
+        height?: number;
+        radius?: number;
+        speed?: number;
+        animateFavicon?: boolean;
+      }
     ) => { destroy: () => void } | null;
   }
 }
@@ -59,6 +65,7 @@ export function OrbHero() {
           height: size,
           radius: 0.308,
           speed: 1.15,
+          animateFavicon: true,
         });
         if (instance) {
           setShaderReady(true);
