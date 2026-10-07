@@ -178,4 +178,76 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(formatRelativeTime("2026-10-07T09:00:00Z", now)).toBe("3h");
     expect(formatRelativeTime("2026-10-05T12:00:00Z", now)).toBe("2d");
   });
+
+  it("computes unreadCount, filters child subagent workers and unassigned probes, and cleans Rust Some(N) errors", () => {
+    const unreadWaiting = makeMission({
+      id: "m-unread",
+      title: "/goal Orb",
+      status: "awaiting_user",
+      project: "orb",
+      first_viewed_at: null,
+      history: [{ role: "assistant", content: "Ready for your review on the new unread filter." }],
+      updated_at: "2026-10-07T11:50:00Z",
+    });
+    const alreadyViewedCompleted = makeMission({
+      id: "m-read",
+      title: "Earlier completed run",
+      status: "completed",
+      project: "orb",
+      first_viewed_at: "2026-10-07T11:45:00Z",
+      last_output_at: "2026-10-07T11:40:00Z",
+      updated_at: "2026-10-07T11:40:00Z",
+    });
+    const subagentWorker = makeMission({
+      id: "m-subagent",
+      title: "You are a sub-agent working on issue #1534",
+      status: "completed",
+      project: "orb",
+      parent_mission_id: "m-unread",
+      tags: ["worker-dispatch:issue-1534"],
+    });
+    const unassignedProbe = makeMission({
+      id: "m-probe",
+      title: "Reply with only PONG.",
+      status: "completed",
+      project: null,
+    });
+    const rustErrorMission = makeMission({
+      id: "m-rust-err",
+      title: "Keep working on #1534",
+      status: "failed",
+      project: "paloma",
+      terminal_reason: "opencode turn failed: error: command exited with Some(1)",
+      updated_at: "2026-10-07T11:48:00Z",
+    });
+
+    const sections = buildInboxSections(
+      [unreadWaiting, alreadyViewedCompleted, subagentWorker, unassignedProbe, rustErrorMission],
+      sampleProjects,
+      () => undefined,
+      () => undefined,
+      Date.parse("2026-10-07T12:00:00Z"),
+    );
+
+    // Subagent worker and unassigned probe are excluded
+    const allIds = [...sections.needsYou, ...sections.ready].map((i) => i.id);
+    expect(allIds).toEqual(["m-rust-err", "m-unread", "m-read"]);
+
+    // Unread vs read tracking
+    const unreadItem = sections.needsYou.find((i) => i.id === "m-unread")!;
+    const readItem = sections.ready.find((i) => i.id === "m-read")!;
+    expect(unreadItem.unread).toBe(true);
+    expect(readItem.unread).toBe(false);
+    expect(sections.unreadCount).toBe(2); // m-unread + m-rust-err
+    expect(sections.attentionCount).toBe(1); // m-rust-err (failed)
+
+    // Deduplicated headline when goal title matches project title ("Orb" + "/goal Orb")
+    expect(unreadItem.isGoal).toBe(true);
+    expect(unreadItem.headline).toBe("Orb objective");
+
+    // Cleaned Rust Some(1) error text
+    const errItem = sections.needsYou.find((i) => i.id === "m-rust-err")!;
+    expect(errItem.summary).not.toContain("Some(1)");
+  });
 });
+

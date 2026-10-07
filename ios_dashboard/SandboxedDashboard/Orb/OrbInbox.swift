@@ -1,5 +1,105 @@
 import SwiftUI
 
+@Observable
+final class OrbMissionUnreadStore {
+    static let shared = OrbMissionUnreadStore()
+
+    private let defaultsKey = "orb.missionSeenAt.v2"
+    private(set) var version = 0
+    private var seenByMissionID: [String: String] = [:]
+    private var manuallyUnreadIDs: Set<String> = []
+
+    private static let unreadResponseStates: Set<String> = [
+        "awaiting_user", "waiting_user", "completed", "succeeded",
+        "failed", "blocked", "not_feasible", "paused", "interrupted",
+    ]
+
+    private init() {
+        if let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] {
+            seenByMissionID = stored
+        }
+    }
+
+    func isUnread(row: OrbRow, hasInteraction: Bool = false) -> Bool {
+        _ = version
+        guard hasInteraction || Self.unreadResponseStates.contains(row.state) else {
+            return false
+        }
+        if manuallyUnreadIDs.contains(row.id) {
+            return true
+        }
+        let firstViewed = row.raw["first_viewed_at"].text
+        if !firstViewed.isEmpty {
+            if row.updatedAt.isEmpty || firstViewed >= row.updatedAt {
+                return false
+            }
+        }
+        if let seen = seenByMissionID[row.id] {
+            if row.updatedAt.isEmpty || seen >= row.updatedAt {
+                return false
+            }
+        }
+        return true
+    }
+
+    func markRead(_ row: OrbRow, syncBackend: Bool = true) {
+        markRead(id: row.id, updatedAt: row.updatedAt, syncBackend: syncBackend)
+    }
+
+    func markRead(id: String, updatedAt: String? = nil, syncBackend: Bool = true) {
+        guard !id.isEmpty else { return }
+        let nowIso = ISO8601DateFormatter().string(from: Date())
+        let stamp = max(updatedAt ?? "", nowIso)
+        manuallyUnreadIDs.remove(id)
+        if seenByMissionID[id] != stamp {
+            seenByMissionID[id] = stamp
+            UserDefaults.standard.set(seenByMissionID, forKey: defaultsKey)
+            version += 1
+        }
+        if syncBackend {
+            Task {
+                _ = try? await OrbCore.shared.call(
+                    "/api/control/missions/\(OrbCore.escape(id))/opened",
+                    method: "POST"
+                )
+            }
+        }
+    }
+
+    func markUnread(id: String) {
+        guard !id.isEmpty else { return }
+        manuallyUnreadIDs.insert(id)
+        version += 1
+    }
+
+    func toggleUnread(_ row: OrbRow) {
+        if isUnread(row: row) {
+            markRead(row)
+        } else {
+            manuallyUnreadIDs.insert(row.id)
+            version += 1
+        }
+    }
+
+    func markAllRead(_ rows: [OrbRow]) {
+        guard !rows.isEmpty else { return }
+        let nowIso = ISO8601DateFormatter().string(from: Date())
+        for row in rows {
+            manuallyUnreadIDs.remove(row.id)
+            seenByMissionID[row.id] = max(row.updatedAt, nowIso)
+            let id = row.id
+            Task {
+                _ = try? await OrbCore.shared.call(
+                    "/api/control/missions/\(OrbCore.escape(id))/opened",
+                    method: "POST"
+                )
+            }
+        }
+        UserDefaults.standard.set(seenByMissionID, forKey: defaultsKey)
+        version += 1
+    }
+}
+
 enum OrbInboxTone: String, Equatable, Sendable {
     case amber
     case red
@@ -63,6 +163,8 @@ struct OrbInboxItem: Identifiable, Equatable {
     let category: OrbInboxCategory
     let machine: String
     let isGoal: Bool
+    let unread: Bool
+    let attention: Bool
     let updatedAt: String
     let interaction: OrbInboxInteraction?
 }
@@ -136,8 +238,18 @@ enum OrbInboxModel {
             return ""
         }
         trimmed = trimmed.replacingOccurrences(
+            of: #"(?i);\s*error:\s*command exited with (?:Some\()?(-?\d+)\)?"#,
+            with: "",
+            options: .regularExpression
+        )
+        trimmed = trimmed.replacingOccurrences(
             of: #"\(exit Some\((-?\d+)\)\)"#,
             with: "(exit $1)",
+            options: .regularExpression
+        )
+        trimmed = trimmed.replacingOccurrences(
+            of: #"\bSome\((-?\d+)\)"#,
+            with: "$1",
             options: .regularExpression
         )
         trimmed = trimmed.replacingOccurrences(
@@ -283,11 +395,28 @@ enum OrbInboxModel {
         )
     }
 
+    static func isSubagent(row: OrbRow) -> Bool {
+        if !row.raw["parent_mission_id"].text.isEmpty || !row.raw["callback_parent_mission_id"].text.isEmpty {
+            return true
+        }
+        if row.raw["tags"].items.contains(where: {
+            $0.text.hasPrefix("worker-dispatch:") || $0.text == "superseded" || $0.text.hasPrefix("superseded-by:")
+        }) {
+            return true
+        }
+        let rawTitle = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rawTitle.range(of: #"^you are a sub-?agent\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        return false
+    }
+
     static func classify(row: OrbRow, interaction: OrbInboxInteraction?) -> OrbInboxCategory {
         guard row.mobile else { return .hidden }
         let status = row.state
         if hiddenStatuses.contains(status) { return .hidden }
         if interaction != nil { return .needsYou }
+        if isSubagent(row: row) { return .hidden }
         if workingStatuses.contains(status) { return .working }
         if ["blocked", "failed", "not_feasible", "awaiting_user", "waiting_user"].contains(status) {
             return .needsYou
@@ -417,6 +546,8 @@ enum OrbInboxModel {
         let summary = extractSummary(row: row, events: events, interaction: interaction)
         let (badge, tone) = resolveBadgeAndTone(row: row, summary: summary, interaction: interaction)
         let isGoal = row.raw["goal_mode"].flag || OrbStyle.goalObjective(row.raw["title"].text) != nil
+        let unread = OrbMissionUnreadStore.shared.isUnread(row: row, hasInteraction: interaction != nil)
+        let attention = interaction != nil || ["blocked", "failed", "not_feasible"].contains(row.state)
 
         return OrbInboxItem(
             id: row.id,
@@ -430,6 +561,8 @@ enum OrbInboxModel {
             category: category,
             machine: resolveMachine(row: row),
             isGoal: isGoal,
+            unread: unread,
+            attention: attention,
             updatedAt: row.updatedAt,
             interaction: interaction
         )
@@ -464,8 +597,13 @@ enum OrbInboxModel {
 
         for row in missions where !seen.contains(row.id) && !dismissedIDs.contains(row.id) {
             seen.insert(row.id)
-            let slug = row.raw["project"].text.isEmpty ? "default" : row.raw["project"].text
-            if !projects.isEmpty && projectsBySlug[slug] == nil { continue }
+            let rawSlug = row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !projects.isEmpty {
+                let isClient = row.raw["tags"].items.contains(where: { $0.text == "placement:client" })
+                if rawSlug.isEmpty && !isClient { continue }
+                let slug = rawSlug.isEmpty ? "default" : rawSlug
+                if projectsBySlug[slug] == nil { continue }
+            }
             let events = eventsByMission[row.id] ?? []
             guard let item = buildItem(
                 row: row,
@@ -494,6 +632,20 @@ enum OrbInboxModel {
     }
 }
 
+enum OrbInboxFilterMode: String, CaseIterable {
+    case unread
+    case attention
+    case all
+
+    var title: String {
+        switch self {
+        case .unread: return "Unread"
+        case .attention: return "Attention"
+        case .all: return "All"
+        }
+    }
+}
+
 struct OrbInboxView: View {
     let projects: [OrbRow]
     @Binding var actionableCount: Int
@@ -502,6 +654,7 @@ struct OrbInboxView: View {
     @State private var missions: [OrbRow] = []
     @State private var loading = true
     @State private var error = ""
+    @State private var filterMode: OrbInboxFilterMode = .unread
     @State private var selectedProject: String?
     @State private var showWorking = false
     @State private var dismissedIDs: Set<String> = []
@@ -515,9 +668,11 @@ struct OrbInboxView: View {
 
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
+    private let unreadStore = OrbMissionUnreadStore.shared
 
     private var computed: (needsYou: [OrbInboxItem], ready: [OrbInboxItem], working: [OrbInboxItem]) {
-        OrbInboxModel.buildSections(
+        _ = unreadStore.version
+        return OrbInboxModel.buildSections(
             missions: missions,
             projects: projects,
             eventsByMission: eventsByMission,
@@ -526,19 +681,47 @@ struct OrbInboxView: View {
         )
     }
 
+    private func matchesFilter(_ item: OrbInboxItem, mode: OrbInboxFilterMode? = nil) -> Bool {
+        switch mode ?? filterMode {
+        case .unread: return item.unread
+        case .attention: return item.attention
+        case .all: return true
+        }
+    }
+
+    private var unreadCount: Int {
+        (computed.needsYou + computed.ready).filter(\.unread).count
+    }
+
+    private var attentionCount: Int {
+        (computed.needsYou + computed.ready).filter(\.attention).count
+    }
+
+    private var totalActionableCount: Int {
+        computed.needsYou.count + computed.ready.count
+    }
+
+    private var modeFilteredNeedsYou: [OrbInboxItem] {
+        computed.needsYou.filter { matchesFilter($0) }
+    }
+
+    private var modeFilteredReady: [OrbInboxItem] {
+        computed.ready.filter { matchesFilter($0) }
+    }
+
     private var filteredNeedsYou: [OrbInboxItem] {
-        guard let slug = selectedProject else { return computed.needsYou }
-        return computed.needsYou.filter { $0.projectSlug == slug }
+        guard let slug = selectedProject else { return modeFilteredNeedsYou }
+        return modeFilteredNeedsYou.filter { $0.projectSlug == slug }
     }
 
     private var filteredReady: [OrbInboxItem] {
-        guard let slug = selectedProject else { return computed.ready }
-        return computed.ready.filter { $0.projectSlug == slug }
+        guard let slug = selectedProject else { return modeFilteredReady }
+        return modeFilteredReady.filter { $0.projectSlug == slug }
     }
 
     private var projectFilters: [(slug: String, title: String, count: Int)] {
         var counts: [String: (title: String, count: Int)] = [:]
-        for item in computed.needsYou + computed.ready {
+        for item in modeFilteredNeedsYou + modeFilteredReady {
             let current = counts[item.projectSlug] ?? (item.projectTitle, 0)
             counts[item.projectSlug] = (item.projectTitle, current.count + 1)
         }
@@ -552,6 +735,7 @@ struct OrbInboxView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     headerSummary
+                    modeFilterBar
 
                     if projectFilters.count > 1 {
                         projectFilterChips
@@ -625,14 +809,82 @@ struct OrbInboxView: View {
                 }
             }
         }
-        .onChange(of: computed.needsYou.count + computed.ready.count) { _, newValue in
+        .onChange(of: unreadCount) { _, newValue in
             actionableCount = newValue
+        }
+    }
+
+    private var modeFilterBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                ForEach(OrbInboxFilterMode.allCases, id: \.rawValue) { mode in
+                    let active = filterMode == mode
+                    let count = mode == .unread ? unreadCount : (mode == .attention ? attentionCount : totalActionableCount)
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            filterMode = mode
+                        }
+                        OrbHaptics.selection()
+                    } label: {
+                        HStack(spacing: 5) {
+                            if mode == .unread {
+                                Circle()
+                                    .fill(Color.blue)
+                                    .frame(width: 6, height: 6)
+                            }
+                            Text(mode.title)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(active ? .primary : OrbStyle.textSecondary)
+                            Text("\(count)")
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .monospacedDigit()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            active ? OrbStyle.elevated : Color.clear,
+                            in: Capsule()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("inbox.filter.\(mode.rawValue)")
+                }
+            }
+            .padding(3)
+            .background(OrbStyle.surface, in: Capsule())
+            .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+
+            Spacer()
+
+            if unreadCount > 0 {
+                Button {
+                    OrbHaptics.selection()
+                    withAnimation(.snappy(duration: 0.2)) {
+                        unreadStore.markAllRead((computed.needsYou + computed.ready).filter(\.unread).map(\.row))
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Read all")
+                            .font(.caption.weight(.medium))
+                    }
+                    .foregroundStyle(OrbStyle.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(OrbStyle.surface, in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("inbox.markAllRead")
+            }
         }
     }
 
     private var headerSummary: some View {
         HStack(alignment: .center, spacing: 10) {
-            Text("Needs your input or ready for review.")
+            Text("New agent responses and questions waiting on you.")
                 .font(.footnote)
                 .foregroundStyle(OrbStyle.textSecondary)
                 .lineLimit(1)
@@ -795,11 +1047,17 @@ struct OrbInboxView: View {
         return VStack(alignment: .leading, spacing: 9) {
             Button {
                 OrbHaptics.selection()
+                unreadStore.markRead(item.row)
                 onOpenMission(item.row)
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
-                    // Line 1: Project dot + Project name + Goal tag + Headline + Badge + Time
+                    // Line 1: Unread dot + Project dot + Project name + Goal tag + Headline + Badge + Time
                     HStack(alignment: .center, spacing: 6) {
+                        if item.unread {
+                            Circle()
+                                .fill(Color.blue)
+                                .frame(width: 7, height: 7)
+                        }
                         Circle()
                             .fill(appearance.color(item.projectSlug) ?? OrbStyle.icon)
                             .frame(width: 7, height: 7)
@@ -822,7 +1080,7 @@ struct OrbInboxView: View {
                                 )
                         }
                         Text(item.headline)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.subheadline.weight(item.unread ? .semibold : .medium))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
 
@@ -866,7 +1124,7 @@ struct OrbInboxView: View {
             }
             .buttonStyle(.plain)
 
-            // Quick actions row (Options / Reply / Done)
+            // Quick actions row (Options / Read / Reply / Done)
             HStack(spacing: 8) {
                 if let interaction = item.interaction, !interaction.options.isEmpty {
                     ForEach(interaction.options) { opt in
@@ -901,6 +1159,30 @@ struct OrbInboxView: View {
                 }
 
                 Spacer()
+
+                if item.unread {
+                    Button {
+                        OrbHaptics.selection()
+                        withAnimation(.snappy(duration: 0.2)) {
+                            unreadStore.markRead(item.row)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.blue)
+                                .frame(width: 6, height: 6)
+                            Text("Read")
+                                .font(.caption.weight(.medium))
+                        }
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.04), in: Capsule())
+                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                }
 
                 Button {
                     OrbHaptics.selection()
@@ -1014,9 +1296,15 @@ struct OrbInboxView: View {
         .accessibilityIdentifier("inbox.row.\(item.id)")
         .contextMenu {
             Button {
+                unreadStore.markRead(item.row)
                 onOpenMission(item.row)
             } label: {
                 Label("Open conversation", systemImage: "bubble.left.and.bubble.right")
+            }
+            Button {
+                unreadStore.toggleUnread(item.row)
+            } label: {
+                Label(item.unread ? "Mark as read" : "Mark as unread", systemImage: item.unread ? "envelope.open" : "envelope.badge")
             }
             Button {
                 replyingMissionID = item.id
@@ -1042,18 +1330,40 @@ struct OrbInboxView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(OrbStyle.success)
             }
-            Text(selectedProject != nil ? "Nothing needs you in this project" : "Inbox zero")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
             Text(
-                !computed.working.isEmpty
-                    ? "\(computed.working.count) \(computed.working.count == 1 ? "agent is" : "agents are") working quietly in the background."
-                    : "When an agent needs a decision or finishes a run, it will surface here."
+                selectedProject != nil
+                    ? "Nothing in this project"
+                    : (filterMode == .unread ? "All caught up on unread responses" : "Inbox zero")
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+            Text(
+                filterMode == .unread && totalActionableCount > 0
+                    ? "You’ve opened every recent agent response. \(totalActionableCount) earlier \(totalActionableCount == 1 ? "conversation is" : "conversations are") in All."
+                    : (!computed.working.isEmpty
+                        ? "\(computed.working.count) \(computed.working.count == 1 ? "agent is" : "agents are") working quietly in the background."
+                        : "When an agent needs a decision or finishes a run, it will surface here.")
             )
             .font(.footnote)
             .foregroundStyle(OrbStyle.textSecondary)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 24)
+
+            if filterMode != .all && totalActionableCount > 0 {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { filterMode = .all }
+                    OrbHaptics.selection()
+                } label: {
+                    Text("View all (\(totalActionableCount))")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(OrbStyle.elevated, in: Capsule())
+                        .overlay(Capsule().stroke(OrbStyle.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
@@ -1134,18 +1444,18 @@ struct OrbInboxView: View {
         if missions.isEmpty, let cached = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
             missions = cached.items.map { OrbRow($0) }.filter(\.mobile)
             seedCachedEvents(for: missions)
-            actionableCount = computed.needsYou.count + computed.ready.count
+            actionableCount = unreadCount
         }
         do {
-            let raw = try await api.call("/api/control/missions?limit=100")
+            let raw = try await api.call("/api/control/missions?limit=100&all=true")
             let rows = raw.items.map { OrbRow($0) }.filter(\.mobile)
             missions = rows
             OrbDisk.saveAsync(raw, key: "inbox:missions")
             seedCachedEvents(for: rows)
-            actionableCount = computed.needsYou.count + computed.ready.count
+            actionableCount = unreadCount
             error = ""
             await prefetchActiveEvents(for: rows)
-            actionableCount = computed.needsYou.count + computed.ready.count
+            actionableCount = unreadCount
         } catch {
             if missions.isEmpty {
                 self.error = error.localizedDescription
@@ -1187,7 +1497,8 @@ struct OrbInboxView: View {
             }
             undoItem = (id: item.id, title: item.headline)
         }
-        actionableCount = computed.needsYou.count + computed.ready.count
+        unreadStore.markRead(item.row)
+        actionableCount = unreadCount
         do {
             _ = try await api.call(
                 "/api/control/missions/\(OrbCore.escape(item.id))/status",
@@ -1210,8 +1521,9 @@ struct OrbInboxView: View {
         let ids = items.map(\.id)
         withAnimation(.snappy(duration: 0.22)) {
             for id in ids { dismissedIDs.insert(id) }
+            unreadStore.markAllRead(items.map(\.row))
         }
-        actionableCount = computed.needsYou.count + computed.ready.count
+        actionableCount = unreadCount
         do {
             for item in items {
                 _ = try await api.call(
@@ -1230,8 +1542,9 @@ struct OrbInboxView: View {
         withAnimation(.snappy(duration: 0.22)) {
             undoItem = nil
             dismissedIDs.remove(last.id)
+            unreadStore.markUnread(id: last.id)
         }
-        actionableCount = computed.needsYou.count + computed.ready.count
+        actionableCount = unreadCount
         do {
             _ = try await api.call(
                 "/api/control/missions/\(OrbCore.escape(last.id))/status",
@@ -1267,6 +1580,7 @@ struct OrbInboxView: View {
             }
             withAnimation(.snappy(duration: 0.22)) {
                 _ = answeredCallIDs.insert(interaction.callID)
+                unreadStore.markRead(item.row)
             }
             await load(force: true)
         } catch {
@@ -1296,6 +1610,7 @@ struct OrbInboxView: View {
                 replyDraft = ""
                 replyFocused = false
                 _ = dismissedIDs.insert(item.id)
+                unreadStore.markRead(item.row)
             }
             await load(force: true)
         } catch {

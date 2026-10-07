@@ -25,7 +25,7 @@ import { SideQuestions, type SideQuestionsHandle } from "./SideQuestionPanel";
 import { AgentActivity, activityShouldCollapse } from "./AgentActivity";
 import { startLocalOrigin, localRunKnown, localAgentForLaunch } from "./localAgents";
 import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
-import { MachineLoadBadge, byLeastLoaded, recordFleet, recordMissions } from "./machineLoad";
+import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
@@ -129,6 +129,7 @@ const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ d
 import { InboxPage } from "./Inbox";
 import { buildInboxSections } from "./inboxModel";
 import { pendingMissionInteraction } from "./missionAttention";
+import { markMissionRead, unreadVersion } from "./missionUnread";
 
 const PAGES = new Set(["inbox", "cloud-agent", "settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
 
@@ -1138,8 +1139,10 @@ export default function App() {
   };
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
+  const [explicitMachine, setExplicitMachine] = createSignal(false);
   const [newMachine, setNewMachine] = createSignal((localStorage.getItem(MACHINE_KEY) === "dgx-spark-admin" ? "core" : localStorage.getItem(MACHINE_KEY)) || "core");
   const chooseMachine = (id: string) => {
+    setExplicitMachine(true);
     setNewMachine(id);
     try { localStorage.setItem(MACHINE_KEY, id === "dgx-spark-admin" ? "core" : id); } catch { /* ignore */ }
     if (id === "local") void refreshLocalAgents(false);
@@ -1180,12 +1183,6 @@ export default function App() {
 
   const [missions, setMissions] = createSignal<Mission[]>([]);
   const [missionsLoading, setMissionsLoading] = createSignal(true);
-  const inboxCount = createMemo(() => {
-    transcriptVersion();
-    return isConnected()
-      ? buildInboxSections(missions(), liveProjects(), (id) => peekReadyTranscript(id)?.items, pendingMissionInteraction).totalActionable
-      : 0;
-  });
   const [previewContext, setPreviewContext] = createSignal<{id: string; pct: number | null} | null>(null);
   const [previewPlan, setPreviewPlan] = createSignal<{id:string; data:PlanProgressData | undefined}>();
   const [openMission, setOpenMission] = createSignal<Mission | null>(null);
@@ -1246,9 +1243,64 @@ export default function App() {
       setRemoteLaunch((prev) => ({ ...prev, state: "error" }));
     }
   };
+  const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
+  createEffect(on(connectionVersion, () => {
+    setProjectMissions({});
+  }, { defer: true }));
+  const inboxMissions = createMemo(() => {
+    const byId = new Map<string, Mission>();
+    const put = (m: Mission) => {
+      if (!m?.id || isMissionDeleting(m.id)) return;
+      const prev = byId.get(m.id);
+      if (!prev) {
+        byId.set(m.id, m);
+        return;
+      }
+      const prevTs = Date.parse(prev.updated_at || prev.created_at || "") || 0;
+      const nextTs = Date.parse(m.updated_at || m.created_at || "") || 0;
+      if (nextTs >= prevTs) {
+        byId.set(m.id, {
+          ...prev,
+          ...m,
+          history: m.history?.length ? m.history : prev.history,
+        });
+      } else {
+        byId.set(m.id, {
+          ...m,
+          ...prev,
+          history: prev.history?.length ? prev.history : m.history,
+        });
+      }
+    };
+    for (const rows of Object.values(projectMissions())) {
+      for (const m of rows) put(m);
+    }
+    for (const m of missions()) put(m);
+    return Array.from(byId.values());
+  });
   const currentMissionId = createMemo(() => {
     const id = selected();
     return id && id.startsWith("m:") ? id.slice(2) : null;
+  });
+  const inboxCount = createMemo(() => {
+    transcriptVersion();
+    unreadVersion();
+    return isConnected()
+      ? buildInboxSections(
+          inboxMissions(),
+          liveProjects(),
+          (id) => peekReadyTranscript(id)?.items,
+          pendingMissionInteraction,
+          Date.now(),
+          currentMissionId(),
+        ).unreadCount
+      : 0;
+  });
+  createEffect(() => {
+    const mid = currentMissionId();
+    if (!mid) return;
+    const m = openMission()?.id === mid ? openMission()! : inboxMissions().find((row) => row.id === mid);
+    markMissionRead(m ?? mid);
   });
   // Project controller (Hermes cron): `c:<slug>`.
   const currentController = createMemo(() => {
@@ -1279,6 +1331,12 @@ export default function App() {
   const sortedNodes = createMemo(() => {
     const nodes = preferSparkAdministration([...fleetNodes()], node => node.id);
     return [...byLeastLoaded(nodes.filter(usableNode), node => node.id), ...nodes.filter(node => !usableNode(node))];
+  });
+  const firstNodeId = createMemo(() => firstAvailableNodeId(sortedNodes()));
+  createEffect(() => {
+    if (!isConnected() || explicitMachine() || creating() || launchPreview()) return;
+    const first = firstNodeId();
+    if (first && newMachine() !== first) setNewMachine(first);
   });
   const machineLabel = () => {
     if (isConnected()) {
@@ -1379,7 +1437,12 @@ export default function App() {
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
     if (id?.startsWith("m:") && isMissionDeleting(id.slice(2))) return false;
-    if(id===null){setLaunchPreview(null);setLaunchViewKey('');}
+    if(id===null){
+      setLaunchPreview(null);setLaunchViewKey('');
+      setExplicitMachine(false);
+      const first = firstNodeId();
+      if (first) setNewMachine(first);
+    }
     if (id === "execution") id = "settings";
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
     navigationVersion++;
@@ -1393,7 +1456,12 @@ export default function App() {
         setHIdx(h.length - 1);
       }
     });
-    if (id?.startsWith("m:")) void loadTranscript(id.slice(2)).catch(() => {});
+    if (id?.startsWith("m:")) {
+      const mid = id.slice(2);
+      const known = missions().find((m) => m.id === mid);
+      markMissionRead(known ?? mid);
+      void loadTranscript(mid).catch(() => {});
+    }
     toBottom();
     return true;
   };
@@ -1752,10 +1820,21 @@ export default function App() {
                       const removed = new Set(ids.map(id => `m:${id}`));
                       batch(() => {
                         setMissions(rows => rows.filter(m => !idSet.has(m.id)));
+                        setProjectMissions(prev => {
+                          const next: Record<string, Mission[]> = {};
+                          for (const [k, rows] of Object.entries(prev)) {
+                            next[k] = rows.filter(m => !idSet.has(m.id));
+                          }
+                          return next;
+                        });
                         if (removed.has(selected() ?? "")) setSelected(null);
                         // Back/forward must not reopen conversations that no longer exist.
                         setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));
                       });
+                    }}
+                    onProjectMissions={(slug, rows) => {
+                      const clean = rows.filter(m => !isMissionDeleting(m.id));
+                      setProjectMissions(prev => ({ ...prev, [slug]: clean }));
                     }}
                     open={open}
                     onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
@@ -2030,7 +2109,7 @@ export default function App() {
                         </div>
                       </div>
                     </Show>
-                  </div><WorkingDirectoryPicker machine={newMachine()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineName()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
 
                 {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
@@ -2090,7 +2169,7 @@ export default function App() {
         <Switch>
             <Match when={selected() === "inbox"}>
               <InboxPage
-                missions={missions()}
+                missions={inboxMissions()}
                 projects={liveProjects()}
                 loading={missionsLoading()}
                 onOpenMission={(id) => open(`m:${id}`)}
@@ -2099,6 +2178,13 @@ export default function App() {
                 onRefresh={refreshMissions}
                 onMissionUpdated={(m) => {
                   setMissions((ms) => [m, ...ms.filter((x) => x.id !== m.id)]);
+                  setProjectMissions((prev) => {
+                    const next: Record<string, Mission[]> = {};
+                    for (const [k, rows] of Object.entries(prev)) {
+                      next[k] = rows.map((x) => (x.id === m.id ? m : x));
+                    }
+                    return next;
+                  });
                   bumpProjects();
                 }}
               />

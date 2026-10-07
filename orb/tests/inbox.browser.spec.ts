@@ -192,6 +192,11 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await page.keyboard.press("Meta+KeyI");
   await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
 
+  // Unread filter is selected by default
+  const unreadTab = page.locator('[data-inbox-filter="unread"]');
+  await expect(unreadTab).toHaveClass(/on/);
+  await expect(unreadTab).toContainText("Unread");
+
   // Working agent is quiet behind the "1 working" pill, not in the main list
   const workingPill = page.locator(".inbox-working-pill");
   await expect(workingPill).toContainText("1 working");

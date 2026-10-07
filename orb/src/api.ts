@@ -247,6 +247,8 @@ export interface Mission {
   track?: string | null;
   github_pr?: string | null;
   tags?: string[];
+  first_viewed_at?: string | null;
+  last_output_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1031,6 +1033,10 @@ async function confirmCoreChange(change: { id: string; status?: string; title?: 
 
 export async function cancelMission(id: string): Promise<void> {
   await api<void>(`/api/control/missions/${id}/cancel`, { method: "POST" });
+}
+
+export async function markMissionOpened(id: string): Promise<void> {
+  await api(`/api/control/missions/${encodeURIComponent(id)}/opened`, { method: "POST" });
 }
 
 /** Next-turn settings. The mission must be idle; a running turn returns 409.

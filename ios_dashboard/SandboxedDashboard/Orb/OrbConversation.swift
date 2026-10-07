@@ -187,8 +187,14 @@ struct OrbConversation: View {
                             selection.model = mission["model_override"].text
                         }
                         if mission != .null { loading = false }
+                        let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
+                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts)
                     }
                     await refresh()
+                    if let id {
+                        let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
+                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts)
+                    }
                     while !Task.isCancelled {
                         // When SSE stream is connected for local/remote agents, poll lightly (12s);
                         // for cloud turns without SSE, poll every 3s while working.

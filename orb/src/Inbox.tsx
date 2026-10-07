@@ -26,14 +26,23 @@ import {
 } from "./inboxModel";
 import { pendingMissionInteraction } from "./missionAttention";
 import {
+  loadTranscript,
   peekReadyTranscript,
   prefetchTranscript,
   refreshTranscript,
   transcriptVersion,
 } from "./missionCache";
+import {
+  markMissionRead,
+  markMissionUnread,
+  markMissionsRead,
+  unreadVersion,
+} from "./missionUnread";
 import { rememberApprovedPlan } from "./PlanProgress";
 import { projectColor } from "./projectAppearance";
 import { InboxSkeleton } from "./Skeleton";
+
+export type InboxViewMode = "unread" | "attention" | "all";
 
 const invokeLocalInteraction = (command: string, args: Record<string, unknown>) => {
   const host = window as unknown as {
@@ -57,6 +66,7 @@ export function InboxPage(p: {
   onRefresh: () => Promise<void> | void;
   onMissionUpdated?: (mission: Mission) => void;
 }) {
+  const [viewMode, setViewMode] = createSignal<InboxViewMode>("unread");
   const [projectFilter, setProjectFilter] = createSignal<string | null>(null);
   const [showWorking, setShowWorking] = createSignal(false);
   const [focusedId, setFocusedId] = createSignal<string | null>(null);
@@ -64,7 +74,12 @@ export function InboxPage(p: {
   const [replyDraft, setReplyDraft] = createSignal("");
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
-  const [undoItem, setUndoItem] = createSignal<{ id: string; title: string } | null>(null);
+  const [undoItem, setUndoItem] = createSignal<{
+    id: string;
+    title: string;
+    mission: Mission;
+    wasUnread: boolean;
+  } | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [nowMs, setNowMs] = createSignal(Date.now());
 
@@ -95,6 +110,7 @@ export function InboxPage(p: {
 
   const allSections = createMemo(() => {
     transcriptVersion();
+    unreadVersion();
     const dismissed = dismissedIds();
     const visibleMissions = p.missions.filter((m) => !dismissed.has(m.id));
     return buildInboxSections(
@@ -106,21 +122,46 @@ export function InboxPage(p: {
     );
   });
 
-  // Prefetch transcripts for top actionable items that lack history so their 1-line summary populates.
+  const refreshedTranscriptAt = new Map<string, number>();
+
+  // Load or refresh transcripts for top actionable items so their 1-line summary reflects the latest turn immediately.
   createEffect(() => {
     if (!isConnected()) return;
     const { needsYou, ready } = allSections();
     const candidates = [...needsYou, ...ready].slice(0, 14);
-    for (const item of candidates) {
+    candidates.forEach((item, idx) => {
+      const prevMs = refreshedTranscriptAt.get(item.id);
       if (!peekReadyTranscript(item.id)) {
-        prefetchTranscript(item.id);
+        refreshedTranscriptAt.set(item.id, item.updatedMs);
+        if (idx < 8) {
+          void loadTranscript(item.id).catch(() => {});
+        } else {
+          prefetchTranscript(item.id);
+        }
+      } else if (prevMs === undefined || item.updatedMs > prevMs) {
+        refreshedTranscriptAt.set(item.id, item.updatedMs);
+        void refreshTranscript(item.id).catch(() => {});
       }
-    }
+    });
   });
+
+  const matchesViewMode = (item: InboxItem, mode = viewMode()): boolean => {
+    if (mode === "unread") return item.unread;
+    if (mode === "attention") return item.attention;
+    return true;
+  };
+
+  const modeFilteredNeedsYou = createMemo(() =>
+    allSections().needsYou.filter((item) => matchesViewMode(item)),
+  );
+
+  const modeFilteredReady = createMemo(() =>
+    allSections().ready.filter((item) => matchesViewMode(item)),
+  );
 
   const availableProjects = createMemo(() => {
     const counts = new Map<string, { slug: string; title: string; count: number }>();
-    for (const item of [...allSections().needsYou, ...allSections().ready]) {
+    for (const item of [...modeFilteredNeedsYou(), ...modeFilteredReady()]) {
       const existing = counts.get(item.projectSlug);
       if (existing) existing.count++;
       else counts.set(item.projectSlug, { slug: item.projectSlug, title: item.projectTitle, count: 1 });
@@ -137,17 +178,24 @@ export function InboxPage(p: {
 
   const filteredNeedsYou = createMemo(() => {
     const filter = projectFilter();
-    const list = allSections().needsYou;
+    const list = modeFilteredNeedsYou();
     return filter ? list.filter((item) => item.projectSlug === filter) : list;
   });
 
   const filteredReady = createMemo(() => {
     const filter = projectFilter();
-    const list = allSections().ready;
+    const list = modeFilteredReady();
     return filter ? list.filter((item) => item.projectSlug === filter) : list;
   });
 
   const actionableItems = createMemo(() => [...filteredNeedsYou(), ...filteredReady()]);
+
+  const unreadItemsInScope = createMemo(() => {
+    const filter = projectFilter();
+    return [...allSections().needsYou, ...allSections().ready].filter(
+      (item) => item.unread && (!filter || item.projectSlug === filter),
+    );
+  });
 
   // Keep focusedId anchored to a valid actionable item
   createEffect(() => {
@@ -162,10 +210,32 @@ export function InboxPage(p: {
     }
   });
 
+  const toggleReadState = (item: InboxItem) => {
+    if (item.unread) {
+      const items = actionableItems();
+      const idx = items.findIndex((x) => x.id === item.id);
+      const nextFocus = items[idx + 1]?.id ?? items[idx - 1]?.id ?? null;
+      markMissionRead(item.mission);
+      if (viewMode() === "unread" && focusedId() === item.id) {
+        setFocusedId(nextFocus);
+      }
+    } else {
+      markMissionUnread(item.mission);
+    }
+  };
+
+  const markAllUnreadAsRead = () => {
+    const items = unreadItemsInScope();
+    if (!items.length) return;
+    markMissionsRead(items.map((i) => i.mission));
+  };
+
   const markDone = async (item: InboxItem) => {
     if (busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
+    const wasUnread = item.unread;
+    markMissionRead(item.mission);
     // Optimistically hide and advance focus to the next row
     const items = actionableItems();
     const idx = items.findIndex((x) => x.id === item.id);
@@ -177,13 +247,14 @@ export function InboxPage(p: {
     }
     setFocusedId(nextFocus);
     if (undoTimer) clearTimeout(undoTimer);
-    setUndoItem({ id: item.id, title: item.headline });
+    setUndoItem({ id: item.id, title: item.headline, mission: item.mission, wasUnread });
     undoTimer = setTimeout(() => setUndoItem(null), 6000);
 
     try {
       await archiveMission(item.id);
       void p.onRefresh();
     } catch (e) {
+      if (wasUnread) markMissionUnread(item.mission);
       setDismissedIds((prev) => {
         const next = new Set(prev);
         next.delete(item.id);
@@ -200,6 +271,7 @@ export function InboxPage(p: {
     const readyItems = filteredReady();
     if (!readyItems.length) return;
     setError(null);
+    markMissionsRead(readyItems.map((i) => i.mission));
     const ids = readyItems.map((i) => i.id);
     setDismissedIds((prev) => {
       const next = new Set(prev);
@@ -225,6 +297,9 @@ export function InboxPage(p: {
     if (undoTimer) clearTimeout(undoTimer);
     setUndoItem(null);
     setError(null);
+    if (last.wasUnread) {
+      markMissionUnread(last.mission);
+    }
     setDismissedIds((prev) => {
       const next = new Set(prev);
       next.delete(last.id);
@@ -256,6 +331,7 @@ export function InboxPage(p: {
     if (!text || busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
+    markMissionRead(item.mission);
     try {
       const result = await sendMissionMessage(item.id, text, [], crypto.randomUUID());
       setReplyingId(null);
@@ -285,6 +361,7 @@ export function InboxPage(p: {
     if (!interaction || busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
+    markMissionRead(item.mission);
     try {
       const answer = option.action
         ? { action: option.action, feedback: "" }
@@ -370,12 +447,18 @@ export function InboxPage(p: {
       if (e.key === "Enter" && currentItem) {
         if (target?.closest("button:not(.inbox-row-main)")) return;
         e.preventDefault();
+        markMissionRead(currentItem.mission);
         p.onOpenMission(currentItem.id);
         return;
       }
       if (e.key.toLowerCase() === "r" && currentItem && !e.shiftKey) {
         e.preventDefault();
         openQuickReply(currentItem);
+        return;
+      }
+      if (e.key.toLowerCase() === "u" && currentItem && !e.shiftKey) {
+        e.preventDefault();
+        toggleReadState(currentItem);
         return;
       }
       if (e.key.toLowerCase() === "e" && currentItem && !e.shiftKey) {
@@ -408,9 +491,10 @@ export function InboxPage(p: {
 
     return (
       <article
-        class={`inbox-row ${isFocused() ? "focused" : ""} ${isBusy() ? "busy" : ""}`}
+        class={`inbox-row ${item.unread ? "unread" : "read"} ${isFocused() ? "focused" : ""} ${isBusy() ? "busy" : ""}`}
         data-inbox-id={item.id}
         data-inbox-tone={item.tone}
+        data-inbox-unread={item.unread ? "true" : "false"}
         onMouseEnter={() => {
           if (!replyingId()) setFocusedId(item.id);
         }}
@@ -419,10 +503,20 @@ export function InboxPage(p: {
           <button
             type="button"
             class="inbox-row-main"
-            onClick={() => p.onOpenMission(item.id)}
-            aria-label={`${item.projectTitle}: ${item.headline}. ${item.badge}. ${item.summary}`}
+            onClick={() => {
+              markMissionRead(item.mission);
+              p.onOpenMission(item.id);
+            }}
+            aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${item.summary}`}
           >
             <div class="inbox-row-top">
+              <Show when={item.unread}>
+                <span
+                  class="inbox-unread-dot"
+                  title="Unread response"
+                  aria-hidden="true"
+                />
+              </Show>
               <span class="inbox-project-pill">
                 <i
                   class="inbox-project-dot"
@@ -452,8 +546,8 @@ export function InboxPage(p: {
             </div>
           </button>
 
-          <div class="inbox-row-actions">
-            <Show when={item.interaction?.options.length}>
+          <Show when={item.interaction?.options.length}>
+            <div class="inbox-row-actions">
               <div class="inbox-options" role="group" aria-label="Quick choices">
                 <For each={item.interaction!.options}>
                   {(opt, idx) => (
@@ -473,40 +567,57 @@ export function InboxPage(p: {
                   )}
                 </For>
               </div>
-            </Show>
-
-            <div class="inbox-triage-btns">
-              <button
-                type="button"
-                class={`inbox-act-btn ${isReplying() ? "on" : ""}`}
-                disabled={isBusy()}
-                title="Reply inline (R)"
-                aria-label={`Reply to ${item.headline}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openQuickReply(item);
-                }}
-              >
-                <Ic.ReplyIcon size={13} />
-                <span>Reply</span>
-                <kbd aria-hidden="true">R</kbd>
-              </button>
-              <button
-                type="button"
-                class="inbox-act-btn done"
-                disabled={isBusy()}
-                title="Mark done (E)"
-                aria-label={`Mark ${item.headline} done`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void markDone(item);
-                }}
-              >
-                <Ic.CheckIcon size={13} />
-                <span>Done</span>
-                <kbd aria-hidden="true">E</kbd>
-              </button>
             </div>
+          </Show>
+
+          <div class="inbox-triage-btns">
+            <Show when={item.unread}>
+              <button
+                type="button"
+                class="inbox-act-btn"
+                disabled={isBusy()}
+                title="Mark as read (U)"
+                aria-label={`Mark ${item.headline} as read`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleReadState(item);
+                }}
+              >
+                <span class="inbox-unread-dot sm" aria-hidden="true" />
+                <span>Read</span>
+                <kbd aria-hidden="true">U</kbd>
+              </button>
+            </Show>
+            <button
+              type="button"
+              class={`inbox-act-btn ${isReplying() ? "on" : ""}`}
+              disabled={isBusy()}
+              title="Reply inline (R)"
+              aria-label={`Reply to ${item.headline}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                openQuickReply(item);
+              }}
+            >
+              <Ic.ReplyIcon size={13} />
+              <span>Reply</span>
+              <kbd aria-hidden="true">R</kbd>
+            </button>
+            <button
+              type="button"
+              class="inbox-act-btn done"
+              disabled={isBusy()}
+              title="Archive & mark done (E)"
+              aria-label={`Mark ${item.headline} done`}
+              onClick={(e) => {
+                e.stopPropagation();
+                void markDone(item);
+              }}
+            >
+              <Ic.CheckIcon size={13} />
+              <span>Done</span>
+              <kbd aria-hidden="true">E</kbd>
+            </button>
           </div>
         </div>
 
@@ -564,14 +675,21 @@ export function InboxPage(p: {
     );
   };
 
+  const headerBadgeCount = () =>
+    viewMode() === "unread"
+      ? allSections().unreadCount
+      : viewMode() === "attention"
+        ? allSections().attentionCount
+        : allSections().totalActionable;
+
   return (
     <div class="page inbox-page" ref={listContainerRef}>
       <div class="page-head inbox-head">
         <div class="inbox-title-group">
           <h2>Inbox</h2>
-          <Show when={allSections().totalActionable > 0}>
-            <span class="inbox-total-pill" aria-label={`${allSections().totalActionable} items`}>
-              {allSections().totalActionable}
+          <Show when={headerBadgeCount() > 0}>
+            <span class="inbox-total-pill" aria-label={`${headerBadgeCount()} items`}>
+              {headerBadgeCount()}
             </span>
           </Show>
         </div>
@@ -591,6 +709,7 @@ export function InboxPage(p: {
           </Show>
           <div class="inbox-key-legend" aria-hidden="true">
             <span><kbd>J</kbd><kbd>K</kbd> navigate</span>
+            <span><kbd>U</kbd> read</span>
             <span><kbd>R</kbd> reply</span>
             <span><kbd>E</kbd> done</span>
           </div>
@@ -598,7 +717,7 @@ export function InboxPage(p: {
       </div>
 
       <p class="s-lead inbox-lead">
-        Agents that need your input or finished their run. Working agents stay quiet until they need you.
+        New agent responses and questions waiting on you. Working agents stay quiet until they finish.
       </p>
 
       <Show when={error()}>
@@ -624,6 +743,57 @@ export function InboxPage(p: {
           </div>
         }
       >
+        <div class="inbox-toolbar">
+          <div class="inbox-mode-tabs" role="tablist" aria-label="Inbox filter">
+            <button
+              type="button"
+              role="tab"
+              data-inbox-filter="unread"
+              aria-selected={viewMode() === "unread"}
+              class={`inbox-mode-tab ${viewMode() === "unread" ? "on" : ""}`}
+              onClick={() => setViewMode("unread")}
+            >
+              <span class="inbox-unread-dot" aria-hidden="true" />
+              <span>Unread</span>
+              <span class="inbox-filter-count">{allSections().unreadCount}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-inbox-filter="attention"
+              aria-selected={viewMode() === "attention"}
+              class={`inbox-mode-tab ${viewMode() === "attention" ? "on" : ""}`}
+              onClick={() => setViewMode("attention")}
+            >
+              <span>Needs attention</span>
+              <span class="inbox-filter-count">{allSections().attentionCount}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-inbox-filter="all"
+              aria-selected={viewMode() === "all"}
+              class={`inbox-mode-tab ${viewMode() === "all" ? "on" : ""}`}
+              onClick={() => setViewMode("all")}
+            >
+              <span>All</span>
+              <span class="inbox-filter-count">{allSections().totalActionable}</span>
+            </button>
+          </div>
+
+          <Show when={unreadItemsInScope().length > 0}>
+            <button
+              type="button"
+              class="inbox-mark-all-read-btn"
+              onClick={markAllUnreadAsRead}
+              title="Mark all unread responses as read"
+            >
+              <Ic.CheckIcon size={12} />
+              <span>Mark all read</span>
+            </button>
+          </Show>
+        </div>
+
         <Show when={availableProjects().length > 1}>
           <div class="inbox-filters" role="toolbar" aria-label="Filter by project">
             <button
@@ -712,13 +882,30 @@ export function InboxPage(p: {
                 <div class="inbox-empty-ico">
                   <Ic.CheckIcon size={20} />
                 </div>
-                <strong>All caught up</strong>
+                <strong>
+                  {viewMode() === "unread"
+                    ? "All caught up on unread responses"
+                    : viewMode() === "attention"
+                      ? "Nothing blocked or failing"
+                      : "All caught up"}
+                </strong>
                 <p>
-                  {allSections().working.length > 0
-                    ? `${allSections().working.length} ${allSections().working.length === 1 ? "agent is" : "agents are"} working quietly in the background and will appear here when ready.`
-                    : "No agents are waiting on your input or review right now."}
+                  {viewMode() === "unread" && allSections().totalActionable > 0
+                    ? `You’ve opened every recent agent response. ${allSections().totalActionable} earlier ${allSections().totalActionable === 1 ? "conversation is" : "conversations are"} available in All.`
+                    : allSections().working.length > 0
+                      ? `${allSections().working.length} ${allSections().working.length === 1 ? "agent is" : "agents are"} working quietly in the background and will appear here when ready.`
+                      : "No agents are waiting on your input or review right now."}
                 </p>
                 <div class="inbox-empty-actions">
+                  <Show when={viewMode() !== "all" && allSections().totalActionable > 0}>
+                    <button
+                      type="button"
+                      class="s-btn"
+                      onClick={() => setViewMode("all")}
+                    >
+                      View all ({allSections().totalActionable})
+                    </button>
+                  </Show>
                   <Show when={allSections().working.length > 0}>
                     <button
                       type="button"

@@ -3,6 +3,7 @@ import { DEFAULT_PROJECT } from "./defaultProject";
 import { displayTitle } from "./goal";
 import type { PendingInteraction } from "./missionAttention";
 import { nodeLabel } from "./missionLaunch";
+import { isMissionUnread, missionResponseTimestampMs } from "./missionUnread";
 import type { StreamItem } from "./transcriptModel";
 
 export const INBOX_SENTENCE_MAX_CHARS = 112;
@@ -45,6 +46,8 @@ export type InboxItem = {
   relativeTime: string;
   updatedMs: number;
   isGoal: boolean;
+  unread: boolean;
+  attention: boolean;
   interaction?: InboxInteraction;
 };
 
@@ -53,6 +56,8 @@ export type InboxSections = {
   ready: InboxItem[];
   working: InboxItem[];
   totalActionable: number;
+  unreadCount: number;
+  attentionCount: number;
 };
 
 const WORKING_STATUSES = new Set([
@@ -299,6 +304,28 @@ export function extractInboxInteraction(
   return undefined;
 }
 
+/** Child worker missions belong nested inside their parent orchestrator in the sidebar, not as standalone Inbox items. */
+export function isSubagentMission(
+  mission: Pick<Mission, "title" | "parent_mission_id" | "callback_parent_mission_id" | "tags">,
+): boolean {
+  if (mission.parent_mission_id || mission.callback_parent_mission_id) return true;
+  if (
+    mission.tags?.some(
+      (tag) =>
+        tag.startsWith("worker-dispatch:") ||
+        tag === "superseded" ||
+        tag.startsWith("superseded-by:"),
+    )
+  ) {
+    return true;
+  }
+  const rawTitle = (mission.title ?? "").trim();
+  if (/^you are a sub-?agent\b/i.test(rawTitle)) {
+    return true;
+  }
+  return false;
+}
+
 export function classifyInboxMission(
   mission: Mission,
   interaction?: InboxInteraction,
@@ -308,6 +335,7 @@ export function classifyInboxMission(
   if (HIDDEN_STATUSES.has(status)) return "hidden";
   // An active mission with a live pending interaction immediately surfaces in Needs You
   if (interaction) return "needs_you";
+  if (isSubagentMission(mission)) return "hidden";
   if (WORKING_STATUSES.has(status)) return "working";
   if (
     status === "blocked" ||
@@ -327,7 +355,9 @@ export function classifyInboxMission(
 function humanizeStatusText(raw: string | null | undefined): string {
   const trimmed = (raw ?? "")
     .trim()
+    .replace(/;\s*error:\s*command exited with (?:Some\()?(-?\d+)\)?/gi, "")
     .replace(/\(exit Some\((-?\d+)\)\)/g, "(exit $1)")
+    .replace(/\bSome\((-?\d+)\)/g, "$1")
     .replace(/finished with state 'failed'\s*/gi, "failed ");
   if (!trimmed) return "";
   // Ignore internal snake_case enum tokens like "remote_node_job"
@@ -337,13 +367,13 @@ function humanizeStatusText(raw: string | null | undefined): string {
     /^Remote\s+(\S+)\s+job\s+[0-9a-f-]{36}\s+on\s+node\s+'([^']+)'\s+([\s\S]+)$/i,
   );
   if (remoteMatch) {
-    return `Remote ${remoteMatch[1]} run on ${remoteMatch[2]} ${remoteMatch[3]}`;
+    return `Remote ${remoteMatch[1]} run on ${nodeLabel(remoteMatch[2])} ${remoteMatch[3]}`;
   }
   const genericJobMatch = trimmed.match(
     /^Job\s+[0-9a-f-]{36}\s+on\s+node\s+'([^']+)'\s+([\s\S]+)$/i,
   );
   if (genericJobMatch) {
-    return `Remote run on ${genericJobMatch[1]} ${genericJobMatch[2]}`;
+    return `Remote run on ${nodeLabel(genericJobMatch[1])} ${genericJobMatch[2]}`;
   }
   return trimmed;
 }
@@ -472,6 +502,7 @@ export function buildInboxItem(
   items?: StreamItem[],
   observed?: PendingInteraction,
   nowMs = Date.now(),
+  selectedMissionId?: string | null,
 ): InboxItem | null {
   const interaction = extractInboxInteraction(mission, items, observed);
   const category = classifyInboxMission(mission, interaction);
@@ -484,15 +515,39 @@ export function buildInboxItem(
 
   const rawTitle = displayTitle(mission.title);
   const firstUser = mission.history?.find((h) => h.role === "user")?.content;
-  const headline =
+  let headline =
     rawTitle ||
     (firstUser ? clipToSentence(firstUser, 56) : "") ||
     "Untitled conversation";
 
+  const isGoal = Boolean(
+    mission.goal_mode || (mission.title && mission.title.trim().startsWith("/goal")),
+  );
+  if (headline.trim().toLowerCase() === projectTitle.trim().toLowerCase()) {
+    const goalLines = (mission.goal_objective ?? firstUser ?? "")
+      .split(/\r?\n/)
+      .map((l) => stripMarkdownToProse(l))
+      .filter((l) => l && l.toLowerCase() !== projectTitle.trim().toLowerCase());
+    if (goalLines.length > 0) {
+      headline = clipToSentence(goalLines[0], 56);
+    } else if (isGoal) {
+      headline = `${projectTitle} objective`;
+    }
+  }
+
   const summary = extractSummary(mission, items, interaction);
   const { badge, tone } = resolveBadgeAndTone(mission, summary, interaction);
-  const updatedIso = mission.updated_at || mission.created_at;
-  const updatedMs = Date.parse(updatedIso) || 0;
+  const updatedMs = missionResponseTimestampMs(mission);
+  const updatedIso =
+    updatedMs > 0
+      ? new Date(updatedMs).toISOString()
+      : mission.updated_at || mission.last_output_at || mission.created_at;
+  const unread = isMissionUnread(mission, selectedMissionId, Boolean(interaction));
+  const attention =
+    Boolean(interaction) ||
+    mission.status === "blocked" ||
+    mission.status === "failed" ||
+    mission.status === "not_feasible";
 
   return {
     id: mission.id,
@@ -507,7 +562,9 @@ export function buildInboxItem(
     machine: resolveMachine(mission),
     relativeTime: formatRelativeTime(updatedIso, nowMs),
     updatedMs,
-    isGoal: Boolean(mission.goal_mode || (mission.title && mission.title.trim().startsWith("/goal"))),
+    isGoal,
+    unread,
+    attention,
     interaction,
   };
 }
@@ -531,6 +588,7 @@ export function buildInboxSections(
   getTranscript?: (id: string) => StreamItem[] | undefined,
   getInteraction?: (id: string) => PendingInteraction | undefined,
   nowMs = Date.now(),
+  selectedMissionId?: string | null,
 ): InboxSections {
   const needsYou: InboxItem[] = [];
   const ready: InboxItem[] = [];
@@ -541,14 +599,23 @@ export function buildInboxSections(
       : null;
 
   for (const mission of missions) {
-    const slug = mission.project || DEFAULT_PROJECT.slug;
-    if (liveSlugs && !liveSlugs.has(slug)) continue;
+    const rawSlug = mission.project?.trim();
+    const observed = getInteraction?.(mission.id);
+    if (liveSlugs) {
+      // Exclude unassigned probe missions that don't belong to any project unless they are client-placed or asking a live question.
+      if (!rawSlug && !mission.tags?.includes("placement:client") && !observed) {
+        continue;
+      }
+      const slug = rawSlug || DEFAULT_PROJECT.slug;
+      if (!liveSlugs.has(slug)) continue;
+    }
     const item = buildInboxItem(
       mission,
       projects,
       getTranscript?.(mission.id),
-      getInteraction?.(mission.id),
+      observed,
       nowMs,
+      selectedMissionId,
     );
     if (!item) continue;
     if (item.category === "needs_you") needsYou.push(item);
@@ -565,10 +632,19 @@ export function buildInboxSections(
   ready.sort((a, b) => b.updatedMs - a.updatedMs);
   working.sort((a, b) => b.updatedMs - a.updatedMs);
 
+  let unreadCount = 0;
+  let attentionCount = 0;
+  for (const item of [...needsYou, ...ready]) {
+    if (item.unread) unreadCount++;
+    if (item.attention) attentionCount++;
+  }
+
   return {
     needsYou,
     ready,
     working,
     totalActionable: needsYou.length + ready.length,
+    unreadCount,
+    attentionCount,
   };
 }

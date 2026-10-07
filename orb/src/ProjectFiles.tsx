@@ -21,6 +21,7 @@ import * as Ic from "./icons";
 import * as SidebarIcon from "./sidebarIcons";
 import { pendingMissionInteraction } from "./missionAttention";
 import { MissionGlyph, missionStatusPresentation } from "./MissionGlyph";
+import { isMissionUnread } from "./missionUnread";
 import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { displayTitle } from "./goal";
 import { missionDestination, nodeLabel } from "./missionLaunch";
@@ -242,6 +243,7 @@ export function LiveProjectsSection(p: {
   onNewAgent: (slug: string, path?: string) => void;
   onNewCloudAgent?: (slug: string, path?: string) => void;
   onDeleted?: (ids: string[]) => void;
+  onProjectMissions?: (slug: string, rows: Mission[]) => void;
   /** "+" on the section header: create a project (opens the picker flow). */
   onNewProject: (anchor: HTMLButtonElement) => void;
 }) {
@@ -848,6 +850,7 @@ export function LiveProjectsSection(p: {
         const visibleList = list.filter(m => !deletedInSession.has(m.id));
         const merged = mergeById((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m));
         if (merged !== missions[slug]) setMissions(slug, merged);
+        p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;
         const live = new Set(["active", "pending", "queued", "resuming", "running", "starting"]);
         const deleting = deletingIds();
@@ -888,7 +891,7 @@ export function LiveProjectsSection(p: {
     }
   };
   const warmupProjects = (list: ProjectSummary[]) => {
-    const limit = Math.min(4, prefetchProjectLimit());
+    const limit = list.length;
     if (!limit) return;
     const active = new Set((p.activityMissions ?? []).filter(m => ["active", "running", "starting", "resuming"].includes(m.status)).map(m => m.project));
     const prioritized = [...list].sort((a, b) => Number(!!expanded[b.slug] || active.has(b.slug)) - Number(!!expanded[a.slug] || active.has(a.slug)));
@@ -1450,6 +1453,7 @@ export function LiveProjectsSection(p: {
     const updateStatus = (statusFor: (m: Mission) => string) => batch(() => {
       for (const slug of Object.keys(missions)) {
         setMissions(slug, m => targetIds.has(m.id), m => ({ ...m, status: statusFor(m) }));
+        p.onProjectMissions?.(slug, missions[slug] ?? []);
       }
       setArchivedMissions(rows => {
         const rest = rows.filter(m => !targetIds.has(m.id));
@@ -2031,7 +2035,7 @@ export function LiveProjectsSection(p: {
         }
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={!d.launched}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
     {launchedToggle(row, d)}</>;

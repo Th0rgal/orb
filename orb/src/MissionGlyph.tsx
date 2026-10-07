@@ -42,7 +42,7 @@ export function missionStatusPresentation(status: string, request?: PendingInter
   }
 }
 
-export function MissionGlyph(p: { status: string; missionId?: string; identity?: JSX.Element; continuation?: ContinuationSummary | null }) {
+export function MissionGlyph(p: { status: string; missionId?: string; unread?: boolean; identity?: JSX.Element; continuation?: ContinuationSummary | null }) {
   const continuation = () => {
     const local = localContinuation(p.missionId);
     const items = [...(local?.items ?? []), ...(p.continuation?.items ?? [])];
@@ -76,7 +76,7 @@ export function MissionGlyph(p: { status: string; missionId?: string; identity?:
     onClick={e => { if (items().length) show(e); }}
     onKeyDown={e => { if (items().length && (e.key === "Enter" || e.key === " ")) show(e); }}>
     <Show when={p.identity} fallback={<Icon.Bot />}>{p.identity}</Show>
-    <Show when={state().icon}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
+    <Show when={state().icon} fallback={<Show when={p.unread}><span class="mission-unread-dot" aria-hidden="true" /></Show>}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
   </span><Show when={open()}><Dialog title="Scheduled wake-ups" busy={busy()} onClose={() => setOpen(false)}>
     <Show when={error()}><p role="alert">{error()}</p></Show>
     <For each={items()} fallback={<p>No pending wake-ups.</p>}>{item => <div class="wake-up-item">

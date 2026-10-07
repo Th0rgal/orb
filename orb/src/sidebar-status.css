@@ -6,6 +6,7 @@
 .mission-glyph.running .mission-status-mark { color: var(--blue); }
 .mission-glyph.success .mission-status-mark { color: var(--green); }
 .mission-glyph.attention .mission-status-mark { color: var(--amber); }
+.mission-unread-dot { position: absolute; right: -2px; bottom: -1px; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 1.5px var(--bg, #141414); pointer-events: none; }
 .mission-status-spin { animation: mission-status-spin 1.4s linear infinite; }
 @keyframes mission-status-spin { to { transform: rotate(360deg); } }
 .row.done-toggle .history-chevron { width: 12px; height: 12px; flex: none; color: var(--fg-3); }

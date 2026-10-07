@@ -745,6 +745,7 @@ struct OrbProjectPage: View {
     }
     @ViewBuilder
     private func statusGlyph(for row: OrbRow) -> some View {
+        let _ = OrbMissionUnreadStore.shared.version
         if row.active {
             OrbRunningDots(size: 13)
                 .frame(width: 20, height: 22)
@@ -753,7 +754,7 @@ struct OrbProjectPage: View {
                 .overlay(alignment: .bottomTrailing) {
                     if ["failed", "blocked", "not_feasible"].contains(row.state) {
                         Circle().fill(OrbStyle.warning).frame(width: 6, height: 6)
-                    } else if ["awaiting_user", "waiting_user"].contains(row.state) {
+                    } else if OrbMissionUnreadStore.shared.isUnread(row: row) {
                         Circle().fill(Color.blue).frame(width: 6, height: 6)
                     }
                 }
