@@ -124,7 +124,8 @@ export function OrbHero() {
           <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
           <strong>Antigravity</strong>, <strong>OpenCode</strong>, and{" "}
           <strong>Grok</strong> on your computer or your private cloud, and continue every
-          conversation anywhere.
+          conversation anywhere. Formerly <code>sandboxed.sh</code>, which is now the
+          backend to the Orb clients.
         </p>
         <div className="orb-hero-actions">
           <Link href="/getting-started" className="orb-btn orb-btn-primary">

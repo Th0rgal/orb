@@ -18,11 +18,11 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   metadataBase: new URL("https://orb.thomas.md"),
   title: {
-    default: "Orb (sandboxed.sh) | Your agents, machines and subscriptions",
-    template: "%s | Orb (sandboxed.sh)",
+    default: "Orb | Your agents, machines and subscriptions",
+    template: "%s | Orb",
   },
   description:
-    "Run and orchestrate AI coding agents across your computer, your private cloud, and managed cloud services. Built for Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, ChatGPT, and Cursor Cloud.",
+    "Your agents, machines and subscriptions in one place on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients). Built for Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, ChatGPT, and Cursor Cloud.",
   applicationName: "Orb",
   generator: "Next.js",
   keywords: [
@@ -47,9 +47,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Orb (sandboxed.sh)",
+    title: "Orb",
     description:
-      "Your agents, machines and subscriptions. One place to work on macOS and iOS.",
+      "Your agents, machines and subscriptions. One place to work on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
     creator: "@music_music_yo",
     images: ["/og-image.png"],
   },
@@ -58,15 +58,15 @@ export const metadata: Metadata = {
     locale: "en_US",
     url: "https://orb.thomas.md",
     siteName: "Orb",
-    title: "Orb (sandboxed.sh)",
+    title: "Orb",
     description:
-      "Your agents, machines and subscriptions. One place to work on macOS and iOS.",
+      "Your agents, machines and subscriptions. One place to work on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "Orb (sandboxed.sh) - Your agents, machines and subscriptions",
+        alt: "Orb - Your agents, machines and subscriptions",
       },
     ],
   },

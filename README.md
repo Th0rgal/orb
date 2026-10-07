@@ -1,12 +1,13 @@
 <p align="center">
-  <img src="orb/src-tauri/icons/icon.png" width="96" alt="Orb · sandboxed.sh" />
+  <img src="orb/src-tauri/icons/icon.png" width="96" alt="Orb" />
 </p>
 
-<h1 align="center">Orb (sandboxed.sh)</h1>
+<h1 align="center">Orb</h1>
 
 <p align="center">
   <strong>Your agents, machines and subscriptions. One place to work.</strong><br/>
-  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.
+  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.<br/>
+  <sub>Formerly <code>sandboxed.sh</code> — <code>sandboxed.sh</code> is now the backend to the Orb clients.</sub>
 </p>
 
 <p align="center">
@@ -97,7 +98,7 @@ ChatGPT browser or create a Cursor Cloud API account.
 
 ## Under the hood
 
-**Orb is the client; sandboxed.sh is the execution and persistence layer.**
+**Orb is the client; sandboxed.sh (the project's former name) is now the backend to the Orb clients.**
 Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
 projects, missions, event history and remote-node coordination. Cloud adapters
 observe provider work independently of the client window.
@@ -114,4 +115,4 @@ and mission records as Orb.
 
 ---
 
-Transitioning to **Orb** (`orb.thomas.md`) · Formerly `sandboxed.sh` / Open Agent.
+**Orb** (`orb.thomas.md`) · Formerly `sandboxed.sh` (now the backend to the Orb clients).

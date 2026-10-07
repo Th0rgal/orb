@@ -1,9 +1,9 @@
-# Orb (sandboxed.sh) Documentation
+# Orb Documentation
 # For AI Agents and LLMs
 # https://orb.thomas.md (formerly https://sandboxed.sh)
 
-> Orb (sandboxed.sh) is a unified client (macOS Tauri + SolidJS, iOS SwiftUI, Web) and self-hosted Rust control plane for AI coding agents (Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok) plus cloud agents (Hermes, ChatGPT, Grok Bot, Cursor Cloud).
-> Note: The entire project is being renamed from sandboxed.sh (formerly Open Agent) to Orb, hosted at https://orb.thomas.md.
+> Orb is a unified client (macOS Tauri + SolidJS, iOS SwiftUI, Web) for AI coding agents (Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok) and cloud agents (Hermes, ChatGPT, Grok Bot, Cursor Cloud).
+> Note: `sandboxed.sh` is the former name of the project and is now the Rust backend (`sandboxed-sh`) to the Orb clients.
 
 ## How to Access Documentation as Raw Markdown
 

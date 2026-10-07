@@ -15,7 +15,7 @@ function Logo() {
         className="orb-nav-logo-img"
       />
       <span className="orb-nav-title">
-        Orb <span className="orb-nav-subtitle">· sandboxed.sh</span>
+        Orb
       </span>
     </div>
   );
