@@ -1,8 +1,6 @@
 # Orb Desktop
 
-Desktop client for **Orb** (`sandboxed.sh`, built with Tauri 2 + SolidJS): projects and their synchronized `@context` files, running missions with live transcripts, local and remote machines (the `sandboxed-node` fleet plus shared SSH hosts), providers (CLIProxyAPI-owned OAuth subscriptions and API keys), and a unified **New Agent** / **Cloud Agent** composer. Connect a backend in **Settings → Client → Backend** (dashboard password); the URL and JWT are kept in localStorage.
-
-> **Upcoming rename:** The entire `sandboxed.sh` project is unifying under the name **Orb** at **[`orb.thomas.md`](https://orb.thomas.md)**.
+Desktop client for **Orb** (built with Tauri 2 + SolidJS): projects and their synchronized `@context` files, running missions with live transcripts, local and remote machines (the `sandboxed-node` fleet plus shared SSH hosts), providers (CLIProxyAPI-owned OAuth subscriptions and API keys), and a unified **New Agent** / **Cloud Agent** composer. Connect to your `sandboxed.sh` backend (`sandboxed.sh` is the former name of the project and now the backend to the Orb clients) in **Settings → Client → Backend** (dashboard password); the URL and JWT are kept in localStorage.
 
 ![Orb on macOS](../screenshots/orb-desktop.webp)
 

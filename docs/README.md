@@ -1,6 +1,6 @@
-# Orb & sandboxed.sh Documentation
+# Orb Documentation
 
-> **Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is unifying under the name **Orb**, and the web app and documentation will be served at **[`orb.thomas.md`](https://orb.thomas.md)**. Existing binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`, `palomactl`), systemd units, and API paths remain compatible during the transition.
+> **Note:** **Orb** ([`orb.thomas.md`](https://orb.thomas.md)) is the project name. `sandboxed.sh` (formerly Open Agent) is the former name of the project and is now the Rust backend (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`, `palomactl`) to the Orb clients.
 
 ![Orb on macOS](../screenshots/orb-desktop.webp)
 

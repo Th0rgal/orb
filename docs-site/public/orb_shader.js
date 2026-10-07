@@ -911,28 +911,11 @@ const vsFbo = `#version 300 es
     window.addEventListener("pointermove", onMove, { passive: true });
     canvasShader.addEventListener("pointerleave", onLeave, { passive: true });
 
-    // 60 FPS animated navbar mark + browser-safe animated tab favicon
-    let favCanvas = null;
-    let favCtx = null;
-    let favLink = null;
+    // 60 FPS animated navbar mark (tab favicon stays static /favicon.png)
     let navCanvas = null;
     let navCtx = null;
-    let lastFaviconTs = 0;
 
-    if (opts.animateFavicon && typeof document !== "undefined") {
-      favCanvas = document.createElement("canvas");
-      favCanvas.width = 48;
-      favCanvas.height = 48;
-      favCtx = favCanvas.getContext("2d");
-      favLink = document.querySelector("link[rel*='icon']");
-      if (!favLink) {
-        favLink = document.createElement("link");
-        favLink.rel = "icon";
-        favLink.type = "image/png";
-        document.head.appendChild(favLink);
-      }
-
-      // Replace the static 22x22 navbar img with a direct 60 FPS canvas when present
+    if (typeof document !== "undefined") {
       const navImg = document.querySelector(".orb-nav-logo-img");
       if (navImg && navImg.tagName === "IMG" && navImg.parentNode) {
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -949,8 +932,8 @@ const vsFbo = `#version 300 es
       }
     }
 
-    function updateFaviconFromShader(now) {
-      if (document.hidden) return;
+    function updateNavMarkFromShader() {
+      if (document.hidden || !navCtx || !navCanvas) return;
       try {
         const w = canvasShader.width;
         const h = canvasShader.height;
@@ -961,39 +944,17 @@ const vsFbo = `#version 300 es
         const sw = Math.min(w - sx, cropHalf * 2.0);
         const sh = Math.min(h - sy, cropHalf * 2.0);
 
-        // 1. Update in-page navbar mark at full 60 FPS (zero PNG encoding / IPC overhead)
-        if (navCtx && navCanvas) {
-          const nw = navCanvas.width;
-          const nh = navCanvas.height;
-          navCtx.clearRect(0, 0, nw, nh);
-          navCtx.save();
-          navCtx.beginPath();
-          navCtx.arc(nw * 0.5, nh * 0.5, nw * 0.48, 0, Math.PI * 2);
-          navCtx.closePath();
-          navCtx.clip();
-          navCtx.drawImage(canvasShader, sx, sy, sw, sh, 0, 0, nw, nh);
-          navCtx.restore();
-        }
-
-        // 2. Update browser tab <link rel="icon"> at ~15 FPS (66ms) so we don't cancel
-        // in-flight Chromium FaviconHandler::OnUpdateCandidates downloads every 16ms
-        // while hitting Chromium's 200ms BrowserUiController::kUIUpdateCoalescingTime ceiling.
-        if (favCtx && favCanvas && favLink && now - lastFaviconTs >= 65) {
-          lastFaviconTs = now;
-          favCtx.clearRect(0, 0, 48, 48);
-          favCtx.save();
-          favCtx.beginPath();
-          favCtx.arc(24, 24, 23, 0, Math.PI * 2);
-          favCtx.closePath();
-          favCtx.clip();
-          favCtx.drawImage(canvasShader, sx, sy, sw, sh, 1, 1, 46, 46);
-          favCtx.restore();
-
-          favLink.href = favCanvas.toDataURL("image/png");
-        }
-      } catch (_) {
-        // Fallback /favicon.png remains active if canvas readback fails
-      }
+        const nw = navCanvas.width;
+        const nh = navCanvas.height;
+        navCtx.clearRect(0, 0, nw, nh);
+        navCtx.save();
+        navCtx.beginPath();
+        navCtx.arc(nw * 0.5, nh * 0.5, nw * 0.48, 0, Math.PI * 2);
+        navCtx.closePath();
+        navCtx.clip();
+        navCtx.drawImage(canvasShader, sx, sy, sw, sh, 0, 0, nw, nh);
+        navCtx.restore();
+      } catch (_) {}
     }
 
     let rafId = 0;
@@ -1010,12 +971,12 @@ const vsFbo = `#version 300 es
       state.pointerX += (state.targetPointerX - state.pointerX) * 0.08;
       state.pointerY += (state.targetPointerY - state.pointerY) * 0.08;
       drawShaderFrame();
-      updateFaviconFromShader(now);
+      updateNavMarkFromShader();
       rafId = requestAnimationFrame(renderFrame);
     }
 
     drawShaderFrame();
-    updateFaviconFromShader(lastTs);
+    updateNavMarkFromShader();
     rafId = requestAnimationFrame(renderFrame);
 
     return {

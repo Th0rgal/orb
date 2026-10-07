@@ -34,7 +34,7 @@ use crate::util::{
 use crate::workspace::{Workspace, WorkspaceStatus, WorkspaceType};
 
 /// Git remote used for sandboxed.sh self-updates
-const SANDBOXED_REPO_REMOTE: &str = "https://github.com/Th0rgal/sandboxed.sh.git";
+const SANDBOXED_REPO_REMOTE: &str = "https://github.com/Th0rgal/orb.git";
 const MIN_SUPPORTED_OPENCODE_VERSION: &str = "1.18.0";
 
 /// Information about a system component.
@@ -2594,7 +2594,7 @@ async fn check_sandboxed_update(
     // First, try GitHub releases API
     let client = reqwest::Client::new();
     let resp = client
-        .get("https://api.github.com/repos/Th0rgal/sandboxed.sh/releases/latest")
+        .get("https://api.github.com/repos/Th0rgal/orb/releases/latest")
         .header("User-Agent", "open-agent")
         .send()
         .await

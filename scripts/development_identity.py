@@ -268,8 +268,8 @@ def verify(root, network=True):
         r = subprocess.run(["ssh", "-F", str(generation / "ssh/config"), "-T", "git@github.com"], capture_output=True, text=True, timeout=25)
         if "Hi Th0rgal! You've successfully authenticated" not in r.stdout + r.stderr:
             raise RuntimeError("GitHub SSH authentication failed")
-        run(["git", "ls-remote", "git@github.com:Th0rgal/sandboxed.sh.git", "HEAD"], env=env)
-        run(["git", "ls-remote", "https://github.com/Th0rgal/sandboxed.sh.git", "HEAD"], env=env)
+        run(["git", "ls-remote", "git@github.com:Th0rgal/orb.git", "HEAD"], env=env)
+        run(["git", "ls-remote", "https://github.com/Th0rgal/orb.git", "HEAD"], env=env)
         if shutil.which("gh", path=env.get("PATH")):
             if run(["gh", "api", "user", "--jq", ".login"], env=env).strip() != "Th0rgal":
                 raise RuntimeError("gh identity mismatch")

@@ -374,7 +374,7 @@ that answers them.
 git submodule update --init third_party/hermes-agent
 
 # clone with it
-git clone --recurse-submodules https://github.com/Th0rgal/sandboxed.sh.git
+git clone --recurse-submodules https://github.com/Th0rgal/orb.git
 
 # move the pin to the current production tip
 git -C third_party/hermes-agent fetch origin production

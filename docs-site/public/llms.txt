@@ -54,6 +54,6 @@ POST /api/mcp/call                              # Unified MCP tool invocation (e
 ```
 
 ## Source
-- Repository: https://github.com/Th0rgal/sandboxed.sh
+- Repository: https://github.com/Th0rgal/orb
 - Library Template: https://github.com/Th0rgal/sandboxed-library-template
-- Website & Docs: https://orb.thomas.md (https://sandboxed.sh)
+- Website & Docs: https://orb.thomas.md (formerly https://sandboxed.sh)

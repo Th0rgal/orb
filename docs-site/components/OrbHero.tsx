@@ -18,7 +18,6 @@ declare global {
         relightAmp?: number;
         iridAmp?: number;
         haloAmp?: number;
-        animateFavicon?: boolean;
       }
     ) => { destroy: () => void } | null;
   }
@@ -74,7 +73,6 @@ export function OrbHero() {
           metalAmp: 1.50,
           relightAmp: 2.15,
           iridAmp: 2.05,
-          animateFavicon: true,
         });
         if (instance) {
           setShaderReady(true);
@@ -135,7 +133,7 @@ export function OrbHero() {
             Workspaces
           </Link>
           <a
-            href="https://github.com/Th0rgal/sandboxed.sh"
+            href="https://github.com/Th0rgal/orb"
             target="_blank"
             rel="noreferrer"
             className="orb-btn orb-btn-ghost"

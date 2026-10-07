@@ -1,8 +1,8 @@
-# Installing Orb & sandboxed.sh
+# Installing Orb & the sandboxed.sh Backend
 
-> **Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is being renamed to **Orb** and will be hosted at **[`orb.thomas.md`](https://orb.thomas.md)**. During the transition, server binaries (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`), Docker images, and environment variables retain their `sandboxed-sh` names.
+> **Note:** **Orb** (`orb.thomas.md`) is the new name of the project. `sandboxed.sh` (formerly Open Agent) is the former name and is now the Rust backend (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) to the Orb clients.
 
-There are two ways to install the backend server, which powers **Orb Desktop** (`orb/`), **Orb iOS** (`ios_dashboard/`), and the **Web Admin Console** (`dashboard/`):
+There are two ways to install the `sandboxed.sh` backend server, which powers **Orb Desktop** (`orb/`), **Orb iOS** (`ios_dashboard/`), and the **Web Admin Console** (`dashboard/`):
 
 ## 1. Docker (Recommended for Quick Start)
 
@@ -11,8 +11,8 @@ One command starts the Rust backend, web console, Caddy proxy, and primary codin
 → **[Docker installation guide](docs/install-docker.md)**
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed.sh.git
-cd sandboxed.sh
+git clone https://github.com/Th0rgal/orb.git
+cd orb
 cp .env.example .env
 # Edit .env to set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d

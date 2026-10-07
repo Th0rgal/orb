@@ -1,6 +1,6 @@
-# Installing sandboxed.sh with Docker
+# Installing the sandboxed.sh Backend for Orb with Docker
 
-Docker is the easiest way to run sandboxed.sh (formerly Open Agent). One command gets you a complete environment with the Rust backend, Next.js dashboard, and the primary AI harness CLIs pre-installed.
+Docker is the easiest way to run the `sandboxed.sh` backend (`sandboxed.sh` is the former name of **Orb**, and is now the backend to the Orb clients). One command gets you a complete environment with the Rust backend, Next.js dashboard, and the primary AI harness CLIs pre-installed.
 
 ## Prerequisites
 
@@ -10,8 +10,8 @@ Docker is the easiest way to run sandboxed.sh (formerly Open Agent). One command
 ## Quick Start
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed.sh.git
-cd sandboxed.sh
+git clone https://github.com/Th0rgal/orb.git
+cd orb
 cp .env.example .env
 # Edit .env — at minimum, set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d

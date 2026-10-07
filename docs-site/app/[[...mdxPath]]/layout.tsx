@@ -30,7 +30,7 @@ export default async function DocsLayout({
     <Navbar
       logo={<Logo />}
       logoLink="/"
-      projectLink="https://github.com/Th0rgal/sandboxed.sh"
+      projectLink="https://github.com/Th0rgal/orb"
     />
   );
   const pageMap = await getPageMap("/");
@@ -38,7 +38,7 @@ export default async function DocsLayout({
     <Layout
       navbar={navbar}
       editLink="Edit this page on GitHub"
-      docsRepositoryBase="https://github.com/Th0rgal/sandboxed.sh/blob/master/docs-site"
+      docsRepositoryBase="https://github.com/Th0rgal/orb/blob/master/docs-site"
       sidebar={{ defaultMenuCollapseLevel: 1 }}
       pageMap={pageMap}
       footer={null}

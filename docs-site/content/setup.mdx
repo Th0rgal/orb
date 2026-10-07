@@ -12,8 +12,8 @@ Choose between **Docker** (fastest on any OS) or a **Native Linux** installation
 Docker bundles the Rust backend, web admin console, Caddy reverse proxy, and core CLIs in one container. See the [Docker Install](/install-docker) guide:
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed.sh.git
-cd sandboxed.sh
+git clone https://github.com/Th0rgal/orb.git
+cd orb
 cp .env.example .env
 # Edit .env: set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d
@@ -55,7 +55,7 @@ Always use debug `cargo build` (not `--release`) for the I/O-bound control plane
 ```bash
 mkdir -p /opt/sandboxed_sh
 cd /opt/sandboxed_sh
-git clone https://github.com/Th0rgal/sandboxed.sh.git repo
+git clone https://github.com/Th0rgal/orb.git repo
 cd repo
 
 cargo build --bin sandboxed-sh --bin sandboxed-mcp --bin sandboxed-node --bin palomactl
@@ -122,4 +122,4 @@ Put Nginx or Caddy in front of `127.0.0.1:3000` with TLS (for example at `https:
 | **Web Admin Console** | Deploy `dashboard/` to Vercel (`NEXT_PUBLIC_API_URL`) or run `bun dev` locally |
 | **Hermes Coordinator** | Point Hermes's MCP server config at `/usr/local/bin/sandboxed-mcp` |
 
-For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and Tailscale), see [`docs/install-native.md`](https://github.com/Th0rgal/sandboxed.sh/blob/master/docs/install-native.md).
+For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and Tailscale), see [`docs/install-native.md`](https://github.com/Th0rgal/orb/blob/master/docs/install-native.md).
