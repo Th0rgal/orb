@@ -193,6 +193,17 @@ export async function takeQueuedMessage(id:string){
 export async function retryQueuedMessage(id:string){
  const key=storageKey(),row=(await read(key)).find(row=>row.id===id);
  if(!row)return;
+ if(row.state==='accepted'&&row.interrupted){
+  try{
+   const native=await pollLocal(row.mission);
+   if(!native.done){
+    recordLocalFailure(row.mission,null);
+    if(key===storageKey())await update(key,id,stored=>{if(stored.state==='accepted'&&stored.interrupted){delete stored.interrupted;delete stored.error;}});
+    wake();
+    return;
+   }
+  }catch{/* fall through to recovery */}
+ }
  if(row.interrupted||(row.state==='dispatching'&&row.error)){
   try{await recoverLocalLaunch(row.mission);}
   catch(recovery){
@@ -348,6 +359,18 @@ export function startLocalQueueWorker(){
      again=true;continue;
     }
     if(row.interrupted&&row.state==='accepted'){
+     // If another Orb window had transiently marked this row interrupted while this
+     // window is actually running the turn, re-attach the follower and clear the error.
+     try{
+      const native=await pollLocal(row.mission);
+      if(!valid())return;
+      if(!native.done){
+       recordLocalFailure(row.mission,null);
+       await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted){delete stored.interrupted;delete stored.error;}});
+       follow({...row,interrupted:undefined,error:undefined});
+       continue;
+      }
+     }catch{/* no local run or poll error falls through to recovery */}
      // The previous agent was still finishing when recovery was first tried. Look again.
      try{
       await recoverLocalLaunch(row.mission);if(!valid())return;
