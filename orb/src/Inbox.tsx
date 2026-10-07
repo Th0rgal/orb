@@ -524,14 +524,14 @@ export function InboxPage(p: {
         return;
       }
       if (e.key === "Enter" && currentItem) {
-        if (target?.closest("button:not(.inbox-row-main)")) return;
+        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn)")) return;
         e.preventDefault();
         markItemAndChildrenRead(currentItem);
         p.onOpenMission(currentItem.id);
         return;
       }
       if (e.key === " " && currentItem) {
-        if (target?.closest("button:not(.inbox-row-main)")) return;
+        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn)")) return;
         e.preventDefault();
         togglePeek(currentItem);
         return;
@@ -617,15 +617,39 @@ export function InboxPage(p: {
       if (!inboxConfig().aiSummary) return undefined;
       return getCachedInboxDigest(item.id, item.updatedMs);
     };
-    const taskLine = () => digest()?.task || item.lastRequest;
-    const outcomeLine = () => digest()?.outcome || item.summary;
+    const normalizeCmp = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+    const isGenericBoilerplate = (s: string) =>
+      /^(execute|complete|continue|run|perform)\s+the\s+.*(mission|goal|objective|task)/i.test(s) ||
+      /^mission\s+.*(stopped|completed|finished|blocked)\b/i.test(s) ||
+      /no conversation details/i.test(s);
+    const taskLine = () => {
+      const aiTask = digest()?.task?.trim();
+      if (aiTask && !isGenericBoilerplate(aiTask)) return aiTask;
+      return item.lastRequest?.trim();
+    };
+    const outcomeLine = () => {
+      const aiOutcome = digest()?.outcome?.trim();
+      if (aiOutcome && !isGenericBoilerplate(aiOutcome)) return aiOutcome;
+      return item.summary;
+    };
     const verdict = () => digest()?.verdict || item.verdict;
     const showTaskLine = () => {
       if (item.interaction) return false;
-      const t = taskLine()?.trim();
+      const t = taskLine();
       if (!t) return false;
-      if (digest()?.task) return true;
-      return t.toLowerCase() !== item.headline.trim().toLowerCase();
+      const nt = normalizeCmp(t);
+      const nh = normalizeCmp(item.headline);
+      const no = normalizeCmp(outcomeLine());
+      if (!nt || nt === nh || nt === no) return false;
+      // Hide if headline already starts with or contains the same words
+      if (nh.length >= 18 && (nt.startsWith(nh.slice(0, 18)) || nh.startsWith(nt.slice(0, 18)))) {
+        return false;
+      }
+      return true;
     };
     const visiblePeekTurns = () => {
       const all = item.allPeekTurns?.length ? item.allPeekTurns : item.peekTurns;
@@ -649,16 +673,15 @@ export function InboxPage(p: {
       >
         <div class="inbox-row-body">
           <div class="inbox-row-main-col">
-            <button
-              type="button"
-              class="inbox-row-main"
-              onClick={() => {
-                markItemAndChildrenRead(item);
-                p.onOpenMission(item.id);
-              }}
-              aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${outcomeLine()}`}
-            >
-              <div class="inbox-row-top">
+            <div class="inbox-row-top">
+              <button
+                type="button"
+                class="inbox-row-title-btn"
+                onClick={() => {
+                  markItemAndChildrenRead(item);
+                  p.onOpenMission(item.id);
+                }}
+              >
                 <Show when={item.unread}>
                   <span
                     class="inbox-unread-dot"
@@ -683,23 +706,115 @@ export function InboxPage(p: {
                 </Show>
                 <span class="inbox-headline">{item.headline}</span>
                 <span class={`inbox-badge ${item.tone}`}>{item.badge}</span>
-                <Show when={item.machine}>
-                  <span class="inbox-machine">{item.machine}</span>
-                </Show>
-                <Show when={item.relativeTime}>
-                  <time class="inbox-time">{item.relativeTime}</time>
-                </Show>
+              </button>
+
+              <div class="inbox-row-right">
+                <div class="inbox-row-meta">
+                  <Show when={item.machine}>
+                    <span class="inbox-machine">{item.machine}</span>
+                  </Show>
+                  <Show when={item.relativeTime}>
+                    <time class="inbox-time">{item.relativeTime}</time>
+                  </Show>
+                </div>
+
+                <div class="inbox-triage-btns">
+                  <Show when={item.canRetry}>
+                    <button
+                      type="button"
+                      class="inbox-act-btn retry"
+                      disabled={isBusy()}
+                      title="Retry / resume mission (⇧R)"
+                      aria-label={`Retry ${item.headline}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void retryMission(item);
+                      }}
+                    >
+                      <span aria-hidden="true">↻</span>
+                      <span>Retry</span>
+                    </button>
+                  </Show>
+                  <button
+                    type="button"
+                    class={`inbox-act-btn ${isPeeked() ? "on" : ""}`}
+                    disabled={isBusy()}
+                    title="Peek conversation (Space)"
+                    aria-label={`Peek ${item.headline}`}
+                    aria-expanded={isPeeked()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePeek(item);
+                    }}
+                  >
+                    <span>Peek</span>
+                  </button>
+                  <Show when={item.unread}>
+                    <button
+                      type="button"
+                      class="inbox-act-btn"
+                      disabled={isBusy()}
+                      title="Mark as read (U)"
+                      aria-label={`Mark ${item.headline} as read`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleReadState(item);
+                      }}
+                    >
+                      <span>Read</span>
+                    </button>
+                  </Show>
+                  <button
+                    type="button"
+                    class={`inbox-act-btn ${isReplying() ? "on" : ""}`}
+                    disabled={isBusy()}
+                    title="Reply inline (R)"
+                    aria-label={`Reply to ${item.headline}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openQuickReply(item);
+                    }}
+                  >
+                    <span>Reply</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="inbox-act-btn done"
+                    disabled={isBusy()}
+                    title="Archive & mark done (E)"
+                    aria-label={`Mark ${item.headline} done`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void markDone(item);
+                    }}
+                  >
+                    <Ic.CheckIcon size={12} />
+                    <span>Done</span>
+                  </button>
+                </div>
               </div>
+            </div>
+
+            <button
+              type="button"
+              class="inbox-row-main"
+              onClick={() => {
+                markItemAndChildrenRead(item);
+                p.onOpenMission(item.id);
+              }}
+              aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${outcomeLine()}`}
+            >
               <Show when={showTaskLine()}>
                 <div class="inbox-task-row">
-                  <span class="inbox-digest-tag task">Task</span>
+                  <span class="inbox-digest-label">Asked</span>
                   <span class="inbox-task-text">{taskLine()}</span>
                 </div>
               </Show>
               <div class="inbox-row-bottom">
                 <Show when={!item.interaction}>
                   <span
-                    class={`inbox-digest-tag outcome ${verdict()}`}
+                    class={`inbox-verdict-glyph ${verdict()}`}
+                    aria-hidden="true"
                     title={
                       digest()?.aiGenerated
                         ? `AI summary (${digest()?.model || inboxConfig().model})`
@@ -707,18 +822,18 @@ export function InboxPage(p: {
                     }
                   >
                     {verdict() === "failed"
-                      ? "✕ Failed"
+                      ? "✕"
                       : verdict() === "waiting"
-                        ? "⏳ Waiting"
+                        ? "·"
                         : verdict() === "needs_input"
-                          ? "? Input"
-                          : "✓ Outcome"}
+                          ? "?"
+                          : "✓"}
                   </span>
                 </Show>
                 <p class="inbox-summary">{outcomeLine()}</p>
                 <Show when={!item.interaction && item.workReceiptSummary}>
                   <span class="inbox-work-chip" title="Tools executed in the latest turn">
-                    {item.workReceiptSummary}
+                    · {item.workReceiptSummary}
                   </span>
                 </Show>
               </div>
@@ -785,88 +900,6 @@ export function InboxPage(p: {
               </div>
             </div>
           </Show>
-
-          <div class="inbox-triage-btns">
-            <Show when={item.canRetry}>
-              <button
-                type="button"
-                class="inbox-act-btn retry"
-                disabled={isBusy()}
-                title="Retry / resume mission (⇧R)"
-                aria-label={`Retry ${item.headline}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void retryMission(item);
-                }}
-              >
-                <span aria-hidden="true">↻</span>
-                <span>Retry</span>
-                <kbd aria-hidden="true">⇧R</kbd>
-              </button>
-            </Show>
-            <button
-              type="button"
-              class={`inbox-act-btn ${isPeeked() ? "on" : ""}`}
-              disabled={isBusy()}
-              title="Peek recent turns (Space)"
-              aria-label={`Peek ${item.headline}`}
-              aria-expanded={isPeeked()}
-              onClick={(e) => {
-                e.stopPropagation();
-                togglePeek(item);
-              }}
-            >
-              <span>Peek</span>
-              <kbd aria-hidden="true">Space</kbd>
-            </button>
-            <Show when={item.unread}>
-              <button
-                type="button"
-                class="inbox-act-btn"
-                disabled={isBusy()}
-                title="Mark as read (U)"
-                aria-label={`Mark ${item.headline} as read`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleReadState(item);
-                }}
-              >
-                <span class="inbox-unread-dot sm" aria-hidden="true" />
-                <span>Read</span>
-                <kbd aria-hidden="true">U</kbd>
-              </button>
-            </Show>
-            <button
-              type="button"
-              class={`inbox-act-btn ${isReplying() ? "on" : ""}`}
-              disabled={isBusy()}
-              title="Reply inline (R)"
-              aria-label={`Reply to ${item.headline}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                openQuickReply(item);
-              }}
-            >
-              <Ic.ReplyIcon size={13} />
-              <span>Reply</span>
-              <kbd aria-hidden="true">R</kbd>
-            </button>
-            <button
-              type="button"
-              class="inbox-act-btn done"
-              disabled={isBusy()}
-              title="Archive & mark done (E)"
-              aria-label={`Mark ${item.headline} done`}
-              onClick={(e) => {
-                e.stopPropagation();
-                void markDone(item);
-              }}
-            >
-              <Ic.CheckIcon size={13} />
-              <span>Done</span>
-              <kbd aria-hidden="true">E</kbd>
-            </button>
-          </div>
         </div>
 
         <Show when={item.interaction?.detail && item.interaction.kind === "permission"}>
@@ -877,6 +910,7 @@ export function InboxPage(p: {
           <div class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${item.headline}`}>
             <div class="inbox-peek-head">
               <div class="inbox-peek-head-left">
+                <span class="inbox-peek-caption">Conversation preview</span>
                 <Show when={hiddenPeekCount() > 0}>
                   <button
                     type="button"
@@ -890,7 +924,7 @@ export function InboxPage(p: {
                       });
                     }}
                   >
-                    ↑ Show {hiddenPeekCount()} earlier {hiddenPeekCount() === 1 ? "turn" : "turns"}
+                    Show {hiddenPeekCount()} earlier {hiddenPeekCount() === 1 ? "turn" : "turns"}
                   </button>
                 </Show>
               </div>
@@ -902,15 +936,29 @@ export function InboxPage(p: {
                   p.onOpenMission(item.id);
                 }}
               >
-                Open full conversation →
+                Open thread →
               </button>
             </div>
 
             <div
               class="inbox-peek-scroll"
               ref={(el) => {
-                queueMicrotask(() => {
-                  el.scrollTop = el.scrollHeight;
+                createEffect(() => {
+                  const turns = visiblePeekTurns();
+                  if (!isPeekExpanded()) {
+                    queueMicrotask(() => {
+                      if (turns.length <= 1) {
+                        el.scrollTop = 0;
+                        return;
+                      }
+                      const lastTurnEl = el.querySelector(".inbox-peek-turn:last-of-type") as HTMLElement | null;
+                      if (lastTurnEl && lastTurnEl.offsetHeight > el.clientHeight * 0.75) {
+                        el.scrollTop = Math.max(0, lastTurnEl.offsetTop - 8);
+                      } else {
+                        el.scrollTop = el.scrollHeight;
+                      }
+                    });
+                  }
                 });
               }}
             >
@@ -922,9 +970,6 @@ export function InboxPage(p: {
                         {(receipt) => (
                           <details class={`inbox-peek-work ${receipt().failed ? "failed" : ""}`}>
                             <summary class="inbox-peek-work-sum">
-                              <span class="inbox-peek-work-ico" aria-hidden="true">
-                                {receipt().failed ? "✕" : "⚡"}
-                              </span>
                               <span>
                                 {receipt().failed ? "Failed" : "Worked"} — {receipt().summary}
                               </span>
@@ -940,11 +985,9 @@ export function InboxPage(p: {
                         )}
                       </Show>
                       <div class={`inbox-peek-turn ${turn.role}`}>
-                        <div class="inbox-peek-turn-head">
-                          <span class={`inbox-peek-role ${turn.role}`}>
-                            {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
-                          </span>
-                        </div>
+                        <span class={`inbox-peek-role ${turn.role}`}>
+                          {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
+                        </span>
                         <div class="inbox-peek-turn-body">
                           <Markdown text={turn.markdown || turn.text} />
                         </div>
@@ -965,7 +1008,7 @@ export function InboxPage(p: {
               <input
                 type="text"
                 class="inbox-reply-input"
-                placeholder={`Reply to ${item.headline}…`}
+                placeholder={`Reply to ${item.projectTitle}…`}
                 aria-label={`Reply in peek to ${item.headline}`}
                 value={peekReplyDrafts()[item.id] ?? ""}
                 disabled={isBusy()}
@@ -994,7 +1037,7 @@ export function InboxPage(p: {
           </div>
         </Show>
 
-        <Show when={isReplying()}>
+        <Show when={isReplying() && !isPeeked()}>
           <form
             class="inbox-reply-bar"
             onSubmit={(e) => {
@@ -1064,17 +1107,6 @@ export function InboxPage(p: {
         </div>
 
         <div class="inbox-head-right">
-          <button
-            type="button"
-            class="inbox-model-pill"
-            title="Configure Inbox AI summary model in Settings"
-            onClick={() => (p.onOpenInboxSettings ?? p.onOpenSettings)()}
-          >
-            <Ic.GearIcon size={12} />
-            <span>
-              {inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI summary off"}
-            </span>
-          </button>
           <Show when={allSections().working.length > 0}>
             <button
               type="button"
@@ -1087,14 +1119,22 @@ export function InboxPage(p: {
               <span>{allSections().working.length} working</span>
             </button>
           </Show>
-          <div class="inbox-key-legend" aria-hidden="true">
-            <span><kbd>J</kbd><kbd>K</kbd> navigate</span>
-            <span><kbd>Space</kbd> peek</span>
-            <span><kbd>U</kbd> read</span>
-            <span><kbd>R</kbd> reply</span>
-            <span><kbd>⇧R</kbd> retry</span>
-            <span><kbd>E</kbd> done</span>
-          </div>
+          <button
+            type="button"
+            class="inbox-model-pill"
+            title={
+              inboxConfig().aiSummary
+                ? `Inbox AI summaries: ${inboxConfig().model} (Click to configure)`
+                : "Inbox AI summaries off (Click to configure)"
+            }
+            aria-label={`Inbox settings (${inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI summary off"})`}
+            onClick={() => (p.onOpenInboxSettings ?? p.onOpenSettings)()}
+          >
+            <Ic.GearIcon size={13} />
+            <span class="inbox-model-pill-label">
+              {inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI off"}
+            </span>
+          </button>
         </div>
       </div>
 

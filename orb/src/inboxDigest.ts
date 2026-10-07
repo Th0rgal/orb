@@ -19,7 +19,7 @@ export type InboxDigest = {
   updatedMs: number;
 };
 
-const STORAGE_KEY = "orb:inbox-digest:v1";
+const STORAGE_KEY = "orb:inbox-digest:v3";
 const MAX_CACHE_ENTRIES = 160;
 const MAX_CONCURRENT = 2;
 
@@ -158,21 +158,18 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
     }
   }
 
-  if (!lastUser && Array.isArray(mission.history)) {
+  if (Array.isArray(mission.history)) {
     for (let i = mission.history.length - 1; i >= 0; i--) {
       const h = mission.history[i];
-      if (h.role === "user" && h.content?.trim()) {
+      if (!lastUser && h.role === "user" && h.content?.trim()) {
         lastUser = cleanUserText(h.content);
-        break;
       }
-    }
-  }
-  if (!lastAssistant && Array.isArray(mission.history)) {
-    for (let i = mission.history.length - 1; i >= 0; i--) {
-      const h = mission.history[i];
       if (h.role === "assistant" && h.content?.trim()) {
-        lastAssistant = cleanAssistantText(h.content);
-        break;
+        const cleaned = cleanAssistantText(h.content);
+        if (cleaned) {
+          lastAssistant = cleaned;
+          break;
+        }
       }
     }
   }
@@ -188,12 +185,13 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
 }
 
 const DIGEST_PROMPT = [
-  "Summarize the latest turn of this coding agent conversation for an operator Inbox card.",
+  "Summarize the latest turn of this coding agent conversation for a minimalist operator Inbox card.",
   "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-  '{"task":"<concise 5-12 word summary of what the user last asked or the mission goal>","outcome":"<concise 6-16 word summary of what the agent actually did and its result>","verdict":"succeeded|failed|waiting|needs_input"}',
+  '{"task":"<concise 4-10 word summary of the latest follow-up request, or empty string if identical to the mission title>","outcome":"<concise 6-15 word summary of the concrete result, answer, or specific blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
   "Rules:",
   "- Write in the same language as the conversation.",
-  "- Never say vague filler like 'Here is the edited policy' or 'I will wait for the background task'; state specifically what was produced, changed, verified, or what it is waiting on.",
+  "- If there is no follow-up request different from the mission title, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\" or \"Mission stopped and is currently blocked\".",
+  "- In \"outcome\", state the specific technical finding, commit/PR, answer, or exact failure reason.",
   "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
 ].join("\n");
 
@@ -318,14 +316,10 @@ export function requestInboxDigest(
   if (!isConnected()) return;
   const cfg = inboxConfig();
   if (!cfg.aiSummary) return;
-  // Avoid calling remote /btw for local-only unsynced sessions
-  if (mission.tags?.includes("placement:client")) return;
-
-  const hasContent =
+  const hasConversation =
     (items && items.some((i) => i.kind === "text" || i.kind === "user" || i.kind === "error")) ||
-    (Array.isArray(mission.history) && mission.history.length > 0) ||
-    Boolean(mission.terminal_reason || mission.status_message);
-  if (!hasContent) return;
+    (Array.isArray(mission.history) && mission.history.length > 0);
+  if (!hasConversation) return;
 
   const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
   if (getCachedInboxDigest(mission.id, updatedMs, cfg.model)) return;

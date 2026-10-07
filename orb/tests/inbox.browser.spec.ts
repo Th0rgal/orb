@@ -205,7 +205,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   // Sidebar shows Inbox with actionable badge count (4: m-perm, m-question, m-failed, m-done; m-working & m-child-fail are quiet/grouped)
   const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
-  await expect(inboxNav).toBeVisible();
+  await expect(inboxNav).toBeVisible({ timeout: 15000 });
   await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("4");
 
   // Open Inbox via ⌘I shortcut
@@ -271,16 +271,24 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   // Replied mission immediately leaves the actionable list
   await expect(questionRow).toBeHidden();
 
-  // Verify m-done shows the Task/Outcome digest, grouped child track failure pill, and Space peek preview
+  // Verify m-done shows the Asked/outcome digest, grouped child track failure pill, and Space peek preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
   await expect(doneRow.locator(".inbox-task-text")).toHaveText(
     "Hide the sidebar scroll thumb until hover.",
   );
-  await expect(doneRow.locator(".inbox-digest-tag.outcome")).toContainText("Outcome");
+  await expect(doneRow.locator(".inbox-verdict-glyph.succeeded")).toHaveText("✓");
   await expect(doneRow.locator(".inbox-child-pill.failed")).toContainText(
     "1 track failed: Track G-4 Proof Closure",
   );
   await doneRow.hover();
+
+  // Verify the triage toolbar sits in the header row and never overlaps the summary or task text
+  const toolbarBox = await doneRow.locator(".inbox-triage-btns").boundingBox();
+  const summaryBox = await doneRow.locator(".inbox-summary").boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  expect(summaryBox).not.toBeNull();
+  expect(toolbarBox!.y + toolbarBox!.height).toBeLessThanOrEqual(summaryBox!.y + 4);
+
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
   await expect(doneRow.locator(".inbox-peek-drawer")).toContainText(
@@ -338,10 +346,19 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
   await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
   // Wait for skeleton to finish and real production rows or zero state to appear
   await expect(page.locator(".inbox-skeleton")).toBeHidden({ timeout: 15000 });
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(3500);
   const outDir = process.env.ORB_SCREENSHOT_DIR;
   if (outDir) {
     await page.screenshot({ path: join(outDir, "orb-desktop-inbox-prod-dark.png") });
+    const firstRow = page.locator(".inbox-row").first();
+    if ((await firstRow.count()) > 0) {
+      await firstRow.hover();
+      await firstRow.locator(".inbox-act-btn", { hasText: "Peek" }).click();
+      await expect(firstRow.locator(".inbox-peek-drawer")).toBeVisible();
+      await page.waitForTimeout(500);
+      await page.screenshot({ path: join(outDir, "orb-desktop-inbox-prod-peek.png") });
+      await firstRow.locator(".inbox-act-btn", { hasText: "Peek" }).click();
+    }
     await page.evaluate(() => {
       document.documentElement.dataset.theme = "light";
       localStorage.setItem("orb-theme", "light");

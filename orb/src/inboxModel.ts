@@ -425,6 +425,7 @@ export function classifyInboxMission(
 function humanizeStatusText(raw: string | null | undefined): string {
   const trimmed = (raw ?? "")
     .trim()
+    .replace(/\s*diagnostics:\s*\d{4}-\d{2}-\d{2}T[\s\S]*$/i, "")
     .replace(/;\s*error:\s*command exited with (?:Some\()?(-?\d+)\)?/gi, "")
     .replace(/\(exit Some\((-?\d+)\)\)/g, "(exit $1)")
     .replace(/\bSome\((-?\d+)\)/g, "$1")
@@ -448,6 +449,29 @@ function humanizeStatusText(raw: string | null | undefined): string {
   return trimmed;
 }
 
+function stripLeadingNarration(raw: string): string {
+  const paragraphs = raw
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (paragraphs.length > 1) {
+    const isProceduralOrClosing = (p: string) =>
+      /^(no local repo\b|let me\b|i['’]ll\b|i will\b|je vais\b|je reprends\b|gh appears\b|if you['’]?d? (?:like|want)\b|let me know if\b|would you like me to\b|si tu veux\b)/i.test(
+        p,
+      );
+    const substantive = paragraphs.filter((p) => !isProceduralOrClosing(p) && p.length >= 28);
+    if (substantive.length > 0) {
+      // Pick the last substantive paragraph so the final finding/conclusion is shown rather than early narration
+      return substantive.at(-1)!;
+    }
+  }
+  const stripped = raw.replace(
+    /^(?:(?:No local repo\.|gh appears stuck\.|[^.!?\n]*\b(?:Let me|I['’]ll|I will)\b[^.!?\n]*[.!?])\s*)+/i,
+    "",
+  );
+  return stripped.trim().length >= 24 ? stripped.trim() : raw;
+}
+
 function extractSummary(
   mission: Mission,
   items?: StreamItem[],
@@ -455,8 +479,27 @@ function extractSummary(
 ): string {
   if (interaction?.prompt) return interaction.prompt;
 
+  if (Array.isArray(mission.history) && mission.history.length > 0) {
+    for (let i = mission.history.length - 1; i >= 0; i--) {
+      const entry = mission.history[i];
+      if (entry.role === "assistant" && entry.content?.trim()) {
+        const cleanHist = humanizeStatusText(entry.content) || entry.content;
+        const clipped = clipToSentence(stripLeadingNarration(cleanHist));
+        if (clipped) return clipped;
+      }
+    }
+  }
+
   if (items && items.length > 0) {
+    let lastUserIdx = -1;
     for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === "user" && !it.queued) {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    for (let i = items.length - 1; i > lastUserIdx; i--) {
       const item = items[i];
       if (item.kind === "error" && item.text.trim()) {
         const cleanErr = humanizeStatusText(item.text) || item.text;
@@ -464,17 +507,7 @@ function extractSummary(
       }
       if (item.kind === "text" && item.text.trim()) {
         const cleanTxt = humanizeStatusText(item.text) || item.text;
-        return clipToSentence(cleanTxt);
-      }
-    }
-  }
-
-  if (Array.isArray(mission.history) && mission.history.length > 0) {
-    for (let i = mission.history.length - 1; i >= 0; i--) {
-      const entry = mission.history[i];
-      if (entry.role === "assistant" && entry.content?.trim()) {
-        const cleanHist = humanizeStatusText(entry.content) || entry.content;
-        return clipToSentence(cleanHist);
+        return clipToSentence(stripLeadingNarration(cleanTxt));
       }
     }
   }
@@ -576,7 +609,9 @@ function cleanUserMarkdown(raw: string): string {
 }
 
 function cleanAssistantMarkdown(raw: string): string {
-  return parseRemoteLog(raw).text.trim();
+  return parseRemoteLog(raw)
+    .text.replace(/\n*diagnostics:\s*\d{4}-\d{2}-\d{2}T[\s\S]*$/i, "")
+    .trim();
 }
 
 function formatToolDetail(tool: Extract<StreamItem, { kind: "tool" }>): string {
@@ -625,9 +660,6 @@ export function extractLastRequest(mission: Mission, items?: StreamItem[]): stri
         if (cleaned) return clipToSentence(cleaned, 120);
       }
     }
-  }
-  if (mission.goal_objective?.trim()) {
-    return clipToSentence(mission.goal_objective, 120);
   }
   return undefined;
 }
@@ -700,9 +732,17 @@ export function extractAllPeekTurns(
         const prev = turns.at(-1);
         const receipt = buildWorkReceipt(pendingTools);
         pendingTools = [];
-        if (prev?.role === "assistant" && prev.text === clipped) {
-          if (md.length > (prev.markdown?.length ?? 0)) prev.markdown = md;
-          if (receipt && !prev.workReceipt) prev.workReceipt = receipt;
+        if (prev?.role === "assistant") {
+          prev.text = clipped;
+          prev.markdown = md;
+          if (receipt) {
+            if (prev.workReceipt) {
+              prev.workReceipt.toolCount += receipt.toolCount;
+              prev.workReceipt.details = [...prev.workReceipt.details, ...receipt.details].slice(-6);
+            } else {
+              prev.workReceipt = receipt;
+            }
+          }
         } else if (clean || md) {
           turns.push({
             role: "assistant",
@@ -712,19 +752,46 @@ export function extractAllPeekTurns(
           });
         }
       } else if (item.kind === "error" && item.text.trim()) {
-        const md = humanizeStatusText(item.text) || item.text.trim();
+        const md = cleanAssistantMarkdown(humanizeStatusText(item.text) || item.text.trim());
         const clean = stripMarkdownToProse(md);
         const receipt = buildWorkReceipt(pendingTools);
-        if (receipt) receipt.failed = true;
+        const isActualError =
+          /^(error|fatal|panic|remote\s+\S+\s+run|native\s+codex\s+goal\s+stopped|command\s+exited|failed\b)/i.test(
+            clean,
+          ) || md.length < 220;
+        if (receipt && isActualError) receipt.failed = true;
         pendingTools = [];
         if (clean || md) {
           turns.push({
-            role: "error",
+            role: isActualError ? "error" : "assistant",
             text: clipToSentence(clean || md, 240),
             markdown: md,
             workReceipt: receipt,
           });
         }
+      }
+    }
+    const histLastAssistant = Array.isArray(mission.history)
+      ? [...mission.history].reverse().find((h) => h.role === "assistant" && h.content?.trim())
+      : undefined;
+    if (histLastAssistant?.content) {
+      const md = cleanAssistantMarkdown(histLastAssistant.content);
+      const clean = stripMarkdownToProse(humanizeStatusText(md) || md);
+      const clipped = clipToSentence(clean || md, 240);
+      const receipt = buildWorkReceipt(pendingTools);
+      pendingTools = [];
+      const last = turns.at(-1);
+      if (last?.role === "assistant") {
+        last.text = clipped;
+        last.markdown = md;
+        if (receipt && !last.workReceipt) last.workReceipt = receipt;
+      } else if (clean || md) {
+        turns.push({
+          role: "assistant",
+          text: clipped,
+          markdown: md,
+          workReceipt: receipt,
+        });
       }
     }
   } else if (Array.isArray(mission.history) && mission.history.length > 0) {
@@ -758,11 +825,17 @@ export function extractAllPeekTurns(
     (mission.status === "failed" || mission.status === "blocked" || mission.status === "not_feasible") &&
     !turns.some((t) => t.role === "error")
   ) {
-    turns.push({
-      role: "error",
-      text: clipToSentence(errDetail, 240),
-      markdown: errDetail,
-    });
+    const clippedErr = clipToSentence(errDetail, 240);
+    const lastTurn = turns.at(-1);
+    const lastText = (lastTurn?.markdown || lastTurn?.text || "").toLowerCase();
+    const errPrefix = clippedErr.slice(0, 32).toLowerCase();
+    if (!lastTurn || !errPrefix || !lastText.includes(errPrefix)) {
+      turns.push({
+        role: "error",
+        text: clippedErr,
+        markdown: errDetail,
+      });
+    }
   }
 
   if (turns.length === 0 && summaryFallback) {

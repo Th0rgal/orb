@@ -429,4 +429,43 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(inboxConfig().model).toBe("builtin/fast");
     saveInboxConfig({ aiSummary: true, model: "builtin/smart" });
   });
+
+  it("strips noisy codex_app_server diagnostics and avoids duplicate error turns in peek", () => {
+    const blockedVerity = makeMission({
+      id: "m-verity",
+      title: "/goal Complete the existing lfglabs-dev/verity roadmap",
+      goal_mode: true,
+      goal_objective: "Complete the existing lfglabs-dev/verity roadmap",
+      status: "blocked",
+      project: "orb",
+      status_message:
+        "Native Codex goal stopped with status 'paused'; the objective and counters are preserved. Resume after resolving that stop.\n\ndiagnostics: 2026-10-07T16:10:33.000520Z ERROR codex_app_server: Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted",
+      history: [
+        {
+          role: "assistant",
+          content:
+            "All 10 PRs are merged and all roadmap deliverables verified. Work and validation receipts are preserved.",
+        },
+      ],
+    });
+
+    const sections = buildInboxSections(
+      [blockedVerity],
+      sampleProjects,
+      () => undefined,
+      () => undefined,
+      Date.parse("2026-10-07T16:25:00Z"),
+    );
+
+    const item = sections.needsYou[0];
+    // goal_objective is not duplicated into lastRequest when there is no distinct user message
+    expect(item.lastRequest).toBeUndefined();
+    expect(item.allPeekTurns).toHaveLength(2);
+    expect(item.allPeekTurns[0].role).toBe("assistant");
+    expect(item.allPeekTurns[1].role).toBe("error");
+    expect(item.allPeekTurns[1].markdown).not.toContain("codex_app_server");
+    expect(item.allPeekTurns[1].markdown).toContain(
+      "Native Codex goal stopped with status 'paused'",
+    );
+  });
 });
