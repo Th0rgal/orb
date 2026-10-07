@@ -13,6 +13,11 @@ declare global {
         height?: number;
         radius?: number;
         speed?: number;
+        flowAmp?: number;
+        metalAmp?: number;
+        relightAmp?: number;
+        iridAmp?: number;
+        haloAmp?: number;
         animateFavicon?: boolean;
       }
     ) => { destroy: () => void } | null;
@@ -64,7 +69,11 @@ export function OrbHero() {
           width: size,
           height: size,
           radius: 0.308,
-          speed: 1.15,
+          speed: 2.15,
+          flowAmp: 2.35,
+          metalAmp: 1.50,
+          relightAmp: 2.15,
+          iridAmp: 2.05,
           animateFavicon: true,
         });
         if (instance) {
