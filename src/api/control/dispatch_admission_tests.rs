@@ -11763,3 +11763,165 @@ async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_m
         vec![first_id]
     );
 }
+
+#[tokio::test]
+async fn iphone_owned_client_mission_receives_prompt_and_streams_events() {
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let phone = Uuid::new_v4().to_string();
+    let Json(registered) = super::clients::register_client(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(
+            serde_json::from_value(json!({
+                "client_id": phone,
+                "platform": "ios",
+                "runtime": "ios",
+                "capabilities": {"local_agents": true, "arbitrary_ui_injection": false},
+                "harnesses": ["codex"],
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(registered["label"], "iPhone");
+    assert_eq!(registered["online"], true);
+
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Phone task",
+        "prompt": "Open Maps",
+        "backend": "claudecode",
+        "placement": "client",
+        "client_id": phone,
+    }))
+    .unwrap();
+    let created = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let id = Uuid::parse_str(created.1 .0["id"].as_str().unwrap()).unwrap();
+    let mission = h
+        .control
+        .mission_store
+        .get_mission(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(client_placement::is_tagged(&mission.project.tags));
+    assert_eq!(
+        worker_location::client_owner(&mission),
+        Some(phone.as_str())
+    );
+
+    // The prompt is delivered to the phone's inbox, not to another client.
+    let inbox = |client: String| {
+        let state = h.state.clone();
+        let user = h.user.clone();
+        async move {
+            machine_transfer::client_run(
+                State(state),
+                Extension(user),
+                Path(id),
+                Json(serde_json::from_value(json!({"op":"inbox_all","client_id":client})).unwrap()),
+            )
+            .await
+            .unwrap()
+            .0
+        }
+    };
+    let delivered = inbox(phone.clone()).await;
+    assert_eq!(delivered["messages"][0]["content"], "Open Maps");
+    let Json(anchorless) = super::clients::client_inbox(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(phone.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(anchorless["messages"][0]["content"], "Open Maps");
+    assert!(inbox(Uuid::new_v4().to_string()).await["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let Json(run) = machine_transfer::client_run(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(
+            serde_json::from_value(json!({"op":"begin","client_id":phone,"prompt":"Open Maps"}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let run_id: Uuid = serde_json::from_value(run["run_id"].clone()).unwrap();
+    let generation = run["generation"].as_u64().unwrap();
+
+    // Events without the run receipt are refused.
+    let stale = super::clients::append_client_events(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(
+            serde_json::from_value(json!({"events":[{"type":"text_delta","content":"x"}]}))
+                .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(stale.unwrap_err().0, StatusCode::CONFLICT);
+
+    let Json(accepted) = super::clients::append_client_events(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(
+            serde_json::from_value(json!({
+                "run_id": run_id,
+                "generation": generation,
+                "events": [
+                    {"type":"tool_call","tool_call_id":"c1","name":"computer.open_url","args":{"url":"maps://?q=coffee"}},
+                    {"type":"tool_result","tool_call_id":"c1","name":"computer.open_url","result":{"opened":true}},
+                    {"type":"thinking","content":"Maps is open","done":true}
+                ]
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted["accepted"], 3);
+    let events = h
+        .control
+        .mission_store
+        .get_events(id, None, None, None)
+        .await
+        .unwrap();
+    let kinds: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+    assert!(kinds.contains(&"tool_call"));
+    assert!(kinds.contains(&"tool_result"));
+    assert!(kinds.contains(&"thinking"));
+
+    // A client id without client placement is refused.
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Core task", "backend": "claudecode", "client_id": phone,
+    }))
+    .unwrap();
+    let refused = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await;
+    assert_eq!(refused.unwrap_err().0, StatusCode::BAD_REQUEST);
+}

@@ -1,4 +1,5 @@
 import { isBtwMission, type Mission, type ProjectSummary } from "./api";
+import { clientMachineLabel, isClientPlaced } from "./clientOwner";
 import { DEFAULT_PROJECT } from "./defaultProject";
 import { displayTitle } from "./goal";
 import type { PendingInteraction } from "./missionAttention";
@@ -473,7 +474,7 @@ function resolveBadgeAndTone(
 }
 
 function resolveMachine(mission: Mission): string | undefined {
-  if (mission.tags?.includes("placement:client")) return "This computer";
+  if (isClientPlaced(mission)) return clientMachineLabel(mission);
   if (mission.backend?.startsWith("cloud_")) {
     return (
       {

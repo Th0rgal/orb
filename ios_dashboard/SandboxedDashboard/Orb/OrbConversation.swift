@@ -255,7 +255,7 @@ struct OrbConversation: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 if unavailable {
-                    ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))
+                    ContentUnavailableView("Side conversation", systemImage: "bubble.left.and.text.bubble.right", description: Text("This side conversation belongs to the Orb client that started it and cannot be continued here."))
                 } else {
                     conversationContent(scroll: scroll)
                 }
@@ -1138,6 +1138,12 @@ struct OrbConversation: View {
                     body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
+                    else if selection.node == OrbSelection.iPhoneNode {
+                        // Runs on this iPhone: Core records it and delivers the prompt to this client's inbox.
+                        body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model)
+                        body["placement"] = .string("client"); body["client_id"] = .string(OrbClientIdentity.id)
+                        if selection.backend == "codex" { body["tags"] = .array(body["tags"]!.items + [.string(LocalAgentNode.engineTag + selection.engine)]) }
+                    }
                     else { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty && selection.node != "core" { body["remote_node_id"] = .string(selection.node) } }
                     pending = OrbPending(path: "/api/control/missions", body: .object(body))
                 }
@@ -1198,6 +1204,11 @@ struct OrbConversation: View {
     }
     private func cancel() async {
         guard let id else { return }
+        if OrbRow(mission).ownedByThisIPhone {
+            await LocalAgentNode.shared.stop(mission: id)
+            await refresh(force: true)
+            return
+        }
         do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(isCloud ? "cloud/cancel" : "cancel")", method: "POST"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func removeQueued(_ message: String) async {
@@ -1835,13 +1846,18 @@ private struct OrbMissionTasksCard: View {
 }
 
 struct OrbSelection {
+    static let iPhoneNode = "this-iphone"
     var provider = "agent", account = "", backend = "", model = "", node = "", repository = "", gitRef = ""
+    /// On-iPhone Codex engine: `cli` (Codex CLI in the local Linux runtime) or
+    /// `computer-use` (native Responses API computer-use loop, no runtime needed).
+    var engine = "computer-use"
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
     var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Choose agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
     var compactLabel: String {
         let base = model.isEmpty ? label : model
+        if !cloud && node == Self.iPhoneNode { return "\(base) · iPhone" }
         if !cloud && !node.isEmpty && node != "core" {
             return "\(base) · \(node)"
         }
@@ -1923,7 +1939,16 @@ struct OrbAgentPicker: View {
                     }
                 } else {
                     Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.disabled(existing).accessibilityIdentifier("picker.harness")
-                    if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag("core"); ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
+                    if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag("core"); if LocalAgentNode.shared.enabled { Text("This iPhone").tag(OrbSelection.iPhoneNode) }; ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
+                    if !existing && selection.node == OrbSelection.iPhoneNode {
+                        if selection.backend == "codex" {
+                            Picker("Engine", selection: $selection.engine) {
+                                Text("Computer use (built in)").tag(LocalAgentNode.computerUseEngine)
+                                Text("Codex CLI (Linux runtime)").tag(LocalAgentNode.cliEngine)
+                            }
+                        }
+                        Text(OrbLocalAgentsSettings.harnessNote(selection.backend, engine: selection.engine)).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 if selection.provider != "grok_bot" { Picker("Model", selection: $selection.model) {
                     Text("Service default").tag("")

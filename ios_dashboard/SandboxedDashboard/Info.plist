@@ -74,5 +74,22 @@
     <array>
         <string>audio</string>
     </array>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>md.thomas.openagent.dashboard.agent.*</string>
+    </array>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>shortcuts</string>
+        <string>tg</string>
+        <string>whatsapp</string>
+        <string>uber</string>
+        <string>comgooglemaps</string>
+        <string>spotify</string>
+        <string>youtube</string>
+        <string>slack</string>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Agents running on this iPhone connect to Orb's on-device tool server over the loopback interface.</string>
 </dict>
 </plist>

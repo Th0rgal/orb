@@ -6,6 +6,10 @@ options:
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
 
+packages:
+  OrbLocalKit:
+    path: OrbLocalKit
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -35,9 +39,91 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_EMIT_LOC_STRINGS: "YES"
         GENERATE_INFOPLIST_FILE: "NO"
+        SWIFT_OBJC_BRIDGING_HEADER: SandboxedDashboard/OrbLocal/Orb-Bridging-Header.h
+        # Link iSH ARM64 (OpenMinis/ish-arm64) for the on-device Linux runtime:
+        # set ORB_ISH_BUILD_DIR to its meson build dir and add
+        # ORB_WITH_ISH=1 to GCC_PREPROCESSOR_DEFINITIONS (see docs/IOS_LOCAL_AGENT_CAPABILITIES.md).
+        # Without it the runtime reports itself unavailable; computer use still works.
+        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) $(ORB_ISH_DEFINES)"
+        HEADER_SEARCH_PATHS: "$(inherited) $(ORB_ISH_SOURCE_DIR)"
+        OTHER_LDFLAGS: "$(inherited) $(ORB_ISH_LDFLAGS)"
+    dependencies:
+      - package: OrbLocalKit
+      - target: OrbKeyboard
+      - target: OrbScreenBroadcast
+      - sdk: libresolv.tbd
     entitlements:
       path: SandboxedDashboard/SandboxedDashboard.entitlements
-      properties: {}
+      properties:
+        com.apple.security.application-groups:
+          - group.md.thomas.openagent.dashboard
+
+  OrbKeyboard:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: OrbKeyboard
+    dependencies:
+      - package: OrbLocalKit
+    info:
+      path: OrbKeyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Orb
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).KeyboardViewController"
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            RequestsOpenAccess: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openagent.dashboard.keyboard
+        PRODUCT_NAME: OrbKeyboard
+        MARKETING_VERSION: "1.4.0"
+        CURRENT_PROJECT_VERSION: "2026100702"
+    entitlements:
+      path: OrbKeyboard/OrbKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.md.thomas.openagent.dashboard
+
+  OrbScreenBroadcast:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: OrbScreenBroadcast
+    dependencies:
+      - sdk: ReplayKit.framework
+    info:
+      path: OrbScreenBroadcast/Info.plist
+      properties:
+        CFBundleDisplayName: Orb Screen
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).SampleHandler"
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openagent.dashboard.screen
+        PRODUCT_NAME: OrbScreenBroadcast
+        # ReplayKit invokes the handler on its own queue; the ObjC base class is
+        # not Sendable, so this small extension builds in Swift 5 mode.
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.4.0"
+        CURRENT_PROJECT_VERSION: "2026100702"
+    entitlements:
+      path: OrbScreenBroadcast/OrbScreenBroadcast.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.md.thomas.openagent.dashboard
 
   SandboxedDashboardTests:
     type: bundle.unit-test

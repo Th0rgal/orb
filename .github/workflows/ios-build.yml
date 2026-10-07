@@ -50,3 +50,18 @@ jobs:
             -scheme SandboxedDashboard \
             -destination "generic/platform=iOS" \
             CODE_SIGNING_ALLOWED=NO
+
+  orb-local-kit:
+    name: OrbLocalKit tests (Linux)
+    # Platform-neutral core of the on-iPhone agent runtime: harness dialects,
+    # runner lifecycle, computer-use loop, MCP server, keyboard queue.
+    runs-on: ubuntu-24.04
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    container: swift:6.1-noble
+    defaults:
+      run:
+        working-directory: ios_dashboard/OrbLocalKit
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test
+        run: swift test

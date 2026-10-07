@@ -56,3 +56,8 @@ it('keeps delivery pending when binding persistence fails',async()=>{
  expect(mocks.enqueue).not.toHaveBeenCalled();
  expect(mocks.api.mock.calls.some(c=>JSON.parse(c[1].body).op==='received')).toBe(false);
 });
+
+it('never claims a mission owned by an iPhone',async()=>{
+ stop=startClientDelegations(()=>[{...mission,tags:['placement:client','worker-client:computer','client-platform:ios']}] as never);await vi.advanceTimersByTimeAsync(1);
+ expect(mocks.api).not.toHaveBeenCalled();
+});

@@ -510,8 +510,8 @@ enum OrbInboxModel {
     }
 
     static func resolveMachine(row: OrbRow) -> String {
-        if row.raw["tags"].items.contains(where: { $0.text == "placement:client" }) {
-            return "This computer"
+        if row.clientPlaced {
+            return row.clientMachineLabel
         }
         if row.backend.hasPrefix("cloud_") {
             return OrbStyle.serviceName(row.backend)

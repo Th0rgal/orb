@@ -1,4 +1,5 @@
 import { missionParent } from "./missionTree";
+import { clientMachineLabel, ownedByMobileClient } from "./clientOwner";
 import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue, type RemoteQueueHandle } from "./RemoteQueue";
 import { CyberPicker, MissionCyber, draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
@@ -1410,7 +1411,7 @@ export default function App() {
     const modelLabel = choice?.models.find(m => m.value === model)?.label;
     const effort = normalizeEffort(mission?.model_effort, backend);
     return { id, title: displayTitle(mission?.title) || "Mission", local,
-      destination: local ? "This computer" : missionDestination(mission ?? null, recalledLaunch(id)),
+      destination: local ? clientMachineLabel(mission) : missionDestination(mission ?? null, recalledLaunch(id)),
       directory: binding?.cwd || mission?.working_directory,
       parent: mission && missionParent(mission) ? missions().find(m => m.id === missionParent(mission))?.title || missionParent(mission) : undefined,
       children: missions().filter(m => missionParent(m) === id).length,
@@ -2821,7 +2822,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     });
   }));
 
-  const localMissionId=createMemo(()=>mission()?.tags?.includes("placement:client")?p.id:null);
+  const localMissionId=createMemo(()=>mission()?.tags?.includes("placement:client")&&!ownedByMobileClient(mission())?p.id:null);
   createEffect(() => {
     const id=localMissionId();
     if(!id)return;

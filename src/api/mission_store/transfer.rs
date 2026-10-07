@@ -14,7 +14,8 @@ impl Machine {
         match self {
             Self::Core => "Core".into(),
             Self::Node { id } => id.clone(),
-            Self::Client { .. } => "This computer".into(),
+            // Core cannot know which device is reading; never say "this computer".
+            Self::Client { .. } => "an Orb client device".into(),
         }
     }
 }

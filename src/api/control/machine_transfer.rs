@@ -1016,51 +1016,9 @@ pub async fn client_run(
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
     if req.op == "inbox_all" {
-        let items = control
-            .mission_store
-            .list_pending_board_outbox_filtered(1000, Some(true))
-            .await
-            .map_err(internal_error)?;
-        let mut owners = std::collections::HashMap::new();
-        let mut messages = Vec::new();
-        for item in items
-            .into_iter()
-            .filter(|item| item.delivery_kind == worker_location::CLIENT_DELIVERY)
-        {
-            let target = item.boss_mission_id;
-            if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(target) {
-                entry.insert(
-                    worker_location::resolved_client_owner(&control.mission_store, target)
-                        .await
-                        .map_err(internal_error)?,
-                );
-            }
-            if owners.get(&target).and_then(|owner| owner.as_deref())
-                == Some(req.client_id.as_str())
-            {
-                // A target that no longer exists must not hold up delivery
-                // for the computer's other workers; its rows are retired.
-                let candidate = match control.mission_store.get_mission(target).await {
-                    Ok(Some(candidate)) => candidate,
-                    Ok(None) => {
-                        tracing::warn!(target = %target, "client delivery target is gone; retiring its message");
-                        let _ = control
-                            .mission_store
-                            .acknowledge_board_outbox(&item.idempotency_key)
-                            .await;
-                        continue;
-                    }
-                    Err(error) => return Err(internal_error(error)),
-                };
-                if worker_location::board_allows_client_run(&control.mission_store, &candidate)
-                    .await
-                    .map_err(internal_error)?
-                {
-                    messages.push(item.payload);
-                }
-            }
-        }
-        return Ok(Json(json!({"messages":messages})));
+        return Ok(Json(
+            json!({"messages":client_inbox(&control, &req.client_id).await?}),
+        ));
     }
     if !client_placement::is_tagged(&m.project.tags) {
         return Err(conflict(
@@ -1229,6 +1187,56 @@ pub async fn client_run(
         json!({"run_id":run.run_id,"generation":run.generation}),
     ))
 }
+/// Pending deliveries for every mission owned by `client_id`.
+pub(crate) async fn client_inbox(
+    control: &ControlState,
+    client_id: &str,
+) -> Result<Vec<Value>, Error> {
+    let items = control
+        .mission_store
+        .list_pending_board_outbox_filtered(1000, Some(true))
+        .await
+        .map_err(internal_error)?;
+    let mut owners = std::collections::HashMap::new();
+    let mut messages = Vec::new();
+    for item in items
+        .into_iter()
+        .filter(|item| item.delivery_kind == worker_location::CLIENT_DELIVERY)
+    {
+        let target = item.boss_mission_id;
+        if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(target) {
+            entry.insert(
+                worker_location::resolved_client_owner(&control.mission_store, target)
+                    .await
+                    .map_err(internal_error)?,
+            );
+        }
+        if owners.get(&target).and_then(|owner| owner.as_deref()) == Some(client_id) {
+            // A target that no longer exists must not hold up delivery
+            // for the computer's other workers; its rows are retired.
+            let candidate = match control.mission_store.get_mission(target).await {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => {
+                    tracing::warn!(target = %target, "client delivery target is gone; retiring its message");
+                    let _ = control
+                        .mission_store
+                        .acknowledge_board_outbox(&item.idempotency_key)
+                        .await;
+                    continue;
+                }
+                Err(error) => return Err(internal_error(error)),
+            };
+            if worker_location::board_allows_client_run(&control.mission_store, &candidate)
+                .await
+                .map_err(internal_error)?
+            {
+                messages.push(item.payload);
+            }
+        }
+    }
+    Ok(messages)
+}
+
 pub(crate) async fn check_client_receipt(
     control: &ControlState,
     id: Uuid,

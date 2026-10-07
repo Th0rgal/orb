@@ -1,4 +1,5 @@
 import type { DraftImage } from "./imageAttachments";
+import { clientMachineLabel, isClientPlaced } from "./clientOwner";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice } from "./ErrorNotice";
 import { Show } from "solid-js";
@@ -39,7 +40,7 @@ export function dockModelLabel(harnessName: string, modelLabel: string): string 
 export function missionDestination(mission: Mission | null, receipt?: LaunchReceipt) {
   const destination = mission?.machine_transfer?.destination;
   if (destination) return destination.kind === "core" ? "Core" : destination.kind === "client" ? "This computer" : nodeLabel(destination.id);
-  if (mission?.tags?.includes("placement:client") || receipt?.nodeId === "local") return "This computer";
+  if (isClientPlaced(mission) || receipt?.nodeId === "local") return clientMachineLabel(mission);
   // Server-owned remote placement or the accepted selection takes precedence
   // over workspace_name, which can still name the host's bookkeeping workspace.
   return nodeLabel(mission?.remote_job?.node_id ?? mission?.remote_node_id ?? receipt?.nodeId ?? mission?.workspace_name ?? "selected machine");

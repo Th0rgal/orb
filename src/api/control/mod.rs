@@ -10,6 +10,7 @@
 pub(crate) mod btw_context;
 mod callback_parent;
 pub(crate) mod client_placement;
+pub(crate) mod clients;
 pub(crate) mod continuations;
 pub mod cyber;
 pub(crate) mod deferred_messages;
@@ -8901,10 +8902,15 @@ pub struct CreateMissionRequest {
     /// Orb `@` chips: materialized into `.paloma/` before the harness starts.
     #[serde(default)]
     pub attachments: Option<Vec<crate::api::mission_payload::MissionAttachment>>,
-    /// `"client"` means the Orb desktop that created the mission runs the CLI.
-    /// The backend records the mission and does not start a harness.
+    /// `"client"` means a connected Orb client (desktop or iPhone) runs the
+    /// CLI. The backend records the mission and does not start a harness.
     #[serde(default)]
     pub placement: Option<String>,
+    /// Registered Orb client that owns a `placement:"client"` mission. When
+    /// set, the initial prompt is delivered to that client's inbox; without
+    /// it, the creating client claims the mission by beginning a run.
+    #[serde(default)]
+    pub client_id: Option<String>,
     /// Catch-all for unrecognized request fields. Serde ignores unknown fields
     /// by default, which has repeatedly hidden client bugs (a `prompt` sent
     /// before the field existed, a mistyped `target_mission_id`). Captured
@@ -11266,6 +11272,7 @@ pub(super) async fn create_mission_inner(
         origin_session_id: None,
         attachments: None,
         placement: None,
+        client_id: None,
         extra: Default::default(),
     });
 
@@ -11884,6 +11891,17 @@ pub(super) async fn create_mission_inner(
             "placement client cannot target a remote node".into(),
         ));
     }
+    if !client_placement
+        && req
+            .client_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "client_id requires placement client".into(),
+        ));
+    }
     // A client placement executes on the Orb machine, same as a remote node:
     // do not probe the backend host for the CLI.
     let runs_locally = !client_placement
@@ -12024,6 +12042,36 @@ pub(super) async fn create_mission_inner(
         let tags = normalized_request_tags.get_or_insert_with(Vec::new);
         if !client_placement::is_tagged(tags) {
             tags.push(client_placement::TAG.to_string());
+        }
+        if let Some(owner) = req
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let owner = Uuid::parse_str(owner)
+                .ok()
+                .filter(|id| !id.is_nil())
+                .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id".to_string()))?;
+            let tag = format!("{}{owner}", worker_location::CLIENT_TAG);
+            if tags
+                .iter()
+                .any(|t| t.starts_with(worker_location::CLIENT_TAG) && t != &tag)
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "client_id conflicts with the mission's owning client".into(),
+                ));
+            }
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+            if let Some(record) =
+                clients::get(&state.config.working_dir, &user.id, owner).map_err(internal_error)?
+            {
+                tags.retain(|t| !t.starts_with(clients::PLATFORM_TAG));
+                tags.push(format!("{}{}", clients::PLATFORM_TAG, record.platform));
+            }
         }
     }
     if let Some(estimated_gib) = effective_estimated_disk_gib {
@@ -18725,6 +18773,7 @@ pub async fn clone_mission(
         origin_session_id: source.origin_session_id.clone(),
         attachments: None,
         placement: None,
+        client_id: None,
         extra: Default::default(),
     };
 

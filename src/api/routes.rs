@@ -991,6 +991,19 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::set_client_mission_status),
         )
         .route(
+            "/api/control/missions/:id/client-events",
+            post(control::clients::append_client_events)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/api/control/clients",
+            get(control::clients::list_clients).post(control::clients::register_client),
+        )
+        .route(
+            "/api/control/clients/:id/inbox",
+            get(control::clients::client_inbox),
+        )
+        .route(
             "/api/control/missions/:id/title",
             post(control::set_mission_title),
         )

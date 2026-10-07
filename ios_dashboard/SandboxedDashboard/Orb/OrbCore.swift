@@ -71,6 +71,19 @@ struct OrbRow: Identifiable, Hashable {
         return cp.isEmpty ? nil : cp
     }
     var mobile: Bool { !raw["tags"].items.contains(where: { $0.text.hasPrefix("btw-parent:") }) }
+    var clientPlaced: Bool { raw["tags"].items.contains { $0.text == "placement:client" } }
+    var ownedByThisIPhone: Bool { raw["tags"].items.contains { $0.text == "worker-client:\(OrbClientIdentity.id)" } }
+    /// Who runs a client-placed mission. Never assumes a desktop.
+    var clientMachineLabel: String {
+        if ownedByThisIPhone { return "This iPhone" }
+        let platform = raw["tags"].items.map(\.text).first { $0.hasPrefix("client-platform:") }.map { String($0.dropFirst(16)) }
+        switch platform {
+        case "ios": return "iPhone"
+        case "ipados": return "iPad"
+        case "macos": return "Mac"
+        default: return "Orb desktop"
+        }
+    }
     var active: Bool { ["active", "pending", "running", "starting"].contains(state) }
 }
 

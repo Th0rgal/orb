@@ -30,6 +30,8 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.providers")
                 NavigationLink { OrbMachinesSettings() } label: { Label("Machines", systemImage: "desktopcomputer") }
                     .accessibilityIdentifier("settings.machines")
+                NavigationLink { OrbLocalAgentsSettings() } label: { Label("This iPhone", systemImage: "iphone") }
+                    .accessibilityIdentifier("settings.this-iphone")
             }
             .scrollContentBackground(.hidden).background(OrbStyle.background)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)

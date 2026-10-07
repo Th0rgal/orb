@@ -1,4 +1,5 @@
 import { api, connectionVersion, getMission, type Mission } from './api';
+import { ownedByMobileClient } from './clientOwner';
 import { machineIdentity, nativeInvoke } from './clientRuns';
 import { localBinding, localDirectory, recordLocalFailure, refreshLocalAgents, rememberBinding, restoreLocalBindings } from './localAgents';
 import { captureWakeupFences, enqueueLocalMessage } from './localMessageQueue';
@@ -17,7 +18,8 @@ export function startClientDelegations(missions: () => Mission[]) {
     try {
       const clientId = await machineIdentity();
       await restoreLocalBindings();
-      const anchor = missions().find(mission => mission.tags?.includes('placement:client') &&
+      // Phone-owned missions are claimed by Orb iOS, never by a desktop.
+      const anchor = missions().find(mission => mission.tags?.includes('placement:client') && !ownedByMobileClient(mission) &&
         (mission.tags.includes(`worker-client:${clientId}`) || !!localBinding(mission.id)));
       if (!anchor || !valid()) return;
       const post = <T>(id:string,body:object) => api<T>(`/api/control/missions/${id}/client-run`, {
