@@ -453,6 +453,12 @@ pub fn local_agents_poll(id: String) -> Result<PollState, String> {
 
 /// Read only the execution owned by the caller, under the same registry lock.
 pub fn poll_generation(id: &str, expected: Option<&str>) -> Result<PollState, String> {
+    if expected.is_none() {
+        let has_run = runs().lock().map_err(|e| e.to_string())?.contains_key(id);
+        if !has_run {
+            let _ = try_reattach_orphan_antigravity(id);
+        }
+    }
     let map = runs().lock().map_err(|e| e.to_string())?;
     let run = map.get(id).ok_or_else(|| "no local run".to_string())?;
     if expected.is_some_and(|generation| generation != run.generation) {
@@ -478,6 +484,10 @@ pub fn local_agents_subscribe(
     id: String,
     on_event: tauri::ipc::Channel<OutputEvent>,
 ) -> Result<u64, String> {
+    let has_run = runs().lock().map_err(|e| e.to_string())?.contains_key(&id);
+    if !has_run {
+        let _ = try_reattach_orphan_antigravity(&id);
+    }
     let run = runs()
         .lock()
         .map_err(|e| e.to_string())?
@@ -539,6 +549,9 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         let status = child.wait().map_err(|e| e.to_string())?;
         *run.exit_code.lock().map_err(|e| e.to_string())? = status.code();
         drop(child);
+        if expected.is_none() {
+            stop_orphan_mission_processes(id);
+        }
         run.text.wait_drained(Some(Duration::from_secs(2)));
         if !run.text.drained() {
             return Err(
@@ -546,8 +559,312 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
             );
         }
         run.done.store(true, Ordering::SeqCst);
+    } else if expected.is_none() {
+        stop_orphan_mission_processes(id);
     }
     Ok(())
+}
+
+fn find_orphan_mission_pids(id: &str, session_id: Option<&str>) -> Vec<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::new()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+    let session = session_id.map(str::trim).filter(|s| !s.is_empty());
+    let mut pids = Vec::new();
+    for (pid, proc_info) in system.processes() {
+        let pid_u32 = pid.as_u32();
+        if pid_u32 == std::process::id() {
+            continue;
+        }
+        let cmd: Vec<String> = proc_info
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        if cmd.is_empty() {
+            continue;
+        }
+        let matches_mission = !id.is_empty() && cmd.iter().any(|arg| arg.contains(id));
+        let matches_session = session.is_some_and(|sid| {
+            cmd.windows(2).any(|pair| {
+                matches!(
+                    pair[0].as_str(),
+                    "--conversation" | "--resume" | "--session" | "--session-id"
+                ) && pair[1] == sid
+            })
+        });
+        if matches_mission || matches_session {
+            pids.push(pid_u32);
+        }
+    }
+    pids
+}
+
+fn stop_orphan_mission_processes(id: &str) {
+    let session_id = crate::local_bindings(None, None)
+        .ok()
+        .and_then(|b| b[id]["sessionId"].as_str().map(str::to_owned));
+    let pids = find_orphan_mission_pids(id, session_id.as_deref());
+    if pids.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        for &pid in &pids {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+                libc::kill(-(pid as i32), libc::SIGTERM);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if find_orphan_mission_pids(id, session_id.as_deref()).is_empty() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        for &pid in &pids {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+fn try_reattach_orphan_antigravity(id: &str) -> bool {
+    let Ok(bindings) = crate::local_bindings(None, None) else {
+        return false;
+    };
+    let binding = &bindings[id];
+    if binding["harness"].as_str() != Some("antigravity") {
+        return false;
+    }
+    let Some(session) = binding["sessionId"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let Some(cwd_str) = binding["cwd"].as_str().filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let pids = find_orphan_mission_pids(id, Some(&session));
+    if pids.is_empty() {
+        return false;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    let transcript_path = home
+        .join(".gemini/antigravity-cli/brain")
+        .join(&session)
+        .join(".system_generated/logs/transcript.jsonl");
+    if !transcript_path.is_file() {
+        return false;
+    }
+    let Ok(mut map) = runs().lock() else {
+        return false;
+    };
+    if map.contains_key(id) {
+        return true;
+    }
+    let dummy_child = match Command::new("sh")
+        .args(["-c", "while :; do sleep 3600; done"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let text = Arc::new(Output::default());
+    let done = Arc::new(AtomicBool::new(false));
+    let exit_code = Arc::new(Mutex::new(None));
+    let session_id = Arc::new(Mutex::new(Some(session.clone())));
+    let error = Arc::new(Mutex::new(None));
+    let child = Arc::new(Mutex::new(dummy_child));
+    let run = Run {
+        mcp_wrapped: false,
+        generation: uuid::Uuid::new_v4().to_string(),
+        cwd: PathBuf::from(cwd_str),
+        child: Arc::clone(&child),
+        text: Arc::clone(&text),
+        done: Arc::clone(&done),
+        exit_code: Arc::clone(&exit_code),
+        session_id: Arc::clone(&session_id),
+        error: Arc::clone(&error),
+        resumed: true,
+    };
+    map.insert(id.to_owned(), run);
+    drop(map);
+
+    let mission_id = id.to_owned();
+    let guard = text.reader();
+    thread::spawn(move || {
+        let _guard = guard;
+        let mut thoughts = crate::antigravity::thoughts::Reader::new(&home);
+        let mut seen_steps = std::collections::HashSet::<u64>::new();
+        let mut floor_step: Option<u64> = None;
+        let mut latest_text = String::new();
+        let mut stream = crate::antigravity::Stream::default();
+        stream.session = Some(session.clone());
+        text.antigravity_progress(&stream);
+        text.publish_activities();
+
+        loop {
+            if let Ok(content) = std::fs::read_to_string(&transcript_path) {
+                let entries: Vec<Value> = content
+                    .lines()
+                    .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                    .collect();
+                if floor_step.is_none() {
+                    floor_step = entries
+                        .iter()
+                        .rev()
+                        .find(|e| e["type"] == "USER_INPUT")
+                        .and_then(|e| e["step_index"].as_u64());
+                    if let Some(floor) = floor_step {
+                        thoughts.observe(&json!({
+                            "event": "step_update",
+                            "step_update": {
+                                "conversation_id": session,
+                                "step_index": floor
+                            }
+                        }));
+                    }
+                }
+                if let Some(floor) = floor_step {
+                    let mut changed = false;
+                    for entry in entries
+                        .iter()
+                        .filter(|e| e["step_index"].as_u64().is_some_and(|idx| idx > floor))
+                    {
+                        let Some(idx) = entry["step_index"].as_u64() else {
+                            continue;
+                        };
+                        let status = entry["status"].as_str().unwrap_or("");
+                        let step_type = entry["type"].as_str().unwrap_or("");
+                        let is_done = matches!(status, "DONE" | "ERROR");
+                        if step_type == "PLANNER_RESPONSE" {
+                            if let Some(c) = entry["content"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            {
+                                if latest_text != c {
+                                    latest_text = c.to_owned();
+                                    text.replace(latest_text.clone());
+                                }
+                            }
+                            if let Some(tools) = entry["tool_calls"].as_array() {
+                                if !tools.is_empty() && seen_steps.insert(idx) {
+                                    let tool = &tools[0];
+                                    let name = tool["name"].as_str().unwrap_or("tool");
+                                    let call_id = format!("{session}:{idx}");
+                                    text.native_activity(&json!({
+                                        "type": "tool_call",
+                                        "toolCallId": call_id,
+                                        "name": name,
+                                        "toolName": name,
+                                        "rawInput": tool["args"]
+                                    }));
+                                    changed = true;
+                                }
+                            }
+                            if let Some(thinking) = entry["thinking"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            {
+                                let first_line = thinking
+                                    .lines()
+                                    .find(|l| !l.trim().is_empty())
+                                    .unwrap_or("Thinking");
+                                text.antigravity_thought(&json!({
+                                    "conversation_id": session,
+                                    "step_index": idx,
+                                    "text": first_line,
+                                    "done": is_done
+                                }));
+                                changed = true;
+                            }
+                        } else if step_type == "GENERIC" && is_done && seen_steps.insert(idx) {
+                            let prev_idx = idx.saturating_sub(1);
+                            let call_id = format!("{session}:{prev_idx}");
+                            text.native_activity(&json!({
+                                "type": "tool_call_update",
+                                "toolCallId": call_id,
+                                "status": if status == "ERROR" { "failed" } else { "completed" },
+                                "rawOutput": entry["content"]
+                            }));
+                            changed = true;
+                        }
+                    }
+                    for event in thoughts.poll() {
+                        text.antigravity_thought(&event);
+                        changed = true;
+                    }
+                    if changed {
+                        text.publish_activities();
+                    }
+                }
+            }
+            let alive = !find_orphan_mission_pids(&mission_id, Some(&session)).is_empty();
+            if !alive || done.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        stream.success = true;
+        text.antigravity_progress(&stream);
+        text.publish_activities();
+        if let Ok(mut c) = child.lock() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Ok(mut code) = exit_code.lock() {
+            if code.is_none() {
+                *code = Some(0);
+            }
+        }
+        done.store(true, Ordering::SeqCst);
+        let final_state = PollState {
+            text: text.snapshot(),
+            activities: text.activities(),
+            done: true,
+            exit_code: *exit_code.lock().unwrap(),
+            session_id: session_id.lock().unwrap().clone(),
+            error: error.lock().unwrap().clone(),
+            retryable: false,
+            resumed: true,
+            waiting_since: None,
+        };
+        text.finish(final_state);
+    });
+    true
+}
+
+#[cfg(test)]
+mod orphan_reattach_tests {
+    use super::*;
+    #[test]
+    fn find_orphan_mission_pids_returns_empty_for_unknown_ids() {
+        let pids = find_orphan_mission_pids(
+            "00000000-0000-0000-0000-000000000000",
+            Some("00000000-0000-0000-0000-000000000001"),
+        );
+        assert!(pids.is_empty());
+    }
 }
 
 fn spawn_harness(

@@ -498,7 +498,7 @@ export function startLocalQueueWorker(){
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}
  };
  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.
- const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error))onWake();},30000);window.addEventListener('online',onWake);
+ const timer=setInterval(()=>{if(entries().some(row=>row.state==='queued'||row.state==='dispatching'||!!row.error||!!row.interrupted))onWake();},3000);window.addEventListener('online',onWake);
  return ()=>{stopped=true;clearRetryTimer();clearInterval(timer);window.removeEventListener(wakeEvent,onWake);window.removeEventListener('online',onWake);};
 }
 
