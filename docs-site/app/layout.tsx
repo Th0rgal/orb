@@ -18,11 +18,11 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   metadataBase: new URL("https://orb.thomas.md"),
   title: {
-    default: "Orb | Your agents, machines and subscriptions",
+    default: "Orb | All your AI providers, machines, and agent harnesses in one place.",
     template: "%s | Orb",
   },
   description:
-    "Your agents, machines and subscriptions in one place on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients). Built for Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, ChatGPT, and Cursor Cloud.",
+    "All your AI providers, machines, and agent harnesses in one place. Connect subscriptions, APIs, and your own hardware to your machines and orchestrate Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, ChatGPT, and Cursor Cloud on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
   applicationName: "Orb",
   generator: "Next.js",
   keywords: [
@@ -49,7 +49,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Orb",
     description:
-      "Your agents, machines and subscriptions. One place to work on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
+      "All your AI providers, machines, and agent harnesses in one place. Formerly sandboxed.sh (now the backend to the Orb clients).",
     creator: "@music_music_yo",
     images: ["/og-image.png"],
   },
@@ -60,13 +60,13 @@ export const metadata: Metadata = {
     siteName: "Orb",
     title: "Orb",
     description:
-      "Your agents, machines and subscriptions. One place to work on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
+      "All your AI providers, machines, and agent harnesses in one place. Formerly sandboxed.sh (now the backend to the Orb clients).",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "Orb - Your agents, machines and subscriptions",
+        alt: "Orb - All your AI providers, machines, and agent harnesses in one place.",
       },
     ],
   },

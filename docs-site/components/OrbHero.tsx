@@ -115,15 +115,14 @@ export function OrbHero() {
 
       <div className="orb-hero-copy">
         <h1 className="orb-hero-title">
-          Your agents, machines and subscriptions. One place to work.
+          All your AI providers, machines, and agent harnesses in one place.
         </h1>
         <p className="orb-hero-lead">
-          Use Orb on macOS and iOS to organize projects, launch{" "}
-          <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
+          Connect your subscriptions, API keys, and local hardware to your machines, and
+          orchestrate <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
           <strong>Antigravity</strong>, <strong>OpenCode</strong>, and{" "}
-          <strong>Grok</strong> on your computer or your private cloud, and continue every
-          conversation anywhere. Formerly <code>sandboxed.sh</code>, which is now the
-          backend to the Orb clients.
+          <strong>Grok</strong> from macOS and iOS. Formerly <code>sandboxed.sh</code>,
+          which is now the backend to the Orb clients.
         </p>
         <div className="orb-hero-actions">
           <Link href="/getting-started" className="orb-btn orb-btn-primary">

@@ -5,8 +5,8 @@
 <h1 align="center">Orb</h1>
 
 <p align="center">
-  <strong>Your agents, machines and subscriptions. One place to work.</strong><br/>
-  Use Orb on desktop or iOS to organize projects, launch agents and continue their conversations.<br/>
+  <strong>All your AI providers, machines, and agent harnesses in one place.</strong><br/>
+  Connect your subscriptions, API keys, and local hardware to your machines, and orchestrate every agent harness from macOS and iOS.<br/>
   <sub>Formerly <code>sandboxed.sh</code> — <code>sandboxed.sh</code> is now the backend to the Orb clients.</sub>
 </p>
 
