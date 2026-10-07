@@ -2,7 +2,8 @@
 (function(root){
   const md = root.markdownit({html:false,linkify:true,breaks:false,typographer:false});
   const safeLink = value => /^(https?:|mailto:)/i.test(value) && !/^https?:\/\/[^/]*@/i.test(value);
-  md.validateLink = value => safeLink(value) || /^(sandbox:|\/mnt\/data\/)/.test(value);
+  const localFileLink = value => /^(sandbox:|\/mnt\/data\/|file:\/\/\/|\/(?:srv|Users|root|workspace|home|var|tmp)\/)/.test(value);
+  md.validateLink = value => safeLink(value) || localFileLink(value);
   function formula(source, display) {
     try { return root.katex.renderToString(source,{displayMode:display,throwOnError:false,trust:false,maxExpand:1000,output:'htmlAndMathml'}); }
     catch (_) { return '<code class="math-error">'+md.utils.escapeHtml(source)+'</code>'; }
@@ -39,6 +40,14 @@
     const token=state.push('orb_math_block','math',0);token.content=content;token.block=true;token.map=[start,next];state.line=next;return true;
   },{alt:['paragraph','reference','blockquote','list']});
   md.renderer.rules.orb_math_block=(tokens,index)=>'<div class="math-block">'+formula(tokens[index].content,true)+'</div>\n';
+  const defaultLinkOpen = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+  md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    const href = tokens[idx].attrGet('href') || '';
+    if (/^(file:\/\/\/|\/(?:srv|Users|root|workspace|home|var|tmp)\/)/i.test(href)) {
+      tokens[idx].attrJoin('class', 'file-link');
+    }
+    return defaultLinkOpen(tokens, idx, options, env, self);
+  };
   const imageRule=md.renderer.rules.image;
   md.renderer.rules.image=(tokens,index,options,env,self)=>{
     const src=tokens[index].attrGet('src')||'';

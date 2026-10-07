@@ -179,4 +179,85 @@ final class OrbRichTextTests: XCTestCase {
         XCTAssertEqual(formulas, 1, "MathML must remain available to accessibility at larger sizes")
     }
 
+    func testCompareNativeVsPooledWebViewRenderer() async throws {
+        let sample = #"""
+        # Architecture Overview
+        - **Fast pagination**: active missions load in 1 page instead of 9.
+        - **Async disk actor**: zero main-thread stalls during typing.
+
+        ```swift
+        let rows = try await OrbCore.shared.missions("verity-core")
+        ```
+
+        See [OrbCore.swift](file:///Users/thomas/work/paloma/sandboxed_sh/ios_dashboard/SandboxedDashboard/Orb/OrbCore.swift) for details.
+        """#
+
+        // Option A: Native block parser
+        let blocks = OrbNativeMarkdownView.parseBlocks(sample)
+        XCTAssertEqual(blocks.count, 4)
+        XCTAssertFalse(OrbNativeMarkdownView.requiresWebRenderer(sample))
+        XCTAssertTrue(OrbNativeMarkdownView.requiresWebRenderer("Inline math $x^2$ requires KaTeX"))
+        XCTAssertTrue(OrbNativeMarkdownView.requiresWebRenderer("| Col A | Col B |\n| --- | --- |"))
+
+        // Option B: Pooled WKWebView + file:/// link pill
+        OrbRichText.preferNativeWhenSimple = false
+        let web = try await render(sample)
+        let fileLinks = try await web.evaluateJavaScript("document.querySelectorAll('a.file-link').length") as? Int
+        XCTAssertEqual(fileLinks, 1)
+        _ = try await web.evaluateJavaScript("document.querySelector('a.file-link').click()")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(openedArtifact, "file:///Users/thomas/work/paloma/sandboxed_sh/ios_dashboard/SandboxedDashboard/Orb/OrbCore.swift")
+
+        // Benchmark mounting 12 assistant messages in a conversation VStack
+        let messages = (0..<12).map { i in
+            sample + "\n\nParagraph \(i) with `inlineCode(\(i))` and **bold** text."
+        }
+        struct ConversationFeed: View {
+            let messages: [String]
+            var body: some View {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(Array(messages.enumerated()), id: \.offset) { _, msg in
+                            OrbRichText(source: msg)
+                        }
+                    }
+                }
+            }
+        }
+
+        OrbRichText.preferNativeWhenSimple = true
+        let t0Native = ContinuousClock.now
+        let nativeHost = UIHostingController(rootView: ConversationFeed(messages: messages))
+        window?.rootViewController = nativeHost
+        nativeHost.view.layoutIfNeeded()
+        let nativeMountMs = t0Native.duration(to: ContinuousClock.now)
+
+        OrbWebViewPool.shared.warmUp(count: 6)
+        try await Task.sleep(for: .milliseconds(350))
+        OrbRichText.preferNativeWhenSimple = false
+        let t0Pooled = ContinuousClock.now
+        let pooledHost = UIHostingController(rootView: ConversationFeed(messages: messages))
+        window?.rootViewController = pooledHost
+        pooledHost.view.layoutIfNeeded()
+        let pooledMountMs = t0Pooled.duration(to: ContinuousClock.now)
+
+        print("BENCHMARK_OPTION_A_VS_B: nativeMount=\(nativeMountMs) pooledWebViewMount=\(pooledMountMs)")
+
+        // Render and attach visual showcase of RemoteLog + file:/// chip + KaTeX
+        let rawRemoteLog = """
+        Remote node 'ashur' job d04c77b2-7028-4c03-b7c1-ab20b818e0f3 finished with state 'succeeded' (exit Some(0))
+
+        log tail:
+        {"sessionID":"ses_pareto","type":"text","part":{"id":"p1","text":"## Pareto Frontier Verification\\n\\nVerified the dominance relation in [OrbCore.swift](file:///Users/thomas/work/paloma/sandboxed_sh/ios_dashboard/SandboxedDashboard/Orb/OrbCore.swift) and confirmed active mission pagination drops payload size by **94%** (`1.57 MB` → `94 KB`).\\n\\n$$\\\\forall x \\\\in P, \\\\; \\\\nexists y \\\\in P : y \\\\succ x$$"}}
+        """
+        let parsedRemote = OrbRemoteLog.parse(rawRemoteLog)
+        let showcaseWeb = try await render(parsedRemote.text)
+        try await Task.sleep(for: .milliseconds(250))
+        let snapshot = try await showcaseWeb.takeSnapshot(configuration: nil)
+        let attachment = XCTAttachment(image: snapshot)
+        attachment.name = "orb_after_richtext_showcase"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
 }

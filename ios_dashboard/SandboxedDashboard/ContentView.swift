@@ -60,13 +60,20 @@ struct ContentView: View {
     }
 
     private func checkAuth() async {
-        isCheckingAuth = true
-
         // If not configured, show setup sheet
         guard api.isConfigured else {
             isCheckingAuth = false
             showSetupSheet = true
             return
+        }
+
+        // Optimistic cold launch: if we already have a non-expired session token,
+        // render OrbHome immediately from cache and validate health in parallel.
+        if api.isAuthenticated && !api.authSessionExpired {
+            isAuthenticated = true
+            isCheckingAuth = false
+        } else {
+            isCheckingAuth = true
         }
 
         do {

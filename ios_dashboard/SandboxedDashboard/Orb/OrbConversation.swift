@@ -29,14 +29,19 @@ struct OrbConversation: View {
     @State private var attachments: [OrbAttachment] = []
     @State private var preview: OrbPreviewFile?
     @State private var events: [StoredEvent] = []
+    @State private var workModel = OrbWorkModel()
     @State private var queued: [OrbJSON] = []
     @State private var mode = "Message"
     @State private var refreshing = false
     @State private var lastRefresh = Date.distantPast
     @State private var stream: Task<Void, Never>?
+    @State private var draftSaveTask: Task<Void, Never>?
+    @State private var eventRefreshTask: Task<Void, Never>?
+    @State private var optimisticPrompt: String?
     @State private var liveText = ""
     @State private var answered: Set<String> = []
     @State private var copiedItemID: String?
+    @State private var expandedLogIDs: Set<String> = []
     @State private var queueExpanded = true
     @FocusState private var composerFocused: Bool
     @Environment(\.scenePhase) private var phase
@@ -46,10 +51,12 @@ struct OrbConversation: View {
     private var turns: [OrbJSON] { execution["turns"].items }
     private var isCloud: Bool { execution != .null || !mission["cloud"]["provider"].text.isEmpty || (id == nil && selection.cloud) }
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
-    private var working: Bool { isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : ["active", "pending"].contains(mission["status"].text) }
+    static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
+    private var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
+    private var working: Bool { optimisticPrompt != nil || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : ["active", "pending", "running", "starting"].contains(mission["status"].text)) }
 
-    private var workModel: OrbWorkModel {
-        OrbWorkModel.build(from: events, working: working)
+    private func rebuildWorkModel() {
+        workModel = OrbWorkModel.build(from: events, working: working)
     }
 
     private func baseStepLabel() -> String {
@@ -106,11 +113,24 @@ struct OrbConversation: View {
     private var cloudBlocked: Bool { isCloud && turns.contains { ["submission_uncertain", "incompatible", "reconnect_required"].contains($0["phase"].text) } }
     private var status: String { (turns.last?["phase"].text ?? mission["status"].text).replacingOccurrences(of: "_", with: " ") }
     private var history: [(String, String, String)] {
-        if isCloud { return turns.flatMap { turn in [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty } } }
-        return mission["history"].items.enumerated().map { (String($0.offset), $0.element["role"].text, $0.element["content"].text) }
+        var rows: [(String, String, String)]
+        if isCloud {
+            rows = turns.flatMap { turn in [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty } }
+        } else {
+            rows = mission["history"].items.enumerated().map { (String($0.offset), $0.element["role"].text, $0.element["content"].text) }
+        }
+        if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
+            rows.append(("optimistic-user", "user", opt))
+        }
+        return rows
     }
     private var lastUserItemID: String? {
         history.last(where: { $0.1 == "user" })?.0
+    }
+    private var resolvedNavigationTitle: String {
+        let raw = mission["title"].text
+        if !raw.isEmpty { return OrbStyle.displayTitle(raw) }
+        return missionID == nil ? "New agent" : "Conversation"
     }
 
     var body: some View {
@@ -118,8 +138,10 @@ struct OrbConversation: View {
             conversationContainer(scroll: scroll)
                 .background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
-                .navigationTitle(mission["title"].text.isEmpty ? (missionID == nil ? "New agent" : "Conversation") : mission["title"].text)
+                .navigationTitle(resolvedNavigationTitle)
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         conversationToolbarMenu
@@ -138,20 +160,53 @@ struct OrbConversation: View {
                 .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
                 .sheet(isPresented: $moving) { moveConversationSheet }
                 .task {
+                    OrbWebViewPool.shared.warmUp(count: 3)
                     id = missionID
                     text = OrbDisk.read(draftKey, as: String.self) ?? ""
                     attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
                     if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
-                    if let id { mission = OrbReadCache.read("mission:\(id)") ?? .null; execution = OrbReadCache.read("cloud:\(id)") ?? .null; if execution != .null { selection.restore(execution["selection"]) } }
+                    if let id {
+                        mission = OrbReadCache.read("mission:\(id)") ?? .null
+                        execution = OrbReadCache.read("cloud:\(id)") ?? .null
+                        if execution != .null { selection.restore(execution["selection"]) }
+                        else if mission != .null {
+                            selection.backend = mission["backend"].text
+                            selection.node = mission["remote_node_id"].text
+                            selection.model = mission["model_override"].text
+                        }
+                    }
                     await refresh()
                     while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(3)) } catch { break }
-                        if phase == .active { await refresh(force: working) }
+                        // When SSE stream is connected for local/remote agents, poll lightly (12s);
+                        // for cloud turns without SSE, poll every 3s while working.
+                        let interval: Duration = (stream != nil && !isCloud) ? .seconds(12) : .seconds(3)
+                        do { try await Task.sleep(for: interval) } catch { break }
+                        if phase == .active && (working || isCloud) { await refresh(force: working) }
                     }
                 }
-                .onChange(of: text) { _, value in do { try OrbDisk.save(value, key: draftKey) } catch { self.error = "Could not save draft: \(error.localizedDescription)" } }
-                .onChange(of: attachments) { _, value in do { try OrbDisk.save(value, key: draftKey + ":files") } catch { self.error = "Could not save attachments: \(error.localizedDescription)" } }
-                .onDisappear { stream?.cancel(); stream = nil }
+                .onChange(of: text) { _, value in
+                    // Absorb typed `/goal ` or `/plan ` prefix into the mode pill when supported.
+                    if supportsMode && mode == "Message" {
+                        if value == "/goal " { mode = "Goal"; text = ""; return }
+                        if value == "/plan " { mode = "Plan"; text = ""; return }
+                    }
+                    let key = draftKey
+                    draftSaveTask?.cancel()
+                    draftSaveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        guard !Task.isCancelled else { return }
+                        OrbDisk.saveAsync(value, key: key)
+                    }
+                }
+                .onChange(of: attachments) { _, value in
+                    OrbDisk.saveAsync(value, key: draftKey + ":files")
+                }
+                .onDisappear {
+                    draftSaveTask?.cancel()
+                    eventRefreshTask?.cancel()
+                    if !text.isEmpty { OrbDisk.saveAsync(text, key: draftKey) }
+                    stream?.cancel(); stream = nil
+                }
                 .onChange(of: phase) { _, value in
                     if value == .active { Task { await refresh(force: true) } }
                     else { stream?.cancel(); stream = nil }
@@ -205,7 +260,10 @@ struct OrbConversation: View {
                 }
             }
         }
-        .onChange(of: working) { _, now in if !now { OrbWorkClock.stop("local:\(id ?? "")") } }
+        .onChange(of: working) { _, now in
+            if !now { OrbWorkClock.stop("local:\(id ?? "")") }
+            rebuildWorkModel()
+        }
         .onChange(of: history.last?.0) { _, _ in
             if !openedAtLatest || followsLatest {
                 scroll.scrollTo("conversation-bottom", anchor: .bottom)
@@ -217,13 +275,9 @@ struct OrbConversation: View {
     @ViewBuilder
     private func conversationContent(scroll: ScrollViewProxy) -> some View {
         if loading && missionID != nil && mission == .null {
-            ProgressView("Loading conversation…")
-                .font(.footnote)
-                .foregroundStyle(OrbStyle.textSecondary)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 20)
+            conversationLoadingSkeletons
         }
-        if missionID == nil && id == nil {
+        if missionID == nil && id == nil && optimisticPrompt == nil {
             VStack(alignment: .leading, spacing: 6) {
                 Text("What would you like to work on?")
                     .font(.title3.weight(.semibold))
@@ -272,8 +326,10 @@ struct OrbConversation: View {
             }
         }
         if working && !liveText.isEmpty {
-            OrbRichText(source: liveText)
-                .transition(.opacity)
+            OrbRichText(source: liveText, onArtifact: { path in
+                Task { await openWorkspaceOrArtifact(path) }
+            })
+            .transition(.opacity)
         }
         ForEach(pendingQuestionEvents) { event in
             if let data = event.content.data(using: .utf8), let request = try? JSONDecoder().decode(OrbJSON.self, from: data) {
@@ -292,6 +348,33 @@ struct OrbConversation: View {
         }
     }
 
+    private var conversationLoadingSkeletons: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Spacer(minLength: 80)
+                Text("User message prompt placeholder line")
+                    .font(.subheadline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Assistant response heading placeholder")
+                    .font(.headline)
+                Text("First line of assistant markdown response with technical details and context.")
+                    .font(.subheadline)
+                Text("Second line of assistant response placeholder.")
+                    .font(.subheadline)
+            }
+            .padding(.vertical, 4)
+        }
+        .redacted(reason: .placeholder)
+        .orbShimmer(active: true)
+        .padding(.top, 12)
+        .allowsHitTesting(false)
+        .accessibilityLabel("Loading conversation")
+    }
+
     private var pendingQuestionEvents: [StoredEvent] {
         events.filter { event in
             event.eventType == "tool_call" && ["ui_native_request", "AskUserQuestion", "question"].contains(event.toolName ?? "") && !answered.contains(event.toolCallId ?? "") && !events.contains(where: { $0.eventType == "tool_result" && $0.toolCallId == event.toolCallId })
@@ -301,39 +384,83 @@ struct OrbConversation: View {
     @ViewBuilder
     private func messageHistoryRow(item: (String, String, String)) -> some View {
         if item.1 == "user" {
-            let images = OrbMessageImages.parse(item.2)
-            let isPendingTurn = working && item.0 == lastUserItemID
-            HStack {
-                Spacer(minLength: 40)
-                VStack(alignment: .leading, spacing: 8) {
-                    if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
-                    if !images.text.isEmpty {
-                        Text(images.text)
-                            .font(.subheadline)
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
-                            .orbShimmer(active: isPendingTurn)
+            let presentation = OrbMessagePresentation.parse(item.2)
+            if let wake = OrbBackgroundWake.parse(presentation.text) {
+                backgroundWakeRow(itemID: item.0, wake: wake)
+            } else {
+                let images = OrbMessageImages.parse(presentation.text)
+                let goalObj = OrbStyle.goalObjective(images.text)
+                let planObj = goalObj == nil ? OrbStyle.planObjective(images.text) : nil
+                let displayBody = goalObj ?? planObj ?? images.text
+                let isPendingTurn = working && item.0 == lastUserItemID
+                HStack {
+                    Spacer(minLength: 40)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
+                        if goalObj != nil || planObj != nil || presentation.attached {
+                            HStack(spacing: 6) {
+                                if goalObj != nil {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "target")
+                                            .font(.system(size: 10, weight: .semibold))
+                                        Text("Goal")
+                                            .font(.caption2.weight(.semibold))
+                                    }
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.1), in: Capsule())
+                                } else if planObj != nil {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "list.bullet.clipboard")
+                                            .font(.system(size: 10, weight: .semibold))
+                                        Text("Plan")
+                                            .font(.caption2.weight(.semibold))
+                                    }
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.1), in: Capsule())
+                                }
+                                if presentation.attached {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "paperclip")
+                                            .font(.system(size: 10, weight: .medium))
+                                        Text("Attached context")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                                }
+                            }
+                        }
+                        if !displayBody.isEmpty {
+                            Text(displayBody)
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .orbShimmer(active: isPendingTurn)
+                        }
                     }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(isPendingTurn ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-                )
-                .contextMenu {
-                    if !images.text.isEmpty {
-                        Button {
-                            UIPasteboard.general.string = images.text
-                            OrbHaptics.light()
-                        } label: {
-                            Label("Copy message", systemImage: "doc.on.doc")
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isPendingTurn ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                    )
+                    .contextMenu {
+                        if !displayBody.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = displayBody
+                                OrbHaptics.light()
+                            } label: {
+                                Label("Copy message", systemImage: "doc.on.doc")
+                            }
                         }
                     }
                 }
+                .id(item.0)
             }
-            .id(item.0)
         } else if let quiz = quiz(for: item) {
             VStack(alignment: .leading, spacing: 12) {
                 if !quiz.before.isEmpty { OrbRichText(source: quiz.before) }
@@ -343,15 +470,16 @@ struct OrbConversation: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .id(item.0)
         } else {
+            let parsedRemote = OrbRemoteLog.parse(item.2)
             VStack(alignment: .leading, spacing: 4) {
-                OrbRichText(source: item.2, onArtifact: { path in
-                    Task { await download(path.replacingOccurrences(of: "sandbox:", with: "")) }
+                OrbRichText(source: parsedRemote.text, onArtifact: { path in
+                    Task { await openWorkspaceOrArtifact(path) }
                 })
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     Button {
-                        UIPasteboard.general.string = item.2
+                        UIPasteboard.general.string = parsedRemote.text
                         OrbHaptics.light()
                         withAnimation(.snappy(duration: 0.15)) { copiedItemID = item.0 }
                         Task {
@@ -376,11 +504,111 @@ struct OrbConversation: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(copiedItemID == item.0 ? "Copied response" : "Copy response")
+
+                    if parsedRemote.details != nil {
+                        Button {
+                            withAnimation(.snappy(duration: 0.18)) {
+                                if !expandedLogIDs.insert(item.0).inserted {
+                                    expandedLogIDs.remove(item.0)
+                                }
+                            }
+                            OrbHaptics.selection()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .rotationEffect(.degrees(expandedLogIDs.contains(item.0) ? 90 : 0))
+                                Text("Remote log")
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .padding(.vertical, 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     Spacer()
+                }
+
+                if let details = parsedRemote.details, expandedLogIDs.contains(item.0) {
+                    ScrollView {
+                        Text(details.prefix(8000))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 160)
+                    .padding(8)
+                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
                 }
             }
             .id(item.0)
         }
+    }
+
+    @ViewBuilder
+    private func backgroundWakeRow(itemID: String, wake: OrbBackgroundWake) -> some View {
+        let isExpanded = expandedLogIDs.contains(itemID)
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.snappy(duration: 0.18)) {
+                    if !expandedLogIDs.insert(itemID).inserted {
+                        expandedLogIDs.remove(itemID)
+                    }
+                }
+                OrbHaptics.selection()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: wake.killed ? "xmark.octagon" : "terminal")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(wake.killed ? OrbStyle.warning : OrbStyle.textMuted)
+                    Text(wake.killed ? "Background task stopped" : "Background task finished")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(OrbStyle.textSecondary)
+                    Text(wake.command)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(OrbStyle.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(OrbStyle.textMuted)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Task \(wake.task) · \(wake.command)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(OrbStyle.textMuted)
+                    if !wake.output.isEmpty {
+                        ScrollView {
+                            Text(wake.output.prefix(4000))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                    if !wake.note.isEmpty {
+                        Text(wake.note)
+                            .font(.caption2)
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
+            }
+        }
+        .id(itemID)
     }
 
     @ViewBuilder
@@ -492,37 +720,78 @@ struct OrbConversation: View {
     }
 
     private var modeQuery: String? {
-        guard !isCloud, selection.backend == "codex",
-              let token = text.split(whereSeparator: { $0.isWhitespace }).last,
+        guard supportsMode else { return nil }
+        // Support both `/` at the start of the draft (Cursor slash palette) and `@` token trigger.
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("/") && !trimmed.contains(" ") {
+            let query = String(trimmed.dropFirst()).lowercased()
+            if ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) { return query }
+        }
+        guard let token = text.split(whereSeparator: { $0.isWhitespace }).last,
               token.hasPrefix("@") else { return nil }
         let query = String(token.dropFirst()).lowercased()
         return ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) ? query : nil
     }
 
     private func chooseMode(_ value: String) {
-        if let range = text.range(of: "@", options: .backwards) { text.removeSubrange(range.lowerBound...) }
-        mode = value
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("/") && !trimmed.contains(" ") {
+            text = ""
+        } else if let range = text.range(of: "@", options: .backwards) {
+            text.removeSubrange(range.lowerBound...)
+        }
+        withAnimation(.snappy(duration: 0.18)) {
+            mode = value
+        }
+        OrbHaptics.selection()
         composerFocused = true
     }
 
     private var modePicker: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Choose a mode").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.vertical, 8)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("MODES")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(OrbStyle.textMuted)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
             ForEach(["Message", "Plan", "Goal"].filter { modeQuery?.isEmpty != false || $0.lowercased().hasPrefix(modeQuery ?? "") }, id: \.self) { value in
+                let subtitle = value == "Goal" ? "Keep iterating until this objective is met" : (value == "Plan" ? "Plan before making changes" : "Standard conversation turn")
                 Button { chooseMode(value) } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: value == "Goal" ? "target" : value == "Plan" ? "list.bullet.clipboard" : "bubble.left").frame(width: 24)
-                        Text(value)
+                    HStack(spacing: 10) {
+                        Image(systemName: value == "Goal" ? "target" : value == "Plan" ? "list.bullet.clipboard" : "bubble.left")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(mode == value ? .primary : OrbStyle.textSecondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(value)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                            Text(subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                        }
                         Spacer()
-                        if mode == value { Image(systemName: "checkmark").foregroundStyle(.secondary) }
-                    }.padding(10).contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityIdentifier("mode-option-" + value.lowercased())
+                        if mode == value {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(mode == value ? Color.white.opacity(0.06) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("mode-option-" + value.lowercased())
             }
         }
         .padding(6)
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(OrbStyle.borderStrong))
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(OrbStyle.borderStrong))
         .padding(.bottom, 6)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mode-picker")
     }
@@ -637,27 +906,39 @@ struct OrbConversation: View {
     private var composerInput: some View {
         VStack(alignment: .leading, spacing: 2) {
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
-            if mode != "Message" && !isCloud && selection.backend == "codex" {
-                Button { mode = "Message" } label: {
-                    Label(mode, systemImage: "xmark.circle.fill")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.white.opacity(0.08), in: Capsule())
+            if mode != "Message" && supportsMode {
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) { mode = "Message" }
+                    OrbHaptics.selection()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: mode == "Goal" ? "target" : "list.bullet.clipboard")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(mode)
+                            .font(.caption.weight(.medium))
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.09), in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.borderStrong))
                 }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
                 .accessibilityLabel("Clear " + mode + " mode")
             }
-            TextField(id == nil ? "Plan, ask, build…" : (working ? "Queue a follow-up…" : "Follow up…"), text: $text, axis: .vertical)
+            TextField(id == nil ? (mode == "Goal" ? "Describe the goal objective…" : mode == "Plan" ? "What should we plan?" : "Plan, ask, build…") : (working ? "Queue a follow-up…" : "Follow up…"), text: $text, axis: .vertical)
                 .lineLimit(1...6)
                 .font(.subheadline)
                 .padding(.horizontal, 4)
                 .padding(.top, 6)
                 .focused($composerFocused)
-                .disabled(busy)
                 .accessibilityIdentifier("composer")
             HStack(spacing: 6) {
                 if !project.isEmpty && !isCloud {
-                    OrbAttachments(files: $attachments, error: $error, showMode: selection.backend == "codex" ? {
+                    OrbAttachments(files: $attachments, error: $error, showMode: supportsMode ? {
                         if modeQuery == nil { text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@" }
                         composerFocused = true
                     } : nil, showFiles: false)
@@ -703,6 +984,15 @@ struct OrbConversation: View {
         .accessibilityIdentifier("conversation-composer")
     }
 
+    private func scheduleCoalescedRefresh() {
+        eventRefreshTask?.cancel()
+        eventRefreshTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await refresh(force: true)
+        }
+    }
+
     private func refresh(force: Bool = false) async {
         guard let id, !refreshing else { return }
         if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
@@ -710,6 +1000,9 @@ struct OrbConversation: View {
         do {
             let value = try await OrbReadCache.conversation(id, force: force)
             mission = value
+            if let opt = optimisticPrompt, mission["history"].items.contains(where: { $0["role"].text == "user" && $0["content"].text == opt }) {
+                optimisticPrompt = nil
+            }
             unavailable = !OrbRow(value).mobile
             guard !unavailable else { return }
             if OrbRow(value).cloud && execution == .null {
@@ -729,8 +1022,10 @@ struct OrbConversation: View {
                             if op == "append" { liveText += content }
                             else if op == "replace" { liveText = content }
                         }
-                        if ["assistant_message", "mission_status_changed", "tool_call", "tool_result", "thinking"].contains(type) {
+                        if ["assistant_message", "mission_status_changed"].contains(type) {
                             Task { await refresh(force: true) }
+                        } else if ["tool_call", "tool_result", "thinking"].contains(type) {
+                            scheduleCoalescedRefresh()
                         }
                     }
                 }
@@ -738,17 +1033,22 @@ struct OrbConversation: View {
                 selection.backend = value["backend"].text
                 selection.node = value["remote_node_id"].text
                 if selection.model.isEmpty { selection.model = value["model_override"].text }
-                let batch = try await APIService.shared.getMissionEventsWithMeta(id: id, limit: 200, sinceSeq: events.last?.sequence)
-                let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
-                events = unique.values.sorted { $0.sequence < $1.sequence }
-                queued = try await api.call("/api/control/queue").items.filter { $0["mission_id"].text == id }
+                async let batchTask = APIService.shared.getMissionEventsWithMeta(id: id, limit: 200, sinceSeq: events.last?.sequence)
+                async let queueTask = api.call("/api/control/queue")
+                let (batch, queueResp) = try await (batchTask, queueTask)
+                if !batch.events.isEmpty || events.isEmpty {
+                    let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
+                    events = unique.values.sorted { $0.sequence < $1.sequence }
+                    rebuildWorkModel()
+                }
+                queued = queueResp.items.filter { $0["mission_id"].text == id }
             } else {
-                let accounts = try await api.call("/api/cloud/accounts").items
+                let accounts = (try? await OrbReadCache.cloudAccounts().items) ?? []
                 let account = accounts.first { $0["id"].text == execution["selection"]["account"].text && $0["provider"].text == execution["selection"]["provider"].text }
                 selection.canCancel = account?["capabilities"]["cancel"].flag ?? false
             }
-            if execution != .null { try OrbDisk.save(execution, key: "cloud:\(id)") }
-            try OrbDisk.save(value, key: "mission:\(id)")
+            if execution != .null { OrbDisk.saveAsync(execution, key: "cloud:\(id)") }
+            OrbDisk.saveAsync(value, key: "mission:\(id)")
             lastRefresh = Date()
         } catch {
             if mission == .null { mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null }
@@ -759,21 +1059,34 @@ struct OrbConversation: View {
     /// True once Core accepted the request, even if the refresh that follows fails.
     @discardableResult private func send() async -> Bool {
         guard !busy, !cloudBlocked else { return false }; busy = true; defer { busy = false }
+        let savedDraft = text
+        let savedAttachments = attachments
+        let savedMode = mode
         do {
             guard !isCloud || attachments.isEmpty else { throw OrbHTTPError(status: 400, detail: "This cloud service does not support attachments. Remove the files before sending.") }
-            try OrbDisk.save(attachments, key: draftKey + ":files")
+            draftSaveTask?.cancel()
+            OrbDisk.saveAsync(attachments, key: draftKey + ":files")
             let pending: OrbPending
-            if let saved = OrbDisk.read(pendingKey, as: OrbPending.self) { pending = saved }
-            else {
+            if let saved = OrbDisk.read(pendingKey, as: OrbPending.self) {
+                pending = saved
+                optimisticPrompt = saved.body["content"].text.isEmpty ? saved.body["prompt"].text : saved.body["content"].text
+            } else {
                 var uploaded: [OrbJSON] = []
                 var prompt = text
-                if !isCloud && selection.backend == "codex" && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
+                if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
+                // Optimistic UI: show the user bubble immediately and clear composer text while sending.
+                withAnimation(.snappy(duration: 0.18)) {
+                    optimisticPrompt = prompt
+                    text = ""
+                    followsLatest = true
+                }
                 for file in attachments {
                     let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(selection.node.isEmpty ? "core" : selection.node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                     guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                     uploaded.append(.object(["kind": .string("file"), "path": receipt["path"]]))
                     prompt += "\n[Uploaded: " + receipt["path"].text + "]"
                 }
+                optimisticPrompt = prompt
                 var body: [String: OrbJSON]
                 if let id {
                     body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(UUID().uuidString)]
@@ -783,13 +1096,13 @@ struct OrbConversation: View {
                     }
                     if isCloud { body["cloud_model"] = .string(selection.model); body["cloud_model_params"] = selection.params }
                     if !isCloud && !selection.model.isEmpty && selection.model != mission["model_override"].text {
-                        guard !working else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
+                        guard !working || optimisticPrompt != nil else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
                         _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["model_override": .string(selection.model)]))
                     }
                     pending = OrbPending(path: "/api/control/message", body: .object(body))
                 } else {
                     try selection.validate()
-                    body = ["title": .string(String(text.prefix(100))), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
+                    body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
                     else { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty { body["remote_node_id"] = .string(selection.node) } }
@@ -803,9 +1116,22 @@ struct OrbConversation: View {
             }
             if id == nil { guard !result["id"].text.isEmpty else { throw URLError(.cannotParseResponse) }; id = result["id"].text }
             OrbReadCache.invalidate("project:\(project)")
-            OrbDisk.remove(pendingKey); attachments = []; OrbDisk.remove(draftKey + ":files"); text = ""; error = ""; followsLatest = true; openedAtLatest = false; await refresh(force: true)
+            OrbReadCache.invalidate("project:\(project):all")
+            OrbDisk.remove(pendingKey)
+            OrbDisk.remove(draftKey)
+            attachments = []
+            OrbDisk.remove(draftKey + ":files")
+            error = ""
+            followsLatest = true
+            openedAtLatest = false
+            await refresh(force: true)
+            optimisticPrompt = nil
             return true
         } catch {
+            optimisticPrompt = nil
+            if text.isEmpty { text = savedDraft }
+            attachments = savedAttachments
+            mode = savedMode
             if let http = error as? OrbHTTPError, [400, 422].contains(http.status) { OrbDisk.remove(pendingKey) }
             self.error = "Message kept. \(error.localizedDescription)"
             return false
@@ -816,12 +1142,24 @@ struct OrbConversation: View {
         guard let id, !destinationProject.isEmpty else { return }
         var tags = mission["tags"].items.filter { !$0.text.hasPrefix("orb-folder:") }
         if !destinationFolder.isEmpty { tags.append(.string("orb-folder:" + destinationFolder)) }
-        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)])); moving = false; OrbReadCache.invalidate("project:\(project)"); OrbReadCache.invalidate("project:\(destinationProject)"); await refresh(force: true) }
-        catch { self.error = error.localizedDescription }
+        do {
+            _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)]))
+            moving = false
+            OrbReadCache.invalidate("project:\(project)")
+            OrbReadCache.invalidate("project:\(project):all")
+            OrbReadCache.invalidate("project:\(destinationProject)")
+            OrbReadCache.invalidate("project:\(destinationProject):all")
+            await refresh(force: true)
+        } catch { self.error = error.localizedDescription }
     }
     private func mutate(_ fields: [String: OrbJSON]) async {
         guard let id else { return }
-        do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(fields["title"] != nil ? "title" : "status")", method: "POST", body: .object(fields)); OrbReadCache.invalidate("project:\(project)"); await refresh(force: true) } catch { self.error = error.localizedDescription }
+        do {
+            _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(fields["title"] != nil ? "title" : "status")", method: "POST", body: .object(fields))
+            OrbReadCache.invalidate("project:\(project)")
+            OrbReadCache.invalidate("project:\(project):all")
+            await refresh(force: true)
+        } catch { self.error = error.localizedDescription }
     }
     private func cancel() async {
         guard let id else { return }
@@ -831,6 +1169,47 @@ struct OrbConversation: View {
         do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func safeURL(_ value: String) -> URL? { guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil else { return nil }; return url }
+
+    private func openWorkspaceOrArtifact(_ rawLink: String) async {
+        if rawLink.hasPrefix("file:///") {
+            guard let url = URL(string: rawLink) else { return }
+            await downloadWorkspaceFile(url.path)
+        } else if rawLink.hasPrefix("/srv/") || rawLink.hasPrefix("/Users/") || rawLink.hasPrefix("/root/") || rawLink.hasPrefix("/workspace/") || rawLink.hasPrefix("/home/") || rawLink.hasPrefix("/var/") || rawLink.hasPrefix("/tmp/") {
+            let cleanPath = rawLink.components(separatedBy: "#").first ?? rawLink
+            await downloadWorkspaceFile(cleanPath)
+        } else {
+            await download(rawLink.replacingOccurrences(of: "sandbox:", with: ""))
+        }
+    }
+
+    private func downloadWorkspaceFile(_ path: String) async {
+        let token = APIService.shared.authToken ?? ""
+        var candidates: [[URLQueryItem]] = []
+        if let id { candidates.append([.init(name: "path", value: path), .init(name: "mission_id", value: id)]) }
+        candidates.append([.init(name: "path", value: path)])
+        for query in candidates {
+            var components = URLComponents(string: OrbCore.shared.endpoint + "/api/fs/download")
+            components?.queryItems = query
+            guard let url = components?.url else { continue }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 20
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            guard let (tempFile, response) = try? await URLSession.shared.download(for: request) else { continue }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                try? FileManager.default.removeItem(at: tempFile)
+                continue
+            }
+            let name = path.components(separatedBy: "/").last ?? "file"
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let dest = directory.appendingPathComponent(["", ".", ".."].contains(name) ? "file" : name)
+            try? FileManager.default.moveItem(at: tempFile, to: dest)
+            preview = OrbPreviewFile(url: dest)
+            return
+        }
+        error = "File preview unavailable for \(path.components(separatedBy: "/").last ?? path)."
+    }
+
     private func download(_ path: String) async {
         guard let id else { return }
         do {
@@ -1454,8 +1833,9 @@ struct OrbAgentPicker: View {
     @State private var backends: [OrbJSON] = []
     @State private var nodes: [OrbJSON] = []
     @State private var repos: [OrbJSON] = []
+    @State private var backendModelsMap: OrbJSON = .null
+    @State private var loadingOptions = false
     @State private var error = ""
-    private let api = OrbCore.shared
     var body: some View {
         NavigationStack {
             Form {
@@ -1498,6 +1878,12 @@ struct OrbAgentPicker: View {
                         }
                     }
                 }
+                if loadingOptions && models.isEmpty {
+                    HStack(spacing: 8) {
+                        OrbRunningDots(size: 10)
+                        Text("Loading options…").font(.footnote).foregroundStyle(OrbStyle.textSecondary)
+                    }
+                }
                 if existing && selection.provider != "grok_bot" { Text("Model changes apply to the next message.").font(.footnote).foregroundStyle(.secondary) }
             }.navigationTitle("Agent settings").navigationBarTitleDisplayMode(.inline).scrollDismissesKeyboard(.interactively).toolbar { Button("Done") { dismiss() } }
             .task { await load() }
@@ -1508,34 +1894,76 @@ struct OrbAgentPicker: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
+    private func applyAgentCatalog(_ catalog: OrbJSON) {
+        let response = catalog["backends"]
+        backends = (response.items.isEmpty ? response["backends"].items : response.items)
+            .filter { $0["id"].text != "chatgpt_ui" }
+        if !existing && selection.backend == "chatgpt_ui" {
+            selection.backend = ""; selection.model = ""; selection.params = .array([])
+        }
+        nodes = catalog["nodes"]["nodes"].items
+        backendModelsMap = catalog["models"]["backends"]
+        models = backendModelsMap[selection.backend].items
+    }
     private func load() async {
+        loadingOptions = true
+        defer { loadingOptions = false }
         do {
-            if selection.cloud { accounts = try await api.call("/api/cloud/accounts").items }
-            else {
-                let response = try await api.call("/api/backends")
-                backends = (response.items.isEmpty ? response["backends"].items : response.items)
-                    .filter { $0["id"].text != "chatgpt_ui" }
-                if !existing && selection.backend == "chatgpt_ui" {
-                    selection.backend = ""; selection.model = ""; selection.params = .array([])
+            if selection.cloud {
+                if let cachedAccounts = OrbReadCache.read("catalog:cloud:accounts") {
+                    accounts = cachedAccounts.items
                 }
-                let fleet = try await api.call("/api/remote-nodes"); nodes = fleet["nodes"].items
+                let provider = selection.provider
+                if provider != "grok_bot" {
+                    let endpoint = provider == "hermes" ? "hermes" : (provider == "chatgpt" ? "chatgpt" : "cursor")
+                    if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
+                        models = cachedOpts["models"]["items"].items
+                        repos = cachedOpts["repositories"]["items"].items
+                    }
+                    async let accountsTask = OrbReadCache.cloudAccounts()
+                    async let optionsTask = OrbReadCache.cloudOptions(endpoint)
+                    let (accValue, optValue) = try await (accountsTask, optionsTask)
+                    accounts = accValue.items
+                    if selection.provider == provider {
+                        models = optValue["models"]["items"].items
+                        repos = optValue["repositories"]["items"].items
+                    }
+                } else {
+                    accounts = try await OrbReadCache.cloudAccounts().items
+                    models = []
+                }
+            } else {
+                if let cached = OrbReadCache.read("catalog:agent") {
+                    applyAgentCatalog(cached)
+                }
+                let catalog = try await OrbReadCache.agentCatalog()
+                applyAgentCatalog(catalog)
             }
-            await loadModels(); error = ""
+            error = ""
         } catch { self.error = error.localizedDescription }
     }
     private func loadModels() async {
         let provider = selection.provider, backend = selection.backend
+        if !selection.cloud && backendModelsMap != .null {
+            models = backendModelsMap[backend].items
+            return
+        }
         do {
             if selection.cloud {
                 guard provider != "grok_bot" else { models = []; return }
                 let endpoint = provider == "hermes" ? "hermes" : (provider == "chatgpt" ? "chatgpt" : "cursor")
-                let value = try await api.call("/api/cloud/\(endpoint)/options")
+                if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
+                    models = cachedOpts["models"]["items"].items
+                    repos = cachedOpts["repositories"]["items"].items
+                }
+                let value = try await OrbReadCache.cloudOptions(endpoint)
                 guard selection.provider == provider else { return }
                 models = value["models"]["items"].items; repos = value["repositories"]["items"].items
             } else {
-                let value = try await api.call("/api/providers/backend-models")
+                let catalog = try await OrbReadCache.agentCatalog()
                 guard selection.backend == backend && selection.provider == provider else { return }
-                models = value["backends"][backend].items
+                backendModelsMap = catalog["models"]["backends"]
+                models = backendModelsMap[backend].items
             }
         } catch { self.error = error.localizedDescription }
     }

@@ -134,10 +134,11 @@ final class OrbCore {
         return data.isEmpty ? .null : try JSONDecoder().decode(OrbJSON.self, from: data)
     }
     static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
-    func missions(_ project: String) async throws -> [OrbRow] {
+    func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
         var rows: [OrbRow] = [], offset = 0
+        let allQuery = includeArchived ? "&all=true" : ""
         while true {
-            let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
+            let page = try await call("/api/control/missions?project=\(Self.escape(project))\(allQuery)&limit=100&offset=\(offset)").items
             let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
             rows += fresh
             if page.count < 100 || fresh.isEmpty { break }
@@ -148,10 +149,22 @@ final class OrbCore {
 }
 
 /// Persist the exact request before submitting. An uncertain response never creates a new identity.
-struct OrbPending: Codable {
+struct OrbPending: Codable, Sendable {
     let path: String
     let body: OrbJSON
 }
+
+private actor OrbDiskWriter {
+    static let shared = OrbDiskWriter()
+    func write(_ data: Data, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+    func read(from url: URL) -> Data? {
+        try? Data(contentsOf: url)
+    }
+}
+
 @MainActor
 enum OrbDisk {
     static func url(_ key: String) -> URL {
@@ -165,7 +178,23 @@ enum OrbDisk {
         guard let data = try? Data(contentsOf: url(key)) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
-    static func save<T: Encodable>(_ value: T, key: String) throws { try JSONEncoder().encode(value).write(to: url(key), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
+    static func readAsync<T: Decodable & Sendable>(_ key: String, as type: T.Type) async -> T? {
+        let target = url(key)
+        guard let data = await OrbDiskWriter.shared.read(from: target) else { return nil }
+        return await Task.detached(priority: .utility) {
+            try? JSONDecoder().decode(type, from: data)
+        }.value
+    }
+    static func save<T: Encodable>(_ value: T, key: String) throws {
+        try JSONEncoder().encode(value).write(to: url(key), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+    static func saveAsync<T: Encodable & Sendable>(_ value: T, key: String) {
+        let target = url(key)
+        Task.detached(priority: .utility) {
+            guard let data = try? JSONEncoder().encode(value) else { return }
+            try? await OrbDiskWriter.shared.write(data, to: target)
+        }
+    }
     static func remove(_ key: String) { try? FileManager.default.removeItem(at: url(key)) }
 }
 
@@ -180,9 +209,14 @@ enum OrbReadCache {
     static func read(_ name: String) -> OrbJSON? {
         values[key(name)]?.value ?? OrbDisk.read(name, as: OrbJSON.self)
     }
-    static func load(_ name: String, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
+    static func seed(_ name: String, value: OrbJSON) {
         let scope = key(name)
-        if !force, let entry = values[scope], Date().timeIntervalSince(entry.date) < 30 { return entry.value }
+        values[scope] = Entry(value: value, date: Date())
+        OrbDisk.saveAsync(value, key: name)
+    }
+    static func load(_ name: String, ttl: TimeInterval = 30, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
+        let scope = key(name)
+        if !force, let entry = values[scope], Date().timeIntervalSince(entry.date) < ttl { return entry.value }
         if let item = pending[scope] {
             let value = try await item.task.value
             guard scope == key(name), !item.task.isCancelled else { throw CancellationError() }
@@ -196,7 +230,7 @@ enum OrbReadCache {
         guard scope == key(name), pending[scope]?.id == item.id else { throw CancellationError() }
         if values.count >= 64, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
         values[scope] = Entry(value: value, date: Date())
-        try? OrbDisk.save(value, key: name)
+        OrbDisk.saveAsync(value, key: name)
         return value
     }
     static func invalidate(_ name: String) {
@@ -205,9 +239,10 @@ enum OrbReadCache {
         pending[scope] = nil
         if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
     }
-    static func project(_ id: String, force: Bool = false) async throws -> OrbJSON {
-        try await load("project:\(id)", force: force) {
-            async let missions = OrbCore.shared.missions(id)
+    static func project(_ id: String, includeArchived: Bool = false, force: Bool = false) async throws -> OrbJSON {
+        let cacheKey = includeArchived ? "project:\(id):all" : "project:\(id)"
+        return try await load(cacheKey, force: force) {
+            async let missions = OrbCore.shared.missions(id, includeArchived: includeArchived)
             async let manifest = OrbCore.shared.call("/api/projects/\(OrbCore.escape(id))/context/manifest")
             return try await .object(["missions": .array(missions.map(\.raw)), "manifest": manifest])
         }
@@ -220,6 +255,24 @@ enum OrbReadCache {
     static func cloud(_ id: String, force: Bool = false) async throws -> OrbJSON {
         try await load("cloud:\(id)", force: force) {
             try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cloud")
+        }
+    }
+    static func agentCatalog(force: Bool = false) async throws -> OrbJSON {
+        try await load("catalog:agent", ttl: 120, force: force) {
+            async let backends = OrbCore.shared.call("/api/backends")
+            async let nodes = OrbCore.shared.call("/api/remote-nodes")
+            async let models = OrbCore.shared.call("/api/providers/backend-models")
+            return try await .object(["backends": backends, "nodes": nodes, "models": models])
+        }
+    }
+    static func cloudAccounts(force: Bool = false) async throws -> OrbJSON {
+        try await load("catalog:cloud:accounts", ttl: 90, force: force) {
+            try await OrbCore.shared.call("/api/cloud/accounts")
+        }
+    }
+    static func cloudOptions(_ endpoint: String, force: Bool = false) async throws -> OrbJSON {
+        try await load("catalog:cloud:\(endpoint)", ttl: 120, force: force) {
+            try await OrbCore.shared.call("/api/cloud/\(endpoint)/options")
         }
     }
     static func prefetch(_ rows: [OrbRow]) async {

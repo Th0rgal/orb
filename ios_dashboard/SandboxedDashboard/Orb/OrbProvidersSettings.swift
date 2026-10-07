@@ -111,15 +111,35 @@ struct OrbProvidersSettings: View {
         catch { ready = false; self.error = error.localizedDescription; return }
         do {
             usage = try await client.call("/api/ai/providers/usage")["entries"]; usageError = ""
-            // The bulk endpoint may only have a cache; request current subscription windows too.
-            for provider in providers where ["kimi", "minimax", "zai"].contains(provider["provider_type"].text) || provider["uses_oauth"].flag {
-                let id = provider["id"].text
-                do {
-                    let value = try await client.call("/api/ai/providers/\(OrbCore.escape(id))/usage")
-                    if case .object(var entries) = usage { entries[id] = value; usage = .object(entries) }
-                    else { usage = .object([id: value]) }
-                } catch is CancellationError { return }
-                catch { usageError = "Some usage details are unavailable. Pull to refresh." }
+            // The bulk endpoint may only have a cache; request current subscription windows in parallel.
+            let targets = providers.filter { ["kimi", "minimax", "zai"].contains($0["provider_type"].text) || $0["uses_oauth"].flag }
+            guard !targets.isEmpty else { return }
+            let localClient = client
+            var failed = false
+            await withTaskGroup(of: (String, OrbJSON?).self) { group in
+                for provider in targets {
+                    let id = provider["id"].text
+                    group.addTask {
+                        do {
+                            let value = try await localClient.call("/api/ai/providers/\(OrbCore.escape(id))/usage")
+                            return (id, value)
+                        } catch {
+                            return (id, nil)
+                        }
+                    }
+                }
+                var entries: [String: OrbJSON] = {
+                    if case .object(let existing) = usage { return existing }
+                    return [:]
+                }()
+                for await (id, value) in group {
+                    if let value { entries[id] = value }
+                    else { failed = true }
+                }
+                usage = .object(entries)
+            }
+            if failed && !Task.isCancelled {
+                usageError = "Some usage details are unavailable. Pull to refresh."
             }
         } catch is CancellationError { return }
         catch { usageError = "Usage is unavailable. \(error.localizedDescription)" }

@@ -45,18 +45,55 @@ enum OrbStyle {
         }
     }
 
+    nonisolated(unsafe) private static let isoFractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) private static let isoFallbackFormatter = ISO8601DateFormatter()
+
     static func relativeTime(_ raw: String, now: Date = Date()) -> String {
         guard !raw.isEmpty else { return "" }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fallback = ISO8601DateFormatter()
-        guard let date = formatter.date(from: raw) ?? fallback.date(from: raw) else { return "" }
+        guard let date = isoFractionalFormatter.date(from: raw) ?? isoFallbackFormatter.date(from: raw) else { return "" }
         let delta = max(0, Int(now.timeIntervalSince(date)))
         if delta < 45 { return "now" }
         if delta < 3600 { return "\(delta / 60)m" }
         if delta < 86_400 { return "\(delta / 3600)h" }
         if delta < 604_800 { return "\(delta / 86_400)d" }
         return "\(delta / 604_800)w"
+    }
+
+    static func goalObjective(_ text: String) -> String? {
+        let rest = text.drop(while: { $0.isWhitespace })
+        guard rest.hasPrefix("/goal") else { return nil }
+        let after = rest.dropFirst(5)
+        if !after.isEmpty && !(after.first?.isWhitespace ?? false) { return nil }
+        let objective = after.trimmingCharacters(in: .whitespacesAndNewlines)
+        return objective.isEmpty ? nil : objective
+    }
+
+    static func planObjective(_ text: String) -> String? {
+        let rest = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rest.hasPrefix("/plan") else { return nil }
+        let after = rest.dropFirst(5)
+        if !after.isEmpty && !(after.first?.isWhitespace ?? false) { return nil }
+        return after.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func displayTitle(_ title: String) -> String {
+        guard !title.isEmpty else { return title }
+        if let g = goalObjective(title), !g.isEmpty { return g }
+        if let p = planObjective(title), !p.isEmpty { return p }
+        return title
+    }
+
+    static func missionTitle(_ text: String) -> String {
+        let base = goalObjective(text) ?? planObjective(text).flatMap({ $0.isEmpty ? nil : $0 }) ?? text
+        let line = base.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespaces) ?? ""
+        if line.count > 42 {
+            return String(line.prefix(41)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return line.isEmpty ? String(text.prefix(42)) : line
     }
 }
 
@@ -65,6 +102,17 @@ enum OrbHaptics {
     static func selection() { UISelectionFeedbackGenerator().selectionChanged() }
     static func light() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
     static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+}
+
+/// Tactile press scale effect for interactive rows and buttons.
+struct OrbPressButtonStyle: ButtonStyle {
+    var scale: CGFloat = 0.985
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1.0)
+            .opacity(configuration.isPressed ? 0.88 : 1.0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: configuration.isPressed)
+    }
 }
 
 /// Cursor-style 3×3 animated dot matrix for running agents and tool folds.
@@ -271,6 +319,7 @@ struct OrbHome: View {
                                 Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
                             }
                         }
+                        .buttonStyle(OrbPressButtonStyle())
                         .accessibilityIdentifier("project.\(project.id)")
                         .contextMenu {
                             Button("Rename") { renamedTitle = project.name; renaming = project }
@@ -285,11 +334,16 @@ struct OrbHome: View {
                             }
                         }
                     }
-                    if loading && projects.isEmpty { ProgressView("Loading projects…").frame(maxWidth: .infinity).padding(.top, 32) }
+                    if loading && projects.isEmpty { projectSkeletons }
                     if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
                 }.padding(.horizontal, 18)
             }
-            .background(OrbStyle.background).navigationTitle("Projects").navigationBarTitleDisplayMode(.inline).toolbar {
+            .background(OrbStyle.background)
+            .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
                 ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
             }
@@ -311,6 +365,30 @@ struct OrbHome: View {
             }
         }.tint(.primary).preferredColorScheme(.dark)
     }
+    private var projectSkeletons: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<5, id: \.self) { index in
+                HStack(spacing: 14) {
+                    OrbListIcon(symbol: "folder")
+                    Text(index.isMultiple(of: 2) ? "Project name placeholder" : "Project workspace")
+                        .font(.body.weight(.medium))
+                        .redacted(reason: .placeholder)
+                    Spacer()
+                    Text("2h")
+                        .font(.caption)
+                        .redacted(reason: .placeholder)
+                }
+                .padding(.vertical, 12)
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                }
+            }
+        }
+        .orbShimmer(active: true)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading projects")
+    }
     private func load() async {
         defer { loading = false }
         if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = cached["projects"].items.map { OrbRow($0, project: true) } }
@@ -320,9 +398,14 @@ struct OrbHome: View {
             // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
-            try OrbDisk.save(value, key: "projects"); error = ""
-            // Warm only the first project; never fan out across the entire account.
-            if let first = projects.first { Task { _ = try? await OrbReadCache.project(first.id) } }
+            OrbDisk.saveAsync(value, key: "projects"); error = ""
+            // Warm the first project and the agent picker catalog so opening a project or composer feels instant.
+            if let first = projects.first {
+                Task {
+                    _ = try? await OrbReadCache.project(first.id)
+                    _ = try? await OrbReadCache.agentCatalog()
+                }
+            }
         } catch { self.error = error.localizedDescription }
     }
     private func create() async {
@@ -344,11 +427,12 @@ struct OrbProjectPage: View {
     @State private var error = ""
     @State private var newFolder = false
     @State private var folderName = ""
+    @State private var loadedArchived = false
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     private var visible: [OrbRow] {
         missions.filter { row in
-            (search.isEmpty || row.name.localizedCaseInsensitiveContains(search)) &&
+            (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
             (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
             (filter != "Working" || row.active) &&
             (filter != "Needs attention" || ["blocked", "failed", "interrupted"].contains(row.state))
@@ -381,7 +465,12 @@ struct OrbProjectPage: View {
                 folderRows
                 if !loading && visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
             }.padding(.horizontal, 18)
-        }.background(OrbStyle.background).navigationTitle(project.name).navigationBarTitleDisplayMode(.inline)
+        }
+        .background(OrbStyle.background)
+        .navigationTitle(project.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .searchable(text: $search, prompt: "Search conversations")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { Menu {
@@ -399,12 +488,19 @@ struct OrbProjectPage: View {
         }
         .alert("New folder", isPresented: $newFolder) { TextField("Folder name", text: $folderName); Button("Create") { Task { await mkdir() } }; Button("Cancel", role: .cancel) {} }
         .task { await load() }.refreshable { await load(force: true) }
+        .onChange(of: filter) { _, newValue in
+            if newValue == "Archived" && !loadedArchived {
+                Task { await load(force: true) }
+            }
+        }
     }
     private var conversationSkeletons: some View {
         VStack(spacing: 0) {
-            ForEach(0..<5) { index in
+            ForEach(0..<5, id: \.self) { index in
                 HStack(alignment: .top, spacing: 12) {
-                    Circle().fill(Color.secondary.opacity(0.25)).frame(width: 8, height: 8).padding(.top, 8)
+                    OrbListIcon(symbol: "cpu")
+                        .opacity(0.45)
+                        .padding(.top, 1)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(index.isMultiple(of: 2) ? "Conversation title placeholder" : "Conversation title")
                             .font(.subheadline)
@@ -414,10 +510,12 @@ struct OrbProjectPage: View {
                 }.padding(.vertical, 10)
                     .overlay(alignment: .bottom) { Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32) }
             }
-        }.allowsHitTesting(false)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading conversations")
-            .accessibilityIdentifier("conversations-loading")
+        }
+        .orbShimmer(active: true)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading conversations")
+        .accessibilityIdentifier("conversations-loading")
     }
     private var folderRows: some View {
         ForEach(paths.filter(shown), id: \.self) { folder in
@@ -465,13 +563,27 @@ struct OrbProjectPage: View {
         }
     }
     private func missionLink(_ row: OrbRow) -> some View {
-        NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
+        let isGoal = OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag
+        let cleanTitle = OrbStyle.displayTitle(row.name)
+        return NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
             HStack(alignment: .top, spacing: 12) {
                 statusGlyph(for: row)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(row.name)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if isGoal {
+                            HStack(spacing: 3) {
+                                Image(systemName: "target")
+                                    .font(.system(size: 9, weight: .semibold))
+                                Text("Goal")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.07), in: Capsule())
+                        }
+                        Text(cleanTitle)
                             .font(.subheadline.weight(.medium))
                             .lineLimit(1)
                             .foregroundStyle(.primary)
@@ -496,6 +608,7 @@ struct OrbProjectPage: View {
                 Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
             }
         }
+        .buttonStyle(OrbPressButtonStyle())
         .accessibilityIdentifier("mission.\(row.id)")
         .contextMenu {
             if !row.active && row.state != "acknowledged" {
@@ -504,6 +617,7 @@ struct OrbProjectPage: View {
                         do {
                             _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("acknowledged")]))
                             OrbReadCache.invalidate("project:\(project.id)")
+                            OrbReadCache.invalidate("project:\(project.id):all")
                             await load(force: true)
                         } catch { self.error = error.localizedDescription }
                     }
@@ -516,11 +630,17 @@ struct OrbProjectPage: View {
         if case .object(let entries) = value["manifest"]["entries"] { folders = entries.filter { $0.value["directory"].flag }.map(\.key) }
     }
     private func load(force: Bool = false) async {
-        if let cached = OrbReadCache.read("project:\(project.id)") { apply(cached); loading = false }
+        let includeArchived = filter == "Archived"
+        let cacheKey = includeArchived ? "project:\(project.id):all" : "project:\(project.id)"
+        if let cached = OrbReadCache.read(cacheKey) ?? OrbReadCache.read("project:\(project.id)") {
+            apply(cached)
+            loading = false
+        }
         defer { loading = false }
         do {
-            let value = try await OrbReadCache.project(project.id, force: force)
+            let value = try await OrbReadCache.project(project.id, includeArchived: includeArchived, force: force)
             guard !Task.isCancelled else { return }
+            if includeArchived { loadedArchived = true }
             apply(value); loading = false; error = ""
             await OrbReadCache.prefetch(missions)
         } catch is CancellationError {} catch { self.error = error.localizedDescription }

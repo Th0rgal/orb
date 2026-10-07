@@ -4,10 +4,23 @@ struct OrbDocuments: View {
     let project: String
     let path: String
     @State private var entries: [OrbJSON] = []
+    @State private var loading = true
     @State private var error = ""
     var body: some View {
         List {
             if !error.isEmpty { OrbNotice(message: error) }
+            if loading && entries.isEmpty {
+                ForEach(0..<4, id: \.self) { index in
+                    HStack(spacing: 12) {
+                        OrbListIcon(symbol: index.isMultiple(of: 2) ? "folder" : "doc.text")
+                        Text(index.isMultiple(of: 2) ? "Project context folder" : "README.md")
+                            .font(.subheadline)
+                            .redacted(reason: .placeholder)
+                    }
+                    .orbShimmer(active: true)
+                    .listRowBackground(Color.clear)
+                }
+            }
             ForEach(entries.indices, id: \.self) { index in
                 let entry = entries[index]
                 let name = entry["name"].text
@@ -20,6 +33,7 @@ struct OrbDocuments: View {
             }
         }.listStyle(.plain).scrollContentBackground(.hidden).background(OrbStyle.background).navigationBarTitleDisplayMode(.inline).navigationTitle(path.isEmpty ? "Project context" : path.components(separatedBy: "/").last ?? path)
         .task {
+            defer { loading = false }
             do { entries = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(project))/files?path=\(OrbCore.escape(path))")["entries"].items }
             catch { self.error = error.localizedDescription }
         }
@@ -36,13 +50,29 @@ struct OrbDocument: View {
     @State private var error = ""
     @State private var saving = false
     @State private var savedContent = ""
+    @State private var draftSaveTask: Task<Void, Never>?
     @FocusState private var editorFocused: Bool
     private var draftKey: String { "document:\(project):\(path)" }
     var body: some View {
         VStack {
             if !error.isEmpty { OrbNotice(message: error) }
-            if editing { TextEditor(text: $content).focused($editorFocused).onAppear { editorFocused = true }.scrollContentBackground(.hidden).padding(.horizontal, 12).font(.system(.body, design: .monospaced)).accessibilityIdentifier("document-editor") }
-            else { ScrollView { OrbRichText(source: content).padding(20).frame(maxWidth: .infinity, alignment: .leading) } }
+            if !loaded && error.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Document heading placeholder").font(.headline)
+                    Text("First paragraph of project context documentation with multiple lines of descriptive content.")
+                        .font(.subheadline)
+                    Text("Second paragraph placeholder text.")
+                        .font(.subheadline)
+                }
+                .redacted(reason: .placeholder)
+                .orbShimmer(active: true)
+                .padding(20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else if editing {
+                TextEditor(text: $content).focused($editorFocused).onAppear { editorFocused = true }.scrollContentBackground(.hidden).padding(.horizontal, 12).font(.system(.body, design: .monospaced)).accessibilityIdentifier("document-editor")
+            } else {
+                ScrollView { OrbRichText(source: content).padding(20).frame(maxWidth: .infinity, alignment: .leading) }
+            }
         }.background(OrbStyle.background).navigationBarTitleDisplayMode(.inline).navigationTitle(path.components(separatedBy: "/").last ?? path)
         .toolbar {
             if loaded {
@@ -61,11 +91,26 @@ struct OrbDocument: View {
             } catch { self.error = error.localizedDescription }
         }
         .onChange(of: content) { _, value in
-            if loaded && editing { do { try OrbDisk.save(OrbJSON.object(["content": .string(value), "revision": revision]), key: draftKey) } catch { self.error = error.localizedDescription } }
+            guard loaded && editing else { return }
+            let key = draftKey
+            let rev = revision
+            draftSaveTask?.cancel()
+            draftSaveTask = Task {
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                OrbDisk.saveAsync(OrbJSON.object(["content": .string(value), "revision": rev]), key: key)
+            }
+        }
+        .onDisappear {
+            if loaded && editing && content != savedContent {
+                draftSaveTask?.cancel()
+                OrbDisk.saveAsync(OrbJSON.object(["content": .string(content), "revision": revision]), key: draftKey)
+            }
         }
     }
     private func save() async {
         guard !saving && revision != .null else { return }; saving = true; defer { saving = false }
+        draftSaveTask?.cancel()
         do {
             let result = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(project))/file", method: "PUT", body: .object(["path": .string(path), "content": .string(content), "expected_revision": revision]))
             revision = result["revision"]; savedContent = content; OrbDisk.remove(draftKey); editing = false; error = ""

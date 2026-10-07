@@ -7,8 +7,9 @@ struct OrbMessageImages: Equatable {
     let paths: [String]
     let references: [Int]
 
+    private static let pattern = try! NSRegularExpression(pattern: #"(?:\[Image #(\d+)\][ \t]*)?\[Uploaded: ([^\]\r\n]+)\]"#, options: .caseInsensitive)
+
     static func parse(_ source: String) -> OrbMessageImages {
-        let pattern = try! NSRegularExpression(pattern: #"(?:\[Image #(\d+)\][ \t]*)?\[Uploaded: ([^\]\r\n]+)\]"#, options: .caseInsensitive)
         let ns = source as NSString
         var paths: [String] = [], references: [Int] = [], out = "", last = 0
         for match in pattern.matches(in: source, range: NSRange(location: 0, length: ns.length)) {

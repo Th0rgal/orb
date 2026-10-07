@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import sandboxed_sh
 
 /// Same inputs as the desktop `quiz.test.tsx` and `message-images.test.tsx`, so both clients agree.
@@ -79,5 +80,61 @@ final class OrbDesktopParityTests: XCTestCase {
 
         let settledModel = OrbWorkModel.build(from: events, working: false)
         XCTAssertEqual(settledModel.completedSummary, "Worked — 1 read, 1 edit, 1 command")
+    }
+
+    func testRemoteLogExtractsHumanResponseAndPreservesRawLog() {
+        let rawSuccess = """
+        Remote node 'ashur' job 11111111-2222-3333-4444-555555555555 finished with state 'succeeded' (exit Some(0))
+
+        log tail:
+        {"sessionID":"ses_123","type":"text","part":{"id":"p1","text":"First paragraph."}}
+        {"sessionID":"ses_123","type":"text","part":{"id":"p1","text":"First paragraph."}}
+        {"sessionID":"ses_123","type":"text","part":{"id":"p2","text":"Second paragraph."}}
+        """
+        let parsed = OrbRemoteLog.parse(rawSuccess)
+        XCTAssertEqual(parsed.text, "First paragraph.\n\nSecond paragraph.")
+        XCTAssertEqual(parsed.details, rawSuccess)
+
+        let antigravityJSON = #"{"event":"result","result":{"status":"SUCCESS","duration_seconds":12.4,"num_turns":3,"response":"Clean final answer"}}"#
+        let parsedAG = OrbRemoteLog.parse(antigravityJSON)
+        XCTAssertEqual(parsedAG.text, "Clean final answer")
+        XCTAssertEqual(parsedAG.details, antigravityJSON)
+    }
+
+    func testMessagePresentationStripsAttachmentTrailerOnly() {
+        let uuid = "12345678-1234-1234-1234-123456789abc"
+        let raw = "Please review this.\n\n<!-- paloma:attachment:\(uuid) -->\nAttached context: read `.paloma/messages/\(uuid)/.paloma/attach.md` (paths in that manifest are relative to `.paloma/messages/\(uuid)`)."
+        let parsed = OrbMessagePresentation.parse(raw)
+        XCTAssertEqual(parsed.text, "Please review this.")
+        XCTAssertTrue(parsed.attached)
+
+        let untouched = OrbMessagePresentation.parse("Ordinary message without trailer")
+        XCTAssertEqual(untouched.text, "Ordinary message without trailer")
+        XCTAssertFalse(untouched.attached)
+    }
+
+    func testBackgroundWakeParsesFinishedAndKilledTasks() {
+        let wakeText = """
+        Background task `b1` (`cargo test --workspace`) finished. Output:
+
+        ```
+        test result: ok. 42 passed
+        ```
+
+        Continue from here.
+        """
+        let wake = OrbBackgroundWake.parse(wakeText)
+        XCTAssertEqual(wake?.task, "b1")
+        XCTAssertEqual(wake?.command, "cargo test --workspace")
+        XCTAssertEqual(wake?.output, "test result: ok. 42 passed")
+        XCTAssertEqual(wake?.killed, false)
+    }
+
+    func testGoalAndPlanObjectivesCleanMissionTitles() {
+        XCTAssertEqual(OrbStyle.goalObjective("/goal Make the test suite pass"), "Make the test suite pass")
+        XCTAssertNil(OrbStyle.goalObjective("/goals Make the test suite pass"))
+        XCTAssertEqual(OrbStyle.planObjective("/plan Refactor the networking layer"), "Refactor the networking layer")
+        XCTAssertEqual(OrbStyle.displayTitle("/goal Fix iOS scroll bleed"), "Fix iOS scroll bleed")
+        XCTAssertEqual(OrbStyle.missionTitle("/goal Fix iOS scroll bleed\nExtra details"), "Fix iOS scroll bleed")
     }
 }
