@@ -350,11 +350,11 @@ export function startLocalQueueWorker(){
       again=true;
       continue;
      }
-     // If a follow-up/resume is already queued behind this interrupted row (or a newer run generation executed),
+     // If a newer run generation already executed (or an already-synced turn has a follow-up queued behind it),
      // retire the superseded interrupted row to the recovery archive so it never head-of-line blocks.
      const queuedBehind=rows.filter(r=>r.mission===row.mission&&r.id!==row.id&&r.state==='queued');
      if(row.state==='error'&&queuedBehind.length>0){
-      let superseded=queuedBehind.some(r=>(!r.delegated&&!r.scheduled)||!!row.userSynced);
+      let superseded=!!row.userSynced&&queuedBehind.some(r=>!r.delegated&&!r.scheduled);
       if(!superseded&&row.receipt?.generation!=null){
        const currentMission=await getMission(row.mission).catch(()=>undefined);
        superseded=currentMission?.execution?.generation!=null&&currentMission.execution.generation>row.receipt.generation;

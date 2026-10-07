@@ -49,6 +49,7 @@ fn accounts_of_backend(backend: &str) -> Option<(&'static str, &'static str)> {
     match backend {
         "claudecode" => Some(("anthropic", "Claude")),
         "codex" => Some(("openai", "Codex")),
+        "antigravity" => Some(("google", "Antigravity")),
         _ => None,
     }
 }
@@ -501,6 +502,40 @@ pub(crate) fn provider_has_available_account(
     })
 }
 
+/// Classify a resumable Antigravity remote interruption or transient upstream
+/// error on a mission that already has a persisted native conversation ID.
+pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'static str> {
+    if failure.contains("Antigravity ended without a SUCCESS result") {
+        Some("Antigravity interrupted turn")
+    } else if failure.contains("Antigravity ended its headless turn while background task(s)") {
+        Some("Antigravity background task handoff")
+    } else if failure.contains("INTERNAL (code 500)")
+        || failure.contains("Internal error encountered")
+        || failure.contains("UNAVAILABLE (code 503)")
+        || failure.contains("DEADLINE_EXCEEDED (code 504)")
+    {
+        Some("Antigravity transient upstream error")
+    } else {
+        None
+    }
+}
+
+/// Reset the consecutive replay counter when a replayed remote job made
+/// substantial progress before being interrupted again later.
+pub(crate) async fn reset_remote_replays_after_progress(
+    working_dir: &std::path::Path,
+    mission_id: Uuid,
+) {
+    update_remote_wait(working_dir, mission_id, |previous| {
+        previous.map(|mut wait| {
+            wait.replays = 0;
+            wait.retries = 0;
+            wait
+        })
+    })
+    .await;
+}
+
 /// Decide whether a failed remote job waits for a usage limit, and record
 /// the wait. Recording is idempotent, so a finalization that is retried does
 /// not count twice. A job that did not fail on a usage limit clears the
@@ -521,6 +556,23 @@ pub(crate) async fn plan_remote(
         let replays = remote_wait(working_dir, mission_id)
             .await
             .map_or(0, |wait| wait.replays);
+        let now = Utc::now();
+        if mission.backend == "antigravity"
+            && mission
+                .session_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            && replays < MAX_REMOTE_REPLAYS
+        {
+            if let Some(interruption) = antigravity_resumable_interruption(failure) {
+                let delay = (IMMEDIATE_REPLAY_SECS * (1_i64 << replays.min(4))).min(300);
+                return Some(UsageLimitWait {
+                    limit: interruption.to_string(),
+                    resume_at: now + Duration::seconds(delay),
+                    announced: false,
+                });
+            }
+        }
         let limits = account_limits::shared();
         remote_wait_for_failure(
             &mission.backend,
@@ -528,7 +580,7 @@ pub(crate) async fn plan_remote(
             replays,
             provider_has_available_account(working_dir, provider, &limits),
             &limits,
-            Utc::now(),
+            now,
             Zone::system(),
         )
     }
@@ -547,6 +599,15 @@ pub(crate) async fn plan_remote(
 
 /// What the operator reads under the failed remote job.
 pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> String {
+    if wait.limit.starts_with("Antigravity ") && !wait.limit.ends_with("limit") {
+        return format!(
+            "{}\n\n{} detected. This mission is waiting and its conversation will be resumed \
+             on the node automatically at {}.",
+            output.trim_end(),
+            wait.limit,
+            resume_time(wait),
+        );
+    }
     format!(
         "{}\n\n{} reached. This mission is waiting and its job will be replayed on the node \
          automatically at {}.",
@@ -559,6 +620,13 @@ pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> Str
 /// The prompt a remote mission is continued with. Its native session on the
 /// node already holds the message it was handling.
 pub(crate) fn remote_resume_prompt(limit: &str) -> String {
+    if limit.starts_with("Antigravity ") && !limit.ends_with("limit") {
+        return format!(
+            "{RESUME_PROMPT_MARKER} {limit} stopped your previous turn. Resume your work where \
+             it stopped, and check the state of anything you had started (including any \
+             background tasks or systemd units) before continuing."
+        );
+    }
     format!(
         "{RESUME_PROMPT_MARKER} The {limit} stopped your previous turn and has now reset. Resume \
          your work where it stopped, and check the state of anything you had started."
@@ -1164,5 +1232,38 @@ mod tests {
             after_replay_failure(&wait, false, &still_running, now),
             ReplayFailure::GiveUp
         );
+    }
+
+    #[tokio::test]
+    async fn antigravity_remote_interruption_with_session_schedules_automatic_replay() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "antigravity").await;
+        let failure = "Antigravity ended without a SUCCESS result; resume this conversation before retrying work";
+
+        // Without a persisted native session ID, automatic replay is refused.
+        assert!(plan_remote(dir.path(), &store, mission.id, false, failure)
+            .await
+            .is_none());
+
+        store
+            .update_mission_session_id(
+                mission.id,
+                "ef77ed0f-551d-4624-aad9-2a54bba215b6",
+                "antigravity",
+                None,
+            )
+            .await
+            .unwrap();
+        let wait = plan_remote(dir.path(), &store, mission.id, false, failure)
+            .await
+            .expect("resumable Antigravity interruption schedules automatic replay");
+        assert_eq!(wait.limit, "Antigravity interrupted turn");
+        assert!(wait.resume_at <= Utc::now() + Duration::seconds(35));
+        let text = annotate_remote_output("Remote antigravity job failed", &wait);
+        assert!(text.contains("Antigravity interrupted turn detected"));
+        assert!(text.contains("conversation will be resumed on the node automatically"));
+        let prompt = remote_resume_prompt(&wait.limit);
+        assert!(prompt.contains("Antigravity interrupted turn stopped your previous turn"));
+        assert!(prompt.contains("background tasks or systemd units"));
     }
 }

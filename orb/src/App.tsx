@@ -2681,6 +2681,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
   });
   const [sendingImmediate, setSendingImmediate] = createSignal(false);
+  const localQueueActive = () => clientPlaced() && queuedLocalMessages(p.id).some(row => !row.error && !row.interrupted && (row.state === "queued" || row.state === "dispatching" || row.state === "accepted"));
   const busy = () => {
     if(!p.id)return !p.launchError;
     if (sendingImmediate()) return true;
@@ -2989,7 +2990,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} />
             </Show>
-            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} />
+            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
               <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
@@ -3001,7 +3002,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />

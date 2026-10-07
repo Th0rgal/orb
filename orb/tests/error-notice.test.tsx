@@ -53,6 +53,8 @@ describe("provider usage limits", () => {
     expect(describeError("Error: 429 Too Many Requests").title).toBe("The provider is rate-limiting requests");
     expect(describeError("There was a network issue connecting to the server, please try again. (response may be truncated) (agent executor error: read: no route to host)")).toMatchObject({ title: "Network issue connecting to the model server" });
     expect(describeError("Our servers are experiencing high traffic right now, please try again in a minute. (API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable.)")).toMatchObject({ tone: "warning", title: "The model server is experiencing high traffic" });
+    expect(describeError("Remote antigravity job failed: CLI error: Antigravity ended without a SUCCESS result; resume this conversation before retrying work")).toMatchObject({ title: "Antigravity stopped before completing its turn" });
+    expect(describeError("Remote job failed: write /tmp/out: No space left on device (ENOSPC)")).toMatchObject({ title: "Disk full on the execution machine" });
     expect(describeError("Increased the rate of the limit checker loop.").tone).toBeUndefined();
   });
 });

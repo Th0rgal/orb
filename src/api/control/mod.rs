@@ -12898,7 +12898,7 @@ fn remote_dispatch_is_scheduled_for_future(
 /// paths: log the final assistant message, flip the mission to
 /// completed/failed with `status_reason`, and broadcast the status change.
 #[derive(Clone)]
-struct RemoteMissionOwner {
+pub(crate) struct RemoteMissionOwner {
     mission_store: Arc<dyn MissionStore>,
     events_tx: Option<broadcast::Sender<AgentEvent>>,
 }
@@ -15926,6 +15926,16 @@ async fn poll_remote_job(
                     if should_finalize_remote_job(inactive_status)
                         && matches!(status_reason, "remote_node_job" | "native_goal_stopped")
                     {
+                        if grok
+                            .as_ref()
+                            .and_then(remote_grok::NativeGrokObserver::usage)
+                            .is_some_and(|usage| usage.output_tokens > 1000)
+                        {
+                            usage_limit_wait::reset_remote_replays_after_progress(
+                                ledger_dir, mission_id,
+                            )
+                            .await;
+                        }
                         let failure = cli_error.as_deref().unwrap_or(content.as_str());
                         if let Some(wait) = usage_limit_wait::plan_remote(
                             ledger_dir,

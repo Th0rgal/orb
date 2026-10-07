@@ -683,7 +683,9 @@ fn persistent_nspawn_command(scope_args: Option<&[String]>) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::{spawn_streaming_command, ConfirmedNoLaunch};
+    use super::spawn_streaming_command;
+    #[cfg(target_os = "linux")]
+    use super::ConfirmedNoLaunch;
     use crate::nspawn;
 
     use super::{
@@ -705,6 +707,7 @@ mod tests {
     async fn streaming_no_launch_evidence_distinguishes_exec_failure_from_child_exit() {
         let dir = tempfile::tempdir().unwrap();
         let mut missing = Command::new(dir.path().join("missing-cli"));
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let error = spawn_streaming_command(&mut missing).unwrap_err();
         #[cfg(target_os = "linux")]
         assert!(error.downcast_ref::<ConfirmedNoLaunch>().is_some());

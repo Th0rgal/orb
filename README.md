@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="dashboard/public/favicon.svg" width="80" alt="Orb · sandboxed.sh" />
+  <img src="orb/src-tauri/icons/icon.svg" width="80" alt="Orb · sandboxed.sh" />
 </p>
 
 <h1 align="center">Orb (sandboxed.sh)</h1>

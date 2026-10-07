@@ -56,8 +56,14 @@ it("renders a local failure below the prompt using the red notice, without a yel
   expect(error.textContent).toContain('The local transport was rejected');
   expect(container.querySelector('.user')!.compareDocumentPosition(error)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
-it("does not duplicate a failure already in the transcript",async()=>{
+it("does not duplicate a failure already in the transcript and renders Resume inside the transcript error card",async()=>{
  const {MissionFailure}=await import("../src/missionLaunch");
- const {container}=render(()=><MissionFailure mission={{status:"failed"} as import("../src/api").Mission} failureInTranscript/>);
- expect(container.querySelector('.error-notice')).toBeNull();
+ let resumed = 0;
+ const {container}=render(()=><><Transcript items={[{kind:"user",key:"u",text:"My prompt"},{kind:"error",key:"e",text:"CLI error: Antigravity ended without a SUCCESS result; resume this conversation before retrying work"}]} onResume={()=>{resumed++;}}/><MissionFailure mission={{status:"failed"} as import("../src/api").Mission} failureInTranscript onResume={()=>{resumed++;}}/></>);
+ const cards=container.querySelectorAll('.error-notice');
+ expect(cards).toHaveLength(1);
+ const btn=cards[0].querySelector('.error-notice-actions .error-notice-link') as HTMLButtonElement | null;
+ expect(btn?.textContent).toBe('Resume');
+ btn?.click();
+ expect(resumed).toBe(1);
 });

@@ -382,7 +382,7 @@ export function ThoughtSequence(p: { items: Array<Extract<StreamItem, { kind: "t
   );
 }
 
-export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
+export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -395,6 +395,12 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
   const lastUserKey = createMemo(() => {
     const last = p.items[p.items.length - 1];
     return last?.kind === "user" ? last.key : null;
+  });
+  const lastErrorKey = createMemo(() => {
+    for (let i = groups().length - 1; i >= 0; i--) {
+      if (groups()[i].kind === "error") return groups()[i].key;
+    }
+    return null;
   });
   const turns=createMemo<Array<{key:string;items:Grouped[]}>>((previous)=>{
     const cached=new Map(previous?.map(row=>[row.key,row]));
@@ -436,7 +442,9 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
             case "tool":
               return <ToolRow item={item} />;
             case "error":
-              return <ErrorNotice error={item.text} title={item.cancelled ? "Mission cancelled" : "Mission failed"} />;
+              return <ErrorNotice error={item.text} title={item.cancelled ? "Mission cancelled" : "Mission failed"}>
+                <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+              </ErrorNotice>;
           }
         }}
       </For>}</VirtualTurns></DisclosureState.Provider>

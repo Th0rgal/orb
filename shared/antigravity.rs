@@ -204,16 +204,15 @@ impl Stream {
             "result" => &value["result"],
             _ => return vec![],
         };
-        if kind == "init" {
-            if body["expanded_commands"]
+        if kind == "init"
+            && body["expanded_commands"]
                 .as_array()
                 .or_else(|| value["expanded_commands"].as_array())
                 .is_some_and(|cmds| cmds.iter().any(|c| c["name"].as_str() == Some("goal")))
-            {
-                self.goal_mode = true;
-                if self.goal_iterations == 0 {
-                    self.goal_iterations = 1;
-                }
+        {
+            self.goal_mode = true;
+            if self.goal_iterations == 0 {
+                self.goal_iterations = 1;
             }
         }
         let conv_id = body["conversation_id"]

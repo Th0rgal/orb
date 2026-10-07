@@ -1833,13 +1833,81 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
             })
             .collect()
     }
+    fn collect_stale_mutation_lake_builds(
+        root: &Path,
+        cutoff: std::time::SystemTime,
+        depth: usize,
+        out: &mut Vec<PathBuf>,
+    ) {
+        if depth > 6 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "build"
+                && path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some(".lake")
+            {
+                let mtime = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if mtime <= cutoff {
+                    out.push(path);
+                }
+                continue;
+            }
+            collect_stale_mutation_lake_builds(&path, cutoff, depth + 1, out);
+        }
+    }
+    let mut mutation_builds = Vec::new();
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(20 * 60))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    if let Ok(transfers) = std::fs::read_dir(work_root.join(".transfers")) {
+        for transfer in transfers.filter_map(|e| e.ok()) {
+            let repos_dir = transfer.path().join("destination/workspace/repositories");
+            for repo_dir in subdirs(&repos_dir) {
+                let lake_dir = repo_dir.join(".lake");
+                let Ok(lake_entries) = std::fs::read_dir(&lake_dir) else {
+                    continue;
+                };
+                for entry in lake_entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.contains("mutations"))
+                    {
+                        collect_stale_mutation_lake_builds(&path, cutoff, 0, &mut mutation_builds);
+                    }
+                }
+            }
+        }
+    }
     // checkouts/<repo-hash>/<commit>
     let mut checkouts = Vec::new();
     for repo_dir in subdirs(&work_root.join("checkouts")) {
         checkouts.extend(subdirs(&repo_dir));
     }
     let lake_slots = subdirs(&caches_dir(work_root).join("lake"));
-    let mut candidates = dirs_by_mtime(checkouts);
+    let mut candidates = dirs_by_mtime(mutation_builds);
+    candidates.extend(dirs_by_mtime(checkouts));
     candidates.extend(dirs_by_mtime(lake_slots));
     candidates
 }
