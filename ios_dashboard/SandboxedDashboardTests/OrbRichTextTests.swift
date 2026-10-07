@@ -260,4 +260,38 @@ final class OrbRichTextTests: XCTestCase {
         add(attachment)
     }
 
+    func testLongTableAndMarkdownMessageNeverClipsAt640pt() async throws {
+        let ctrlGMessage = #"""
+        J'ai scanné l'intégralité des **99 dépôts Rust (7 345 tests de propriétés)** dans [candidates/ledger/](file:///Users/thomas/work/rust-verification-benchmark/candidates/ledger/) de `rust-verification-benchmark` pour comparer les problèmes **non-Web3** et **Web3**, en cherchant spécifiquement :
+        1. les propriétés marquées **`proof_infeasible`** (où même les auteurs du benchmark ne savaient pas si la propriété était vraie ou fausse, ou n'ont pas pu la prouver),
+        2. les propriétés où un **vrai contre-exemple upstream** (non détecté par `proptest`/`quickcheck`) a été découvert,
+        3. les algorithmes bit-level/mathématiques rejetés uniquement à cause de limitations d'extraction (`lean_build_failed` / `unsupported_semantics`).
+
+        ---
+
+        ### Comparaison : Code Non-Web3 vs Code Web3
+
+        | Critère | Code Non-Web3 (Moteurs de recherche, SWAR, Compression, Calendriers, Combinatoire) | Code Web3 / Crypto (ZK, Bignums EVM, AMMs) |
+        | :--- | :--- | :--- |
+        | **Pourquoi la vérité terrain y est souvent inconnue** | Les auteurs implémentent des algorithmes académiques (Vigna SWAR, Granlund-Montgomery, Neri-Schneider, Feistel ARX) et se fient à `proptest` (quelques centaines de tirages aléatoires sur $2^{64}$ ou $2^{128}$), **sans jamais faire d'audit formel**. | Le code subit des audits humains, mais utilise des optimisations extrêmes (réduction paresseuse, approximation de quotient multi-limbs, boucles de Newton) où les cas limites échappent aux tests. |
+        | **Fréquence de vrais bugs cachés dans le code de production** | **Très élevée** : dans notre scan, `openpql_prelude` (`MixedRadix`), `dashu` (`div_rem_euclid` sur `MIN`), et potentiellement `arxid` (collision de sous-clés) ont des cas limites qui cassent les assertions des auteurs avec probabilité $< 2^{-60}$. | **Élevée sur les fonctions auxiliaires** : `ruint` (`from_u64_prefix` et `div_3x2`), `goldilocks` (`ntt::shift` qui échoue réellement !), `whirlpools` (`bit_math`). |
+        | **Nature de la difficulté en Lean 4 (pour Opus 5.5)** | Décomposition **SWAR / bit-à-bit parallèle** (octets empaquetés dans un `u64` avec retenues internes), **division par multiplicateurs magiques** à exposant variable (`leading_zeros`), et **bijections combinatoires** (`isqrt`, base mixte). | **Théorie des nombres / Anneaux** ($\mathbb{Z}/p\mathbb{Z}$, matrices unimodulaires d'Euclide-Jebelean) et **convergence monotone de boucles de Newton**. |
+
+        ---
+
+        ### Mon Top 3 (2 Non-Web3 + 1 Web3) où l'on ne sait pas a priori si c'est vrai ou faux
+
+        #### 1. [Non-Web3] Algorithmes SWAR (SIMD Within A Register)
+        Prouver en Lean 4 que `select1_raw` est exact demande l'encadrement diophantien $\lceil 2^{64+p}/d \rceil$ paramétré par $\lfloor \log_2 d \rfloor$.
+        """#
+        let estimate = OrbRichHeightCache.get(ctrlGMessage, .large)
+        XCTAssertGreaterThan(estimate, 640, "Initial height estimate must not clip multi-screen Markdown tables at 640pt")
+        let web = try await render(ctrlGMessage)
+        try await Task.sleep(for: .milliseconds(300))
+        host?.view.layoutIfNeeded()
+        let contentHeight = try await web.evaluateJavaScript("Math.ceil(document.querySelector('#content').getBoundingClientRect().height)") as? Double ?? 0
+        XCTAssertGreaterThan(contentHeight, 900)
+        XCTAssertGreaterThanOrEqual(Double(web.frame.height), contentHeight - 2, "WKWebView frame height must expand to fit the full table and trailing sections")
+    }
+
 }

@@ -117,7 +117,23 @@ struct OrbConversation: View {
         if isCloud {
             rows = turns.flatMap { turn in [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty } }
         } else {
-            rows = mission["history"].items.enumerated().map { (String($0.offset), $0.element["role"].text, $0.element["content"].text) }
+            var deduplicated: [(String, String, String)] = []
+            for (offset, element) in mission["history"].items.enumerated() {
+                let role = element["role"].text
+                let content = element["content"].text
+                if role == "assistant", let last = deduplicated.last, last.1 == "assistant" {
+                    let prevTrimmed = last.2.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let currTrimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Coalesce identical consecutive assistant bubbles or retry-resumed snapshots of the same response.
+                    let sharedPrefixLen = min(160, min(prevTrimmed.count, currTrimmed.count))
+                    if prevTrimmed == currTrimmed || (sharedPrefixLen >= 80 && prevTrimmed.prefix(sharedPrefixLen) == currTrimmed.prefix(sharedPrefixLen)) {
+                        deduplicated[deduplicated.count - 1] = (String(offset), role, content)
+                        continue
+                    }
+                }
+                deduplicated.append((String(offset), role, content))
+            }
+            rows = deduplicated
             // Also include any user_message events recorded in the event stream that haven't landed in mission.history yet.
             for event in events where event.eventType == "user_message" {
                 let text = event.content
@@ -188,7 +204,7 @@ struct OrbConversation: View {
                         }
                         if mission != .null { loading = false }
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
-                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts)
+                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
                     } else if !selection.cloud && selection.node.isEmpty {
                         if let cached = OrbReadCache.read("catalog:agent") {
                             selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items) ?? "core"
@@ -200,7 +216,7 @@ struct OrbConversation: View {
                     await refresh()
                     if let id {
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
-                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts)
+                        OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
                     }
                     while !Task.isCancelled {
                         // When SSE stream is connected for local/remote agents, poll lightly (12s);
@@ -253,7 +269,7 @@ struct OrbConversation: View {
     @ViewBuilder
     private func conversationScrollView(scroll: ScrollViewProxy) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 14) {
                 if unavailable {
                     ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))
                 } else {

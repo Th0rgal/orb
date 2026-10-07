@@ -211,7 +211,8 @@ export class TranscriptReducer {
         const index=this.bubbles.get(finalBubble);
         const previous=index == null ? undefined : this.items[index];
         const native = [...this.bubbles].filter(([id])=>id.startsWith('antigravity:')).sort((a,b)=>a[1]-b[1]).map(([,i])=>this.items[i]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
-        const isNativeReceipt = native.length > 0 && (text === native.map(i=>i.text).join('') || text === native.at(-1)!.text);
+        const trimmed = text.trim();
+        const isNativeReceipt = native.length > 0 && (trimmed === native.map(i=>i.text).join('').trim() || trimmed === native.at(-1)!.text.trim());
         this.close();
         if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
         if(isNativeReceipt) return;

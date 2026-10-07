@@ -101,6 +101,7 @@ import {
   getRemoteNodes,
   isConnected,
   listMissions,
+  listProjectMissions,
   listProjects,
   listHarnessChoices,
   shortModelLabel,
@@ -1221,9 +1222,37 @@ export default function App() {
   };
   const refreshMissions = async () => {
     try {
+      const prev = missions().filter(m => !isMissionDeleting(m.id));
       const fresh = (await listMissions()).filter(m => !isMissionDeleting(m.id));
-      setMissions((prev) => mergeById(prev.filter(m => !isMissionDeleting(m.id)), fresh));
+      const freshIds = new Set(fresh.map(m => m.id));
+      const vanished = prev.filter(m => !freshIds.has(m.id));
+      setMissions((current) => mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh));
       recordMissions(fresh);
+      if (vanished.length) {
+        const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
+        for (const slug of slugs) {
+          void listProjectMissions(slug)
+            .then(rows => {
+              const clean = rows.filter(m => !isMissionDeleting(m.id));
+              setProjectMissions(cur => ({ ...cur, [slug]: clean }));
+            })
+            .catch(() => {});
+        }
+        for (const m of vanished) {
+          if (!m.project?.trim()) {
+            void getMission(m.id)
+              .then(updated => {
+                if (isMissionDeleting(updated.id)) return;
+                const slug = updated.project?.trim() || DEFAULT_PROJECT.slug;
+                setProjectMissions(cur => {
+                  const existing = cur[slug] ?? [];
+                  return { ...cur, [slug]: [updated, ...existing.filter(x => x.id !== updated.id)] };
+                });
+              })
+              .catch(() => {});
+          }
+        }
+      }
       const live = new Set(["active", "running", "pending", "queued", "starting", "resuming"]);
       for (const m of fresh) if (live.has(m.status)) prefetchTranscript(m.id);
       for (const key of cacheRecents()) {
@@ -1300,7 +1329,7 @@ export default function App() {
     const mid = currentMissionId();
     if (!mid) return;
     const m = openMission()?.id === mid ? openMission()! : inboxMissions().find((row) => row.id === mid);
-    markMissionRead(m ?? mid);
+    if (m) markMissionRead(m, true, Boolean(pendingMissionInteraction(mid)));
   });
   // Project controller (Hermes cron): `c:<slug>`.
   const currentController = createMemo(() => {
@@ -1464,8 +1493,8 @@ export default function App() {
     });
     if (id?.startsWith("m:")) {
       const mid = id.slice(2);
-      const known = missions().find((m) => m.id === mid);
-      markMissionRead(known ?? mid);
+      const known = inboxMissions().find((m) => m.id === mid) ?? missions().find((m) => m.id === mid);
+      if (known) markMissionRead(known, true, Boolean(pendingMissionInteraction(mid)));
       void loadTranscript(mid).catch(() => {});
     }
     toBottom();

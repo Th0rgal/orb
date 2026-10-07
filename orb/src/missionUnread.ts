@@ -124,11 +124,18 @@ export function isMissionUnread(
 export function markMissionRead(
   missionOrId:
     | string
-    | Pick<Mission, "id" | "updated_at" | "created_at" | "last_output_at">,
+    | (Pick<Mission, "id" | "updated_at" | "created_at" | "last_output_at"> & {
+        status?: string;
+      }),
   syncBackend = true,
+  hasInteraction = false,
 ): void {
   const id = typeof missionOrId === "string" ? missionOrId : missionOrId.id;
   if (!id) return;
+  const status = typeof missionOrId === "string" ? undefined : missionOrId.status;
+  if (status && !UNREAD_RESPONSE_STATUSES.has(status) && !hasInteraction) {
+    return;
+  }
   const updatedMs =
     typeof missionOrId === "string" ? 0 : missionResponseTimestampMs(missionOrId);
   const stamp = Math.max(Date.now(), updatedMs);
@@ -138,7 +145,11 @@ export function markMissionRead(
     persistSeenCache();
     setUnreadVersion((v) => v + 1);
   }
-  if (syncBackend && isConnected()) {
+  if (
+    syncBackend &&
+    isConnected() &&
+    (!status || UNREAD_RESPONSE_STATUSES.has(status))
+  ) {
     void markMissionOpened(id).catch(() => {});
   }
 }

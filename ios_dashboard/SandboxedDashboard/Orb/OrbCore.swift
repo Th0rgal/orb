@@ -29,7 +29,7 @@ indirect enum OrbJSON: Codable, Sendable, Equatable {
     var text: String { if case .string(let v) = self { return v }; return "" }
     var items: [OrbJSON] { if case .array(let v) = self { return v }; return [] }
     var flag: Bool { if case .bool(let v) = self { return v }; return false }
-    var number: Double? { if case .number(let v) = self { return v }; return nil }
+    var doubleValue: Double? { if case .number(let v) = self { return v }; return nil }
 }
 
 /// Remote placement can be reported by either the mission or its current job.

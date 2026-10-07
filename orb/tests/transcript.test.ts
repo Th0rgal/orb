@@ -176,3 +176,15 @@ it('restores a native bubble before its tool and keeps its DOM identity across r
  expect(live.map(i=>i.kind)).toEqual(['text','tool']);
  expect(texts(live)[0].key).toEqual(texts(replay)[0].key);
 });
+it('deduplicates trimmed terminal assistant_message receipt against native antigravity bubble with trailing newlines',()=>{
+ const bubble='antigravity:869fd922-78ac-4a06-8994-2bda1baed391:2072';
+ const msg='I will wait for the background build task to notify me when it finishes.';
+ const items=buildTranscript([
+  ev('text_op',{bubble_id:bubble,ops:[{type:'snapshot',revision:1,text:`${msg}\n\n`},{type:'finalize'}]}),
+  ev('assistant_message',{canonical:true,bubble_id:bubble,revision:1,content:`${msg}\n\n`}),
+  final(msg,'terminal-receipt'),
+ ]);
+ expect(texts(items)).toHaveLength(1);
+ expect(texts(items)[0].text).toBe(`${msg}\n\n`);
+});
+
