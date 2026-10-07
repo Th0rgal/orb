@@ -1,22 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#0F172A"
-        android:pathData="M54,6 C80.5,6 102,27.5 102,54 C102,80.5 80.5,102 54,102 C27.5,102 6,80.5 6,54 C6,27.5 27.5,6 54,6 Z" />
-    <path
-        android:fillColor="#F8FAFC"
-        android:pathData="M26,33 L82,33 L82,75 L26,75 Z" />
-    <path
-        android:fillColor="#121214"
-        android:pathData="M31,41 L77,41 L77,70 L31,70 Z" />
-    <path
-        android:fillColor="#5EEAD4"
-        android:pathData="M39,49 L50,56 L39,63 L39,58 L45,56 L39,54 Z" />
-    <path
-        android:fillColor="#A78BFA"
-        android:pathData="M55,61 L71,61 L71,66 L55,66 Z" />
-</vector>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/background_primary" />
+    <foreground android:drawable="@drawable/orb_app_icon" />
+</adaptive-icon>

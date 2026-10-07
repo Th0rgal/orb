@@ -34,6 +34,8 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:supportsPictureInPicture="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboard|keyboardHidden|navigation|uiMode"
             android:theme="@style/Theme.SandboxedDashboard"
@@ -51,6 +53,13 @@
                     android:scheme="sandboxed"
                     android:host="auth"
                     android:path="/callback" />
+            </intent-filter>
+            <!-- Orb deep links (orb://inbox, orb://project/<slug>, etc.) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="orb" />
             </intent-filter>
         </activity>
     </application>
