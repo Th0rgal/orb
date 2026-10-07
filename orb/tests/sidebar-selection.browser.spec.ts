@@ -114,6 +114,10 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
     if (cronMatch) {
       const [, slug, id] = cronMatch;
       if (req.method() === 'GET' && !id) return route.fulfill({json:{jobs: crons[slug] ?? []}});
+      if (req.method() === 'DELETE' && id) {
+        crons[slug] = (crons[slug] ?? []).filter(j => j.id !== id);
+        return route.fulfill({json:{ok:true}});
+      }
       if (req.method() === 'PATCH' && id) {
         const body = req.postDataJSON();
         cronUpdates.push({slug, id, body});
@@ -227,5 +231,18 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
   await expect.poll(() => fileTransfers.length).toBe(1);
   expect(cronUpdates[1]).toEqual({slug:'one', id:'cron-2', body:{folder:'docs'}});
   expect(fileTransfers[0]).toEqual({fromSlug:'one', toSlug:'one', path:'notes.md', destination:'docs/notes.md', copy:false});
+
+  // 5. Multi-select crons: right-click shows both Move N crons and Delete N crons…
+  await expect(cron1).toBeVisible();
+  await cron1.click();
+  await cron2.click({modifiers:[shortcut]});
+  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(2);
+  await cron2.click({button:'right'});
+  await expect(page.getByRole('menuitem')).toHaveText(['Move 2 crons', 'Delete 2 crons…']);
+  await page.getByRole('menuitem',{name:'Delete 2 crons…',exact:true}).click();
+  await expect(page.getByRole('dialog',{name:'Delete 2 crons?'})).toBeVisible();
+  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(cron1).toHaveCount(0);
+  await expect(cron2).toHaveCount(0);
 });
 

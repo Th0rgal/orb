@@ -299,7 +299,7 @@ export function LiveProjectsSection(p: {
   const [defaultsError, setDefaultsError] = createSignal<string | null>(null);
   const [crons, setCrons] = createStore<Record<string, import("./api").ControllerJob[]>>({});
   const [controllerMenu, setControllerMenu] = createSignal<{x:number;y:number;slug:string;id?:string;name:string;folder?:string;controller:boolean;archived:boolean} | null>(null);
-  const [deleteCronTarget, setDeleteCronTarget] = createSignal<{slug:string;id?:string;name:string;controller:boolean} | null>(null);
+  const [deleteCronTarget, setDeleteCronTarget] = createSignal<{slug:string;id?:string;name:string;controller:boolean;items?:Array<{slug:string;id:string;name:string}>} | null>(null);
   const [deletingCron, setDeletingCron] = createSignal(false);
   const [deleteCronError, setDeleteCronError] = createSignal<string | null>(null);
   const [movingCron, setMovingCron] = createSignal(false);
@@ -1247,6 +1247,29 @@ export function LiveProjectsSection(p: {
     if (onlyFiles) {
       entries.push({ kind: "item", label: `Copy ${n} items`, icon: Ic.CopyIcon, onClick: () => void copySelectedItems(treeIds, true) });
     }
+    if (onlyCrons) {
+      const cronItems = items as Array<Extract<ClipboardItem, { kind: "cron" }>>;
+      entries.push(
+        { kind: "sep" },
+        {
+          kind: "item",
+          label: `Delete ${n} crons…`,
+          icon: Ic.TrashIcon,
+          danger: true,
+          onClick: () => {
+            setMultiSelectMenu(null);
+            setDeleteCronError(null);
+            setDeleteCronTarget({
+              slug: cronItems[0].slug,
+              id: cronItems[0].id,
+              name: cronItems[0].name,
+              controller: false,
+              items: cronItems.map((c) => ({ slug: c.slug, id: c.id, name: c.name })),
+            });
+          },
+        },
+      );
+    }
     if (onlyMissions) {
       const firstId = (items[0] as { kind: "mission"; id: string }).id;
       entries.push(
@@ -1322,7 +1345,54 @@ export function LiveProjectsSection(p: {
     setDeletingCron(true);
     setDeleteCronError(null);
     try {
-      if (target.controller) {
+      if (target.items && target.items.length > 1) {
+        const failures: string[] = [];
+        const remaining: Array<{ slug: string; id: string; name: string }> = [];
+        const deletedTreeIds = new Set<string>();
+        for (const item of target.items) {
+          if (version !== connectionVersion()) break;
+          try {
+            try {
+              await deleteProjectCron(item.slug, item.id);
+            } catch (err) {
+              if (!(err instanceof ApiError && err.status === 404)) throw err;
+            }
+            if (version !== connectionVersion()) break;
+            cachePut(`c:${item.slug}:${item.id}`, { slug: item.slug, job: null, runs: [] });
+            setCrons(item.slug, (list) => (list ?? []).filter((j) => j.id !== item.id));
+            if (cutCron()?.id === item.id) setCutCron(null);
+            if (readCronReference(fileClipboard())?.id === item.id) setFileClipboard("");
+            if (cutItems().some((c) => c.kind === "cron" && c.id === item.id)) setFileClipboard("");
+            if (p.selected() === `pc:${item.slug}:${item.id}`) p.open(null);
+            deletedTreeIds.add(`pc:${item.slug}:${item.id}`);
+            window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: item.slug, id: item.id, deleted: true } }));
+          } catch (err) {
+            remaining.push(item);
+            failures.push(`${item.name}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        if (version !== connectionVersion()) return;
+        if (deletedTreeIds.size) {
+          setSelectedTreeIds((ids) => {
+            const next = ids.filter((id) => !deletedTreeIds.has(id));
+            if (!next.length) setSelectionActive(false);
+            return next;
+          });
+          if (selectionAnchor && deletedTreeIds.has(selectionAnchor)) selectionAnchor = null;
+          bumpProjects();
+        }
+        if (failures.length) {
+          setDeleteCronTarget(
+            remaining.length > 1
+              ? { ...target, items: remaining }
+              : remaining.length === 1
+                ? { slug: remaining[0].slug, id: remaining[0].id, name: remaining[0].name, controller: false }
+                : null,
+          );
+          setDeleteCronError(failures.join("; "));
+          return;
+        }
+      } else if (target.controller) {
         const view = await deleteProjectController(target.slug);
         if (version !== connectionVersion()) return;
         cachePut(`c:${target.slug}:`, view);
@@ -1339,7 +1409,15 @@ export function LiveProjectsSection(p: {
         setCrons(target.slug, (list) => (list ?? []).filter((j) => j.id !== target.id));
         if (cutCron()?.id === target.id) setCutCron(null);
         if (readCronReference(fileClipboard())?.id === target.id) setFileClipboard("");
+        if (cutItems().some((c) => c.kind === "cron" && c.id === target.id)) setFileClipboard("");
         if (p.selected() === `pc:${target.slug}:${target.id}`) p.open(null);
+        const treeId = `pc:${target.slug}:${target.id}`;
+        setSelectedTreeIds((ids) => {
+          const next = ids.filter((id) => id !== treeId);
+          if (!next.length) setSelectionActive(false);
+          return next;
+        });
+        if (selectionAnchor === treeId) selectionAnchor = null;
       }
       setDeleteCronTarget(null);
       bumpProjects();
@@ -2007,7 +2085,24 @@ export function LiveProjectsSection(p: {
         ] : []),
         {kind:"item",label:"Delete…",icon:Ic.TrashIcon,danger:true,onClick:()=>{setControllerMenu(null);setDeleteCronError(null);setDeleteCronTarget({slug:menu.slug,id:menu.id,name:menu.name,controller:menu.controller});}}
       ]} onClose={()=>setControllerMenu(null)} />}</Show>
-      <Show when={deleteCronTarget()} keyed>{target => <ConfirmDialog title="Delete cron?" description={`Delete ${target.name} from Hermes? This cannot be undone.`} action="Delete" busy={deletingCron()} error={deleteCronError()} onConfirm={() => void confirmDeleteCron()} onClose={() => !deletingCron() && setDeleteCronTarget(null)} />}</Show>
+      <Show when={deleteCronTarget()} keyed>{target => {
+        const count = target.items && target.items.length > 1 ? target.items.length : 1;
+        return (
+          <ConfirmDialog
+            title={count > 1 ? `Delete ${count} crons?` : "Delete cron?"}
+            description={
+              count > 1
+                ? `Delete ${count} crons from Hermes? This cannot be undone.`
+                : `Delete ${target.name} from Hermes? This cannot be undone.`
+            }
+            action="Delete"
+            busy={deletingCron()}
+            error={deleteCronError()}
+            onConfirm={() => void confirmDeleteCron()}
+            onClose={() => !deletingCron() && setDeleteCronTarget(null)}
+          />
+        );
+      }}</Show>
       <Show when={fileMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
         { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
         { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },
