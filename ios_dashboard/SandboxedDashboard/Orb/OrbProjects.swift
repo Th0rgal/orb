@@ -573,6 +573,7 @@ struct OrbProjectPage: View {
     @State private var loading = true
     @State private var folders: [String] = []
     @State private var collapsed: Set<String> = []
+    @State private var expandedMissions: Set<String> = []
     @State private var search = ""
     @State private var filter = "All"
     @State private var error = ""
@@ -581,17 +582,48 @@ struct OrbProjectPage: View {
     @State private var loadedArchived = false
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
+    private func matchesFilter(_ row: OrbRow) -> Bool {
+        (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
+        (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
+        (filter != "Working" || row.active) &&
+        (filter != "Needs attention" || ["blocked", "failed", "interrupted"].contains(row.state))
+    }
     private var visible: [OrbRow] {
-        missions.filter { row in
-            (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
-            (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
-            (filter != "Working" || row.active) &&
-            (filter != "Needs attention" || ["blocked", "failed", "interrupted"].contains(row.state))
+        if !search.isEmpty {
+            return missions.filter(matchesFilter)
         }
+        return OrbMissionTree.treeRows(missions, visible: matchesFilter)
+    }
+    private var nestedRoots: [OrbNestedMission] {
+        if !search.isEmpty {
+            return visible.map { OrbNestedMission(mission: $0) }
+        }
+        return OrbMissionTree.nest(visible)
+    }
+    private struct FlattenedMissionRow: Identifiable {
+        let node: OrbNestedMission
+        let depth: Int
+        let launched: Int
+        let launchedLive: Int
+        let isExpanded: Bool
+        var id: String { node.id }
+    }
+    private func flatten(_ nodes: [OrbNestedMission], depth: Int = 0) -> [FlattenedMissionRow] {
+        var result: [FlattenedMissionRow] = []
+        for node in nodes {
+            let isExpanded = expandedMissions.contains(node.id)
+            let launched = OrbMissionTree.countNested(node)
+            let launchedLive = OrbMissionTree.countNested(node, matches: \.active)
+            result.append(FlattenedMissionRow(node: node, depth: depth, launched: launched, launchedLive: launchedLive, isExpanded: isExpanded))
+            if isExpanded && !node.children.isEmpty {
+                result.append(contentsOf: flatten(node.children, depth: depth + 1))
+            }
+        }
+        return result
     }
     private var filtering: Bool { !search.isEmpty || filter != "All" }
     private var paths: [String] {
-        let sources = (filtering ? [] : folders) + visible.map(\.folder)
+        let sources = (filtering ? [] : folders) + nestedRoots.map(\.mission.folder)
         var all = Set(sources)
         for path in sources {
             let parts = path.split(separator: "/")
@@ -612,9 +644,11 @@ struct OrbProjectPage: View {
                 }
                 if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
                 if loading && missions.isEmpty { conversationSkeletons }
-                ForEach(visible.filter { $0.folder.isEmpty }) { row in missionLink(row) }
+                ForEach(flatten(nestedRoots.filter { $0.mission.folder.isEmpty })) { item in
+                    missionRowView(item)
+                }
                 folderRows
-                if !loading && visible.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
+                if !loading && nestedRoots.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
             }.padding(.horizontal, 18)
         }
         .background(OrbStyle.background)
@@ -691,11 +725,23 @@ struct OrbProjectPage: View {
                 NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: folder) } label: { Image(systemName: "plus").font(.system(size: 14)).frame(width: 44, height: 44) }.accessibilityLabel("New agent in \(folder)")
             }.padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 2)
             if !collapsed.contains(folder) || !search.isEmpty {
-                ForEach(visible.filter { $0.folder == folder }) { row in
-                    missionLink(row).padding(.leading, 16)
+                ForEach(flatten(nestedRoots.filter { $0.mission.folder == folder })) { item in
+                    missionRowView(item)
+                        .padding(.leading, 16)
                 }
             }
         }
+    }
+    private func missionRowView(_ item: FlattenedMissionRow) -> some View {
+        missionLink(item.node.mission, launched: item.launched, launchedLive: item.launchedLive, isExpanded: item.isExpanded) {
+            withAnimation(.snappy(duration: 0.18)) {
+                if !expandedMissions.insert(item.node.id).inserted {
+                    expandedMissions.remove(item.node.id)
+                }
+            }
+            OrbHaptics.selection()
+        }
+        .padding(.leading, CGFloat(min(48, item.depth * 18)))
     }
     @ViewBuilder
     private func statusGlyph(for row: OrbRow) -> some View {
@@ -713,54 +759,78 @@ struct OrbProjectPage: View {
                 }
         }
     }
-    private func missionLink(_ row: OrbRow) -> some View {
+    private func missionLink(_ row: OrbRow, launched: Int = 0, launchedLive: Int = 0, isExpanded: Bool = false, onToggleLaunched: (() -> Void)? = nil) -> some View {
         let isGoal = OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag
         let cleanTitle = OrbStyle.displayTitle(row.name)
-        return NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
-            HStack(alignment: .top, spacing: 12) {
-                statusGlyph(for: row)
-                    .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if isGoal {
-                            HStack(spacing: 3) {
-                                Image(systemName: "target")
-                                    .font(.system(size: 9, weight: .semibold))
-                                Text("Goal")
-                                    .font(.system(size: 10, weight: .semibold))
+        return HStack(spacing: 6) {
+            NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    statusGlyph(for: row)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            if isGoal {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "target")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    Text("Goal")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.white.opacity(0.07), in: Capsule())
                             }
-                            .foregroundStyle(OrbStyle.textSecondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.white.opacity(0.07), in: Capsule())
+                            Text(cleanTitle)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 4)
+                            let rel = OrbStyle.relativeTime(row.updatedAt)
+                            if !rel.isEmpty {
+                                Text(rel)
+                                    .font(.caption2)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .monospacedDigit()
+                            }
                         }
-                        Text(cleanTitle)
-                            .font(.subheadline.weight(.medium))
+                        Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
+                            .font(.caption)
+                            .foregroundStyle(row.active ? OrbStyle.textSecondary : OrbStyle.textMuted)
                             .lineLimit(1)
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 4)
-                        let rel = OrbStyle.relativeTime(row.updatedAt)
-                        if !rel.isEmpty {
-                            Text(rel)
-                                .font(.caption2)
-                                .foregroundStyle(OrbStyle.textMuted)
-                                .monospacedDigit()
-                        }
                     }
-                    Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
-                        .font(.caption)
-                        .foregroundStyle(row.active ? OrbStyle.textSecondary : OrbStyle.textMuted)
-                        .lineLimit(1)
                 }
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
+            .buttonStyle(OrbPressButtonStyle())
+            .accessibilityIdentifier("mission.\(row.id)")
+
+            if launched > 0, let onToggleLaunched {
+                Button(action: onToggleLaunched) {
+                    HStack(spacing: 4) {
+                        Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    }
+                    .foregroundStyle(launchedLive > 0 ? OrbStyle.success : OrbStyle.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.border))
+                    .frame(minHeight: 36)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(isExpanded ? "Hide" : "Show") \(launched) subagents for \(cleanTitle)")
+                .accessibilityIdentifier("mission.subagents.\(row.id)")
             }
         }
-        .buttonStyle(OrbPressButtonStyle())
-        .accessibilityIdentifier("mission.\(row.id)")
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
+        }
         .contextMenu {
             if !row.active && row.state != "acknowledged" {
                 Button("Archive") {
@@ -793,7 +863,7 @@ struct OrbProjectPage: View {
             guard !Task.isCancelled else { return }
             if includeArchived { loadedArchived = true }
             apply(value); loading = false; error = ""
-            await OrbReadCache.prefetch(missions)
+            await OrbReadCache.prefetch(nestedRoots.map(\.mission))
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
     private func mkdir() async {

@@ -63,8 +63,92 @@ struct OrbRow: Identifiable, Hashable {
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
         updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
     }
-    var mobile: Bool { !raw["tags"].items.contains(where: { $0.text == "placement:client" || $0.text.hasPrefix("btw-parent:") }) }
+    var parentMissionID: String? {
+        let p = raw["parent_mission_id"].text
+        if !p.isEmpty { return p }
+        let cp = raw["callback_parent_mission_id"].text
+        return cp.isEmpty ? nil : cp
+    }
+    var mobile: Bool { !raw["tags"].items.contains(where: { $0.text.hasPrefix("btw-parent:") }) }
     var active: Bool { ["active", "pending", "running", "starting"].contains(state) }
+}
+
+struct OrbNestedMission: Identifiable, Hashable {
+    let mission: OrbRow
+    var children: [OrbNestedMission]
+    var id: String { mission.id }
+    init(mission: OrbRow, children: [OrbNestedMission] = []) {
+        self.mission = mission
+        self.children = children
+    }
+}
+
+enum OrbMissionTree {
+    /// Keep archived/completed parents as context for visible child workers without restoring all archived missions.
+    static func treeRows(_ missions: [OrbRow], visible: (OrbRow) -> Bool) -> [OrbRow] {
+        var byID: [String: OrbRow] = [:]
+        for m in missions where byID[m.id] == nil { byID[m.id] = m }
+        var retained = Set(missions.filter(visible).map(\.id))
+        for mission in missions where visible(mission) {
+            var seen: Set<String> = [mission.id]
+            var parent = mission.parentMissionID
+            while let p = parent, !seen.contains(p) {
+                seen.insert(p)
+                guard let row = byID[p] else { break }
+                retained.insert(p)
+                parent = row.parentMissionID
+            }
+        }
+        return missions.filter { retained.contains($0.id) }
+    }
+
+    /// Roots keep the order of the list, and so do the children of each mission.
+    static func nest(_ missions: [OrbRow]) -> [OrbNestedMission] {
+        var byID: [String: OrbRow] = [:]
+        for mission in missions where byID[mission.id] == nil {
+            byID[mission.id] = mission
+        }
+        var childrenByParent: [String: [OrbRow]] = [:]
+        var roots: [OrbRow] = []
+        for mission in missions {
+            if let parentID = mission.parentMissionID,
+               let parent = byID[parentID],
+               parent.id != mission.id,
+               !reaches(byID: byID, from: parent, target: mission.id) {
+                childrenByParent[parentID, default: []].append(mission)
+            } else {
+                roots.append(mission)
+            }
+        }
+        func build(_ row: OrbRow, visited: Set<String>) -> OrbNestedMission {
+            var nextVisited = visited
+            nextVisited.insert(row.id)
+            let kids = (childrenByParent[row.id] ?? []).filter { !nextVisited.contains($0.id) }.map { build($0, visited: nextVisited) }
+            return OrbNestedMission(mission: row, children: kids)
+        }
+        return roots.map { build($0, visited: []) }
+    }
+
+    private static func reaches(byID: [String: OrbRow], from: OrbRow, target: String) -> Bool {
+        var seen: Set<String> = []
+        var current: OrbRow? = from
+        while let cur = current, !seen.contains(cur.id) {
+            if cur.id == target { return true }
+            seen.insert(cur.id)
+            if let p = cur.parentMissionID {
+                current = byID[p]
+            } else {
+                current = nil
+            }
+        }
+        return false
+    }
+
+    static func countNested(_ node: OrbNestedMission, matches: (OrbRow) -> Bool = { _ in true }) -> Int {
+        node.children.reduce(0) { sum, child in
+            sum + (matches(child.mission) ? 1 : 0) + countNested(child, matches: matches)
+        }
+    }
 }
 
 struct OrbHTTPError: LocalizedError {
@@ -136,12 +220,11 @@ final class OrbCore {
     static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
     func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
         var rows: [OrbRow] = [], offset = 0
-        let allQuery = includeArchived ? "&all=true" : ""
         while true {
-            let page = try await call("/api/control/missions?project=\(Self.escape(project))\(allQuery)&limit=100&offset=\(offset)").items
+            let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
             let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
             rows += fresh
-            if page.count < 100 || fresh.isEmpty { break }
+            if !includeArchived || page.count < 100 || fresh.isEmpty { break }
             offset += page.count
         }
         return rows.filter(\.mobile)
@@ -203,6 +286,7 @@ enum OrbDisk {
 enum OrbReadCache {
     private struct Entry { let value: OrbJSON; let date: Date }
     private static var values: [String: Entry] = [:]
+    private static var eventValues: [String: [StoredEvent]] = [:]
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]
     private static func key(_ name: String) -> String { OrbDisk.url(name).absoluteString }
@@ -213,6 +297,26 @@ enum OrbReadCache {
         let scope = key(name)
         values[scope] = Entry(value: value, date: Date())
         OrbDisk.saveAsync(value, key: name)
+    }
+    static func readEvents(_ missionID: String) -> [StoredEvent] {
+        let cacheName = "events:\(missionID)"
+        let scope = key(cacheName)
+        if let cached = eventValues[scope] { return cached }
+        if let disk = OrbDisk.read(cacheName, as: [StoredEvent].self) {
+            eventValues[scope] = disk
+            return disk
+        }
+        return []
+    }
+    static func saveEvents(_ missionID: String, events: [StoredEvent]) {
+        let cacheName = "events:\(missionID)"
+        let scope = key(cacheName)
+        if eventValues.count >= 32, let firstKey = eventValues.keys.first {
+            eventValues.removeValue(forKey: firstKey)
+        }
+        let capped = events.count > 400 ? Array(events.suffix(400)) : events
+        eventValues[scope] = capped
+        OrbDisk.saveAsync(capped, key: cacheName)
     }
     static func load(_ name: String, ttl: TimeInterval = 30, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
         let scope = key(name)
@@ -280,7 +384,13 @@ enum OrbReadCache {
             guard !Task.isCancelled else { return }
             do {
                 _ = try await conversation(row.id)
-                if row.cloud { _ = try await cloud(row.id) }
+                if row.cloud {
+                    _ = try await cloud(row.id)
+                } else if readEvents(row.id).isEmpty {
+                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 200, sinceSeq: nil) {
+                        saveEvents(row.id, events: batch.events)
+                    }
+                }
             } catch { return }
         }
     }

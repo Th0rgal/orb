@@ -244,7 +244,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
         app.buttons["project.orb-test"].tap()
         XCTAssertTrue(app.buttons["folder.Design/Images"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["mission.local-only"].exists)
+        XCTAssertTrue(app.buttons["mission.local-only"].exists)
         app.buttons["mission.existing"].tap()
         XCTAssertTrue(app.textFields["composer"].waitForExistence(timeout: 10) || app.textViews["composer"].exists)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "orb-conversation"; shot.lifetime = .keepAlways; add(shot)

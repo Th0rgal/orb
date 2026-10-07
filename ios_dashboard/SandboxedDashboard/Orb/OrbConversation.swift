@@ -118,6 +118,13 @@ struct OrbConversation: View {
             rows = turns.flatMap { turn in [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty } }
         } else {
             rows = mission["history"].items.enumerated().map { (String($0.offset), $0.element["role"].text, $0.element["content"].text) }
+            // Also include any user_message events recorded in the event stream that haven't landed in mission.history yet.
+            for event in events where event.eventType == "user_message" {
+                let text = event.content
+                if !text.isEmpty && !rows.contains(where: { $0.1 == "user" && $0.2 == text }) {
+                    rows.append(("event-user-\(event.sequence)", "user", text))
+                }
+            }
         }
         if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
             rows.append(("optimistic-user", "user", opt))
@@ -168,12 +175,18 @@ struct OrbConversation: View {
                     if let id {
                         mission = OrbReadCache.read("mission:\(id)") ?? .null
                         execution = OrbReadCache.read("cloud:\(id)") ?? .null
+                        let cachedEvents = OrbReadCache.readEvents(id)
+                        if !cachedEvents.isEmpty {
+                            events = cachedEvents
+                            rebuildWorkModel()
+                        }
                         if execution != .null { selection.restore(execution["selection"]) }
                         else if mission != .null {
                             selection.backend = mission["backend"].text
                             selection.node = mission["remote_node_id"].text
                             selection.model = mission["model_override"].text
                         }
+                        if mission != .null { loading = false }
                     }
                     await refresh()
                     while !Task.isCancelled {
@@ -245,7 +258,8 @@ struct OrbConversation: View {
             if userScrolling { followsLatest = atBottom }
         }
         .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height + geometry.contentInsets.bottom - 32
+            let maxScrollableY = max(0, geometry.contentSize.height - geometry.visibleRect.height)
+            return maxScrollableY <= 24 || geometry.visibleRect.maxY >= geometry.contentSize.height - 40
         } action: { _, value in
             atBottom = value
             if userScrolling { followsLatest = value }
@@ -1000,9 +1014,6 @@ struct OrbConversation: View {
         do {
             let value = try await OrbReadCache.conversation(id, force: force)
             mission = value
-            if let opt = optimisticPrompt, mission["history"].items.contains(where: { $0["role"].text == "user" && $0["content"].text == opt }) {
-                optimisticPrompt = nil
-            }
             unavailable = !OrbRow(value).mobile
             guard !unavailable else { return }
             if OrbRow(value).cloud && execution == .null {
@@ -1022,7 +1033,7 @@ struct OrbConversation: View {
                             if op == "append" { liveText += content }
                             else if op == "replace" { liveText = content }
                         }
-                        if ["assistant_message", "mission_status_changed"].contains(type) {
+                        if ["assistant_message", "mission_status_changed", "user_message"].contains(type) {
                             Task { await refresh(force: true) }
                         } else if ["tool_call", "tool_result", "thinking"].contains(type) {
                             scheduleCoalescedRefresh()
@@ -1039,6 +1050,7 @@ struct OrbConversation: View {
                 if !batch.events.isEmpty || events.isEmpty {
                     let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
                     events = unique.values.sorted { $0.sequence < $1.sequence }
+                    OrbReadCache.saveEvents(id, events: events)
                     rebuildWorkModel()
                 }
                 queued = queueResp.items.filter { $0["mission_id"].text == id }
@@ -1046,6 +1058,14 @@ struct OrbConversation: View {
                 let accounts = (try? await OrbReadCache.cloudAccounts().items) ?? []
                 let account = accounts.first { $0["id"].text == execution["selection"]["account"].text && $0["provider"].text == execution["selection"]["provider"].text }
                 selection.canCancel = account?["capabilities"]["cancel"].flag ?? false
+            }
+            if let opt = optimisticPrompt {
+                let inHistory = mission["history"].items.contains(where: { $0["role"].text == "user" && $0["content"].text == opt })
+                let inEvents = events.contains(where: { $0.eventType == "user_message" && $0.content == opt })
+                let inCloud = turns.contains(where: { $0["prompt"].text == opt })
+                if inHistory || inEvents || inCloud {
+                    optimisticPrompt = nil
+                }
             }
             if execution != .null { OrbDisk.saveAsync(execution, key: "cloud:\(id)") }
             OrbDisk.saveAsync(value, key: "mission:\(id)")
@@ -1115,6 +1135,9 @@ struct OrbConversation: View {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
             }
             if id == nil { guard !result["id"].text.isEmpty else { throw URLError(.cannotParseResponse) }; id = result["id"].text }
+            if let id {
+                OrbReadCache.invalidate("mission:\(id)")
+            }
             OrbReadCache.invalidate("project:\(project)")
             OrbReadCache.invalidate("project:\(project):all")
             OrbDisk.remove(pendingKey)
@@ -1125,7 +1148,6 @@ struct OrbConversation: View {
             followsLatest = true
             openedAtLatest = false
             await refresh(force: true)
-            optimisticPrompt = nil
             return true
         } catch {
             optimisticPrompt = nil
@@ -1489,6 +1511,31 @@ struct OrbWorkFold: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Expanded items render ABOVE the toggle button (matching Desktop WorkFold),
+            // so the toggle button stays anchored at the bottom for easy collapsing.
+            if expanded && !model.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(model.thoughts) { thought in
+                        OrbThoughtRow(thought: thought, isExpanded: expandedItemIDs.contains(thought.id)) {
+                            toggleItem(thought.id)
+                        }
+                    }
+                    ForEach(model.tools) { tool in
+                        OrbToolRow(tool: tool, isExpanded: expandedItemIDs.contains(tool.id)) {
+                            toggleItem(tool.id)
+                        }
+                    }
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(OrbStyle.borderStrong)
+                        .frame(width: 1)
+                        .padding(.vertical, 2)
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
             if working {
                 Button {
                     guard !model.isEmpty else { return }
@@ -1518,7 +1565,7 @@ struct OrbWorkFold: View {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(OrbStyle.textMuted)
-                                .rotationEffect(.degrees(expanded ? 90 : 0))
+                                .rotationEffect(.degrees(expanded ? -90 : 0))
                         }
                     }
                     .padding(.vertical, 4)
@@ -1537,7 +1584,7 @@ struct OrbWorkFold: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(OrbStyle.textMuted)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .rotationEffect(.degrees(expanded ? -90 : 0))
                         Text(model.completedSummary)
                             .font(.footnote)
                             .foregroundStyle(OrbStyle.textSecondary)
@@ -1549,29 +1596,6 @@ struct OrbWorkFold: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("activity-fold")
-            }
-
-            if expanded && !model.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(model.thoughts) { thought in
-                        OrbThoughtRow(thought: thought, isExpanded: expandedItemIDs.contains(thought.id)) {
-                            toggleItem(thought.id)
-                        }
-                    }
-                    ForEach(model.tools) { tool in
-                        OrbToolRow(tool: tool, isExpanded: expandedItemIDs.contains(tool.id)) {
-                            toggleItem(tool.id)
-                        }
-                    }
-                }
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(OrbStyle.borderStrong)
-                        .frame(width: 1)
-                        .padding(.vertical, 2)
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
@@ -1593,12 +1617,22 @@ private struct OrbThoughtRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if isExpanded || thought.streaming {
+                Text(thought.body)
+                    .font(.caption)
+                    .foregroundStyle(OrbStyle.textSecondary)
+                    .textSelection(.enabled)
+                    .lineSpacing(2)
+                    .padding(.leading, 12)
+                    .padding(.vertical, 2)
+            }
+
             Button(action: onTap) {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(OrbStyle.textMuted)
-                        .rotationEffect(.degrees((isExpanded || thought.streaming) ? 90 : 0))
+                        .rotationEffect(.degrees((isExpanded || thought.streaming) ? -90 : 0))
                     Text(thought.streaming ? "Thinking" : "Thought")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
@@ -1615,16 +1649,6 @@ private struct OrbThoughtRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            if isExpanded || thought.streaming {
-                Text(thought.body)
-                    .font(.caption)
-                    .foregroundStyle(OrbStyle.textSecondary)
-                    .textSelection(.enabled)
-                    .lineSpacing(2)
-                    .padding(.leading, 12)
-                    .padding(.vertical, 2)
-            }
         }
     }
 }
@@ -1641,52 +1665,6 @@ private struct OrbToolRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Button {
-                if hasDetails { onTap() }
-            } label: {
-                HStack(spacing: 6) {
-                    Group {
-                        switch tool.status {
-                        case .running:
-                            OrbRunningDots(size: 9)
-                        case .done:
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(OrbStyle.textMuted)
-                        case .error:
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(OrbStyle.warning)
-                        }
-                    }
-                    .frame(width: 12)
-
-                    Text(tool.status == .running ? tool.loadingLabel : tool.completedLabel)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(tool.status == .error ? OrbStyle.warning : OrbStyle.textSecondary)
-
-                    if !tool.target.isEmpty {
-                        Text(tool.target)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundStyle(OrbStyle.textMuted)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-
-                    Spacer(minLength: 4)
-
-                    if hasDetails {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(OrbStyle.textMuted)
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    }
-                }
-                .padding(.vertical, 2)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
             if isExpanded && hasDetails {
                 VStack(alignment: .leading, spacing: 6) {
                     let combined = [tool.argsText, tool.outputText].filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -1727,6 +1705,52 @@ private struct OrbToolRow: View {
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border))
                 .padding(.leading, 14)
             }
+
+            Button {
+                if hasDetails { onTap() }
+            } label: {
+                HStack(spacing: 6) {
+                    Group {
+                        switch tool.status {
+                        case .running:
+                            OrbRunningDots(size: 9)
+                        case .done:
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(OrbStyle.textMuted)
+                        case .error:
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(OrbStyle.warning)
+                        }
+                    }
+                    .frame(width: 12)
+
+                    Text(tool.status == .running ? tool.loadingLabel : tool.completedLabel)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(tool.status == .error ? OrbStyle.warning : OrbStyle.textSecondary)
+
+                    if !tool.target.isEmpty {
+                        Text(tool.target)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    if hasDetails {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .rotationEffect(.degrees(isExpanded ? -90 : 0))
+                    }
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 }

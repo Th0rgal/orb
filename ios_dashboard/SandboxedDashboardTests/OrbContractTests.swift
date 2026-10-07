@@ -23,12 +23,29 @@ final class OrbContractTests: XCTestCase {
         _ = try await OrbReadCache.load(key, fetch: fetch)
         XCTAssertEqual(requests, 2)
     }
-    func testLocalAndSideMissionsAreExcluded() throws {
-        let local = OrbRow(.object(["id": .string("local"), "tags": .array([.string("placement:client")])]))
-        XCTAssertFalse(local.mobile)
+    func testClientMissionsAreVisibleAndSideMissionsAreExcluded() throws {
+        let client = OrbRow(.object(["id": .string("local"), "tags": .array([.string("placement:client")])]))
+        XCTAssertTrue(client.mobile)
+        let btw = OrbRow(.object(["id": .string("side"), "tags": .array([.string("btw-parent:123")])]))
+        XCTAssertFalse(btw.mobile)
         let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_chatgpt")]))
         XCTAssertTrue(cloud.mobile)
         XCTAssertTrue(cloud.cloud)
+    }
+    func testMissionTreeNestingAndParentRetention() {
+        let parent = OrbRow(.object(["id": .string("parent"), "title": .string("Parent"), "status": .string("acknowledged")]))
+        let child1 = OrbRow(.object(["id": .string("child-1"), "title": .string("Subagent 1"), "status": .string("active"), "parent_mission_id": .string("parent")]))
+        let child2 = OrbRow(.object(["id": .string("child-2"), "title": .string("Subagent 2"), "status": .string("completed"), "callback_parent_mission_id": .string("parent")]))
+        let standalone = OrbRow(.object(["id": .string("standalone"), "title": .string("Standalone"), "status": .string("acknowledged")]))
+
+        let retained = OrbMissionTree.treeRows([parent, child1, child2, standalone]) { $0.state != "acknowledged" }
+        XCTAssertEqual(retained.map(\.id), ["parent", "child-1", "child-2"])
+
+        let roots = OrbMissionTree.nest(retained)
+        XCTAssertEqual(roots.map(\.id), ["parent"])
+        XCTAssertEqual(roots[0].children.map(\.id), ["child-1", "child-2"])
+        XCTAssertEqual(OrbMissionTree.countNested(roots[0]), 2)
+        XCTAssertEqual(OrbMissionTree.countNested(roots[0], matches: \.active), 1)
     }
     func testRemoteFollowupOmitsLocalIdentityAcrossPlacementFormats() {
         let local: [String: OrbJSON] = ["project": .string("default"), "track": .string("mission-123"), "github_pr": .null]
