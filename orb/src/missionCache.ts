@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
 import { applyStreamEvent, buildTranscript, type StreamItem } from "./transcriptModel";
 import { getMissionEventPage, storedToStream, type StreamEvent } from "./stream";
@@ -8,8 +9,11 @@ export type TranscriptSnap = { items: StreamItem[]; stream: StreamEvent[]; fromL
 const key = (id: string) => `c:${connectionVersion()}:m:${id}:tx`;
 const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
 
+const [transcriptVersion, setTranscriptVersion] = createSignal(0);
+export { transcriptVersion };
+
 const active=new Map<string,{refs:number;snapshot?:TranscriptSnap}>();
-function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);}
+function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);setTranscriptVersion(v=>v+1);}
 export function retainTranscript(id:string):()=>void{
  const scope=key(id);let entry=active.get(scope);
  if(entry)entry.refs++;else{entry={refs:1,snapshot:cachePeek<TranscriptSnap>(scope)};cacheDelete(scope);active.set(scope,entry);}

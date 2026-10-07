@@ -45,6 +45,12 @@ export const NewAgentIcon = (p: P) => (
     <path d="M2.5 3h11L9.5 8.2V13l-3-1.6V8.2z" />
   </I>
 );
+export const InboxIcon = (p: P) => (
+  <I {...p}>
+    <path d="M2.2 9.2 3.7 3.5a1.2 1.2 0 0 1 1.15-.9h6.3a1.2 1.2 0 0 1 1.15.9l1.5 5.7v3.1a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2z" />
+    <path d="M2.3 9.3h3.4l.9 1.5h2.8l.9-1.5h3.4" />
+  </I>
+);
 export const MachinesIcon = (p: P) => (
   <I {...p}>
     <rect x="2" y="2.4" width="12" height="8.2" rx="1.5" />

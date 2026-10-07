@@ -73,3 +73,43 @@ export function ConversationSkeleton() {
     </div>
   </div>;
 }
+
+/** Two-line placeholder cards matching the Inbox row geometry. */
+export function InboxSkeleton() {
+  return (
+    <div class="inbox-skeleton" role="status" aria-label="Loading inbox" aria-busy="true">
+      <div class="inbox-sk-sec" aria-hidden="true">
+        <div class="sk-bar inbox-sk-head" style={{ width: "96px", height: "12px" }} />
+        <div class="inbox-sk-list">
+          <div class="inbox-sk-row">
+            <div class="inbox-sk-top">
+              <i class="inbox-sk-dot" />
+              <i class="sk-bar" style={{ width: "74px", height: "13px" }} />
+              <i class="sk-bar" style={{ width: "38%", height: "14px" }} />
+              <i class="sk-bar inbox-sk-time" style={{ width: "28px", height: "12px" }} />
+            </div>
+            <i class="sk-bar inbox-sk-line" style={{ width: "82%", height: "13px" }} />
+          </div>
+          <div class="inbox-sk-row">
+            <div class="inbox-sk-top">
+              <i class="inbox-sk-dot" />
+              <i class="sk-bar" style={{ width: "62px", height: "13px" }} />
+              <i class="sk-bar" style={{ width: "46%", height: "14px" }} />
+              <i class="sk-bar inbox-sk-time" style={{ width: "32px", height: "12px" }} />
+            </div>
+            <i class="sk-bar inbox-sk-line" style={{ width: "68%", height: "13px" }} />
+          </div>
+          <div class="inbox-sk-row">
+            <div class="inbox-sk-top">
+              <i class="inbox-sk-dot" />
+              <i class="sk-bar" style={{ width: "88px", height: "13px" }} />
+              <i class="sk-bar" style={{ width: "31%", height: "14px" }} />
+              <i class="sk-bar inbox-sk-time" style={{ width: "26px", height: "12px" }} />
+            </div>
+            <i class="sk-bar inbox-sk-line" style={{ width: "75%", height: "13px" }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

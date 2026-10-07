@@ -285,70 +285,44 @@ struct OrbHome: View {
     @State private var creating = false
     @State private var name = ""
     @State private var linkedMission: String?
+    @State private var linkedProject = ""
+    @State private var linkedFolder = ""
     @State private var renaming: OrbRow?
     @State private var renamedTitle = ""
+    @State private var homeTab = ProcessInfo.processInfo.arguments.contains("-orb_open_inbox") ? "inbox" : "projects"
+    @State private var inboxCount = 0
+    @State private var inboxWorkingCount = 0
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
-                    ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
-                        NavigationLink { OrbProjectPage(project: project) } label: {
-                            HStack(spacing: 14) {
-                                OrbListIcon(symbol: "folder", color: appearance.color(project.id))
-                                Text(project.name)
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-                                Spacer()
-                                if !project.updatedAt.isEmpty {
-                                    Text(OrbStyle.relativeTime(project.updatedAt))
-                                        .font(.caption)
-                                        .foregroundStyle(OrbStyle.textMuted)
-                                        .monospacedDigit()
-                                }
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .padding(.vertical, 12)
-                            .contentShape(Rectangle())
-                            .overlay(alignment: .bottom) {
-                                Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
-                            }
+            Group {
+                if homeTab == "inbox" {
+                    OrbInboxView(
+                        projects: projects,
+                        actionableCount: $inboxCount,
+                        onOpenMission: { row in
+                            linkedProject = row.raw["project"].text
+                            linkedFolder = row.folder
+                            linkedMission = row.id
                         }
-                        .buttonStyle(OrbPressButtonStyle())
-                        .accessibilityIdentifier("project.\(project.id)")
-                        .contextMenu {
-                            Button("Rename") { renamedTitle = project.name; renaming = project }
-                            OrbProjectColorMenu(project: project.id)
-                            Button("Archive") {
-                                Task {
-                                    do {
-                                        _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")]))
-                                        await load()
-                                    } catch { self.error = error.localizedDescription }
-                                }
-                            }
-                        }
-                    }
-                    if loading && projects.isEmpty { projectSkeletons }
-                    if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
-                }.padding(.horizontal, 18)
+                    )
+                } else {
+                    projectsScrollView
+                        .searchable(text: $search, prompt: "Search projects")
+                }
             }
             .background(OrbStyle.background)
-            .navigationTitle("Projects")
+            .navigationTitle(homeTab == "inbox" ? "Inbox" : "Projects")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
+                ToolbarItem(placement: .principal) { homeModePicker }
                 ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
             }
-            .searchable(text: $search, prompt: "Search projects")
-            .task { await load() }.refreshable { await load() }
+            .task { await load() }
             .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
             .alert("New project", isPresented: $creating) {
                 TextField("Project name", text: $name)
@@ -359,11 +333,170 @@ struct OrbHome: View {
                 Button("Save") { if let project = renaming { Task { do { _ = try await api.call("/api/projects", method: "PUT", body: .object(["slug": .string(project.id), "title": .string(renamedTitle)])); await load() } catch { self.error = error.localizedDescription } } } }
                 Button("Cancel", role: .cancel) {}
             }
-            .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: "", folder: "") }
+            .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
             .onOpenURL { url in
-                if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" { linkedMission = url.lastPathComponent }
+                if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" {
+                    linkedProject = ""
+                    linkedFolder = ""
+                    linkedMission = url.lastPathComponent
+                } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "inbox" {
+                    homeTab = "inbox"
+                }
             }
         }.tint(.primary).preferredColorScheme(.dark)
+    }
+
+    private var homeModePicker: some View {
+        HStack(spacing: 2) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { homeTab = "projects" }
+                OrbHaptics.selection()
+            } label: {
+                Text("Projects")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(homeTab == "projects" ? .primary : OrbStyle.textSecondary)
+                    .fixedSize()
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(
+                        homeTab == "projects" ? OrbStyle.elevated : Color.clear,
+                        in: Capsule()
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("home.tab.projects")
+
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { homeTab = "inbox" }
+                OrbHaptics.selection()
+            } label: {
+                HStack(spacing: 5) {
+                    Text("Inbox")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(homeTab == "inbox" ? .primary : OrbStyle.textSecondary)
+                        .fixedSize()
+                    if inboxCount > 0 {
+                        Text("\(inboxCount)")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(homeTab == "inbox" ? OrbStyle.background : .primary)
+                            .monospacedDigit()
+                            .fixedSize()
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(
+                                homeTab == "inbox" ? Color.white : OrbStyle.card,
+                                in: Capsule()
+                            )
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5)
+                .background(
+                    homeTab == "inbox" ? OrbStyle.elevated : Color.clear,
+                    in: Capsule()
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("home.tab.inbox")
+        }
+        .padding(3)
+        .background(OrbStyle.surface, in: Capsule())
+        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var projectsScrollView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
+                if search.isEmpty && (!projects.isEmpty || inboxCount > 0 || inboxWorkingCount > 0) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) { homeTab = "inbox" }
+                        OrbHaptics.selection()
+                    } label: {
+                        HStack(spacing: 14) {
+                            OrbListIcon(symbol: "tray.full")
+                            Text("Inbox")
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if inboxWorkingCount > 0 {
+                                HStack(spacing: 5) {
+                                    OrbRunningDots(size: 10)
+                                    Text("\(inboxWorkingCount) working")
+                                        .font(.caption)
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                        .monospacedDigit()
+                                }
+                            }
+                            if inboxCount > 0 {
+                                Text("\(inboxCount)")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .monospacedDigit()
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2.5)
+                                    .background(OrbStyle.elevated, in: Capsule())
+                                    .overlay(Capsule().stroke(OrbStyle.borderStrong, lineWidth: 0.5))
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                        }
+                    }
+                    .buttonStyle(OrbPressButtonStyle())
+                    .accessibilityIdentifier("home.inbox")
+                }
+                ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
+                    NavigationLink { OrbProjectPage(project: project) } label: {
+                        HStack(spacing: 14) {
+                            OrbListIcon(symbol: "folder", color: appearance.color(project.id))
+                            Text(project.name)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                            if !project.updatedAt.isEmpty {
+                                Text(OrbStyle.relativeTime(project.updatedAt))
+                                    .font(.caption)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .monospacedDigit()
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                        }
+                    }
+                    .buttonStyle(OrbPressButtonStyle())
+                    .accessibilityIdentifier("project.\(project.id)")
+                    .contextMenu {
+                        Button("Rename") { renamedTitle = project.name; renaming = project }
+                        OrbProjectColorMenu(project: project.id)
+                        Button("Archive") {
+                            Task {
+                                do {
+                                    _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")]))
+                                    await load()
+                                } catch { self.error = error.localizedDescription }
+                            }
+                        }
+                    }
+                }
+                if loading && projects.isEmpty { projectSkeletons }
+                if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
+            }.padding(.horizontal, 18)
+        }
+        .refreshable { await load() }
     }
     private var projectSkeletons: some View {
         VStack(spacing: 0) {
@@ -391,7 +524,15 @@ struct OrbHome: View {
     }
     private func load() async {
         defer { loading = false }
-        if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) { projects = cached["projects"].items.map { OrbRow($0, project: true) } }
+        if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) {
+            projects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
+        }
+        if let cachedMissions = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
+            let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
+            let sections = OrbInboxModel.buildSections(missions: rows, projects: projects)
+            inboxCount = sections.needsYou.count + sections.ready.count
+            inboxWorkingCount = sections.working.count
+        }
         do {
             let requested = Date(), endpoint = api.endpoint
             let value = try await api.call("/api/projects")
@@ -399,6 +540,16 @@ struct OrbHome: View {
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             OrbDisk.saveAsync(value, key: "projects"); error = ""
+            let roster = projects
+            Task {
+                if let rawMissions = try? await api.call("/api/control/missions?limit=100") {
+                    OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
+                    let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
+                    let sections = OrbInboxModel.buildSections(missions: rows, projects: roster)
+                    inboxCount = sections.needsYou.count + sections.ready.count
+                    inboxWorkingCount = sections.working.count
+                }
+            }
             // Warm the first project and the agent picker catalog so opening a project or composer feels instant.
             if let first = projects.first {
                 Task {
@@ -409,7 +560,7 @@ struct OrbHome: View {
         } catch { self.error = error.localizedDescription }
     }
     private func create() async {
-        let slug = name.folding(options: .diacriticInsensitive, locale: .current).lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined(separator: "-")
+        let slug = name.folding(options: .diacriticInsensitive, locale: .current).lowercased().split(whereSeparator: { !$0.isLetter && !($0.isNumber) }).joined(separator: "-")
         guard !slug.isEmpty else { return }
         do { _ = try await api.call("/api/projects", method: "PUT", body: .object(["slug": .string(slug), "title": .string(name)])); name = ""; await load() }
         catch { self.error = error.localizedDescription }

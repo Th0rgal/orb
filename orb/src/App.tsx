@@ -60,7 +60,7 @@ import { latestChecklist } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
-import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems } from "./missionCache";
+import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, prefetchTranscript, putTranscript, putTranscriptHeight, putTranscriptItems, transcriptVersion } from "./missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
@@ -126,8 +126,11 @@ import {
   listNodeAntigravityModels,
 } from "./api";
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
+import { InboxPage } from "./Inbox";
+import { buildInboxSections } from "./inboxModel";
+import { pendingMissionInteraction } from "./missionAttention";
 
-const PAGES = new Set(["cloud-agent", "settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["inbox", "cloud-agent", "settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -1176,6 +1179,13 @@ export default function App() {
   });
 
   const [missions, setMissions] = createSignal<Mission[]>([]);
+  const [missionsLoading, setMissionsLoading] = createSignal(true);
+  const inboxCount = createMemo(() => {
+    transcriptVersion();
+    return isConnected()
+      ? buildInboxSections(missions(), liveProjects(), (id) => peekReadyTranscript(id)?.items, pendingMissionInteraction).totalActionable
+      : 0;
+  });
   const [previewContext, setPreviewContext] = createSignal<{id: string; pct: number | null} | null>(null);
   const [previewPlan, setPreviewPlan] = createSignal<{id:string; data:PlanProgressData | undefined}>();
   const [openMission, setOpenMission] = createSignal<Mission | null>(null);
@@ -1224,6 +1234,8 @@ export default function App() {
       }
     } catch {
       /* keep last good list */
+    } finally {
+      setMissionsLoading(false);
     }
   };
   const refreshFleet = async () => {
@@ -1686,6 +1698,12 @@ export default function App() {
                   <span class="row-label">New Agent</span>
                   <kbd>⌘N</kbd>
                 </button>
+                <button class={`row ${selected() === "inbox" ? "active" : ""}`} onClick={() => open("inbox")}>
+                  <span class="row-ico"><Ic.InboxIcon /></span>
+                  <span class="row-label">Inbox</span>
+                  <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
+                  <kbd aria-hidden="true">{shortcutLabel("inbox")}</kbd>
+                </button>
                 <button class={`row ${selected() === "cloud-agent" ? "active" : ""}`} onClick={() => open("cloud-agent")}>
                   <span class="row-ico"><Ic.CloudIcon /></span><span class="row-label">Cloud agent</span><kbd aria-hidden="true">{shortcutLabel("cloud-agent")}</kbd>
                 </button>
@@ -1812,6 +1830,7 @@ export default function App() {
             <Match when={selected() === "providers"}>
               <span>Providers</span>
             </Match>
+            <Match when={selected() === "inbox"}><span>Inbox</span></Match>
             <Match when={selected() === "cloud-agent"}><span>Cloud agent</span></Match>
             <Match when={currentProjectSettings()}>
               {(slug) => <span>{liveProjects().find((x) => x.slug === slug())?.title ?? slug()} · Settings</span>}
@@ -2069,6 +2088,21 @@ export default function App() {
             </div>
         </div></Show>
         <Switch>
+            <Match when={selected() === "inbox"}>
+              <InboxPage
+                missions={missions()}
+                projects={liveProjects()}
+                loading={missionsLoading()}
+                onOpenMission={(id) => open(`m:${id}`)}
+                onOpenSettings={openSettings}
+                onNewAgent={() => open(null)}
+                onRefresh={refreshMissions}
+                onMissionUpdated={(m) => {
+                  setMissions((ms) => [m, ...ms.filter((x) => x.id !== m.id)]);
+                  bumpProjects();
+                }}
+              />
+            </Match>
             <Match when={selected() === "cloud-agent"}>
             <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
               projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}

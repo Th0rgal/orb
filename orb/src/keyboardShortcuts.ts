@@ -1,6 +1,7 @@
 /** Global navigation chords. Keep labels and dispatch in one registry. */
 export const navigationShortcuts = [
   {id:'new-agent', code:'Digit1', label:'⌘1', title:'New agent'},
+  {id:'inbox', code:'KeyI', label:'⌘I', title:'Inbox'},
   {id:'cloud-agent', code:'Digit2', label:'⌘2', title:'Cloud agent'},
   {id:'machines', code:'Digit3', label:'⌘3', title:'Machines'},
   {id:'providers', code:'Digit4', label:'⌘4', title:'Providers'},

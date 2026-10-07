@@ -5,6 +5,7 @@ Global section navigation is registered in `src/keyboardShortcuts.ts`; both disp
 | Shortcut | Action |
 | --- | --- |
 | ⌘1 / ⌘N | New agent |
+| ⌘I | Inbox (local keys inside Inbox: ↑/↓ or J/K navigate, Enter open, R reply inline, E mark done, Z undo, 1/2/3 pick option) |
 | ⌘2 | Cloud agent |
 | ⌘3 | Machines |
 | ⌘4 | Providers |

@@ -35,4 +35,44 @@ final class OrbLiveUITests: XCTestCase {
     @MainActor func testChatGPT() throws { try create("ChatGPT", account: "ChatGPT · ben@starknet.id · chatgpt-profile", model: "GPT-6 Instant") }
     @MainActor func testCursor() throws { try create("Cursor Cloud", account: "Cursor Cloud") }
     @MainActor func testGrok() throws { try create("Grok Bot", account: "Grok Bot") }
+
+    @MainActor func testProductionInboxFlow() throws {
+        guard ProcessInfo.processInfo.environment["ORB_INBOX_PROD_BRIDGE"] == "1" else {
+            throw XCTSkip("Start the localhost production bridge on :18779 and set ORB_INBOX_PROD_BRIDGE=1")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18779", "-orb_test_reset", "YES"]
+        app.launch()
+
+        let homeInbox = app.buttons["home.inbox"]
+        XCTAssertTrue(homeInbox.waitForExistence(timeout: 20))
+        Thread.sleep(forTimeInterval: 1.0)
+        try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-home-prod.png"))
+
+        homeInbox.tap()
+        XCTAssertTrue(app.staticTexts["NEEDS YOU"].waitForExistence(timeout: 20))
+        Thread.sleep(forTimeInterval: 1.0)
+        try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-prod.png"))
+
+        let workingPill = app.buttons["inbox.workingPill"]
+        if workingPill.exists {
+            workingPill.tap()
+            XCTAssertTrue(app.staticTexts["WORKING IN BACKGROUND"].waitForExistence(timeout: 5))
+            Thread.sleep(forTimeInterval: 0.4)
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-working-prod.png"))
+            workingPill.tap()
+        }
+
+        let firstDone = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.done.'")).firstMatch
+        XCTAssertTrue(firstDone.waitForExistence(timeout: 10))
+        firstDone.tap()
+
+        let undoBtn = app.buttons["inbox.undo"]
+        XCTAssertTrue(undoBtn.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.4)
+        try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-undo-prod.png"))
+        undoBtn.tap()
+    }
 }
+

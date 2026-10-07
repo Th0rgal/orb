@@ -137,4 +137,55 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertEqual(OrbStyle.displayTitle("/goal Fix iOS scroll bleed"), "Fix iOS scroll bleed")
         XCTAssertEqual(OrbStyle.missionTitle("/goal Fix iOS scroll bleed\nExtra details"), "Fix iOS scroll bleed")
     }
+
+    func testInboxModelCategorizesAndClipsToSentence() throws {
+        XCTAssertEqual(
+            OrbInboxModel.clipToSentence("## Summary\nImplemented **Inbox** for Orb. It keeps working agents quiet."),
+            "Implemented Inbox for Orb."
+        )
+        XCTAssertEqual(
+            OrbInboxModel.humanizeStatusText("Remote codex job ea56137c-147d-4af4-9c55-7046d6a55288 on node 'ashur' finished with state 'failed' (exit Some(1))"),
+            "Remote codex run on ashur failed (exit 1)"
+        )
+        XCTAssertEqual(OrbInboxModel.humanizeStatusText("remote_node_job"), "")
+
+        let projects: [OrbRow] = [
+            OrbRow(.object(["slug": .string("orb"), "title": .string("Orb")]), project: true),
+            OrbRow(.object(["slug": .string("paloma"), "title": .string("Paloma")]), project: true),
+        ]
+        let missions: [OrbRow] = [
+            OrbRow(.object([
+                "id": .string("m-working"),
+                "title": .string("Run Lean proof"),
+                "status": .string("running"),
+                "project": .string("paloma"),
+                "updated_at": .string("2026-10-07T12:00:00Z"),
+            ])),
+            OrbRow(.object([
+                "id": .string("m-question"),
+                "title": .string("Pick iOS layout"),
+                "status": .string("awaiting_user"),
+                "project": .string("orb"),
+                "updated_at": .string("2026-10-07T11:55:00Z"),
+                "history": .array([
+                    .object(["role": .string("assistant"), "content": .string("Should we place the switcher in the toolbar?")]),
+                ]),
+            ])),
+            OrbRow(.object([
+                "id": .string("m-done"),
+                "title": .string("Fix scroll thumb"),
+                "status": .string("completed"),
+                "project": .string("orb"),
+                "updated_at": .string("2026-10-07T11:45:00Z"),
+            ])),
+        ]
+
+        let sections = OrbInboxModel.buildSections(missions: missions, projects: projects)
+        XCTAssertEqual(sections.working.map(\.id), ["m-working"])
+        XCTAssertEqual(sections.needsYou.map(\.id), ["m-question"])
+        XCTAssertEqual(sections.needsYou.first?.badge, "Question")
+        XCTAssertEqual(sections.ready.map(\.id), ["m-done"])
+        XCTAssertEqual(sections.ready.first?.badge, "Completed")
+    }
 }
+
