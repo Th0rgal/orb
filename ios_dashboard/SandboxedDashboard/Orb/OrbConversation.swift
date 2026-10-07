@@ -189,6 +189,13 @@ struct OrbConversation: View {
                         if mission != .null { loading = false }
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts)
+                    } else if !selection.cloud && selection.node.isEmpty {
+                        if let cached = OrbReadCache.read("catalog:agent") {
+                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items) ?? "core"
+                        }
+                        if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && (selection.node.isEmpty || selection.node == "core") {
+                            selection.node = OrbSelection.firstAvailableNodeID(catalog["nodes"]["nodes"].items) ?? "core"
+                        }
                     }
                     await refresh()
                     if let id {
@@ -1131,7 +1138,7 @@ struct OrbConversation: View {
                     body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
-                    else { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty { body["remote_node_id"] = .string(selection.node) } }
+                    else { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty && selection.node != "core" { body["remote_node_id"] = .string(selection.node) } }
                     pending = OrbPending(path: "/api/control/missions", body: .object(body))
                 }
                 try OrbDisk.save(pending, key: pendingKey)
@@ -1852,6 +1859,33 @@ struct OrbSelection {
         if cloud && account.isEmpty || !cloud && backend.isEmpty { throw OrbHTTPError(status: 400, detail: "Choose an available agent and account.") }
         if provider == "cursor_cloud" && (repository.isEmpty || gitRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) { throw OrbHTTPError(status: 400, detail: "Choose a repository and Git reference for Cursor Cloud.") }
     }
+    static func isUsableComputeNode(_ node: OrbJSON) -> Bool {
+        guard node["status"].text == "online", !node["cordoned"].flag else { return false }
+        let labels = node["labels"].items.map(\.text)
+        return !labels.contains("manual-only")
+    }
+    static func sortedComputeNodes(_ rawNodes: [OrbJSON]) -> [OrbJSON] {
+        let hasSparkAdmin = rawNodes.contains { $0["id"].text == "dgx-spark-admin" && $0["status"].text == "online" }
+        let filtered = hasSparkAdmin ? rawNodes.filter { $0["id"].text != "dgx-spark" } : rawNodes
+        return filtered.sorted { a, b in
+            let aUsable = isUsableComputeNode(a)
+            let bUsable = isUsableComputeNode(b)
+            if aUsable != bUsable { return aUsable && !bUsable }
+            let aJobs = a["active_jobs"].number ?? 0
+            let bJobs = b["active_jobs"].number ?? 0
+            if aJobs != bJobs { return aJobs < bJobs }
+            let aFree = a["mem_available_bytes"].number ?? -1
+            let bFree = b["mem_available_bytes"].number ?? -1
+            if aFree != bFree { return aFree > bFree }
+            return a["id"].text < b["id"].text
+        }
+    }
+    static func firstAvailableNodeID(_ rawNodes: [OrbJSON]) -> String? {
+        let sorted = sortedComputeNodes(rawNodes)
+        guard let first = sorted.first(where: isUsableComputeNode) else { return nil }
+        let id = first["id"].text
+        return id.isEmpty ? nil : id
+    }
 }
 
 struct OrbAgentPicker: View {
@@ -1889,7 +1923,7 @@ struct OrbAgentPicker: View {
                     }
                 } else {
                     Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.disabled(existing).accessibilityIdentifier("picker.harness")
-                    if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag(""); ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
+                    if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag("core"); ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
                 }
                 if selection.provider != "grok_bot" { Picker("Model", selection: $selection.model) {
                     Text("Service default").tag("")
@@ -1931,7 +1965,10 @@ struct OrbAgentPicker: View {
         if !existing && selection.backend == "chatgpt_ui" {
             selection.backend = ""; selection.model = ""; selection.params = .array([])
         }
-        nodes = catalog["nodes"]["nodes"].items
+        nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
+        if !existing && selection.node.isEmpty {
+            selection.node = OrbSelection.firstAvailableNodeID(nodes) ?? "core"
+        }
         backendModelsMap = catalog["models"]["backends"]
         models = backendModelsMap[selection.backend].items
     }

@@ -157,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/software", get(software_inventory))
         .route("/software/updates", post(software_update))
         .route("/software/updates/cancel", post(software_cancel))
+        .route("/fs/list", get(node_fs_list))
+        .route("/fs/mkdir", post(node_fs_mkdir))
         .route("/machine-transfer/capabilities", get(transfer_capabilities))
         .route("/machine-transfer/browse", post(transfer_browse))
         .route(
@@ -1362,4 +1364,89 @@ async fn software_cancel(
     check_auth(&headers, &state)?;
     sandboxed_sh::agent_software::cancel(&body.id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({"ok":true})))
+}
+
+#[derive(Deserialize)]
+struct NodeFsListQuery {
+    #[serde(default)]
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct NodeFsMkdirRequest {
+    path: String,
+}
+
+fn resolve_node_fs_path(work_root: &Path, raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return work_root.to_path_buf();
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        work_root.join(candidate)
+    }
+}
+
+async fn node_fs_list(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Query(q): Query<NodeFsListQuery>,
+) -> Result<Json<Vec<sandboxed_sh::api::fs::FsEntry>>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let target = resolve_node_fs_path(&state.work_root, &q.path);
+    let mut dir = tokio::fs::read_dir(&target).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Cannot read directory '{}': {e}", target.display()),
+        )
+    })?;
+    let mut entries = Vec::new();
+    while let Some(entry) = dir.next_entry().await.map_err(internal_error)? {
+        let Ok(sym_meta) = tokio::fs::symlink_metadata(entry.path()).await else {
+            continue;
+        };
+        let kind = if sym_meta.is_symlink() {
+            "link"
+        } else if sym_meta.is_dir() {
+            "dir"
+        } else if sym_meta.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        #[cfg(unix)]
+        let mtime = {
+            use std::os::unix::fs::MetadataExt;
+            sym_meta.mtime()
+        };
+        #[cfg(not(unix))]
+        let mtime = 0i64;
+        entries.push(sandboxed_sh::api::fs::FsEntry {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: entry.path().to_string_lossy().to_string(),
+            kind: kind.to_string(),
+            size: sym_meta.len(),
+            mtime,
+        });
+    }
+    Ok(Json(entries))
+}
+
+async fn node_fs_mkdir(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Json(req): Json<NodeFsMkdirRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let target = resolve_node_fs_path(&state.work_root, &req.path);
+    tokio::fs::create_dir_all(&target).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Cannot create directory '{}': {e}", target.display()),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

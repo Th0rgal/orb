@@ -69,7 +69,7 @@ async function setup(page:Page, options:{reject?:boolean;legacy?:boolean;remoteS
  }
  return {posts,attachmentReads,releasePost,releaseHistory,setSuccess:()=>{fail=false;},changeFleet:()=>{fleetChanged=true;},listReads:()=>listReads,fleetReads:()=>fleetReads};
 }
-async function chooseRemote(page:Page){await page.getByRole("button",{name:/Core \(agent-core\)/}).click();await page.getByRole("button",{name:/dgx-spark online/}).click();}
+async function chooseRemote(page:Page){if(await page.getByRole("button",{name:/^DGX Spark$/}).isVisible())return;await page.getByRole("button",{name:/Core \(agent-core\)/}).click();await page.getByRole("button",{name:/dgx-spark online/}).click();}
 const composerInput=(page:Page)=>page.getByPlaceholder(/Describe a task, \/ for commands, @ for context|Describe the objective/);
 /**
  * Where a phase is reported. A healthy in-flight mission no longer draws a

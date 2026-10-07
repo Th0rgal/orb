@@ -1331,6 +1331,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/fs/upload-finalize", post(fs::upload_finalize))
         .route("/api/fs/mkdir", post(fs::mkdir))
         .route("/api/fs/rm", post(fs::rm))
+        .route("/api/remote-nodes/:id/fs/list", get(fs::remote_node_list))
+        .route(
+            "/api/remote-nodes/:id/fs/mkdir",
+            post(fs::remote_node_mkdir),
+        )
         // MCP management endpoints
         .route("/api/mcp", get(mcp_api::list_mcps))
         .route("/api/mcp", post(mcp_api::add_mcp))

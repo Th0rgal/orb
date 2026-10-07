@@ -58,6 +58,12 @@ export function byLeastLoaded<T>(rows: T[], machine: (row: T) => string): T[] {
     .map(entry => entry.row);
 }
 
+/** First automatically schedulable compute node from the sorted list (online, uncordoned, non-manual). */
+export function firstAvailableNodeId(nodes: RemoteNodeView[]): string | undefined {
+  const usable = nodes.filter(node => node.status === "online" && !node.cordoned && !node.labels?.includes("manual-only"));
+  return byLeastLoaded(usable, node => node.id)[0]?.id;
+}
+
 const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(bytes < 10 * 1024 ** 3 ? 1 : 0)} GiB`;
 export function machineLoadTitle(machine: string): string {
   const load = machineLoad(machine);

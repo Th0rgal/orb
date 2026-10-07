@@ -78,4 +78,17 @@ final class OrbContractTests: XCTestCase {
         selection.gitRef = "main"
         XCTAssertNoThrow(try selection.validate())
     }
+    func testFirstAvailableNodeSelectsLeastLoadedOnlineNode() {
+        let gib = 1024.0 * 1024.0 * 1024.0
+        let nodes: [OrbJSON] = [
+            .object(["id": .string("ashur"), "status": .string("online"), "cordoned": .bool(false), "active_jobs": .number(0), "mem_available_bytes": .number(30 * gib)]),
+            .object(["id": .string("babylon"), "status": .string("online"), "cordoned": .bool(false), "active_jobs": .number(0), "mem_available_bytes": .number(60 * gib)]),
+            .object(["id": .string("nippur"), "status": .string("online"), "cordoned": .bool(false), "active_jobs": .number(1), "mem_available_bytes": .number(100 * gib)]),
+            .object(["id": .string("dgx-spark-admin"), "status": .string("online"), "cordoned": .bool(false), "labels": .array([.string("manual-only")]), "active_jobs": .number(0), "mem_available_bytes": .number(120 * gib)]),
+            .object(["id": .string("sepolia"), "status": .string("offline"), "cordoned": .bool(false), "active_jobs": .number(0), "mem_available_bytes": .number(128 * gib)])
+        ]
+        let sorted = OrbSelection.sortedComputeNodes(nodes)
+        XCTAssertEqual(sorted.map { $0["id"].text }, ["babylon", "ashur", "nippur", "dgx-spark-admin", "sepolia"])
+        XCTAssertEqual(OrbSelection.firstAvailableNodeID(nodes), "babylon")
+    }
 }

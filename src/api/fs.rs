@@ -1091,6 +1091,90 @@ pub async fn mkdir(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+pub async fn remote_node_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+    Query(q): Query<PathQuery>,
+) -> Result<Json<Vec<FsEntry>>, (StatusCode, String)> {
+    let node = state.config.remote_nodes.node(&node_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Remote node '{node_id}' not found"),
+        )
+    })?;
+    let token = std::env::var(&node.token_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Token env '{}' is not configured", node.token_env),
+        )
+    })?;
+    let res = state
+        .http_client
+        .get(format!("{}/fs/list", node.base_url.trim_end_matches('/')))
+        .query(&[("path", q.path.as_str())])
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Remote node unreachable: {e}"),
+            )
+        })?;
+    if !res.status().is_success() {
+        let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let text = res.text().await.unwrap_or_default();
+        return Err((status, text));
+    }
+    let entries = res.json::<Vec<FsEntry>>().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid remote node response: {e}"),
+        )
+    })?;
+    Ok(Json(entries))
+}
+
+pub async fn remote_node_mkdir(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+    Json(req): Json<MkdirRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let node = state.config.remote_nodes.node(&node_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Remote node '{node_id}' not found"),
+        )
+    })?;
+    let token = std::env::var(&node.token_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Token env '{}' is not configured", node.token_env),
+        )
+    })?;
+    let res = state
+        .http_client
+        .post(format!("{}/fs/mkdir", node.base_url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(10))
+        .json(&serde_json::json!({ "path": req.path }))
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Remote node unreachable: {e}"),
+            )
+        })?;
+    if !res.status().is_success() {
+        let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let text = res.text().await.unwrap_or_default();
+        return Err((status, text));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn rm(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RmRequest>,

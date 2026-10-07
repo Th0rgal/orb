@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
-import { MachineLoadBadge, byLeastLoaded, machineLoad, machineLoadTitle, recordFleet, recordLocalMemory, recordMissions } from "../src/machineLoad";
+import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, machineLoad, machineLoadTitle, recordFleet, recordLocalMemory, recordMissions } from "../src/machineLoad";
 
 const GiB = 1024 ** 3;
 const mission = (id: string, status: string, extra: Record<string, unknown> = {}) => ({ id, status, history: [], created_at: "", updated_at: "", backend: "claudecode", ...extra }) as any;
@@ -54,4 +54,15 @@ it("shows a quiet count with the agent icon, and nothing for an idle machine", (
   const idle = render(() => <MachineLoadBadge machine="babylon" />);
   expect(idle.container.querySelector(".machine-load")).toBeNull();
   expect(machineLoadTitle("babylon")).toBe("No agent running");
+});
+
+it("selects the first online uncordoned non-manual node from the sorted list", () => {
+  const nodes = [
+    { id: "dgx-spark-admin", status: "online", cordoned: false, labels: ["manual-only"] },
+    { id: "babylon", status: "online", cordoned: false, labels: [] },
+    { id: "ashur", status: "online", cordoned: false, labels: [] },
+    { id: "sepolia", status: "offline", cordoned: false, labels: [] },
+  ];
+  expect(firstAvailableNodeId(nodes)).toBe("babylon");
+  expect(firstAvailableNodeId([nodes[0], nodes[3]])).toBeUndefined();
 });

@@ -1332,7 +1332,13 @@ export default function App() {
     const nodes = preferSparkAdministration([...fleetNodes()], node => node.id);
     return [...byLeastLoaded(nodes.filter(usableNode), node => node.id), ...nodes.filter(node => !usableNode(node))];
   });
-  const firstNodeId = createMemo(() => firstAvailableNodeId(sortedNodes()));
+  const canAutoSelectRemote = () => {
+    const rl = remoteLaunch();
+    if (rl.state !== "ready" || !rl.capability?.typed) return false;
+    const backend = harnessPick()?.backend ?? harnessChoices()[0]?.backend.id;
+    return !backend || remoteHarnessSupport(rl.capability, backend) === "supported";
+  };
+  const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes()) : null));
   createEffect(() => {
     if (!isConnected() || explicitMachine() || creating() || launchPreview()) return;
     const first = firstNodeId();
