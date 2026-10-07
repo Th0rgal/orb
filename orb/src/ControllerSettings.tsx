@@ -13,6 +13,7 @@ export type CronDraft = {
   name: string;
   schedule: string;
   prompt: string;
+  script_content: string;
   skills: string[];
   deliver: string;
   failure_deliver: string;
@@ -31,6 +32,7 @@ export function draftOf(view: ControllerView): CronDraft {
     name: j?.name ?? "",
     schedule: scheduleExpression(j?.schedule).trim(),
     prompt: s?.prompt ?? "",
+    script_content: s?.script_content ?? "",
     skills: [...(s?.skills ?? [])],
     deliver: s?.deliver ?? "",
     failure_deliver: s?.failure_deliver ?? "",
@@ -88,11 +90,11 @@ export function CronForm(p: {
   let restored: { draft: CronDraft; base: CronDraft; skillInput?: string } | null = null;
   try { restored = JSON.parse(sessionStorage.getItem(storageKey) ?? "null"); } catch { /* unavailable storage */ }
   const initialDraft = () => ({ ...draftOf(p.view), ...(p.creating ? { deliver: p.view.settings?.deliver ?? `project:${p.view.slug}` } : {}) });
-  const [draft, setDraft] = createStore<CronDraft>(restored?.draft ?? initialDraft());
+  const [draft, setDraft] = createStore<CronDraft>({ ...initialDraft(), ...(restored?.draft ?? {}) });
   const [confirmDiscard, setConfirmDiscard] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [deleteError, setDeleteError] = createSignal<string | null>(null);
-  const [base, setBase] = createSignal<CronDraft>(restored?.base ?? initialDraft());
+  const [base, setBase] = createSignal<CronDraft>({ ...initialDraft(), ...(restored?.base ?? {}) });
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [skillInput, setSkillInput] = createSignal(restored?.skillInput ?? "");
@@ -129,6 +131,7 @@ export function CronForm(p: {
     if (draft.name.trim() !== b.name) out.name = draft.name.trim();
     if (draft.schedule.trim() !== b.schedule) out.schedule = draft.schedule.trim();
     if (draft.prompt !== b.prompt) out.prompt = draft.prompt;
+    if (p.view.settings?.script && draft.script_content !== b.script_content) out.script_content = draft.script_content;
     if (draft.skills.join("\n") !== b.skills.join("\n")) out.skills = [...draft.skills];
     if (draft.deliver.trim() !== b.deliver) out.deliver = draft.deliver.trim();
     if (draft.failure_deliver.trim() !== b.failure_deliver) out.failure_deliver = draft.failure_deliver.trim();
@@ -151,10 +154,11 @@ export function CronForm(p: {
     if (p.deliveryRoute && !p.deliveryRoute.ready) return "No delivery route is bound yet. That route is plumbing, not a chat to open. Bind one first, or choose local to keep output on the job only.";
     return "Run output is stored on this job. A copy may also land on the project's delivery route — look here, not in Hermes chat.";
   };
+  const hasScript = () => Boolean(p.view.settings?.script);
   const save = async () => {
     if (saving()) return;
     addSkill();
-    if (!draft.name.trim() || !draft.prompt.trim() || !draft.schedule.trim()) {
+    if (!draft.name.trim() || (!draft.prompt.trim() && !hasScript()) || !draft.schedule.trim()) {
       setError("Name, instruction, and schedule are required."); return;
     }
     if (draft.name.trim().length > 200) { setError("Name must be 200 characters or fewer."); return; }
@@ -240,11 +244,43 @@ export function CronForm(p: {
         </Row>
       </Section>
 
-      <Section title="Instruction">
+      <Show when={settings()?.script}>
+        {(scriptName) => (
+          <Section
+            title="Script"
+            hint={
+              settings()?.no_agent
+                ? `Script-only Hermes cron (no_agent). Runs ${settings()?.script_path ?? scriptName()} directly on each tick.`
+                : `Pre-run script (${settings()?.script_path ?? scriptName()}) whose stdout is injected into the instruction.`
+            }
+          >
+            <div class="cs-prompt-wrap">
+              <textarea
+                aria-label="Script"
+                class="cs-prompt cs-script"
+                spellcheck={false}
+                placeholder={settings()?.script_content == null ? `Script ${scriptName()} on Hermes host` : undefined}
+                value={draft.script_content}
+                onInput={(e) => setDraft("script_content", e.currentTarget.value)}
+              />
+              <div class="cs-prompt-foot">
+                <span>{settings()?.script_path ?? scriptName()}</span>
+                <span>{settings()?.no_agent ? "Direct script execution (no LLM turn)" : "Pre-run data collector"}</span>
+              </div>
+            </div>
+          </Section>
+        )}
+      </Show>
+
+      <Section
+        title={settings()?.no_agent ? "Notes / Description" : "Instruction"}
+        hint={settings()?.no_agent ? "Optional operator note for this script-only cron (not sent to an LLM because no_agent is enabled)." : undefined}
+      >
         <div class="cs-prompt-wrap">
           <textarea
             aria-label="Instruction" class="cs-prompt"
             spellcheck={false}
+            placeholder={settings()?.no_agent ? `Script-only cron (${settings()?.script ?? "script"}). Optional note or documentation…` : undefined}
             value={draft.prompt}
             onInput={(e) => setDraft("prompt", e.currentTarget.value)}
           />

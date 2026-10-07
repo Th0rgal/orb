@@ -1690,12 +1690,8 @@ async fn continue_inner(
     }
     // A live job must never produce a replacement hint, even for a harness
     // or track that cannot resume. Clients act on that hint by creating a job.
-    if placement.live
-        || matches!(
-            mission.status,
-            MissionStatus::Active | MissionStatus::Pending
-        )
-    {
+    let job_running = placement.live || mission.status == MissionStatus::Active;
+    if job_running {
         return Err((
             StatusCode::CONFLICT,
             format!(
@@ -1788,12 +1784,7 @@ async fn continue_inner(
             local_resume_refusal(&mission, &placement),
         ));
     }
-    if placement.live
-        || matches!(
-            mission.status,
-            MissionStatus::Active | MissionStatus::Pending
-        )
-    {
+    if job_running {
         return Err((
             StatusCode::CONFLICT,
             format!(

@@ -196,6 +196,45 @@ function SilentFold(p: { runs: ControllerRun[] }) {
   );
 }
 
+export function buildCronDebugPrompt(view: View): string {
+  const j = view.job;
+  const s = view.settings;
+  if (!j) return "";
+  const lines: string[] = [
+    `Inspect and debug the Hermes cron job "${j.name}" (id: \`${j.id}\`, project: \`${view.slug}\`).`,
+    "",
+    "### Cron Metadata",
+    `- **Schedule:** \`${j.schedule ?? "unknown"}\``,
+    `- **State:** \`${j.state ?? (j.enabled ? "scheduled" : "paused")}\` (enabled: \`${j.enabled}\`, failure streak: \`${j.failure_streak}\`)`,
+    `- **Delivery target:** \`${j.deliver ?? s?.deliver ?? "default"}\``,
+  ];
+  if (s?.workdir) lines.push(`- **Working directory:** \`${s.workdir}\``);
+  if (s?.script) {
+    lines.push(`- **Script:** \`${s.script_path ?? s.script}\` (${s.no_agent ? "script-only / no_agent" : "pre-run script"})`);
+  }
+  if (j.last_status || j.last_run_at) {
+    lines.push(`- **Last run:** \`${j.last_run_at ?? "never"}\` (status: \`${j.last_status ?? "unknown"}\`)`);
+  }
+  if (j.last_error) {
+    lines.push("", "### Last Error", "```", j.last_error.trim(), "```");
+  }
+  if (s?.script_content) {
+    lines.push("", `### Script Source (\`${s.script_path ?? s.script}\`)`, "```", s.script_content.trim(), "```");
+  }
+  if (s?.prompt?.trim()) {
+    lines.push("", "### Instruction / Prompt", "```", s.prompt.trim(), "```");
+  }
+  const recent = (view.runs ?? []).slice(0, 3);
+  if (recent.length) {
+    lines.push("", "### Recent Runs");
+    for (const r of recent) {
+      const summary = r.error ? `error: ${r.error}` : r.report ? r.report.slice(0, 300) : r.silent ? "silent tick" : (r.status ?? "unknown");
+      lines.push(`- \`${r.at ?? r.id}\` (${r.status ?? "done"}): ${summary.replace(/\n+/g, " ")}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 function FailedFold(p: { runs: ControllerRun[]; error: string }) {
   const span = () => {
     const first = p.runs[p.runs.length - 1];
@@ -323,6 +362,14 @@ export function ControllerView(p: { slug: string; id?: string }) {
                     <div class="cr-name">{j().name}</div>
                     <div class="cr-sub">
                       <span>{j().schedule ?? "scheduled"}</span>
+                      <Show when={view()?.settings?.script}>
+                        {(sc) => (
+                          <>
+                            <span class="cr-sep">·</span>
+                            <span title={view()?.settings?.script_path ?? sc()}>{sc()}</span>
+                          </>
+                        )}
+                      </Show>
                       <Show when={j().folder}>
                         <span class="cr-sep">·</span>
                         <span>{j().folder}</span>
@@ -345,6 +392,19 @@ export function ControllerView(p: { slug: string; id?: string }) {
                   </div>
                   <div class="cr-actions">
                     <Show when={job()?.archived}><span class="dim">Archived · restore from the sidebar</span></Show>
+                    <button
+                      class="s-btn sm quiet"
+                      title="Open a new agent pre-filled with this cron's script, instructions, and recent runs"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("orb:debug-cron", {
+                            detail: { slug: p.slug, id: p.id ?? j().id, prompt: buildCronDebugPrompt(view()!) },
+                          }),
+                        )
+                      }
+                    >
+                      Debug
+                    </button>
                     <Show
                       when={state() === "paused"}
                       fallback={
@@ -361,9 +421,6 @@ export function ControllerView(p: { slug: string; id?: string }) {
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
                     <Show when={!!p.id}>
-                      <button class="s-btn sm quiet" disabled={!!busy()} onClick={() => window.dispatchEvent(new CustomEvent("orb:cron-move-request", { detail: { slug: p.slug, id: p.id, name: j().name, folder: j().folder ?? "" } }))}>
-                        Move…
-                      </button>
                       <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(() => {})}>
                         {busy() === "delete" ? "Deleting…" : "Delete"}
                       </button>

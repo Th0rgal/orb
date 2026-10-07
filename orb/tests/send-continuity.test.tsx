@@ -139,3 +139,45 @@ it('replaces an edited remote queued message without leaving a duplicate Sending
  expect(screen.queryByText('Original queued text')).toBeNull();
 });
 
+it('allows rapidly stacking multiple follow-up messages while earlier sends are still in flight',async()=>{
+ const {getMission,sendMissionMessage}=await import('../src/api');
+ vi.mocked(getMission).mockResolvedValue({id:'stack-busy',status:'active',history:[],created_at:'',updated_at:''});
+ const resolvers:Array<(val:{id:string;queued:boolean})=>void>=[];
+ const sentIds:string[]=[];
+ vi.mocked(sendMissionMessage).mockImplementation((_id,_text,_attachments,clientMessageId)=>{
+  const id=clientMessageId??'gen';
+  sentIds.push(id);
+  return new Promise(resolve=>{resolvers.push(()=>resolve({id,queued:true}));});
+ });
+ vi.stubGlobal('fetch',vi.fn(async(url)=>{
+  if(String(url).includes('/queue?'))return Response.json([]);
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ render(()=><NativeMissionView id="stack-busy" initial={{id:'stack-busy',status:'active',history:[],created_at:'',updated_at:''}}/>);
+ const input=screen.getByPlaceholderText('Send follow-up') as HTMLTextAreaElement;
+ const {fireEvent}=await import('@solidjs/testing-library');
+ // Rapidly send 3 messages without waiting for the network
+ for(const msg of ['First rapid message','Second rapid message','Third rapid message']){
+  expect(input.readOnly).toBe(false);
+  fireEvent.input(input,{target:{value:msg}});
+  fireEvent.keyDown(input,{key:'Enter'});
+  expect(input.value).toBe('');
+ }
+ // All 3 appear immediately in the queue in chronological order
+ await screen.findByText('3 Sending…');
+ const texts=Array.from(document.querySelectorAll('.queue-text')).map(el=>el.textContent);
+ expect(texts).toEqual(['First rapid message','Second rapid message','Third rapid message']);
+ // Drain serialized sends one by one
+ await waitFor(()=>expect(resolvers).toHaveLength(1));
+ resolvers[0]({id:sentIds[0],queued:true});
+ await waitFor(()=>expect(resolvers).toHaveLength(2));
+ resolvers[1]({id:sentIds[1],queued:true});
+ await waitFor(()=>expect(resolvers).toHaveLength(3));
+ resolvers[2]({id:sentIds[2],queued:true});
+ await screen.findByText('3 Queued');
+ await waitFor(()=>expect(screen.queryByText('Sending…')).toBeNull());
+ const confirmedTexts=Array.from(document.querySelectorAll('.queue-text')).map(el=>el.textContent);
+ expect(confirmedTexts).toEqual(['First rapid message','Second rapid message','Third rapid message']);
+});
+
+

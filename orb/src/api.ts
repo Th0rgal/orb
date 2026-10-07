@@ -611,6 +611,8 @@ export interface ControllerSettings {
   reasoning_effort?: string | null;
   workdir?: string | null;
   script?: string | null;
+  script_path?: string | null;
+  script_content?: string | null;
   no_agent: boolean;
   continuity: boolean;
   monitor_url?: string | null;
@@ -636,6 +638,7 @@ export interface ControllerPatch {
   name?: string;
   schedule?: string;
   prompt?: string;
+  script_content?: string;
   skills?: string[];
   deliver?: string;
   failure_deliver?: string;

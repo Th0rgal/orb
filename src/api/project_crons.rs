@@ -513,6 +513,28 @@ async fn create(
     Json(result).into_response()
 }
 
+fn enrich_job_script_metadata(job: &mut Value) {
+    let Some(script) = job
+        .get("script")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(home) = super::project_controller::hermes_home() else {
+        return;
+    };
+    let (script_path, script_content) = super::project_controller::read_job_script(&home, &script);
+    if let Some(path) = script_path {
+        job["script_path"] = json!(path);
+    }
+    if let Some(content) = script_content {
+        job["script_content"] = json!(content);
+    }
+}
+
 async fn get_one(
     State(state): State<Arc<AppState>>,
     Path((slug, id)): Path<(String, String)>,
@@ -537,6 +559,7 @@ async fn get_one(
             .project_cron_folder(&owned_slug, &id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
         result["job"]["folder"] = json!(folder);
+        enrich_job_script_metadata(&mut result["job"]);
         let runs = super::project_controller::hermes_home()
             .map(|h| super::project_controller::build_runs(&h, &id, 30))
             .unwrap_or_default();
@@ -564,6 +587,14 @@ async fn update(
     let owned_slug = match resolve_owned_slug(&state.projects, &slug, &id) {
         Ok(s) => s,
         Err(e) => return e,
+    };
+    let script_content = match body
+        .as_object_mut()
+        .and_then(|o| o.remove("script_content"))
+    {
+        None => None,
+        Some(Value::String(content)) => Some(content),
+        _ => return (StatusCode::BAD_REQUEST, "script_content must be a string").into_response(),
     };
     let target_project = match body.as_object_mut().and_then(|o| o.remove("project")) {
         None => None,
@@ -597,6 +628,44 @@ async fn update(
                 .into_response()
         }
     };
+    if let Some(ref content) = script_content {
+        let Some(home) = super::project_controller::hermes_home() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Hermes home directory is not available on this host",
+            )
+                .into_response();
+        };
+        let current_job = match hermes(
+            &state,
+            reqwest::Method::GET,
+            &format!("/api/jobs/{id}"),
+            None,
+        )
+        .await
+        {
+            Ok(val) => val,
+            Err(e) => return e,
+        };
+        let script_name = current_job
+            .pointer("/job/script")
+            .or_else(|| current_job.get("script"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let Some(script_name) = script_name else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "this cron does not have a script attached",
+            )
+                .into_response();
+        };
+        if let Err(err) = super::project_controller::write_job_script(&home, &script_name, content)
+        {
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    }
     if target_project.is_some() || folder.is_some() {
         if let Err(e) =
             state
@@ -631,6 +700,7 @@ async fn update(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
             result["job"]["folder"] = json!(saved_folder);
             result["job"]["project"] = json!(effective_slug);
+            enrich_job_script_metadata(&mut result["job"]);
             let runs = super::project_controller::hermes_home()
                 .map(|h| super::project_controller::build_runs(&h, &id, 30))
                 .unwrap_or_default();

@@ -4,7 +4,15 @@ import { localContextFile } from "./projectContext";
 import { moveMission } from "./missionMove";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
+export interface CronClipboard { slug: string; id: string; name: string; folder?: string; backend: string; account: string; nonce: string }
+export type ClipboardItem =
+  | { kind: "file"; slug: string; path: string; directory?: boolean }
+  | { kind: "cron"; slug: string; id: string; name: string; folder?: string }
+  | { kind: "mission"; id: string };
+export interface ItemsClipboard { items: ClipboardItem[]; copy: boolean; backend: string; account: string; nonce: string }
 const prefix = "orb:file:";
+const cronPrefix = "orb:cron:";
+const itemsPrefix = "orb:items:";
 function clipboardAccount(): string {
   try {
     const payload = getJwt()?.split(".")[1];
@@ -55,6 +63,30 @@ export function readFileReference(text: string): FileClipboard | null {
   try {
     const value = JSON.parse(text.slice(prefix.length));
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && ["undefined", "boolean"].includes(typeof value.directory) && typeof value.nonce === "string" ? value : null;
+  } catch { return null; }
+}
+export async function copyCronReference(slug: string, id: string, name: string, folder?: string): Promise<string> {
+  const text = cronPrefix + JSON.stringify({ slug, id, name, ...(folder ? { folder } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+  await copyText(text);
+  return text;
+}
+export function readCronReference(text: string): CronClipboard | null {
+  if (!text.startsWith(cronPrefix)) return null;
+  try {
+    const value = JSON.parse(text.slice(cronPrefix.length));
+    return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.id === "string" && typeof value.name === "string" && typeof value.nonce === "string" ? value : null;
+  } catch { return null; }
+}
+export async function copyItemsReference(items: ClipboardItem[], copy: boolean): Promise<string> {
+  const text = itemsPrefix + JSON.stringify({ items, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+  await copyText(text);
+  return text;
+}
+export function readItemsReference(text: string): ItemsClipboard | null {
+  if (!text.startsWith(itemsPrefix)) return null;
+  try {
+    const value = JSON.parse(text.slice(itemsPrefix.length));
+    return value.backend === getApiUrl() && value.account === clipboardAccount() && Array.isArray(value.items) && typeof value.copy === "boolean" && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
 

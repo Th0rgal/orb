@@ -46,3 +46,64 @@ it("deletes a project controller via DELETE /api/projects/:slug/controller", asy
   expect(fetch.mock.calls[0][1]?.method).toBe("DELETE");
   expect(view.job).toBeNull();
 });
+
+it("preserves script_path and script_content on script-based Hermes crons and builds a debug prompt", async () => {
+  const { getProjectCron, updateProjectCron } = await import("../src/api");
+  const { buildCronDebugPrompt } = await import("../src/Controller");
+  const fetchSpy = vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      job: {
+        id: "70c14fb0c5f2",
+        name: "gaulle-film1-watch",
+        schedule: { display: "3m" },
+        enabled: true,
+        state: "scheduled",
+        prompt: "",
+        script: "gaulle_watch_tick.sh",
+        script_path: "/var/lib/hermes-assistant/scripts/gaulle_watch_tick.sh",
+        script_content: "#!/usr/bin/env bash\necho tick\n",
+        no_agent: true,
+        deliver: "telegram:-5261918484",
+      },
+      runs: [
+        { id: "r1", status: "ok", duration_secs: 1.8, silent: true, report: "[SILENT]" },
+      ],
+    }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      job: {
+        id: "70c14fb0c5f2",
+        name: "gaulle-film1-watch",
+        schedule: { display: "3m" },
+        enabled: true,
+        state: "scheduled",
+        prompt: "Watch film1 render progress",
+        script: "gaulle_watch_tick.sh",
+        script_path: "/var/lib/hermes-assistant/scripts/gaulle_watch_tick.sh",
+        script_content: "#!/usr/bin/env bash\necho updated\n",
+        no_agent: true,
+      },
+      runs: [],
+    }), { status: 200 }));
+
+  const view = await getProjectCron("gaulle", "70c14fb0c5f2");
+  expect(view.settings?.script).toBe("gaulle_watch_tick.sh");
+  expect(view.settings?.script_path).toBe("/var/lib/hermes-assistant/scripts/gaulle_watch_tick.sh");
+  expect(view.settings?.script_content).toContain("echo tick");
+  expect(view.settings?.no_agent).toBe(true);
+
+  const debugPrompt = buildCronDebugPrompt(view);
+  expect(debugPrompt).toContain("gaulle-film1-watch");
+  expect(debugPrompt).toContain("/var/lib/hermes-assistant/scripts/gaulle_watch_tick.sh");
+  expect(debugPrompt).toContain("echo tick");
+
+  const updated = await updateProjectCron("gaulle", "70c14fb0c5f2", {
+    prompt: "Watch film1 render progress",
+    script_content: "#!/usr/bin/env bash\necho updated\n",
+  });
+  expect(JSON.parse(String(fetchSpy.mock.calls[1][1]?.body))).toMatchObject({
+    prompt: "Watch film1 render progress",
+    script_content: "#!/usr/bin/env bash\necho updated\n",
+  });
+  expect(updated.settings?.script_content).toContain("echo updated");
+});
+

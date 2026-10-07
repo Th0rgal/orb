@@ -97,3 +97,47 @@ test('long queued prompts stay on one line with the full text available',async({
  expect((await row.boundingBox())!.height).toBeLessThanOrEqual(24);
  await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('3 Queued');
 });
+
+test('rapidly stacking multiple messages and deleting from the queue gives instantaneous (<16ms) visual feedback',async({page})=>{
+ await page.goto('/tests/queued-messages.html');
+ const queue=page.getByRole('region',{name:'Queued messages'});
+ await expect(queue).toContainText('2 Queued');
+ const sendMetrics=await page.evaluate(()=>{
+  const ta=document.querySelector('textarea')!;
+  const sendLatencies:number[]=[];
+  for(const msg of ['rapid stack 1','rapid stack 2','rapid stack 3']){
+   const t0=performance.now();
+   ta.value=msg;
+   ta.dispatchEvent(new InputEvent('input',{bubbles:true,data:msg}));
+   ta.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+   const texts=Array.from(document.querySelectorAll('.queue-text')).map(el=>el.textContent);
+   const t1=performance.now();
+   if(!texts.includes(msg))throw new Error(`Message ${msg} not immediately visible in queue: ${JSON.stringify(texts)}`);
+   if(ta.value!=='')throw new Error(`Textarea did not clear immediately after ${msg}`);
+   if(ta.readOnly)throw new Error(`Textarea became readOnly and blocked rapid stacking after ${msg}`);
+   sendLatencies.push(t1-t0);
+  }
+  return {sendLatencies};
+ });
+ for(const ms of sendMetrics.sendLatencies)expect(ms).toBeLessThan(16);
+ await expect(page.locator('button[aria-label="Remove queued message: rapid stack 2"]')).toBeAttached();
+ const deleteMetrics=await page.evaluate(()=>{
+  const delBtn=document.querySelector('button[aria-label="Remove queued message: rapid stack 2"]') as HTMLButtonElement|null;
+  if(!delBtn)throw new Error('Delete button for rapid stack 2 not found');
+  const d0=performance.now();
+  delBtn.click();
+  const afterTexts=Array.from(document.querySelectorAll('.queue-text')).map(el=>el.textContent);
+  const d1=performance.now();
+  if(afterTexts.includes('rapid stack 2'))throw new Error(`Deleted message still visible synchronously: ${JSON.stringify(afterTexts)}`);
+  return {deleteLatency:d1-d0,afterTexts};
+ });
+ expect(deleteMetrics.deleteLatency).toBeLessThan(16);
+ expect(deleteMetrics.afterTexts).toEqual([
+  'ceci est un message dans la queue',
+  'et en voici un autre',
+  'rapid stack 1',
+  'rapid stack 3',
+ ]);
+ await expect(queue).toContainText('4 Queued');
+});
+

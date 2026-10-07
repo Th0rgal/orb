@@ -136,3 +136,32 @@ it('injects the selected queued message live without deleting remaining queued m
   expect(screen.getByText('First')).toBeTruthy();
   expect(screen.queryByText('Steer live now')).toBeNull();
 });
+
+it('removes a queued message optimistically before the DELETE request resolves and stacks multiple pending items in order', async () => {
+  backend.list.mockResolvedValue([{ id: 'one', content: 'First confirmed', source: 'remote-queue' }]);
+  let resolveDelete!: () => void;
+  backend.api.mockImplementation(() => new Promise<unknown>(r => { resolveDelete = () => r({ ok: true }); }));
+  const cancel = vi.fn();
+  const { createSignal } = await import('solid-js');
+  const [pending, setPending] = createSignal([
+    { id: 'p1', content: 'Stacked 1' },
+    { id: 'p2', content: 'Stacked 2' },
+  ]);
+  render(() => <RemoteQueue mission="remote" pending={pending()} onRows={() => {}} onCancel={cancel}/>);
+  await screen.findByText('3 Queued');
+  const items = Array.from(document.querySelectorAll('.queue-text')).map(el => el.textContent);
+  expect(items).toEqual(['First confirmed', 'Stacked 1', 'Stacked 2']);
+
+  // Click Delete on 'First confirmed' while DELETE is still pending in flight
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: First confirmed' }));
+  // Optimistic DOM removal happens synchronously before resolveDelete() is called
+  expect(screen.queryByText('First confirmed')).toBeNull();
+  expect(cancel).not.toHaveBeenCalled();
+  expect(screen.getByText('2 Sending…')).toBeTruthy();
+  resolveDelete();
+  await waitFor(() => expect(cancel).toHaveBeenCalledWith('one'));
+  setPending([{ id: 'p2', content: 'Stacked 2' }]);
+  await screen.findByText('1 Sending…');
+});
+
+

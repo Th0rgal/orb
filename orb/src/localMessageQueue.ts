@@ -11,11 +11,12 @@ export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
-const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(previous,rows));
+const optimisticallyRemoved=new Set<string>();
+const setEntries=(rows:QueuedLocalMessage[])=>publishEntries(previous=>mergeById(previous,rows.filter(r=>!optimisticallyRemoved.has(r.id))));
 const [accepted,setAccepted]=createSignal<QueuedLocalMessage[]>([]);
 export const queuedLocalMessages=(mission:string)=>entries().filter(row=>row.mission===mission);
 export const acceptedLocalMessages=(mission:string)=>accepted().filter(row=>row.mission===mission);
-export function forgetAcceptedLocalMessages(ids:Set<string>){setAccepted(rows=>rows.filter(row=>!ids.has(row.id)));}
+export function forgetAcceptedLocalMessages(ids:Set<string>){setAccepted(rows=>rows.some(row=>ids.has(row.id))?rows.filter(row=>!ids.has(row.id)):rows);}
 const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
 const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
@@ -87,7 +88,15 @@ export async function confirmWakeupStops(confirmations:{mission:string;token:str
 }
 export async function enqueueLocalMessage(request:StartLocal,text:string,options:{wakeupFence?:WakeupFence;id?:ReturnType<typeof crypto.randomUUID>;waiting?:boolean;delegated?:boolean;scheduled?:boolean;replace?:boolean}={}){
  const key=storageKey(),id=options.id??crypto.randomUUID();
+ if(!options.delegated&&!options.scheduled){
+  if(options.replace){
+   publishEntries(rows=>rows.map(row=>row.id===id&&row.state==='queued'?{...row,text,request:{...request,imagePaths:[...new Set([...(request.imagePaths??[]),...(row.request.imagePaths??[]).filter(path=>text.includes(path))])]},heldAt:undefined}:row));
+  }else{
+   publishEntries(rows=>rows.some(row=>row.id===id)?rows:[...rows.filter(r=>!(r.mission===request.id&&r.state==='error'&&r.interrupted)),{id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled}]);
+  }
+ }
  await locked(key,async()=>{
+  if(optimisticallyRemoved.delete(id))return;
   const seenKey=`${key}:received`,seen=options.delegated?(await readSideThread<string[]>(seenKey)??[]):[];
   if(seen.includes(id))return;
   if(options.scheduled){
@@ -149,21 +158,33 @@ export const canDiscardQueuedMessage=(row:QueuedLocalMessage)=>!['dispatching','
  * Keep its receipt/output in the recovery archive; never discard a newer attempt. */
 async function discardQueuedMessage(id:string):Promise<string|undefined>{
  const key=storageKey(),snapshot=(await read(key)).find(row=>row.id===id);
- if(!snapshot)return;
- if(!canDiscardQueuedMessage(snapshot))throw Error('This message has already been sent.');
- if(snapshot.interrupted||snapshot.state==='dispatching')await recoverLocalLaunch(snapshot.mission);
+ if(snapshot&&!canDiscardQueuedMessage(snapshot))throw Error('This message has already been sent.');
+ if(snapshot&&(snapshot.interrupted||snapshot.state==='dispatching'))await recoverLocalLaunch(snapshot.mission);
  const text=await locked(key,async()=>{
   if(key!==storageKey())throw Error('Connection changed. The message is still saved.');
   const rows=await read(key),row=rows.find(row=>row.id===id);
   if(!row)return;
-  if(JSON.stringify(row)!==JSON.stringify(snapshot))throw Error('This message changed while checking the previous run. Try again.');
+  if(snapshot&&JSON.stringify(row)!==JSON.stringify(snapshot))throw Error('This message changed while checking the previous run. Try again.');
+  if(!canDiscardQueuedMessage(row))throw Error('This message has already been sent.');
   if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
   await write(key,rows.filter(row=>row.id!==id));
   return row.text;
  });
  wake();return text;
 }
-export async function removeQueuedMessage(id:string){await discardQueuedMessage(id);}
+export async function removeQueuedMessage(id:string){
+ const prev=entries();
+ const row=prev.find(r=>r.id===id);
+ if(row&&row.state==='queued'&&!row.interrupted){
+  optimisticallyRemoved.add(id);
+  publishEntries(rows=>rows.filter(r=>r.id!==id));
+ }
+ try{
+  const removed=await discardQueuedMessage(id);
+  if(removed!==undefined)optimisticallyRemoved.delete(id);
+ }
+ catch(e){optimisticallyRemoved.delete(id);if(row)publishEntries(rows=>rows.some(r=>r.id===id)?rows:mergeById(rows,prev));throw e;}
+}
 export async function takeQueuedMessage(id:string){
  const text=await discardQueuedMessage(id);
  if(text===undefined)throw Error('This message is no longer queued.');

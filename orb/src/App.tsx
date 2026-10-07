@@ -351,6 +351,8 @@ export function Composer(p: {
   onEmptySubmit?: () => void;
   /** Right arrow on an empty draft edits the first queued message. */
   onEditFirstQueued?: () => void;
+  /** Allow typing and stacking follow-up messages while an earlier send is in flight. */
+  allowConcurrentSend?: boolean;
 }) {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
@@ -382,7 +384,7 @@ export function Composer(p: {
   };
   let composerElement:HTMLDivElement|undefined;
   nativeComposerDrop(()=>composerElement, async sources=>{
-    if(sending()||uploading()||readingImages()) { setUploadError("Please wait for the current attachment or message to finish, then drop your files again."); return; }
+    if(sendingLocked()||uploading()||readingImages()) { setUploadError("Please wait for the current attachment or message to finish, then drop your files again."); return; }
     if (p.imagesOnly || p.directFileUpload) await attachMixed(sources);
     else await attachSources(sources);
   });
@@ -420,7 +422,9 @@ export function Composer(p: {
   };
   const [images, setImages] = createSignal<DraftImage[]>([]);
   const [viewing, setViewing] = createSignal<number | null>(null);
-  const [sending, setSending] = createSignal(false);
+  const [sendingCount, setSendingCount] = createSignal(0);
+  const sending = () => sendingCount() > 0;
+  const sendingLocked = () => sending() && (!p.allowConcurrentSend || !!p.editingQueued);
   const [pendingSend, setPendingSend] = createSignal<{text:string; images:DraftImage[]} | null>(null);
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
@@ -454,7 +458,7 @@ export function Composer(p: {
     const plain = clipboard.getData("text/plain");
     if (!files.length && !/<img\b|data-proton-embedded\s*=/i.test(html)) return;
     event.preventDefault();
-    if (readingImages() || sending()) return;
+    if (readingImages() || sendingLocked()) return;
     setImageError(null);
     const scope = p.scope;
     const original = text(), start = ta.selectionStart, end = ta.selectionEnd;
@@ -609,7 +613,7 @@ export function Composer(p: {
     const original = text();
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
-    if (p.disabled || (!payload && !images().length) || sending() || uploading() || readingImages()) return;
+    if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
     if (!p.textOnly && !p.imagesOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
       return;
@@ -625,7 +629,7 @@ export function Composer(p: {
     const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
     if(!sideMode)p.onPending?.({text:payload,images:sentImages,retry:()=>{uploaded=originalUploads;setText(original);setImages(sentImages);setMode(originalMode);void send();}});
-    setSending(true);
+    setSendingCount(c => c + 1);
     setText(""); setImages([]); ta.value=""; resize();
     let accepted = false;
     try {
@@ -641,19 +645,21 @@ export function Composer(p: {
         : await (p.sideQuestion ? p.onSend(payload || "Please look at the attached images.", sentImages, resolved.files) : p.onSend(payload || "Please look at the attached images.", sentImages)) !== false;
       if (accepted) {
         if (sideMode) p.onAttachments?.([]);
-        uploaded = [];
+        if (uploaded === resolved.files) uploaded = [];
         setUploadError(null);
-        if (draftScope) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
-        setMode(null);
+        if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
+        if (!text()) setMode(null);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally {
-      if (!accepted && !p.retainFailedMessage && draftScope === p.scope) {
+      setSendingCount(c => Math.max(0, c - 1));
+      if (!accepted && !p.retainFailedMessage && draftScope === p.scope && !text() && !images().length) {
         uploaded = originalUploads;
         setMode(originalMode);setText(original);setImages(sentImages);
         ta.value=original;resize();
       }
-      setPendingSend(null);if(!sideMode)p.onPending?.(null);setSending(false);
+      if (sendingCount() === 0) setPendingSend(null);
+      if (!accepted && !sideMode) p.onPending?.(null);
       // The launch preview hides the composer. Restore visibility before focus.
       if (!accepted && draftScope === p.scope && ta.isConnected) ta.focus();
     }
@@ -699,7 +705,7 @@ export function Composer(p: {
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
       <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly || p.directFileUpload ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
-      <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sending()} onClick={() => (p.imagesOnly || p.directFileUpload) ? void chooseFiles() : setCtx(!ctx())}>
+      <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sendingLocked()} onClick={() => (p.imagesOnly || p.directFileUpload) ? void chooseFiles() : setCtx(!ctx())}>
         <Ic.PlusIcon size={14} />
       </button>
       <Show when={ctx() && !p.imagesOnly && !p.directFileUpload}>
@@ -905,7 +911,7 @@ export function Composer(p: {
   const sendBtn = (
     <div class="send-slot">
       <Show when={(text().trim() || images().length) && !slash() && !voiceActive()}>
-        <button class="send" disabled={p.disabled || uploading() || sending() || readingImages()} onClick={send} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : "Send"}>
+        <button class="send" disabled={p.disabled || uploading() || sendingLocked() || readingImages()} onClick={send} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : "Send"}>
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
@@ -954,7 +960,7 @@ export function Composer(p: {
     <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() || p.editingQueued ? "has-mode" : ""}`} data-mode={mode() ?? ""}
       onDragOver={e=>{if(Array.from(e.dataTransfer?.types??[]).includes("Files")){e.preventDefault();e.stopPropagation();if(e.dataTransfer)e.dataTransfer.dropEffect="copy";e.currentTarget.classList.add("drop-active");}}}
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
-      onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sending()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
+      onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sendingLocked()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
       onClick={() => !voiceActive() && ta.focus()}>
       <Show when={!p.textOnly}>{plus}</Show>
       {slashMenu}
@@ -969,7 +975,7 @@ export function Composer(p: {
       <div class="composer-field">
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show><Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
         <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
-        <textarea readOnly={sending()}
+        <textarea readOnly={sendingLocked()}
           ref={ta}
           onPaste={event => void pasteImages(event)}
           rows={1}
@@ -1116,6 +1122,7 @@ export default function App() {
     : newProject());
   const [createError, setCreateError] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
+  const [newAgentRevision, setNewAgentRevision] = createSignal<{ text: string; append?: boolean } | undefined>();
   const [launchPreview, setLaunchPreview] = createSignal<LaunchReceipt | null>(null);
   const [launchViewKey,setLaunchViewKey]=createSignal('');
   let retryLaunch:(()=>void)|undefined;
@@ -1620,8 +1627,20 @@ export default function App() {
       const target = (ev as CustomEvent<string>).detail;
       if (target) open(target);
     };
+    const onDebugCron = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ slug?: string; prompt?: string }>).detail;
+      if (!detail?.prompt) return;
+      setNewFolder(null);
+      if (detail.slug) setNewProject(detail.slug);
+      open(null);
+      setNewAgentRevision({ text: detail.prompt });
+    };
     window.addEventListener("orb:open-page", onOpenPage);
-    onCleanup(() => window.removeEventListener("orb:open-page", onOpenPage));
+    window.addEventListener("orb:debug-cron", onDebugCron);
+    onCleanup(() => {
+      window.removeEventListener("orb:open-page", onOpenPage);
+      window.removeEventListener("orb:debug-cron", onDebugCron);
+    });
     window.addEventListener("pointerdown", closePlus);
     onCleanup(() => window.removeEventListener("pointerdown", closePlus));
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
@@ -1998,7 +2017,7 @@ export default function App() {
                 {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
                 <div hidden={!!launchPreview()}>
                 <Composer
-
+                  revision={newAgentRevision()}
                   placeholder="Describe a task, / for commands, @ for context"
                   busy={creating()}
                   onSend={create}
@@ -2421,18 +2440,40 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
   const [sendError, setSendError] = createSignal<string | null>(null);
-  const [optimistic, setOptimistic] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;retry?:()=>void} | null>(null);
-  let sendingId:ReturnType<typeof crypto.randomUUID>|undefined;
+  const [optimisticList, setOptimisticList] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;retry?:()=>void}[]>([]);
+  const optimistic = () => optimisticList()[0] ?? null;
+  let sendingIds:ReturnType<typeof crypto.randomUUID>[]=[];
+  let sendChain: Promise<void> = Promise.resolve();
   const beginSend = (draft:{text:string;images:DraftImage[];retry?:()=>void}|null) => {
     if(!draft)return;
-    sendingId=sendError()&&optimistic()?.text===draft.text?optimistic()!.id:crypto.randomUUID();
+    const prevErr = sendError();
+    const firstOpt = optimistic();
+    const nextId = prevErr && firstOpt?.text === draft.text ? firstOpt.id : crypto.randomUUID();
+    sendingIds.push(nextId);
     setSendError(null);
-    setOptimistic({...draft,id:sendingId,waiting:busy()});
+    let addedWaiting = true;
+    setOptimisticList(prev => {
+      const hasEarlierInFlight = prev.some(item => item.id !== nextId);
+      const waiting = busy() || hasEarlierInFlight;
+      addedWaiting = waiting;
+      if (prev.some(item => item.id === nextId)) {
+        return prev.map(item => item.id === nextId ? { ...draft, id: nextId, waiting } : item);
+      }
+      return [...prev, { ...draft, id: nextId, waiting }];
+    });
+    if (!addedWaiting) {
+      nearBottom = true;
+      queueMicrotask(scrollIfPinned);
+    }
   };
   createEffect(()=>{
-    const ids=new Set(items().filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId??'':''));
+    const ids=new Set([
+      ...items().filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId??'':''),
+      ...queuedLocalMessages(p.id).map(row=>row.id),
+      ...acceptedLocalMessages(p.id).map(row=>row.id),
+    ]);
     // Remove the projection only after its canonical identity is visible.
-    if(optimistic()&&ids.has(optimistic()!.id))setOptimistic(null);
+    if(optimisticList().some(item=>ids.has(item.id)))setOptimisticList(prev=>prev.filter(item=>!ids.has(item.id)));
     forgetAcceptedLocalMessages(ids);
   });
   let sideQuestions: SideQuestionsHandle | undefined;
@@ -2709,7 +2750,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(!p.id)return !p.launchError;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     const phase = missionPhase(mission(), activity());
-    return (!!optimistic() && !optimistic()!.waiting || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
+    return (optimisticList().some(item => !item.waiting) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
   const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
@@ -2717,10 +2758,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const canonical = withInitialPrompt(items(), mission(), receipt);
     const known = new Set(canonical.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId:undefined));
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
-    const draft=optimistic();
+    const drafts=optimisticList();
     const projected:StreamItem[]=[];
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-    if(draft&&(!draft.waiting||sendError())&&!known.has(draft.id))projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
+    for(const draft of drafts){if((!draft.waiting||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
     const list = [...canonical,...projected];
     const live = localLiveText(p.id);
     // The server rewrites a local run's reply in place without re-emitting it,
@@ -2748,11 +2789,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
-  const sendMsg = async (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+  const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    const optEntry = optimisticList().find(item => item.id === attemptId);
     setSendError(null);
-    const attemptId=explicitId??sendingId??crypto.randomUUID();
-    sendingId=undefined;
-    if(explicitId&&optimistic()&&optimistic()!.id!==explicitId)setOptimistic(null);
+    if(explicitId&&optimisticList().length&&!optimisticList().some(item=>item.id===explicitId))setOptimisticList([]);
     if (clientPlaced()) {
       const sendVersion=connectionVersion(),sendMission=p.id;
       try {
@@ -2780,7 +2820,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optimistic()?.waiting??busy()});
+        if (!optimisticList().some(item => item.id === attemptId)) return true;
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
@@ -2801,6 +2843,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const replacement = result.replacement;
         const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
         rememberLaunch(replacement.id, { prompt: sent, nodeId, destination: nodeLabel(nodeId), replacement: true });
+        setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
         p.onFork?.(replacement);
         return true;
@@ -2808,6 +2851,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: sent, queued: result.queued, receipt: true, attached: chips.length > 0 } };
       if (replaying) held.push(event);
       else applyLive(event);
+      setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
       if (chips === followAttach()) setFollowAttach([]);
       void refresh();
       return true;
@@ -2816,6 +2860,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if (e instanceof MessageRejectedError || (e instanceof ApiError && e.status < 500 && e.status !== 408)) retryMessage = null;
       setSendError(launchError(e)); return false;
     }
+  };
+  const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
+    const run = sendChain.then(() => sendMsgOnce(text, images, chips, attemptId, explicitId, replace));
+    sendChain = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const [resend, setResend] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string;waiting:boolean;state:"sending"|"accepted"|"error";error?:string}>();
@@ -3021,14 +3071,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             editing={editingQueued()}
             onEdit={row => void queuedEdit.start(row)}
             onSendImmediate={sendRemoteImmediate}
-            pending={!clientPlaced() && optimistic()?.waiting && !sendError() ? {id:optimistic()!.id,content:optimistic()!.text} : undefined}
+            pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting).map(item => ({id:item.id,content:item.text})) : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
             onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
-          <QueuedMessages mission={p.id} editing={editingQueued()} onEdit={row=>void queuedEdit.start(row)}/>
+          <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
+            allowConcurrentSend
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
             onOpenBtw={()=>sideQuestions?.open()}

@@ -104,6 +104,8 @@ pub struct ControllerSettings {
     pub workdir: Option<String>,
     /// Script whose stdout is injected into the prompt (or IS the job).
     pub script: Option<String>,
+    pub script_path: Option<String>,
+    pub script_content: Option<String>,
     pub no_agent: bool,
     /// Each run sees the job's own previous output.
     pub continuity: bool,
@@ -128,6 +130,7 @@ pub struct ControllerView {
 
 /// Mirrors `CONTROLLER_PROMPT_MAX_CHARS` in Hermes' `cron/controller_scope.py`.
 const BOUND_CONTROLLER_PROMPT_BUDGET: usize = 16_000;
+const SCRIPT_CONTENT_MAX_BYTES: usize = 64 * 1024;
 
 /// Editable settings. Absent fields are left untouched; an empty string
 /// clears an optional pin (model, provider, effort, workdir, failure target).
@@ -136,6 +139,7 @@ pub struct UpdateRequest {
     pub name: Option<String>,
     pub schedule: Option<String>,
     pub prompt: Option<String>,
+    pub script_content: Option<String>,
     pub skills: Option<Vec<String>>,
     pub deliver: Option<String>,
     pub failure_deliver: Option<String>,
@@ -291,7 +295,91 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
-fn settings_view(job: &serde_json::Value) -> ControllerSettings {
+pub(super) fn resolve_job_script_path(home: &Path, script: &str) -> Option<PathBuf> {
+    let trimmed = script.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return None;
+    }
+    let candidate_dirs = [home.join("scripts"), home.join(".hermes/scripts")];
+    for scripts_dir in &candidate_dirs {
+        let Ok(canon_dir) = scripts_dir.canonicalize() else {
+            continue;
+        };
+        let raw = Path::new(trimmed);
+        let target = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            scripts_dir.join(raw)
+        };
+        if let Ok(canon_path) = target.canonicalize() {
+            if canon_path.starts_with(&canon_dir) && canon_path.is_file() {
+                return Some(canon_path);
+            }
+        } else if !raw.is_absolute()
+            && !trimmed.contains("..")
+            && !trimmed.starts_with('/')
+            && !trimmed.contains('\\')
+        {
+            return Some(scripts_dir.join(raw));
+        }
+    }
+    None
+}
+
+pub(super) fn read_job_script(home: &Path, script: &str) -> (Option<String>, Option<String>) {
+    let Some(path) = resolve_job_script_path(home, script) else {
+        return (None, None);
+    };
+    let path_str = path.to_string_lossy().into_owned();
+    let content = std::fs::read(&path).ok().map(|bytes| {
+        let slice = &bytes[..bytes.len().min(SCRIPT_CONTENT_MAX_BYTES)];
+        String::from_utf8_lossy(slice).into_owned()
+    });
+    (Some(path_str), content)
+}
+
+pub(super) fn write_job_script(
+    home: &Path,
+    script: &str,
+    content: &str,
+) -> Result<PathBuf, String> {
+    if content.len() > SCRIPT_CONTENT_MAX_BYTES {
+        return Err("script content is larger than 64 KB".into());
+    }
+    let trimmed = script.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('\0')
+        || trimmed.contains("..")
+        || trimmed.starts_with('-')
+    {
+        return Err("invalid script path".into());
+    }
+    let scripts_dir = home.join("scripts");
+    std::fs::create_dir_all(&scripts_dir)
+        .map_err(|e| format!("failed to prepare scripts directory: {e}"))?;
+    let canon_dir = scripts_dir
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve scripts directory: {e}"))?;
+    let path = resolve_job_script_path(home, trimmed).unwrap_or_else(|| scripts_dir.join(trimmed));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        if let Ok(canon_parent) = parent.canonicalize() {
+            if !canon_parent.starts_with(&canon_dir)
+                && !home
+                    .join(".hermes/scripts")
+                    .canonicalize()
+                    .is_ok_and(|d| canon_parent.starts_with(d))
+            {
+                return Err("script path resolves outside Hermes scripts directory".into());
+            }
+        }
+    }
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("failed to write script {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+fn settings_view(job: &serde_json::Value, home: Option<&Path>) -> ControllerSettings {
     let id = str_field(job, "id").unwrap_or_default();
     let prompt = job
         .get("prompt")
@@ -303,6 +391,11 @@ fn settings_view(job: &serde_json::Value) -> ControllerSettings {
         skills = string_list(job.get("skill"));
     }
     let binding = job.get("controller").filter(|v| v.is_object()).cloned();
+    let script = str_field(job, "script");
+    let (script_path, script_content) = match (home, script.as_deref()) {
+        (Some(h), Some(s)) => read_job_script(h, s),
+        _ => (None, None),
+    };
     ControllerSettings {
         prompt_chars: prompt.chars().count(),
         prompt,
@@ -322,7 +415,9 @@ fn settings_view(job: &serde_json::Value) -> ControllerSettings {
         provider: str_field(job, "provider"),
         reasoning_effort: str_field(job, "reasoning_effort"),
         workdir: str_field(job, "workdir"),
-        script: str_field(job, "script"),
+        script,
+        script_path,
+        script_content,
         no_agent: job
             .get("no_agent")
             .and_then(|v| v.as_bool())
@@ -679,7 +774,7 @@ fn controller_view_sync(slug: &str, recorded_id: Option<String>, limit: usize) -
     let jobs = load_jobs(&home);
     let raw = find_job(&jobs, &project_keys(slug), recorded_id.as_deref());
     let job = raw.and_then(job_view);
-    let settings = job.as_ref().and(raw).map(settings_view);
+    let settings = job.as_ref().and(raw).map(|j| settings_view(j, Some(&home)));
     let runs = job
         .as_ref()
         .map(|j| build_runs(&home, &j.id, limit))
@@ -827,15 +922,41 @@ async fn update_controller(
     if !super::projects_overview::is_plain_key(&slug) {
         return Err((StatusCode::BAD_REQUEST, "invalid project slug".to_string()));
     }
-    let edit = edit_args(&req).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let has_script_edit = req.script_content.is_some();
+    let edit = match edit_args(&req) {
+        Ok(args) => Some(args),
+        Err(_) if has_script_edit => None,
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e)),
+    };
     let slug = super::projects_overview::canonicalize_project_slug(&slug);
     let recorded = recorded_controller_id(&state, &slug);
     let (home, job_id) = resolve_controller(slug.clone(), recorded.clone()).await?;
 
-    let mut args = vec!["edit".to_string()];
-    args.extend(edit);
-    args.push(job_id);
-    run_hermes_cron(&home, &args).await?;
+    if let Some(script_content) = req.script_content.clone() {
+        let home_clone = home.clone();
+        let job_id_clone = job_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let jobs = load_jobs(&home_clone);
+            let job = jobs
+                .iter()
+                .find(|j| j.get("id").and_then(|v| v.as_str()) == Some(&job_id_clone))
+                .ok_or_else(|| "controller job not found".to_string())?;
+            let script = str_field(job, "script")
+                .ok_or_else(|| "this cron does not have a script attached".to_string())?;
+            write_job_script(&home_clone, &script, &script_content)?;
+            Ok(())
+        })
+        .await
+        .map_err(internal)?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+
+    if let Some(edit) = edit {
+        let mut args = vec!["edit".to_string()];
+        args.extend(edit);
+        args.push(job_id);
+        run_hermes_cron(&home, &args).await?;
+    }
 
     let view_slug = slug.clone();
     let mut view =
@@ -1138,7 +1259,7 @@ mod tests {
                 "enabled_toolsets":["mcp"],"controller":{"project":"verity-lido","mode":"operator"}}"#,
         )
         .unwrap();
-        let s = settings_view(&job);
+        let s = settings_view(&job, None);
         assert_eq!(s.prompt, "Do the thing.");
         assert_eq!(s.prompt_chars, 13);
         assert_eq!(s.skills, vec!["controllers-policy", "github-workflow"]);
@@ -1150,10 +1271,36 @@ mod tests {
         let plain: serde_json::Value =
             serde_json::from_str(r#"{"id":"j2","prompt":"x","skill":"controllers-policy"}"#)
                 .unwrap();
-        let s = settings_view(&plain);
+        let s = settings_view(&plain, None);
         assert_eq!(s.skills, vec!["controllers-policy"]);
         assert_eq!(s.prompt_budget, None);
         assert!(!s.continuity);
+
+        // Script cron resolves script_path and script_content from HERMES_HOME/scripts
+        let temp = tempfile::tempdir().unwrap();
+        let scripts_dir = temp.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        std::fs::write(
+            scripts_dir.join("gaulle_watch_tick.sh"),
+            "#!/bin/bash\necho tick\n",
+        )
+        .unwrap();
+        let script_job: serde_json::Value = serde_json::from_str(
+            r#"{"id":"419e24282949","name":"gaulle-film1-watch","prompt":"","script":"gaulle_watch_tick.sh","no_agent":true}"#,
+        )
+        .unwrap();
+        let s = settings_view(&script_job, Some(temp.path()));
+        assert_eq!(s.script.as_deref(), Some("gaulle_watch_tick.sh"));
+        assert!(s.no_agent);
+        assert!(s
+            .script_path
+            .as_deref()
+            .unwrap()
+            .ends_with("gaulle_watch_tick.sh"));
+        assert_eq!(
+            s.script_content.as_deref(),
+            Some("#!/bin/bash\necho tick\n")
+        );
     }
 
     #[test]

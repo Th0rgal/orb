@@ -2078,6 +2078,7 @@ select.orb-select-native:disabled { cursor: default; }
 .new-agent:not(.launching) .composer.tall .composer-field textarea { min-height: 48px; }
 
 .row.mission-cut { opacity: .45; }
+.row.folder.active { background: var(--bg-active); color: var(--fg-strong); }
 
 /* Keep pointer selection quiet; keyboard focus follows the whole tree row. */
 .sidebar-tree .tree-entry button:focus-visible { outline: none; }
@@ -2341,10 +2342,10 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Follow-up queue: same width as the composer, quiet surface and compact header. */
 /* Queued follow-ups: one card above the composer, one line per message (Cursor-like). */
-.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); }
+.followup-queue { margin:0 0 8px; padding:10px 8px 6px; border:1px solid var(--stroke); border-radius:var(--radius-xl); background:var(--queue-bg); color:var(--fg-2); font:14px/20px var(--sans); animation:queue-card-reveal 140ms cubic-bezier(.16,1,.3,1) both; }
 .followup-queue.collapsed { padding-bottom:10px; }
 .followup-queue header { display:flex; align-items:center; gap:10px; min-height:24px; padding:0 4px 0 8px; }
-.queue-count { color:var(--fg-2); }
+.queue-count { color:var(--fg-2); font-variant-numeric:tabular-nums; }
 .queue-hint { display:inline-flex; align-items:center; gap:4px; color:var(--fg-4); font-size:13px; }
 .queue-hint svg { width:13px; height:13px; }
 .queue-options { display:flex; align-items:center; gap:10px; margin-left:auto; }
@@ -2356,7 +2357,7 @@ select.orb-select-native:disabled { cursor: default; }
 .followup-queue.collapsed .queue-collapse { transform:rotate(180deg); }
 .followup-queue ol { list-style:none; margin:4px 0 0; padding:0; overflow:visible; }
 .followup-queue ol.scrollable { max-height:220px; overflow-y:auto; }
-.queue-row { border:1px solid transparent; border-radius:var(--radius-md); }
+.queue-row { border:1px solid transparent; border-radius:var(--radius-md); animation:queue-row-reveal 120ms cubic-bezier(.16,1,.3,1) both; }
 .queue-row:hover { background:var(--hover-1); }
 .queue-row.editing { background:var(--bg-active); border-color:var(--stroke-strong); }
 .queue-line { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 8px; }
@@ -2375,6 +2376,9 @@ select.orb-select-native:disabled { cursor: default; }
 .queue-row small[role="alert"] { color:var(--red); }
 .queue-row > .queue-send-now { margin:0 0 6px 4px; font-size:13px; }
 .followup-queue > p[role="alert"] { margin:6px 8px 2px; color:var(--red); font-size:12px; }
+@keyframes queue-card-reveal { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+@keyframes queue-row-reveal { from { opacity:0; transform:translateY(2px); } to { opacity:1; transform:translateY(0); } }
+@media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } }
 @media (max-width:600px) { .queue-hint, .queue-tooltip { display:none; } .queue-row-actions { opacity:1; } }
 
 .file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; z-index:40; }
