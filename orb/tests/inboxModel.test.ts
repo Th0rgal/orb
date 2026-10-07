@@ -341,7 +341,92 @@ describe("classifyInboxMission & buildInboxSections", () => {
       "assistant:Dispatched Track INV-1, Track G-2, and Track G-4.",
     ]);
   });
+
+  it("preserves full Markdown code fences in peekTurns, attaches tool workReceipts, and extracts lastRequest/outcome", async () => {
+    const { buildDigestSnapshot, parseDigestJson } = await import("../src/inboxDigest");
+    const { inboxConfig, saveInboxConfig } = await import("../src/inboxSettings");
+
+    const sparkMission = makeMission({
+      id: "m-spark",
+      title: "DGX Spark",
+      status: "completed",
+      project: "paloma",
+      updated_at: "2026-10-07T15:30:00Z",
+    });
+
+    const items: StreamItem[] = [
+      {
+        kind: "user",
+        key: "u1",
+        text: 'just give me the edited:\n```json\n{\n  "ssh": [{ "action": "accept", "src": ["autogroup:member"] }]\n}\n```',
+      },
+      {
+        kind: "tool",
+        key: "t1",
+        callId: "c1",
+        name: "edit",
+        done: true,
+        args: { file_path: "/etc/tailscale/policy.hujson" },
+      },
+      {
+        kind: "tool",
+        key: "t2",
+        callId: "c2",
+        name: "bash",
+        done: true,
+        args: { command: "tailscale status" },
+      },
+      {
+        kind: "text",
+        key: "a1",
+        text: 'Here\'s the edited policy.\n```json\n{\n  "ssh": [\n    { "action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"] }\n  ]\n}\n```',
+      },
+    ];
+
+    const sections = buildInboxSections(
+      [sparkMission],
+      sampleProjects,
+      () => items,
+      () => undefined,
+      Date.parse("2026-10-07T15:35:00Z"),
+    );
+
+    const row = sections.ready[0];
+    expect(row.lastRequest).toContain("just give me the edited:");
+    expect(row.lastRequest).toContain("json:");
+    expect(row.summary).toContain("Here's the edited policy.");
+    expect(row.summary).toContain("json:");
+    expect(row.workReceiptSummary).toBe("1 command · Edited 1 file");
+    expect(row.verdict).toBe("succeeded");
+
+    // Peek turns preserve unstripped Markdown (code blocks intact) and attach tool work receipts
+    expect(row.allPeekTurns).toHaveLength(2);
+    expect(row.allPeekTurns[0].markdown).toContain("```json");
+    expect(row.allPeekTurns[1].markdown).toContain('"users": ["autogroup:nonroot", "root"]');
+    expect(row.allPeekTurns[1].workReceipt?.summary).toBe("1 command · Edited 1 file");
+    expect(row.allPeekTurns[1].workReceipt?.details).toEqual([
+      "edit tailscale/policy.hujson",
+      "bash: tailscale status",
+    ]);
+
+    // Digest snapshot and JSON parser
+    const snapshot = buildDigestSnapshot(sparkMission, items);
+    expect(snapshot).toContain("Tools executed in latest turn: 1 command · Edited 1 file");
+    const parsed = parseDigestJson(
+      '{"task":"Update Tailscale SSH ACL policy for cross-member access","outcome":"Generated updated JSON ACL policy replacing autogroup:self with autogroup:member","verdict":"succeeded"}',
+      row.updatedMs,
+      "builtin/smart",
+    );
+    expect(parsed?.task).toBe("Update Tailscale SSH ACL policy for cross-member access");
+    expect(parsed?.outcome).toContain("Generated updated JSON ACL policy");
+    expect(parsed?.verdict).toBe("succeeded");
+    expect(parsed?.model).toBe("builtin/smart");
+
+    // Inbox settings default to builtin/smart and persist changes
+    expect(inboxConfig().model).toBe("builtin/smart");
+    expect(inboxConfig().aiSummary).toBe(true);
+    saveInboxConfig({ aiSummary: true, model: "builtin/fast" });
+    expect(inboxConfig().model).toBe("builtin/fast");
+    saveInboxConfig({ aiSummary: true, model: "builtin/smart" });
+  });
 });
-
-
-

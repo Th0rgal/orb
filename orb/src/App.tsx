@@ -36,7 +36,7 @@ import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorNotice } from "./ErrorNotice";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, phaseIsQuiet, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, missionSettingsIdle, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalObjective, goalPrompt, missionTitle, displayTitle, GoalTag, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
-import { atQuery, chipToAttachment, filterAttach, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
+import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasFocusScope } from "./focusScope";
@@ -129,10 +129,11 @@ import {
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 import { InboxPage } from "./Inbox";
 import { buildInboxSections } from "./inboxModel";
+import { InboxSettings } from "./inboxSettings";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
 
-const PAGES = new Set(["inbox", "cloud-agent", "settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -516,10 +517,8 @@ export function Composer(p: {
     const items = filterSlash(modes(), q.query);
     return items.length ? { query: q.query, items } : null;
   });
-  const at = createMemo(() => {
-    if (p.textOnly || p.imagesOnly || voiceActive() || atOff() || slash()) return null;
-    const q = atQuery(text(), caret());
-    if (!q.open) return null;
+  const [ctxFolder, setCtxFolder] = createSignal("");
+  const atSource = createMemo<AttachItem[]>(() => {
     const demo = (p.files ?? []).map((f) => ({
       id: f.id,
       kind: "file" as const,
@@ -527,10 +526,29 @@ export function Composer(p: {
       path: f.name,
       label: f.name,
     }));
-    const source: AttachItem[] = [...(p.sideQuestion || mode() === "btw" ? [{ id: "btw:conversation", kind: "context" as const, section: "Context" as const, path: "conversation", label: "conversation · Latest agent conversation" }] : []), ...(isConnected() ? atItems() : demo)];
-    const items = filterAttach(source, q.query);
-    return items.length ? { query: q.query, items } : null;
+    return [...(p.sideQuestion || mode() === "btw" ? [{ id: "btw:conversation", kind: "context" as const, section: "Context" as const, path: "conversation", label: "conversation · Latest agent conversation" }] : []), ...(isConnected() ? atItems() : demo)];
   });
+  const at = createMemo(() => {
+    if (p.textOnly || p.imagesOnly || voiceActive() || atOff() || slash()) return null;
+    const q = atQuery(text(), caret());
+    if (!q.open) return null;
+    const source = atSource();
+    const items = filterAttach(source, q.query);
+    const folder = folderPrefixFromQuery(source, q.query) ?? "";
+    return items.length ? { query: q.query, items, folder } : null;
+  });
+  const setAtFolder = (folder: string) => {
+    const q = atQuery(text(), caret());
+    if (!q.open || q.start < 0) return;
+    const token = folder ? `@${folder.replace(/\/+$/, "")}/` : "@";
+    const next = `${text().slice(0, q.start)}${token}${text().slice(caret())}`;
+    const nextCaret = q.start + token.length;
+    write(next);
+    setAtOff(false);
+    ta.focus();
+    ta.setSelectionRange(nextCaret, nextCaret);
+    setCaret(nextCaret);
+  };
   createEffect(() => {
     slash();
     setSlashHi(0);
@@ -610,6 +628,8 @@ export function Composer(p: {
     const next = insertMention(text(), caret(), item);
     write(next.text);
     setAtOff(true);
+    setCtx(false);
+    setCtxFolder("");
     ta.focus();
     ta.setSelectionRange(next.caret, next.caret);
     setCaret(next.caret);
@@ -680,6 +700,7 @@ export function Composer(p: {
   const close = () => {
     setMenu(false);
     setCtx(false);
+    setCtxFolder("");
     setWhich(null);
     if (slash()) setSlashOff(true);
     if (atQuery(text(), caret()).open) setAtOff(true);
@@ -707,44 +728,69 @@ export function Composer(p: {
     window.removeEventListener("pointerdown", close);
     window.removeEventListener("keydown", onEsc, true);
   });
+  const plusItems = createMemo(() => {
+    const raw: AttachItem[] = isConnected()
+      ? atItems()
+      : (p.files ?? []).map((f) => ({ id: f.id, kind: "file" as const, section: "Files" as const, path: f.name, label: f.name }));
+    return browseAttachItems(raw, ctxFolder());
+  });
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
       <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly || p.directFileUpload ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
-      <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sendingLocked()} onClick={() => (p.imagesOnly || p.directFileUpload) ? void chooseFiles() : setCtx(!ctx())}>
+      <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sendingLocked()} onClick={() => { if (p.imagesOnly || p.directFileUpload) void chooseFiles(); else { const next = !ctx(); setCtx(next); if (!next) setCtxFolder(""); } }}>
         <Ic.PlusIcon size={14} />
       </button>
       <Show when={ctx() && !p.imagesOnly && !p.directFileUpload}>
         <div class="menu plus-menu slash-menu">
-          <button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span>Upload file or image…</button>
-          <Show when={atItems().some((i) => i.section === "Folders") || (p.files?.length ?? 0) > 0}>
+          <Show when={ctxFolder()} fallback={<button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span><span class="slash-item-label">Upload file or image…</span></button>}>
+            <div class="slash-folder-bar">
+              <button type="button" class="menu-item slash-back" onClick={() => { const cur = ctxFolder(); const slashIdx = cur.lastIndexOf("/"); setCtxFolder(slashIdx >= 0 ? cur.slice(0, slashIdx) : ""); }}>
+                <span class="menu-ico"><Ic.ArrowLeft size={14} /></span>
+                <span class="slash-item-label">{ctxFolder()}/</span>
+              </button>
+              <button type="button" class="slash-attach-folder" title={`Attach @${ctxFolder()}/`} onClick={() => {
+                const f = ctxFolder();
+                const existing = atItems().find((it) => it.section === "Folders" && (it.path ?? "").replace(/\/$/, "").toLowerCase() === f.toLowerCase());
+                pickAttach(existing ?? { id: `folder:${f}`, kind: "folder", section: "Folders", path: f, label: `${f}/` });
+              }}>Attach</button>
+            </div>
+          </Show>
+          <Show when={plusItems().some((i) => i.section === "Folders")}>
             <div class="slash-head">Folders</div>
-            <For each={atItems().filter((i) => i.section === "Folders")}>
-              {(it) => (
-                <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} onClick={() => pickAttach(it)}>
-                  <span class="menu-ico"><Ic.FolderIcon size={14} /></span> {it.label}
-                </button>
-              )}
+            <For each={plusItems().filter((i) => i.section === "Folders")}>
+              {(it) => {
+                const display = () => ctxFolder() && it.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? it.label.slice(ctxFolder().length + 1) : it.label;
+                return (
+                  <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
+                    <span class="menu-ico"><Ic.FolderIcon size={14} /></span>
+                    <span class="slash-item-label">{display()}</span>
+                    <span class="slash-chevron"><Ic.ChevronRight size={12} /></span>
+                  </button>
+                );
+              }}
             </For>
           </Show>
-          <div class="slash-head">Files</div>
-          <For each={isConnected() ? atItems().filter((i) => i.section === "Files") : p.files}>
-            {(f) => {
-              const id = "id" in f ? f.id : (f as { id: string }).id;
-              const label = "label" in f ? (f as AttachItem).label : (f as { name: string }).name;
-              const item: AttachItem = "section" in f ? (f as AttachItem) : { id, kind: "file", section: "Files", path: label, label };
-              return (
-                <button
-                  class={`menu-item ${mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "on" : ""}`}
-                  onClick={() => {
-                    if (p.onAttachments) pickAttach(item);
-                    else p.onToggleFile?.(item.id);
-                  }}
-                >
-                  <span class="menu-ico"><Ic.FileIcon size={14} /></span> {label}
-                </button>
-              );
-            }}
-          </For>
+          <Show when={plusItems().some((i) => i.section === "Files")}>
+            <div class="slash-head">Files</div>
+            <For each={plusItems().filter((i) => i.section === "Files")}>
+              {(item) => {
+                const display = () => ctxFolder() && item.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? item.label.slice(ctxFolder().length + 1) : item.label;
+                return (
+                  <button
+                    class={`menu-item ${mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "on" : ""}`}
+                    title={item.path ?? item.label}
+                    onClick={() => {
+                      if (p.onAttachments) pickAttach(item);
+                      else p.onToggleFile?.(item.id);
+                    }}
+                  >
+                    <span class="menu-ico"><Ic.FileIcon size={14} /></span>
+                    <span class="slash-item-label">{display()}</span>
+                  </button>
+                );
+              }}
+            </For>
+          </Show>
         </div>
       </Show>
     </div>
@@ -934,7 +980,7 @@ export function Composer(p: {
       </div>
     </Show>
   );
-  const atMenu=<Show when={at()}>{s=><MentionPicker items={s().items} index={atHi()} highlight={setAtHi} pick={pickAttach}/>}</Show>;
+  const atMenu=<Show when={at()}>{s=><MentionPicker items={s().items} index={atHi()} highlight={setAtHi} pick={pickAttach} folder={s().folder || undefined} onBack={()=>{const cur=s().folder;const idx=cur.lastIndexOf("/");setAtFolder(idx>=0?cur.slice(0,idx):"");}} onOpenFolder={setAtFolder}/>}</Show>;
   const slashMenu = (
     <Show when={slash()}>
       {(s) => (
@@ -1450,14 +1496,14 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "btw-settings" || selected() === "hermes-settings";
+  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings";
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "btw-settings" && h[i] !== "hermes-settings") {
+      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings") {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -1895,6 +1941,7 @@ export default function App() {
             </button>
             <div class="settings-nav-gap" />
             <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">Client</span></button>
+            <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.InboxIcon /></span><span class="row-label">Inbox</span></button>
             <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><ProviderLogo type="hermes" /></span><span class="row-label">Hermes</span></button>
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Btw</span></button>
             <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.BranchIcon /></span><span class="row-label">Routing</span></button>
@@ -1935,6 +1982,7 @@ export default function App() {
             <Match when={selected() === "settings" || selected() === "execution"}>
               <span>Settings · Client</span>
             </Match>
+            <Match when={selected() === "inbox-settings"}><span>Settings · Inbox</span></Match>
             <Match when={selected() === "hermes-settings"}><span>Settings · Hermes</span></Match>
             <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
             <Match when={selected() === "routing"}><span>Settings · Routing</span></Match>
@@ -2144,7 +2192,7 @@ export default function App() {
                         </div>
                       </div>
                     </Show>
-                  </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineName()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
 
                 {/* NativeMissionView owns the preview through acceptance; failures restore this composer. */}
@@ -2209,6 +2257,7 @@ export default function App() {
                 loading={missionsLoading()}
                 onOpenMission={(id) => open(`m:${id}`)}
                 onOpenSettings={openSettings}
+                onOpenInboxSettings={() => open("inbox-settings")}
                 onNewAgent={() => open(null)}
                 onRefresh={refreshMissions}
                 onMissionUpdated={(m) => {
@@ -2230,6 +2279,7 @@ export default function App() {
               onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
               onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
           </Match>
+          <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
           <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
           <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
           <Match when={selected() === "settings" || selected() === "execution"}>
@@ -2860,8 +2910,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     const refreshLocal = () => reconcile().catch(console.error);
     refreshLocal();
+    const stopPoll = pollWhileVisible(reconcile, 2000);
     window.addEventListener('orb:queue-wake',refreshLocal);
-    onCleanup(()=>window.removeEventListener('orb:queue-wake',refreshLocal));
+    onCleanup(()=>{stopPoll();window.removeEventListener('orb:queue-wake',refreshLocal);});
   });
 
   createEffect(() => {

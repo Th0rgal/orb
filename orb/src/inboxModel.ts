@@ -1,10 +1,14 @@
 import { isBtwMission, type Mission, type ProjectSummary } from "./api";
+import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { DEFAULT_PROJECT } from "./defaultProject";
 import { displayTitle } from "./goal";
+import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import type { PendingInteraction } from "./missionAttention";
 import { nodeLabel } from "./missionLaunch";
 import { isMissionUnread, missionResponseTimestampMs } from "./missionUnread";
+import { remoteLog as parseRemoteLog } from "./remoteLog";
 import type { StreamItem } from "./transcriptModel";
+import { toolArgs, toolName, workSummary } from "./workModel";
 
 export const INBOX_SENTENCE_MAX_CHARS = 112;
 
@@ -32,9 +36,18 @@ export type InboxTone = "amber" | "red" | "blue" | "green" | "muted";
 
 export type InboxCategory = "needs_you" | "ready" | "working" | "hidden";
 
+export type InboxPeekWorkReceipt = {
+  summary: string;
+  toolCount: number;
+  failed?: boolean;
+  details: string[];
+};
+
 export type InboxPeekTurn = {
   role: "user" | "assistant" | "error";
   text: string;
+  markdown?: string;
+  workReceipt?: InboxPeekWorkReceipt;
 };
 
 export type InboxChildFailure = {
@@ -52,6 +65,8 @@ export type InboxChildSummary = {
   hasUnreadFailure: boolean;
 };
 
+export type InboxVerdict = "succeeded" | "failed" | "waiting" | "needs_input";
+
 export type InboxItem = {
   id: string;
   mission: Mission;
@@ -59,6 +74,9 @@ export type InboxItem = {
   projectSlug: string;
   projectTitle: string;
   headline: string;
+  lastRequest?: string;
+  workReceiptSummary?: string;
+  verdict: InboxVerdict;
   summary: string;
   badge: string;
   tone: InboxTone;
@@ -70,6 +88,7 @@ export type InboxItem = {
   attention: boolean;
   canRetry: boolean;
   peekTurns: InboxPeekTurn[];
+  allPeekTurns: InboxPeekTurn[];
   childSummary?: InboxChildSummary;
   interaction?: InboxInteraction;
 };
@@ -106,11 +125,28 @@ const INTERACTIVE_TOOLS = new Set([
   "question",
 ]);
 
+function extractCodeFenceSnippet(raw: string): string {
+  const match = raw.match(/```([a-zA-Z0-9_-]*)\s*\n([\s\S]*?)```/);
+  if (!match) return "";
+  const lang = match[1]?.trim();
+  const body = match[2]
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && l !== "{" && l !== "}" && l !== "[" && l !== "]")
+    .slice(0, 2)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 72);
+  if (!body) return "";
+  return lang ? `[${lang}: ${body}]` : `[${body}]`;
+}
+
 /** Strip markdown syntax into clean single-line prose suitable for a compact inbox preview. */
 export function stripMarkdownToProse(raw: string): string {
   if (!raw) return "";
+  const codeHint = extractCodeFenceSnippet(raw);
   let text = raw
-    // Remove fenced code blocks, keeping a short inline hint if prose is otherwise empty
+    // Remove fenced code blocks, keeping a short inline hint if prose is otherwise empty or a bare lead-in
     .replace(/```[\s\S]*?```/g, " ")
     // Remove markdown headings, blockquotes, horizontal rules
     .replace(/^\s*#{1,6}\s+/gm, "")
@@ -130,6 +166,9 @@ export function stripMarkdownToProse(raw: string): string {
     // Collapse whitespace
     .replace(/\s+/g, " ")
     .trim();
+  if (codeHint && (text.length < 36 || text.endsWith(":"))) {
+    text = text ? `${text} ${codeHint}` : codeHint;
+  }
   return text;
 }
 
@@ -142,9 +181,15 @@ export function stripMarkdownToProse(raw: string): string {
 export function clipToSentence(raw: string, maxChars = INBOX_SENTENCE_MAX_CHARS): string {
   const clean = stripMarkdownToProse(raw);
   if (!clean) return "";
+  const hasCodeHint = Boolean(extractCodeFenceSnippet(raw));
   // Prefer the first complete sentence if it already fits within maxChars.
   const firstSentence = clean.match(/^(.+?[.!?])(?:\s|$)/);
-  if (firstSentence && firstSentence[1].length <= maxChars && firstSentence[1].length >= 16) {
+  if (
+    !hasCodeHint &&
+    firstSentence &&
+    firstSentence[1].length <= maxChars &&
+    firstSentence[1].length >= 16
+  ) {
     return firstSentence[1];
   }
   if (clean.length <= maxChars) return clean;
@@ -152,12 +197,14 @@ export function clipToSentence(raw: string, maxChars = INBOX_SENTENCE_MAX_CHARS)
   const windowText = clean.slice(0, maxChars);
   // Look for the last sentence boundary within the budget
   let lastSentenceEnd = -1;
-  for (let i = windowText.length - 1; i >= 24; i--) {
-    const ch = windowText[i];
-    const next = clean[i + 1];
-    if ((ch === "." || ch === "!" || ch === "?") && (!next || /\s/.test(next))) {
-      lastSentenceEnd = i + 1;
-      break;
+  if (!hasCodeHint) {
+    for (let i = windowText.length - 1; i >= 24; i--) {
+      const ch = windowText[i];
+      const next = clean[i + 1];
+      if ((ch === "." || ch === "!" || ch === "?") && (!next || /\s/.test(next))) {
+        lastSentenceEnd = i + 1;
+        break;
+      }
     }
   }
   if (lastSentenceEnd > 0) {
@@ -519,36 +566,184 @@ function resolveMachine(mission: Mission): string | undefined {
   return undefined;
 }
 
-export function extractPeekTurns(
+function cleanUserMarkdown(raw: string): string {
+  const pres = parseMessagePresentation(raw).text;
+  const wake = parseBackgroundWake(pres);
+  if (wake) {
+    return `Background task \`${wake.task}\` (\`${wake.command}\`) finished.${wake.output ? `\n\n\`\`\`\n${wake.output.slice(0, 600)}\n\`\`\`` : ""}`;
+  }
+  return pres.trim();
+}
+
+function cleanAssistantMarkdown(raw: string): string {
+  return parseRemoteLog(raw).text.trim();
+}
+
+function formatToolDetail(tool: Extract<StreamItem, { kind: "tool" }>): string {
+  const name = toolName(tool.name);
+  const args = toolArgs(tool.args);
+  if (!args) return name;
+  const cmd = args.command ?? args.cmd;
+  if (typeof cmd === "string" && cmd.trim()) {
+    return `${name}: ${cmd.trim().replace(/\s+/g, " ").slice(0, 80)}`;
+  }
+  for (const k of ["file_path", "filePath", "path", "file", "pattern", "query"]) {
+    const val = args[k];
+    if (typeof val === "string" && val.trim()) {
+      return `${name} ${val.trim().split("/").slice(-2).join("/")}`;
+    }
+  }
+  return name;
+}
+
+function buildWorkReceipt(tools: Array<Extract<StreamItem, { kind: "tool" }>>): InboxPeekWorkReceipt | undefined {
+  if (!tools.length) return undefined;
+  const summary = workSummary(tools);
+  const details = tools.slice(-6).map(formatToolDetail);
+  return {
+    summary,
+    toolCount: tools.length,
+    details,
+  };
+}
+
+export function extractLastRequest(mission: Mission, items?: StreamItem[]): string | undefined {
+  if (items && items.length > 0) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === "user" && !it.queued && it.text.trim()) {
+        const cleaned = cleanUserMarkdown(it.text);
+        if (cleaned) return clipToSentence(cleaned, 120);
+      }
+    }
+  }
+  if (Array.isArray(mission.history) && mission.history.length > 0) {
+    for (let i = mission.history.length - 1; i >= 0; i--) {
+      const h = mission.history[i];
+      if (h.role === "user" && h.content?.trim()) {
+        const cleaned = cleanUserMarkdown(h.content);
+        if (cleaned) return clipToSentence(cleaned, 120);
+      }
+    }
+  }
+  if (mission.goal_objective?.trim()) {
+    return clipToSentence(mission.goal_objective, 120);
+  }
+  return undefined;
+}
+
+export function extractLatestWorkReceipt(items?: StreamItem[]): string | undefined {
+  if (!items || !items.length) return undefined;
+  let lastUserIdx = -1;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "user" && !item.queued) {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  const tools: Array<Extract<StreamItem, { kind: "tool" }>> = [];
+  for (let i = lastUserIdx + 1; i < items.length; i++) {
+    const it = items[i];
+    if (it.kind === "tool") tools.push(it);
+  }
+  if (!tools.length) return undefined;
+  return workSummary(tools);
+}
+
+function resolveVerdict(
+  mission: Mission,
+  summary: string,
+  interaction?: InboxInteraction,
+): InboxVerdict {
+  if (interaction) return "needs_input";
+  if (mission.status === "failed" || mission.status === "not_feasible" || mission.status === "blocked") {
+    return "failed";
+  }
+  if (mission.status === "awaiting_user" || mission.status === "waiting_user") {
+    return summary.trim().endsWith("?") ? "needs_input" : "waiting";
+  }
+  if (WORKING_STATUSES.has(mission.status)) return "waiting";
+  return "succeeded";
+}
+
+export function extractAllPeekTurns(
   mission: Mission,
   items?: StreamItem[],
   summaryFallback?: string,
+  maxTurns = 24,
 ): InboxPeekTurn[] {
   const turns: InboxPeekTurn[] = [];
   if (items && items.length > 0) {
-    for (let i = items.length - 1; i >= 0 && turns.length < 3; i--) {
+    let pendingTools: Array<Extract<StreamItem, { kind: "tool" }>> = [];
+    for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      if (item.kind === "user" && item.text.trim()) {
-        const clean = stripMarkdownToProse(item.text);
-        if (clean) turns.unshift({ role: "user", text: clipToSentence(clean, 240) });
+      if (item.kind === "tool") {
+        pendingTools.push(item);
+        continue;
+      }
+      if (item.kind === "user" && !item.queued && item.text.trim()) {
+        pendingTools = [];
+        const md = cleanUserMarkdown(item.text);
+        const clean = stripMarkdownToProse(md);
+        if (clean || md) {
+          turns.push({
+            role: "user",
+            text: clipToSentence(clean || md, 240),
+            markdown: md,
+          });
+        }
       } else if (item.kind === "text" && item.text.trim()) {
-        const clean = stripMarkdownToProse(humanizeStatusText(item.text) || item.text);
-        if (clean && turns.at(0)?.text !== clipToSentence(clean, 240)) {
-          turns.unshift({ role: "assistant", text: clipToSentence(clean, 240) });
+        const md = cleanAssistantMarkdown(item.text);
+        const clean = stripMarkdownToProse(humanizeStatusText(md) || md);
+        const clipped = clipToSentence(clean || md, 240);
+        const prev = turns.at(-1);
+        const receipt = buildWorkReceipt(pendingTools);
+        pendingTools = [];
+        if (prev?.role === "assistant" && prev.text === clipped) {
+          if (md.length > (prev.markdown?.length ?? 0)) prev.markdown = md;
+          if (receipt && !prev.workReceipt) prev.workReceipt = receipt;
+        } else if (clean || md) {
+          turns.push({
+            role: "assistant",
+            text: clipped,
+            markdown: md,
+            workReceipt: receipt,
+          });
         }
       } else if (item.kind === "error" && item.text.trim()) {
-        const clean = stripMarkdownToProse(humanizeStatusText(item.text) || item.text);
-        if (clean) turns.unshift({ role: "error", text: clipToSentence(clean, 240) });
+        const md = humanizeStatusText(item.text) || item.text.trim();
+        const clean = stripMarkdownToProse(md);
+        const receipt = buildWorkReceipt(pendingTools);
+        if (receipt) receipt.failed = true;
+        pendingTools = [];
+        if (clean || md) {
+          turns.push({
+            role: "error",
+            text: clipToSentence(clean || md, 240),
+            markdown: md,
+            workReceipt: receipt,
+          });
+        }
       }
     }
   } else if (Array.isArray(mission.history) && mission.history.length > 0) {
-    for (let i = mission.history.length - 1; i >= 0 && turns.length < 3; i--) {
+    for (let i = 0; i < mission.history.length; i++) {
       const entry = mission.history[i];
       if (!entry.content?.trim()) continue;
       if (entry.role === "user" || entry.role === "assistant") {
-        const clean = stripMarkdownToProse(humanizeStatusText(entry.content) || entry.content);
-        if (clean && turns.at(0)?.text !== clipToSentence(clean, 240)) {
-          turns.unshift({ role: entry.role, text: clipToSentence(clean, 240) });
+        const md =
+          entry.role === "user"
+            ? cleanUserMarkdown(entry.content)
+            : cleanAssistantMarkdown(entry.content);
+        const clean = stripMarkdownToProse(humanizeStatusText(md) || md);
+        const clipped = clipToSentence(clean || md, 240);
+        if ((clean || md) && turns.at(-1)?.text !== clipped) {
+          turns.push({
+            role: entry.role,
+            text: clipped,
+            markdown: md,
+          });
         }
       }
     }
@@ -563,16 +758,29 @@ export function extractPeekTurns(
     (mission.status === "failed" || mission.status === "blocked" || mission.status === "not_feasible") &&
     !turns.some((t) => t.role === "error")
   ) {
-    turns.push({ role: "error", text: clipToSentence(errDetail, 240) });
+    turns.push({
+      role: "error",
+      text: clipToSentence(errDetail, 240),
+      markdown: errDetail,
+    });
   }
 
   if (turns.length === 0 && summaryFallback) {
     turns.push({
       role: mission.status === "failed" || mission.status === "blocked" ? "error" : "assistant",
       text: summaryFallback,
+      markdown: summaryFallback,
     });
   }
-  return turns.slice(-3);
+  return turns.slice(-maxTurns);
+}
+
+export function extractPeekTurns(
+  mission: Mission,
+  items?: StreamItem[],
+  summaryFallback?: string,
+): InboxPeekTurn[] {
+  return extractAllPeekTurns(mission, items, summaryFallback, 24).slice(-3);
 }
 
 const RETRYABLE_STATUSES = new Set(["failed", "interrupted", "blocked", "not_feasible"]);
@@ -618,6 +826,9 @@ export function buildInboxItem(
   }
 
   const summary = extractSummary(mission, items, interaction);
+  const lastRequest = extractLastRequest(mission, items);
+  const workReceiptSummary = extractLatestWorkReceipt(items);
+  const verdict = resolveVerdict(mission, summary, interaction);
   const { badge, tone } = resolveBadgeAndTone(mission, summary, interaction);
   const updatedMs = missionResponseTimestampMs(mission);
   const updatedIso =
@@ -634,7 +845,8 @@ export function buildInboxItem(
     mission.status === "not_feasible" ||
     Boolean(childSummary && childSummary.failed > 0);
   const canRetry = RETRYABLE_STATUSES.has(mission.status);
-  const peekTurns = extractPeekTurns(mission, items, summary);
+  const allPeekTurns = extractAllPeekTurns(mission, items, summary, 24);
+  const peekTurns = allPeekTurns.slice(-3);
 
   return {
     id: mission.id,
@@ -643,6 +855,9 @@ export function buildInboxItem(
     projectSlug,
     projectTitle,
     headline,
+    lastRequest,
+    workReceiptSummary,
+    verdict,
     summary,
     badge,
     tone,
@@ -654,6 +869,7 @@ export function buildInboxItem(
     attention,
     canRetry,
     peekTurns,
+    allPeekTurns,
     childSummary,
     interaction,
   };

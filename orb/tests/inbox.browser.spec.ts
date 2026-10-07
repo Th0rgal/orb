@@ -271,8 +271,12 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   // Replied mission immediately leaves the actionable list
   await expect(questionRow).toBeHidden();
 
-  // Verify m-done shows the grouped child track failure pill and supports Space peek preview
+  // Verify m-done shows the Task/Outcome digest, grouped child track failure pill, and Space peek preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
+  await expect(doneRow.locator(".inbox-task-text")).toHaveText(
+    "Hide the sidebar scroll thumb until hover.",
+  );
+  await expect(doneRow.locator(".inbox-digest-tag.outcome")).toContainText("Outcome");
   await expect(doneRow.locator(".inbox-child-pill.failed")).toContainText(
     "1 track failed: Track G-4 Proof Closure",
   );
@@ -300,6 +304,13 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
     status: "paused",
   });
   await expect(doneRow).toBeVisible();
+
+  // Clicking the AI model pill opens Settings -> Inbox (defaulting to builtin/smart)
+  const modelPill = page.locator(".inbox-model-pill");
+  await expect(modelPill).toContainText("AI · builtin/smart");
+  await modelPill.click();
+  await expect(page.locator(".settings-body h2")).toHaveText("Inbox");
+  await expect(page.getByLabel("Inbox summary model")).toHaveValue("builtin/smart");
 });
 
 test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1", async ({ page }) => {

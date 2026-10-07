@@ -20,10 +20,17 @@ import { ErrorNotice } from "./ErrorNotice";
 import { hasFocusScope } from "./focusScope";
 import * as Ic from "./icons";
 import {
+  getCachedInboxDigest,
+  inboxDigestVersion,
+  requestInboxDigest,
+} from "./inboxDigest";
+import {
   buildInboxSections,
   type InboxItem,
   type InboxOption,
 } from "./inboxModel";
+import { inboxConfig } from "./inboxSettings";
+import { MdView as Markdown } from "./Markdown";
 import { pendingMissionInteraction } from "./missionAttention";
 import {
   loadTranscript,
@@ -62,6 +69,7 @@ export function InboxPage(p: {
   loading?: boolean;
   onOpenMission: (id: string) => void;
   onOpenSettings: () => void;
+  onOpenInboxSettings?: () => void;
   onNewAgent: () => void;
   onRefresh: () => Promise<void> | void;
   onMissionUpdated?: (mission: Mission) => void;
@@ -73,6 +81,8 @@ export function InboxPage(p: {
   const [replyingId, setReplyingId] = createSignal<string | null>(null);
   const [replyDraft, setReplyDraft] = createSignal("");
   const [peekedIds, setPeekedIds] = createSignal<ReadonlySet<string>>(new Set());
+  const [expandedPeekIds, setExpandedPeekIds] = createSignal<ReadonlySet<string>>(new Set());
+  const [peekReplyDrafts, setPeekReplyDrafts] = createSignal<Record<string, string>>({});
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [undoItem, setUndoItem] = createSignal<{
@@ -125,14 +135,16 @@ export function InboxPage(p: {
 
   const refreshedTranscriptAt = new Map<string, number>();
 
-  // Load or refresh transcripts for top actionable items so their 1-line summary reflects the latest turn immediately.
+  // Load or refresh transcripts for top actionable items so their summary and AI digest reflect the latest turn immediately.
   createEffect(() => {
     if (!isConnected()) return;
+    const cfg = inboxConfig();
     const { needsYou, ready } = allSections();
     const candidates = [...needsYou, ...ready].slice(0, 14);
     candidates.forEach((item, idx) => {
       const prevMs = refreshedTranscriptAt.get(item.id);
-      if (!peekReadyTranscript(item.id)) {
+      const readyTx = peekReadyTranscript(item.id);
+      if (!readyTx) {
         refreshedTranscriptAt.set(item.id, item.updatedMs);
         if (idx < 8) {
           void loadTranscript(item.id).catch(() => {});
@@ -142,6 +154,9 @@ export function InboxPage(p: {
       } else if (prevMs === undefined || item.updatedMs > prevMs) {
         refreshedTranscriptAt.set(item.id, item.updatedMs);
         void refreshTranscript(item.id).catch(() => {});
+      }
+      if (cfg.aiSummary && idx < 10 && !item.interaction) {
+        requestInboxDigest(item.mission, readyTx?.items, item.updatedMs);
       }
     });
   });
@@ -558,12 +573,69 @@ export function InboxPage(p: {
     onCleanup(() => window.removeEventListener("keydown", onKeyDown));
   });
 
+  const submitPeekReply = async (item: InboxItem) => {
+    const text = (peekReplyDrafts()[item.id] ?? "").trim();
+    if (!text || busyIds().has(item.id)) return;
+    setError(null);
+    addBusy(item.id);
+    markItemAndChildrenRead(item);
+    try {
+      const result = await sendMissionMessage(item.id, text, [], crypto.randomUUID());
+      setPeekReplyDrafts((prev) => {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
+      if (result.replacement) {
+        p.onMissionUpdated?.(result.replacement);
+      }
+      setDismissedIds((prev) => new Set(prev).add(item.id));
+      void p.onRefresh();
+      setTimeout(() => {
+        setDismissedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(item.id);
+          return next;
+        });
+      }, 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      removeBusy(item.id);
+    }
+  };
+
   const renderRow = (item: InboxItem) => {
     const isFocused = () => focusedId() === item.id;
     const isReplying = () => replyingId() === item.id;
     const isPeeked = () => peekedIds().has(item.id);
+    const isPeekExpanded = () => expandedPeekIds().has(item.id);
     const isBusy = () => busyIds().has(item.id);
     const color = () => projectColor(item.projectSlug);
+    const digest = () => {
+      inboxDigestVersion();
+      if (!inboxConfig().aiSummary) return undefined;
+      return getCachedInboxDigest(item.id, item.updatedMs);
+    };
+    const taskLine = () => digest()?.task || item.lastRequest;
+    const outcomeLine = () => digest()?.outcome || item.summary;
+    const verdict = () => digest()?.verdict || item.verdict;
+    const showTaskLine = () => {
+      if (item.interaction) return false;
+      const t = taskLine()?.trim();
+      if (!t) return false;
+      if (digest()?.task) return true;
+      return t.toLowerCase() !== item.headline.trim().toLowerCase();
+    };
+    const visiblePeekTurns = () => {
+      const all = item.allPeekTurns?.length ? item.allPeekTurns : item.peekTurns;
+      if (isPeekExpanded() || all.length <= 4) return all;
+      return all.slice(-4);
+    };
+    const hiddenPeekCount = () => {
+      const all = item.allPeekTurns?.length ? item.allPeekTurns : item.peekTurns;
+      return Math.max(0, all.length - visiblePeekTurns().length);
+    };
 
     return (
       <article
@@ -584,7 +656,7 @@ export function InboxPage(p: {
                 markItemAndChildrenRead(item);
                 p.onOpenMission(item.id);
               }}
-              aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${item.summary}`}
+              aria-label={`${item.unread ? "Unread. " : ""}${item.projectTitle}: ${item.headline}. ${item.badge}. ${outcomeLine()}`}
             >
               <div class="inbox-row-top">
                 <Show when={item.unread}>
@@ -618,8 +690,37 @@ export function InboxPage(p: {
                   <time class="inbox-time">{item.relativeTime}</time>
                 </Show>
               </div>
+              <Show when={showTaskLine()}>
+                <div class="inbox-task-row">
+                  <span class="inbox-digest-tag task">Task</span>
+                  <span class="inbox-task-text">{taskLine()}</span>
+                </div>
+              </Show>
               <div class="inbox-row-bottom">
-                <p class="inbox-summary">{item.summary}</p>
+                <Show when={!item.interaction}>
+                  <span
+                    class={`inbox-digest-tag outcome ${verdict()}`}
+                    title={
+                      digest()?.aiGenerated
+                        ? `AI summary (${digest()?.model || inboxConfig().model})`
+                        : undefined
+                    }
+                  >
+                    {verdict() === "failed"
+                      ? "✕ Failed"
+                      : verdict() === "waiting"
+                        ? "⏳ Waiting"
+                        : verdict() === "needs_input"
+                          ? "? Input"
+                          : "✓ Outcome"}
+                  </span>
+                </Show>
+                <p class="inbox-summary">{outcomeLine()}</p>
+                <Show when={!item.interaction && item.workReceiptSummary}>
+                  <span class="inbox-work-chip" title="Tools executed in the latest turn">
+                    {item.workReceiptSummary}
+                  </span>
+                </Show>
               </div>
             </button>
 
@@ -774,19 +875,25 @@ export function InboxPage(p: {
 
         <Show when={isPeeked()}>
           <div class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${item.headline}`}>
-            <div class="inbox-peek-turns">
-              <For each={item.peekTurns}>
-                {(turn) => (
-                  <div class={`inbox-peek-turn ${turn.role}`}>
-                    <span class={`inbox-peek-role ${turn.role}`}>
-                      {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
-                    </span>
-                    <p class="inbox-peek-text">{turn.text}</p>
-                  </div>
-                )}
-              </For>
-            </div>
-            <div class="inbox-peek-foot">
+            <div class="inbox-peek-head">
+              <div class="inbox-peek-head-left">
+                <Show when={hiddenPeekCount() > 0}>
+                  <button
+                    type="button"
+                    class="inbox-peek-more-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setExpandedPeekIds((prev) => {
+                        const next = new Set(prev);
+                        next.add(item.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    ↑ Show {hiddenPeekCount()} earlier {hiddenPeekCount() === 1 ? "turn" : "turns"}
+                  </button>
+                </Show>
+              </div>
               <button
                 type="button"
                 class="inbox-peek-open"
@@ -798,6 +905,92 @@ export function InboxPage(p: {
                 Open full conversation →
               </button>
             </div>
+
+            <div
+              class="inbox-peek-scroll"
+              ref={(el) => {
+                queueMicrotask(() => {
+                  el.scrollTop = el.scrollHeight;
+                });
+              }}
+            >
+              <div class="inbox-peek-turns">
+                <For each={visiblePeekTurns()}>
+                  {(turn) => (
+                    <>
+                      <Show when={turn.workReceipt}>
+                        {(receipt) => (
+                          <details class={`inbox-peek-work ${receipt().failed ? "failed" : ""}`}>
+                            <summary class="inbox-peek-work-sum">
+                              <span class="inbox-peek-work-ico" aria-hidden="true">
+                                {receipt().failed ? "✕" : "⚡"}
+                              </span>
+                              <span>
+                                {receipt().failed ? "Failed" : "Worked"} — {receipt().summary}
+                              </span>
+                            </summary>
+                            <Show when={receipt().details.length > 0}>
+                              <ul class="inbox-peek-work-list">
+                                <For each={receipt().details}>
+                                  {(line) => <li>{line}</li>}
+                                </For>
+                              </ul>
+                            </Show>
+                          </details>
+                        )}
+                      </Show>
+                      <div class={`inbox-peek-turn ${turn.role}`}>
+                        <div class="inbox-peek-turn-head">
+                          <span class={`inbox-peek-role ${turn.role}`}>
+                            {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
+                          </span>
+                        </div>
+                        <div class="inbox-peek-turn-body">
+                          <Markdown text={turn.markdown || turn.text} />
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </For>
+              </div>
+            </div>
+
+            <form
+              class="inbox-peek-reply-bar"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitPeekReply(item);
+              }}
+            >
+              <input
+                type="text"
+                class="inbox-reply-input"
+                placeholder={`Reply to ${item.headline}…`}
+                aria-label={`Reply in peek to ${item.headline}`}
+                value={peekReplyDrafts()[item.id] ?? ""}
+                disabled={isBusy()}
+                onInput={(e) =>
+                  setPeekReplyDrafts((prev) => ({
+                    ...prev,
+                    [item.id]: e.currentTarget.value,
+                  }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    togglePeek(item);
+                  }
+                }}
+              />
+              <button
+                type="submit"
+                class="s-btn sm primary"
+                disabled={isBusy() || !(peekReplyDrafts()[item.id] ?? "").trim()}
+              >
+                Send <Ic.ReturnIcon size={12} />
+              </button>
+            </form>
           </div>
         </Show>
 
@@ -871,6 +1064,17 @@ export function InboxPage(p: {
         </div>
 
         <div class="inbox-head-right">
+          <button
+            type="button"
+            class="inbox-model-pill"
+            title="Configure Inbox AI summary model in Settings"
+            onClick={() => (p.onOpenInboxSettings ?? p.onOpenSettings)()}
+          >
+            <Ic.GearIcon size={12} />
+            <span>
+              {inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI summary off"}
+            </span>
+          </button>
           <Show when={allSections().working.length > 0}>
             <button
               type="button"
