@@ -165,6 +165,11 @@ pub(crate) fn resume_prompt(mission: &Mission, wait: &UsageLimitWait, interrupte
         );
         prompt.push_str(interrupted);
     }
+    if mission.backend == "antigravity" && mission.goal_mode {
+        if let Some(objective) = mission.goal_objective.as_ref() {
+            return format!("/goal {objective}\n\n{prompt}");
+        }
+    }
     prompt
 }
 

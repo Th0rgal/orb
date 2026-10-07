@@ -190,9 +190,12 @@ pub async fn deliver(
         let Some(m) = store.get_mission(e.mission_id).await? else {
             continue;
         };
-        if matches!(m.status, MissionStatus::Paused | MissionStatus::Interrupted)
-            && !e.variables_used.contains_key("__delivery_manual")
-        {
+        let paused_or_interrupted = match m.status {
+            MissionStatus::Paused => true,
+            MissionStatus::Interrupted => m.terminal_reason.as_deref() != Some("client_runner"),
+            _ => false,
+        };
+        if paused_or_interrupted && !e.variables_used.contains_key("__delivery_manual") {
             continue;
         }
         if store
@@ -360,6 +363,34 @@ pub async fn action(
                 .map_err(internal_error)?
                 .ok_or((StatusCode::NOT_FOUND, "Wake-up not found".into()))?;
             if !a.active {
+                let mut staged = control
+                    .mission_store
+                    .get_automation_executions(id, None)
+                    .await
+                    .map_err(internal_error)?
+                    .into_iter()
+                    .find(|e| {
+                        e.trigger_source == "durable_schedule"
+                            && matches!(
+                                e.status,
+                                ExecutionStatus::Pending | ExecutionStatus::Running
+                            )
+                            && e.variables_used
+                                .get("__delivery_accepted")
+                                .is_none_or(|v| v != "true")
+                    });
+                if let Some(ref mut e) = staged {
+                    e.variables_used
+                        .insert("__delivery_manual".into(), "true".into());
+                    e.variables_used.remove("__delivery_retry_at");
+                    e.error = None;
+                    control
+                        .mission_store
+                        .update_automation_execution(e.clone())
+                        .await
+                        .map_err(internal_error)?;
+                    return Ok(Json(serde_json::json!({"ok":true})));
+                }
                 return Err((
                     StatusCode::CONFLICT,
                     "Wake-up already queued or cancelled".into(),

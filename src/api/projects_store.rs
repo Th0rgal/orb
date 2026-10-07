@@ -1372,6 +1372,55 @@ impl ProjectsStore {
         Ok(removed > 0)
     }
 
+    pub fn unbind_project_cron_any(&self, job_id: &str) -> Result<bool, String> {
+        let connection = self.lock()?;
+        let removed = connection
+            .execute(
+                "DELETE FROM project_crons WHERE job_id = ?1",
+                params![job_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(removed > 0)
+    }
+
+    pub fn move_project_cron(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        job_id: &str,
+        folder: Option<&str>,
+    ) -> Result<(), String> {
+        if to_slug == "default" {
+            self.ensure_default_project()?;
+        }
+        let connection = self.lock()?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                params![to_slug],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err("destination project not found".into());
+        }
+        let updated = match folder {
+            Some(f) => connection.execute(
+                "UPDATE project_crons SET slug = ?1, folder = ?2 WHERE slug = ?3 AND job_id = ?4",
+                params![to_slug, f, from_slug, job_id],
+            ),
+            None => connection.execute(
+                "UPDATE project_crons SET slug = ?1 WHERE slug = ?2 AND job_id = ?3",
+                params![to_slug, from_slug, job_id],
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("cron is not bound to this project".into());
+        }
+        Ok(())
+    }
+
     /// Every explicit binding, keyed by project slug. Read once per overview
     /// render rather than per row.
     pub fn bindings(&self) -> Result<HashMap<String, ProjectConversation>, String> {

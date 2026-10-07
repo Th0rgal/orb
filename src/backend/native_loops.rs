@@ -125,7 +125,22 @@ impl NativeLoopAdapter for OpenCodeGoal {
     }
 }
 
-/// Shared observer for `/goal` — all three harnesses emit `GoalIteration`
+// ─── Adapter: Antigravity `/goal` ────────────────────────────────────────────
+pub struct AntigravityGoal;
+
+impl NativeLoopAdapter for AntigravityGoal {
+    fn harness(&self) -> &'static str {
+        "antigravity"
+    }
+    fn command(&self) -> &'static str {
+        "goal"
+    }
+    fn observe(&self, event: &AgentEvent) -> LoopObservation {
+        observe_goal_event(event)
+    }
+}
+
+/// Shared observer for `/goal` — all harnesses emit `GoalIteration`
 /// and `GoalStatus` events with the same shape, so the classification is
 /// identical.
 fn observe_goal_event(event: &AgentEvent) -> LoopObservation {
@@ -151,7 +166,13 @@ fn observe_goal_event(event: &AgentEvent) -> LoopObservation {
 /// Returns the registered adapters in iteration order. Add a new harness here
 /// (and only here) to expose it as a native loop.
 pub fn registry() -> &'static [&'static dyn NativeLoopAdapter] {
-    &[&ClaudeCodeGoal, &CodexGoal, &GrokGoal, &OpenCodeGoal]
+    &[
+        &ClaudeCodeGoal,
+        &CodexGoal,
+        &GrokGoal,
+        &OpenCodeGoal,
+        &AntigravityGoal,
+    ]
 }
 
 /// Find the adapter for a given (harness, command) pair, if any.
@@ -208,6 +229,7 @@ mod tests {
         assert!(find_adapter("codex", "goal").is_some());
         assert!(find_adapter("grok", "goal").is_some());
         assert!(find_adapter("opencode", "goal").is_some());
+        assert!(find_adapter("antigravity", "goal").is_some());
         assert!(find_adapter("claudecode", "audit").is_none());
     }
 }

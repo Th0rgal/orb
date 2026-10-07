@@ -66,6 +66,10 @@ fn nested_git_repo_between(path: &std::path::Path, root: &std::path::Path) -> bo
 
 // Older Orb versions did not hold the file lock. Also catches an orphan CLI
 // which survived the desktop process. Unknown cwd is conservatively busy.
+fn is_project_root(dir: &std::path::Path) -> bool {
+    dir.join(".git").exists() || dir.join("AGENTS.md").exists() || dir.join("CLAUDE.md").exists()
+}
+
 fn process_blocks_workspace(
     name: &str,
     cwd: Option<&std::path::Path>,
@@ -74,8 +78,12 @@ fn process_blocks_workspace(
     let harness = ["codex", "claude", "opencode", "grok", "agy"]
         .iter()
         .any(|n| name.contains(n));
-    cwd.is_some_and(|path| path.starts_with(root) && !nested_git_repo_between(path, root))
-        || (harness && cwd.is_none())
+    cwd.is_some_and(|path| {
+        if path == root {
+            return true;
+        }
+        path.starts_with(root) && is_project_root(root) && !nested_git_repo_between(path, root)
+    }) || (cwd.is_none() && harness)
 }
 
 #[test]
@@ -92,9 +100,10 @@ fn antigravity_orphan_blocks_unknown_workspace_recovery() {
         Some(Path::new("/other")),
         Path::new("/work")
     ));
+    assert!(!process_blocks_workspace("tool", None, Path::new("/work")));
     assert!(process_blocks_workspace(
         "tool",
-        Some(Path::new("/work/sub")),
+        Some(Path::new("/work")),
         Path::new("/work")
     ));
 }
@@ -108,6 +117,8 @@ fn child_git_repo_process_does_not_block_parent_workspace_recovery() {
     std::fs::write(multi_repo_workspace.join("AGENTS.md"), "# Paloma\n").unwrap();
     let plain_sub = root.path().join("scratch");
     std::fs::create_dir_all(&plain_sub).unwrap();
+    let paloma_sub = multi_repo_workspace.join("scratch");
+    std::fs::create_dir_all(&paloma_sub).unwrap();
     assert!(!process_blocks_workspace(
         "agy",
         Some(&sub_repo),
@@ -118,10 +129,15 @@ fn child_git_repo_process_does_not_block_parent_workspace_recovery() {
         Some(&multi_repo_workspace),
         root.path()
     ));
-    assert!(process_blocks_workspace(
+    assert!(!process_blocks_workspace(
         "agy",
         Some(&plain_sub),
         root.path()
+    ));
+    assert!(process_blocks_workspace(
+        "agy",
+        Some(&paloma_sub),
+        &multi_repo_workspace
     ));
     assert!(process_blocks_workspace(
         "agy",

@@ -95,6 +95,7 @@ import {
 import { ControllerView } from "./Controller";
 import { timed } from "./diagnostics";
 import {
+  api,
   createMission,
   getMission,
   getRemoteNodes,
@@ -2884,7 +2885,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       if (wasBusy) {
         await cancelMission(p.id).catch(() => {});
-        for (let poll = 0; poll < 20; poll++) {
+        for (let poll = 0; poll < 75; poll++) {
           try {
             const current = await getMission(p.id);
             if (disposed) return;
@@ -2907,9 +2908,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const presented = messagePresentation(row.content);
         const cleanText = presented.text;
         const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
-        const freshId = crypto.randomUUID();
         let sent = false;
-        for (let attempt = 0; attempt < 16; attempt++) {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const freshId = crypto.randomUUID();
           try {
             const result = await sendMissionMessage(p.id, cleanText, attachments, freshId);
             if (result.replacement) {
@@ -2924,6 +2925,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               p.onFork?.(replacement);
               return;
             }
+            if (i === 0 && result.queued && attempt < 29) {
+              await api(`/api/control/queue/${encodeURIComponent(result.id)}`, { method: "DELETE" }).catch(() => {});
+              await new Promise(r => setTimeout(r, 250));
+              continue;
+            }
             const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: cleanText, queued: result.queued, receipt: true, attached: Boolean(row.attached || presented.attached || attachments.length > 0) } };
             if (replaying) held.push(event);
             else applyLive(event);
@@ -2931,7 +2937,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             break;
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            if (attempt < 15 && /still has a remote job|stopping|409/i.test(msg)) {
+            if (attempt < 29 && /still has a remote job|stopping|409/i.test(msg)) {
               await new Promise(r => setTimeout(r, 250));
               continue;
             }

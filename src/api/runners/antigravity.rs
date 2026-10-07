@@ -126,6 +126,26 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stream = Stream::default();
     let mut bound = false;
+    let current_message = match &ctx.extras {
+        super::TurnExtras::Antigravity { current_message } => *current_message,
+        _ => ctx.message,
+    };
+    let goal_objective = crate::api::mission_runner::parse_opencode_goal_objective(current_message)
+        .or_else(|| crate::api::mission_runner::parse_opencode_goal_objective(prompt));
+    let mut last_goal_iteration = 0u32;
+    if let Some(objective) = &goal_objective {
+        let _ = ctx.events_tx.send(AgentEvent::GoalStatus {
+            status: "active".into(),
+            objective: objective.clone(),
+            mission_id: Some(ctx.mission_id),
+        });
+        let _ = ctx.events_tx.send(AgentEvent::GoalIteration {
+            iteration: 1,
+            objective: objective.clone(),
+            mission_id: Some(ctx.mission_id),
+        });
+        last_goal_iteration = 1;
+    }
     let thought_home = match ctx.workspace.env_vars.get("HOME") {
         Some(home)
             if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
@@ -147,6 +167,13 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             _ = ctx.cancel.cancelled() => {
                 stop(&mut child).await;
                 drain.abort();
+                if let Some(objective) = &goal_objective {
+                    let _ = ctx.events_tx.send(AgentEvent::GoalStatus {
+                        status: "paused".into(),
+                        objective: objective.clone(),
+                        mission_id: Some(ctx.mission_id),
+                    });
+                }
                 return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
             }
             _ = thought_tick.tick() => {
@@ -167,6 +194,16 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             continue;
         };
         let tools = stream.feed(&value);
+        if let Some(objective) = &goal_objective {
+            if stream.goal_iterations > last_goal_iteration {
+                last_goal_iteration = stream.goal_iterations;
+                let _ = ctx.events_tx.send(AgentEvent::GoalIteration {
+                    iteration: last_goal_iteration,
+                    objective: objective.clone(),
+                    mission_id: Some(ctx.mission_id),
+                });
+            }
+        }
         if stream.error.is_some() {
             stop(&mut child).await;
             break;
@@ -230,7 +267,18 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         }
     }
     let status = tokio::select! {
-        _ = ctx.cancel.cancelled() => { stop(&mut child).await; drain.abort(); return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled); }
+        _ = ctx.cancel.cancelled() => {
+            stop(&mut child).await;
+            drain.abort();
+            if let Some(objective) = &goal_objective {
+                let _ = ctx.events_tx.send(AgentEvent::GoalStatus {
+                    status: "paused".into(),
+                    objective: objective.clone(),
+                    mission_id: Some(ctx.mission_id),
+                });
+            }
+            return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
+        }
         status = child.wait() => status,
     };
     publish_thoughts(&mut thoughts, &ctx.events_tx, ctx.mission_id);
@@ -247,6 +295,18 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         Err(error) => AgentResult::failure(error, 0)
             .with_terminal_reason(TerminalReason::NativeContinuityRequired),
     };
+    if let Some(objective) = &goal_objective {
+        let final_status = if result.success {
+            stream.goal_status.unwrap_or("complete")
+        } else {
+            "paused"
+        };
+        let _ = ctx.events_tx.send(AgentEvent::GoalStatus {
+            status: final_status.into(),
+            objective: objective.clone(),
+            mission_id: Some(ctx.mission_id),
+        });
+    }
     result = result.with_usage(crate::cost::TokenUsage {
         input_tokens: stream.input_tokens,
         output_tokens: stream.output_tokens,

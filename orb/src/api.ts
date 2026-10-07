@@ -233,7 +233,7 @@ export interface Mission {
   remote_node_id?: string | null;
   terminal_reason?: string | null;
   status_message?: string | null;
-  execution?: { state?: string; terminal_reason?: string | null };
+  execution?: { state?: string; terminal_reason?: string | null; generation?: number };
   remote_job?: RemoteJob | null;
   workspace_name?: string | null;
   workspace_id?: string | null;
@@ -631,6 +631,7 @@ export interface ControllerView {
 
 /** Only the fields that changed; "" clears an optional pin. */
 export interface ControllerPatch {
+  project?: string;
   folder?: string;
   name?: string;
   schedule?: string;
@@ -705,8 +706,8 @@ export async function getProjectCron(slug: string, id: string): Promise<Controll
 
 export async function updateProjectCron(slug: string, id: string, patch: ControllerPatch): Promise<ControllerView> {
   const current = patch.continuity === undefined ? undefined : await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
-  const data = await api<{ job: HermesJob; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hermesPatch(patch, current?.job)) });
-  return getProjectCronFromJob(slug, data.job, data.runs ?? []);
+  const data = await api<{ job: HermesJob & { project?: string }; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hermesPatch(patch, current?.job)) });
+  return getProjectCronFromJob(data.job?.project || patch.project || slug, data.job, data.runs ?? []);
 }
 
 export async function deleteProjectCron(slug: string, id: string): Promise<void> {

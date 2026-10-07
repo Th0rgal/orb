@@ -62,7 +62,8 @@ describe("slash palette and in-input mode", () => {
     expect(slashQuery("/goal ")).toEqual({ open: false, query: "" });
     expect(slashQuery(" /")).toEqual({ open: false, query: "" });
   });
-  it("lists Goal for grok/claude/codex/opencode and hides it for gemini", () => {
+  it("lists Goal for antigravity/grok/claude/codex/opencode and hides it for gemini", () => {
+    expect(composerModes("antigravity").map((i) => i.id)).toEqual(["goal"]);
     expect(composerModes("grok").map((i) => i.id)).toEqual(["goal"]);
     expect(composerModes("claudecode").map((i) => i.id)).toEqual(["goal"]);
     expect(composerModes(null).map((i) => i.id)).toEqual(["goal"]);

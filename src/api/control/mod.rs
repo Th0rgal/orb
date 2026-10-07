@@ -15775,7 +15775,13 @@ async fn poll_remote_job(
     let mut last_status_check: Option<std::time::Instant> = None;
     loop {
         log_tick.tick().await;
-        if last_status_check.is_some_and(|at| at.elapsed() < POLL_INTERVAL) {
+        let inactive_status = match owner.mission_store.get_mission(mission_id).await {
+            Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
+            _ => None,
+        };
+        if inactive_status.is_none()
+            && last_status_check.is_some_and(|at| at.elapsed() < POLL_INTERVAL)
+        {
             if failures == 0 && terminal_observation.is_none() {
                 if let Some(observer) = grok.as_mut() {
                     observer.pump(&client, &node, &shared_token).await;
@@ -15790,10 +15796,6 @@ async fn poll_remote_job(
         // request cancellation but retain the durable handle and keep polling
         // until the node confirms a terminal state. A transient cancel outage
         // must not orphan a still-running remote job.
-        let inactive_status = match owner.mission_store.get_mission(mission_id).await {
-            Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
-            _ => None,
-        };
         if let Some(status) = inactive_status {
             if let Err(err) = client.cancel_job(&node, &shared_token, job_id).await {
                 tracing::warn!(
@@ -23718,6 +23720,11 @@ async fn control_actor_loop(
                 .goal_objective
                 .as_ref()
                 .map(|objective| format!("/goal {objective}"))
+        } else if mission.backend == "antigravity" && mission.goal_mode {
+            mission
+                .goal_objective
+                .as_ref()
+                .map(|objective| format!("/goal {objective}\n\n{INTERRUPTED_RESUME_PROMPT}"))
         } else {
             None
         }

@@ -127,6 +127,9 @@ pub struct Stream {
     pub cache_read_tokens: u64,
     pub thinking_tokens: Option<u64>,
     pub agent_response_active: bool,
+    pub goal_mode: bool,
+    pub goal_iterations: u32,
+    pub goal_status: Option<&'static str>,
     completed_steps: HashSet<u64>,
     tools: HashSet<String>,
     pub background_tasks: BTreeMap<String, bool>,
@@ -138,6 +141,19 @@ fn parse_background_task_started(output: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
+fn strip_goal_sentinels(text: &str) -> (String, Option<&'static str>) {
+    let mut status = None;
+    if text.contains("<!-- GOAL_COMPLETE -->") {
+        status = Some("complete");
+    } else if text.contains("<!-- GOAL_CANCELLED -->") {
+        status = Some("aborted:cancelled");
+    }
+    let cleaned = text
+        .replace("<!-- GOAL_COMPLETE -->", "")
+        .replace("<!-- GOAL_CANCELLED -->", "");
+    (cleaned, status)
+}
+
 impl Stream {
     fn response_event(&mut self, step: u64, delta: &str, done: bool) -> Option<Value> {
         let response = self.responses.entry(step).or_default();
@@ -145,6 +161,13 @@ impl Stream {
             return None;
         }
         response.0.push_str(delta);
+        if self.goal_mode {
+            let (cleaned, status) = strip_goal_sentinels(&response.0);
+            if let Some(status) = status {
+                self.goal_status = Some(status);
+                response.0 = cleaned.trim_end().to_owned();
+            }
+        }
         response.1 += 1;
         response.2 = done;
         if self.turn_id.is_empty() {
@@ -176,12 +199,28 @@ impl Stream {
     pub fn feed(&mut self, value: &Value) -> Vec<Value> {
         let kind = value["event"].as_str().unwrap_or_default();
         let body = match kind {
-            "init" => value,
+            "init" => value.get("init").unwrap_or(value),
             "step_update" => &value["step_update"],
             "result" => &value["result"],
             _ => return vec![],
         };
-        if let Some(id) = body["conversation_id"].as_str().filter(|s| !s.is_empty()) {
+        if kind == "init" {
+            if body["expanded_commands"]
+                .as_array()
+                .or_else(|| value["expanded_commands"].as_array())
+                .is_some_and(|cmds| cmds.iter().any(|c| c["name"].as_str() == Some("goal")))
+            {
+                self.goal_mode = true;
+                if self.goal_iterations == 0 {
+                    self.goal_iterations = 1;
+                }
+            }
+        }
+        let conv_id = body["conversation_id"]
+            .as_str()
+            .or_else(|| value["conversation_id"].as_str())
+            .filter(|s| !s.is_empty());
+        if let Some(id) = conv_id {
             if self.session.as_deref().is_some_and(|old| old != id)
                 || self
                     .expected_session
@@ -213,13 +252,32 @@ impl Stream {
             }
             let mut events = self.close_responses();
             if let Some(response) = body["response"].as_str().filter(|s| !s.is_empty()) {
+                let (cleaned_resp, status) = if self.goal_mode {
+                    let (c, s) = strip_goal_sentinels(response);
+                    (c.trim_end().to_owned(), s)
+                } else {
+                    (response.to_owned(), None)
+                };
+                if let Some(status) = status {
+                    self.goal_status = Some(status);
+                }
                 // Some CLI versions return only the final response. Never erase
                 // the intermediate responses already displayed by a local client.
-                if response != self.text && !self.responses.values().any(|r| r.0 == response) {
-                    self.text.push_str(response);
-                    if let Some(event) = self.response_event(u64::MAX, response, true) {
+                if !cleaned_resp.is_empty()
+                    && cleaned_resp != self.text
+                    && !self.responses.values().any(|r| r.0 == cleaned_resp)
+                {
+                    self.text.push_str(&cleaned_resp);
+                    if let Some(event) = self.response_event(u64::MAX, &cleaned_resp, true) {
                         events.push(event);
                     }
+                }
+            }
+            if self.goal_mode {
+                let (cleaned_text, status) = strip_goal_sentinels(&self.text);
+                if let Some(status) = status {
+                    self.goal_status = Some(status);
+                    self.text = cleaned_text.trim_end().to_owned();
                 }
             }
             // result.usage is lifetime cumulative on resumed conversations.
@@ -243,12 +301,22 @@ impl Stream {
                 *self.thinking_tokens.get_or_insert(0) += tokens;
             }
             self.cache_read_tokens += body["usage"]["cache_read_tokens"].as_u64().unwrap_or(0);
+            if self.goal_mode && body["step_type"] == "system_message" && body["state"] == "DONE" {
+                self.goal_iterations = self.goal_iterations.saturating_add(1);
+            }
         }
         let mut events = vec![];
         if body["step_type"] == "agent_response" {
             self.agent_response_active = body["state"] == "ACTIVE";
             if let Some(delta) = body["text_delta"].as_str() {
                 self.text.push_str(delta);
+                if self.goal_mode {
+                    let (cleaned_text, status) = strip_goal_sentinels(&self.text);
+                    if let Some(status) = status {
+                        self.goal_status = Some(status);
+                        self.text = cleaned_text.trim_end().to_owned();
+                    }
+                }
             }
             if let Some(event) = self.response_event(
                 step,
@@ -797,6 +865,63 @@ mod tests {
         )
         .unwrap();
         stream.reconcile_transcript_background_tasks(home.path());
+        assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn native_goal_tracks_iterations_and_strips_completion_sentinels() {
+        let mut stream = Stream::default();
+        stream.feed(&json!({
+            "event": "init",
+            "init": {
+                "conversation_id": "goal-session",
+                "expanded_commands": [{"name": "goal", "type": "system"}]
+            }
+        }));
+        assert!(stream.goal_mode);
+        assert_eq!(stream.goal_iterations, 1);
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "goal-session",
+                "step_index": 2,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Working on step 1."
+            }
+        }));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "goal-session",
+                "step_index": 3,
+                "state": "DONE",
+                "step_type": "system_message",
+                "text_delta": "Stop hook: verify before completing."
+            }
+        }));
+        assert_eq!(stream.goal_iterations, 2);
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "goal-session",
+                "step_index": 5,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Verified!\n<!-- GOAL_COMPLETE -->"
+            }
+        }));
+        stream.feed(&json!({
+            "event": "result",
+            "result": {
+                "conversation_id": "goal-session",
+                "status": "SUCCESS",
+                "response": "Verified!\n<!-- GOAL_COMPLETE -->"
+            }
+        }));
+        assert_eq!(stream.goal_status, Some("complete"));
+        assert_eq!(stream.summary(), "Verified!");
+        assert!(!stream.text.contains("GOAL_COMPLETE"));
         assert!(stream.finish().is_ok());
     }
 }

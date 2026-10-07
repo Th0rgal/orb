@@ -65,7 +65,7 @@ export function GoalTag(p: { detail?: string; class?: string }) {
 }
 
 /** Native `/goal` loop — same harness ids as `native_loops.rs`. */
-export const GOAL_HARNESSES = new Set(["claudecode", "codex", "grok", "opencode"]);
+export const GOAL_HARNESSES = new Set(["antigravity", "claudecode", "codex", "grok", "opencode"]);
 
 export type ComposerMode = "goal" | "plan" | "btw";
 

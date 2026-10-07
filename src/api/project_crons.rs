@@ -374,13 +374,44 @@ where
     Ok(jobs)
 }
 
-fn owned(store: &ProjectsStore, slug: &str, id: &str) -> Result<(), Response> {
+fn resolve_owned_slug(store: &ProjectsStore, slug: &str, id: &str) -> Result<String, Response> {
     project_exists(store, slug)?;
-    store
+    if store
         .owns_project_cron(slug, id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?
-        .then_some(())
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "cron is not bound to this project").into_response())
+    {
+        return Ok(slug.to_string());
+    }
+    let keys = super::projects_overview::project_tag_keys(slug);
+    for candidate in &keys {
+        if candidate != slug
+            && store
+                .owns_project_cron(candidate, id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?
+        {
+            return Ok(candidate.clone());
+        }
+    }
+    if let Some(owner) = store
+        .cron_owner(id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?
+    {
+        let owner_keys = super::projects_overview::project_tag_keys(&owner);
+        if keys.iter().any(|k| {
+            owner.eq_ignore_ascii_case(k) || owner_keys.iter().any(|ok| ok.eq_ignore_ascii_case(k))
+        }) && store
+            .owns_project_cron(&owner, id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?
+        {
+            return Ok(owner);
+        }
+    }
+    Err((StatusCode::NOT_FOUND, "cron is not bound to this project").into_response())
+}
+
+#[cfg(test)]
+fn owned(store: &ProjectsStore, slug: &str, id: &str) -> Result<(), Response> {
+    resolve_owned_slug(store, slug, id).map(|_| ())
 }
 
 async fn list(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
@@ -394,14 +425,21 @@ async fn list(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> R
     };
     match collect_jobs(ids, |id| {
         let state = &state;
+        let slug = &slug;
         async move {
-            hermes(
+            let res = hermes(
                 state,
                 reqwest::Method::GET,
                 &format!("/api/jobs/{id}"),
                 None,
             )
-            .await
+            .await;
+            if let Err(ref error) = res {
+                if error.status() == StatusCode::NOT_FOUND {
+                    let _ = state.projects.unbind_project_cron(slug, &id);
+                }
+            }
+            res
         }
     })
     .await
@@ -482,9 +520,10 @@ async fn get_one(
     if let Err(e) = valid_slug(&slug) {
         return e;
     }
-    if let Err(e) = owned(&state.projects, &slug, &id) {
-        return e;
-    }
+    let owned_slug = match resolve_owned_slug(&state.projects, &slug, &id) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     hermes(
         &state,
         reqwest::Method::GET,
@@ -495,7 +534,7 @@ async fn get_one(
     .and_then(|mut result| {
         let folder = state
             .projects
-            .project_cron_folder(&slug, &id)
+            .project_cron_folder(&owned_slug, &id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
         result["job"]["folder"] = json!(folder);
         let runs = super::project_controller::hermes_home()
@@ -506,7 +545,12 @@ async fn get_one(
     })
     .map(Json)
     .map(IntoResponse::into_response)
-    .unwrap_or_else(|e| e)
+    .unwrap_or_else(|e| {
+        if e.status() == StatusCode::NOT_FOUND {
+            let _ = state.projects.unbind_project_cron(&owned_slug, &id);
+        }
+        e
+    })
 }
 
 async fn update(
@@ -517,10 +561,29 @@ async fn update(
     if let Err(e) = valid_slug(&slug) {
         return e;
     }
-    if let Err(e) = owned(&state.projects, &slug, &id) {
-        return e;
-    }
-    if let Err(error) = prepare_delivery(&state.projects, &slug, &mut body, false) {
+    let owned_slug = match resolve_owned_slug(&state.projects, &slug, &id) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let target_project = match body.as_object_mut().and_then(|o| o.remove("project")) {
+        None => None,
+        Some(Value::String(target)) => {
+            let trimmed = target.trim().to_string();
+            if let Err(e) = project_exists(&state.projects, &trimmed) {
+                return e;
+            }
+            Some(trimmed)
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "project must be a valid project slug",
+            )
+                .into_response()
+        }
+    };
+    let effective_slug = target_project.as_deref().unwrap_or(&owned_slug).to_string();
+    if let Err(error) = prepare_delivery(&state.projects, &effective_slug, &mut body, false) {
         return error;
     }
     let folder = match body.as_object_mut().and_then(|o| o.remove("folder")) {
@@ -534,14 +597,12 @@ async fn update(
                 .into_response()
         }
     };
-    if let Some(ref f) = folder {
-        if let Err(e) = state.projects.lock().and_then(|c| {
-            c.execute(
-                "UPDATE project_crons SET folder = ?1 WHERE slug = ?2 AND job_id = ?3",
-                rusqlite::params![f, slug, id],
-            )
-            .map_err(|e| e.to_string())
-        }) {
+    if target_project.is_some() || folder.is_some() {
+        if let Err(e) =
+            state
+                .projects
+                .move_project_cron(&owned_slug, &effective_slug, &id, folder.as_deref())
+        {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     }
@@ -566,9 +627,10 @@ async fn update(
         .and_then(|mut result| {
             let saved_folder = state
                 .projects
-                .project_cron_folder(&slug, &id)
+                .project_cron_folder(&effective_slug, &id)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
             result["job"]["folder"] = json!(saved_folder);
+            result["job"]["project"] = json!(effective_slug);
             let runs = super::project_controller::hermes_home()
                 .map(|h| super::project_controller::build_runs(&h, &id, 30))
                 .unwrap_or_default();
@@ -587,9 +649,17 @@ async fn remove(
     if let Err(e) = valid_slug(&slug) {
         return e;
     }
-    if let Err(e) = owned(&state.projects, &slug, &id) {
+    if let Err(e) = project_exists(&state.projects, &slug) {
         return e;
     }
+    let owned_slug = match resolve_owned_slug(&state.projects, &slug, &id) {
+        Ok(s) => Some(s),
+        Err(not_bound) => match state.projects.cron_owner(&id) {
+            Ok(None) => None,
+            Ok(Some(_)) => return not_bound,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        },
+    };
     match hermes(
         &state,
         reqwest::Method::DELETE,
@@ -602,8 +672,12 @@ async fn remove(
         Err(error) if error.status() == StatusCode::NOT_FOUND => {}
         Err(error) => return error,
     }
-    if let Err(e) = state.projects.unbind_project_cron(&slug, &id) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    if let Some(ref owner) = owned_slug {
+        if let Err(e) = state.projects.unbind_project_cron(owner, &id) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+    } else {
+        let _ = state.projects.unbind_project_cron_any(&id);
     }
     Json(json!({ "deleted": id })).into_response()
 }
@@ -616,7 +690,7 @@ async fn action(
     if let Err(e) = valid_slug(&slug) {
         return e;
     }
-    if let Err(e) = owned(&state.projects, &slug, &id) {
+    if let Err(e) = resolve_owned_slug(&state.projects, &slug, &id) {
         return e;
     }
     let action = body.get("action").and_then(Value::as_str).unwrap_or("");
@@ -920,6 +994,38 @@ mod tests {
         assert_eq!(
             sync_hermes_jobs_with_list(&store, &jobs, &mission_projects).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn move_project_cron_transfers_between_projects_and_folders_and_resolves_canonical_slugs() {
+        let store = store();
+        store
+            .bind_project_cron_in_folder("orbit", "job-move", "crons")
+            .unwrap();
+        assert_eq!(
+            store.project_cron_folder("orbit", "job-move").unwrap(),
+            "crons"
+        );
+        store
+            .move_project_cron("orbit", "other", "job-move", Some("monitors/daily"))
+            .unwrap();
+        assert!(store.project_cron_ids("orbit").unwrap().is_empty());
+        assert_eq!(store.project_cron_ids("other").unwrap(), vec!["job-move"]);
+        assert_eq!(
+            store.project_cron_folder("other", "job-move").unwrap(),
+            "monitors/daily"
+        );
+        store
+            .upsert_project("Verity", Some("Verity"), None, None, None)
+            .unwrap();
+        store
+            .upsert_project("verity", Some("verity"), None, None, None)
+            .unwrap();
+        store.bind_project_cron("verity", "verity-cron").unwrap();
+        assert_eq!(
+            resolve_owned_slug(&store, "Verity", "verity-cron").unwrap(),
+            "verity"
         );
     }
 }

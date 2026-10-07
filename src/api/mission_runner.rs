@@ -11,7 +11,39 @@
 //! - Working directory (isolated per mission)
 
 /// Preserve the current request and instructions; trim only synthesized history.
+/// If the message is a native `/goal <objective>` command, keep `/goal ` at the
+/// very start of the prompt so `agy -p` expands its native `/goal` loop.
 pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &str) -> String {
+    let trimmed_msg = message.trim_start();
+    let is_goal = trimmed_msg
+        .strip_prefix("/goal")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    if is_goal {
+        if history.trim().is_empty() {
+            let full = format!("{trimmed_msg}{suffix}");
+            if crate::antigravity::validate_prompt(&full).is_ok() {
+                return full;
+            }
+        } else {
+            let frame_goal = |hist: &str| {
+                format!(
+                    "{trimmed_msg}\n\n## Conversation history (most recent turns)\n\n{hist}{suffix}"
+                )
+            };
+            let full = frame_goal(history);
+            if crate::antigravity::validate_prompt(&full).is_ok() {
+                return full;
+            }
+            let marker = "[Earlier history omitted to fit the native prompt budget]\n";
+            let base = frame_goal(marker).len();
+            let budget = (16usize * 1024).saturating_sub(base);
+            let mut start = history.len().saturating_sub(budget);
+            while !history.is_char_boundary(start) {
+                start += 1;
+            }
+            return frame_goal(&(marker.to_string() + &history[start..]));
+        }
+    }
     let full = crate::util::frame_turn_prompt(history, message) + suffix;
     if crate::antigravity::validate_prompt(&full).is_ok() {
         return full;
@@ -35,6 +67,12 @@ fn antigravity_handoff_preserves_request_and_recent_unicode_history() {
     assert!(prompt.contains("CURRENT_REQUEST"));
     assert!(prompt.contains("RECENT_HISTORY"));
     assert!(prompt.ends_with("REQUIRED_INSTRUCTIONS"));
+
+    let goal_fresh = antigravity_handoff_prompt("", "/goal Ship the fix", "\n\nSUFFIX");
+    assert!(goal_fresh.starts_with("/goal Ship the fix"));
+    let goal_hist = antigravity_handoff_prompt(&history, "/goal Ship the fix", "\n\nSUFFIX");
+    assert!(goal_hist.starts_with("/goal Ship the fix"));
+    assert!(crate::antigravity::validate_prompt(&goal_hist).is_ok());
 }
 
 use std::borrow::Cow;

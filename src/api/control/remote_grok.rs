@@ -349,6 +349,7 @@ impl GrokStream {
                 return;
             }
 
+            let prev_iterations = stream.goal_iterations;
             let tools = stream.feed(&value);
             self.progress |= !tools.is_empty() || !stream.text.is_empty();
             if stream.session != self.session_id {
@@ -356,6 +357,14 @@ impl GrokStream {
                 if let Some(id) = &self.session_id {
                     updates.push(StreamUpdate::SessionId(id.clone()));
                 }
+            }
+            if stream.goal_mode && stream.goal_iterations > prev_iterations {
+                updates.push(StreamUpdate::GoalIteration(u64::from(
+                    stream.goal_iterations,
+                )));
+            }
+            if let Some(status) = stream.goal_status {
+                self.native_goal_status = Some(status.to_string());
             }
             self.text = stream.text.clone();
             self.ended = stream.success;
@@ -1264,8 +1273,16 @@ impl NativeGrokObserver {
         if let Some(objective) =
             goal_objective(&self.mission).filter(|_| self.mission.backend != "codex")
         {
+            let status = if success {
+                self.stream
+                    .native_goal_status
+                    .clone()
+                    .unwrap_or_else(|| "complete".to_string())
+            } else {
+                "paused".to_string()
+            };
             let event = AgentEvent::GoalStatus {
-                status: if success { "complete" } else { "paused" }.to_string(),
+                status,
                 objective,
                 mission_id: Some(self.mission_id),
             };
@@ -1855,6 +1872,11 @@ async fn continue_inner(
     }
     let prompt = content.clone().unwrap_or_else(|| {
         if mission.goal_mode {
+            if mission.backend == "antigravity" {
+                if let Some(objective) = mission.goal_objective.as_ref() {
+                    return format!("/goal {objective}\n\n{}", super::INTERRUPTED_RESUME_PROMPT);
+                }
+            }
             "/goal resume".to_string()
         } else {
             super::INTERRUPTED_RESUME_PROMPT.to_string()

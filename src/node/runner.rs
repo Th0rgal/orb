@@ -30,7 +30,7 @@ pub const DEFAULT_MAX_JOB_SECS: u64 = 14_400;
 pub const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 
 /// Grace period between SIGTERM and SIGKILL when stopping a job.
-const KILL_GRACE: Duration = Duration::from_secs(10);
+const KILL_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

@@ -165,6 +165,16 @@ pub(crate) async fn context(
         roots.sort_unstable();
         roots.dedup();
         let paths = json!({"historical_workspace_roots": roots, "current_workspace_root": t.destination_root});
+        let trimmed = prompt.trim_start();
+        if trimmed
+            .strip_prefix("/goal")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return Ok(format!(
+                "{trimmed}\n\n{}\n\nWorkspace path mapping (interpret historical paths relative to these roots):\n{}",
+                portable_prompt(t), paths
+            ));
+        }
         return Ok(format!(
             "{}\n\nWorkspace path mapping (interpret historical paths relative to these roots):\n{}\n\nCurrent user message:\n{}",
             portable_prompt(t), paths, prompt

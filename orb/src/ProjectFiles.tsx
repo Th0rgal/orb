@@ -44,6 +44,7 @@ import {
   createProjectCron,
   deleteProjectController,
   deleteProjectCron,
+  updateProjectCron,
   listProjectCrons,
   getProjectCronDefaults,
   mkdirProjectFile,
@@ -61,6 +62,7 @@ import {
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
 import { ConfirmDialog, Dialog, DialogButton, PromptSheet } from "./Dialog";
+import { Select } from "./Select";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { copyText } from "./clipboard";
 import { CronForm } from "./ControllerSettings";
@@ -296,10 +298,16 @@ export function LiveProjectsSection(p: {
   const [cronDefaults, setCronDefaults] = createSignal<import("./api").ProjectCronDefaults | null>(null);
   const [defaultsError, setDefaultsError] = createSignal<string | null>(null);
   const [crons, setCrons] = createStore<Record<string, import("./api").ControllerJob[]>>({});
-  const [controllerMenu, setControllerMenu] = createSignal<{x:number;y:number;slug:string;id?:string;name:string;controller:boolean;archived:boolean} | null>(null);
+  const [controllerMenu, setControllerMenu] = createSignal<{x:number;y:number;slug:string;id?:string;name:string;folder?:string;controller:boolean;archived:boolean} | null>(null);
   const [deleteCronTarget, setDeleteCronTarget] = createSignal<{slug:string;id?:string;name:string;controller:boolean} | null>(null);
   const [deletingCron, setDeletingCron] = createSignal(false);
   const [deleteCronError, setDeleteCronError] = createSignal<string | null>(null);
+  const [moveCronTarget, setMoveCronTarget] = createSignal<{slug:string;id:string;name:string;folder:string} | null>(null);
+  const [moveCronProject, setMoveCronProject] = createSignal("");
+  const [moveCronFolder, setMoveCronFolder] = createSignal("");
+  const [movingCron, setMovingCron] = createSignal(false);
+  const [moveCronError, setMoveCronError] = createSignal<string | null>(null);
+  const [cutCron, setCutCron] = createSignal<{slug:string;id:string;name:string} | null>(null);
   const [actionMenu, setActionMenu] = createSignal<{ x: number; y: number; slug: string; path: string } | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ slug: string; path: string } | null>(null);
   const [folderName, setFolderName] = createSignal("");
@@ -689,6 +697,7 @@ export function LiveProjectsSection(p: {
     deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
     setDeletingIds(new Set<string>());
     setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null); setControllerMenu(null); setDeleteCronTarget(null); setDeletingCron(false); setDeleteCronError(null);
+    setMoveCronTarget(null); setMovingCron(false); setMoveCronError(null); setCutCron(null);
     setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null; setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
     setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0; archivesLoaded = false; archivesRequest = null;
     setCronUnsupported(false);
@@ -747,9 +756,40 @@ export function LiveProjectsSection(p: {
         );
       }).finally(() => { if (refreshingVersion === version) refreshingVersion = undefined; });
   };
-  createEffect(on(projectsVersion, () => refresh(), { defer: true }));
+  createEffect(on(projectsVersion, () => {
+    refresh();
+    for (const slug of Object.keys(expanded)) {
+      if (expanded[slug] && !slug.includes(":")) {
+        void loadController(slug, true);
+        void loadCrons(slug, true);
+      }
+    }
+  }, { defer: true }));
   onMount(() => {
     refresh();
+    const onCronChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ slug: string; id?: string; deleted?: boolean; targetSlug?: string; folder?: string }>).detail;
+      if (!detail?.slug) return;
+      if (detail.deleted) {
+        if (detail.id) {
+          setCrons(detail.slug, (list) => (list ?? []).filter((j) => j.id !== detail.id));
+          if (p.selected() === `pc:${detail.slug}:${detail.id}`) p.open(null);
+        } else {
+          setControllers(detail.slug, reconcile({ slug: detail.slug, job: null, runs: [] }));
+          if (p.selected() === `c:${detail.slug}`) p.open(null);
+        }
+      } else {
+        void loadCrons(detail.slug, true);
+        if (detail.targetSlug && detail.targetSlug !== detail.slug) void loadCrons(detail.targetSlug, true);
+      }
+    };
+    const onCronMoveRequest = (event: Event) => {
+      const detail = (event as CustomEvent<{ slug: string; id: string; name: string; folder?: string }>).detail;
+      if (!detail?.slug || !detail?.id) return;
+      beginMoveCron(detail.slug, detail.id, detail.name, detail.folder ?? "");
+    };
+    window.addEventListener("orb:cron-changed", onCronChanged);
+    window.addEventListener("orb:cron-move-request", onCronMoveRequest);
     // Mission statuses under expanded projects would otherwise freeze at
     // expand time (the flat "Sandboxed" list polls, this tree didn't).
     const stop = pollWhileVisible(() => {
@@ -766,7 +806,11 @@ export function LiveProjectsSection(p: {
         }
       }
     }, 10000);
-    onCleanup(stop);
+    onCleanup(() => {
+      stop();
+      window.removeEventListener("orb:cron-changed", onCronChanged);
+      window.removeEventListener("orb:cron-move-request", onCronMoveRequest);
+    });
   });
 
   let missionRevision = 0;
@@ -967,6 +1011,99 @@ export function LiveProjectsSection(p: {
       setActionError(e instanceof Error ? e.message : String(e));
     }
   };
+  const knownFoldersForProject = (slug: string): string[] => {
+    const found = new Set<string>();
+    for (const [key, entries] of Object.entries(dirs)) {
+      if (!key.startsWith(`${slug}:`)) continue;
+      const base = key.slice(slug.length + 1);
+      if (base) found.add(base);
+      for (const e of entries ?? []) {
+        if (e.kind === "dir") found.add(base ? `${base}/${e.name}` : e.name);
+      }
+    }
+    for (const m of missions[slug] ?? []) {
+      const f = missionFolder(m);
+      if (f) found.add(f);
+    }
+    for (const j of crons[slug] ?? []) {
+      if (j.folder) found.add(j.folder);
+    }
+    return [...found].sort();
+  };
+  const beginMoveCron = (slug: string, id: string, name: string, folder = "") => {
+    setControllerMenu(null);
+    setActionMenu(null);
+    setMoveCronError(null);
+    setMoveCronProject(slug);
+    setMoveCronFolder(folder);
+    setMoveCronTarget({ slug, id, name, folder });
+    void loadDir(slug, "");
+  };
+  const performMoveCron = async (fromSlug: string, id: string, toSlug: string, folder: string) => {
+    const version = connectionVersion();
+    const trimmedFolder = folder.trim().replace(/^\/+|\/+$/g, "");
+    const view = await updateProjectCron(fromSlug, id, {
+      ...(toSlug !== fromSlug ? { project: toSlug } : {}),
+      folder: trimmedFolder,
+    });
+    if (version !== connectionVersion()) return;
+    if (toSlug !== fromSlug) {
+      cachePut(`c:${fromSlug}:${id}`, { slug: fromSlug, job: null, runs: [] });
+      setCrons(fromSlug, (list) => (list ?? []).filter((j) => j.id !== id));
+    }
+    cachePut(`c:${toSlug}:${id}`, view);
+    setExpanded(toSlug, true);
+    const segments = trimmedFolder ? trimmedFolder.split("/").filter(Boolean) : [];
+    for (let i = 1; i <= segments.length; i++) {
+      const path = segments.slice(0, i).join("/");
+      setExpanded(`${toSlug}:${path}`, true);
+      void loadDir(toSlug, path, true);
+    }
+    await Promise.all([
+      loadCrons(toSlug, true),
+      ...(toSlug !== fromSlug ? [loadCrons(fromSlug, true)] : []),
+      loadDir(toSlug, "", true),
+    ]);
+    if (p.selected() === `pc:${fromSlug}:${id}`) p.open(`pc:${toSlug}:${id}`);
+    window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: fromSlug, id, targetSlug: toSlug, folder: trimmedFolder } }));
+    bumpProjects();
+  };
+  const saveMoveCron = async () => {
+    const target = moveCronTarget();
+    if (!target || movingCron()) return;
+    const toSlug = (moveCronProject() || target.slug).trim();
+    const folder = moveCronFolder().trim().replace(/^\/+|\/+$/g, "");
+    if (folder.includes("\\") || folder.split("/").some((part) => part === "." || part === "..")) {
+      setMoveCronError("Use a relative folder path without '.' or '..' segments.");
+      return;
+    }
+    setMovingCron(true);
+    setMoveCronError(null);
+    try {
+      await performMoveCron(target.slug, target.id, toSlug, folder);
+      if (cutCron()?.id === target.id) setCutCron(null);
+      setMoveCronTarget(null);
+    } catch (e) {
+      setMoveCronError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMovingCron(false);
+    }
+  };
+  const pasteCron = async (toSlug: string, folder: string) => {
+    const item = cutCron();
+    if (!item || movingCron()) return;
+    setActionMenu(null);
+    setMovingCron(true);
+    setActionError(null);
+    try {
+      await performMoveCron(item.slug, item.id, toSlug, folder);
+      setCutCron(null);
+    } catch (e) {
+      setActionError(`Couldn’t move cron: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMovingCron(false);
+    }
+  };
   /** Folders organize both reference files and executable work. */
   const menuItems = (slug: string, path: string): MenuEntry[] => {
     const items: MenuEntry[] = [
@@ -984,6 +1121,10 @@ export function LiveProjectsSection(p: {
     if (cutId()) items.push(
       { kind: "sep" },
       { kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => pasteMission(slug, path, true) },
+    );
+    if (cutCron()) items.push(
+      { kind: "sep" },
+      { kind: "item", label: `Move cron "${cutCron()!.name}" here`, icon: Ic.PasteIcon, onClick: () => void pasteCron(slug, path) },
     );
     if (path) items.push(
       { kind: "sep" },
@@ -1029,10 +1170,15 @@ export function LiveProjectsSection(p: {
         setControllers(target.slug, reconcile(view));
         if (p.selected() === `c:${target.slug}`) p.open(null);
       } else if (target.id) {
-        await deleteProjectCron(target.slug, target.id);
+        try {
+          await deleteProjectCron(target.slug, target.id);
+        } catch (err) {
+          if (!(err instanceof ApiError && err.status === 404)) throw err;
+        }
         if (version !== connectionVersion()) return;
         cachePut(`c:${target.slug}:${target.id}`, { slug: target.slug, job: null, runs: [] });
         setCrons(target.slug, (list) => (list ?? []).filter((j) => j.id !== target.id));
+        if (cutCron()?.id === target.id) setCutCron(null);
         if (p.selected() === `pc:${target.slug}:${target.id}`) p.open(null);
       }
       setDeleteCronTarget(null);
@@ -1577,11 +1723,11 @@ export function LiveProjectsSection(p: {
     </div>;
     if (d.kind === "cron") {
       const ticking = () => d.controller && (controllers[d.slug]?.runs ?? []).some(r => r.status === "running" || r.status === "claimed");
-      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${p.selected() === row.id ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron"]))} onClick={() => p.open(row.id)}
+      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${!d.controller && cutCron()?.id === d.job?.id ? "mission-cut" : ""} ${p.selected() === row.id ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron", d.job?.folder || undefined]))} onClick={() => p.open(row.id)}
         onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
         e.preventDefault(); e.stopPropagation();
         setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null);
-        setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,id:d.controller ? undefined : d.job?.id,name:d.label,controller:!!d.controller,archived:!!d.job?.archived});
+        setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,id:d.controller ? undefined : d.job?.id,name:d.label,folder:d.job?.folder ?? "",controller:!!d.controller,archived:!!d.job?.archived});
       }}>
         <span class="row-ico glyph"><CronGlyph job={d.job!} running={!!ticking()} /></span><span class="row-label">{d.label}</span>
         <span class="row-machine"><Show when={!d.job!.enabled || d.job!.state === "paused"} fallback={<span class="row-machine-name cron-next">{ticking() ? "ticking" : untilLabel(d.job!.next_run_at, Date.now())}</span>}>
@@ -1645,8 +1791,37 @@ export function LiveProjectsSection(p: {
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
         ...(menu.controller ? [{kind:"item" as const,label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)},{kind:"sep" as const}] : []),
+        ...(!menu.controller && menu.id ? [
+          {kind:"item" as const,label:"Move cron…",icon:Ic.FolderIcon,onClick:()=>beginMoveCron(menu.slug,menu.id!,menu.name,menu.folder ?? "")},
+          {kind:"item" as const,label:"Cut",icon:Ic.CutIcon,onClick:()=>{setControllerMenu(null);setFileClipboard("");setCutId(null);setPendingMoves([]);setCutCron({slug:menu.slug,id:menu.id!,name:menu.name});}},
+          {kind:"sep" as const},
+        ] : []),
         {kind:"item",label:"Delete…",icon:Ic.TrashIcon,danger:true,onClick:()=>{setControllerMenu(null);setDeleteCronError(null);setDeleteCronTarget({slug:menu.slug,id:menu.id,name:menu.name,controller:menu.controller});}}
       ]} onClose={()=>setControllerMenu(null)} />}</Show>
+      <Show when={moveCronTarget()} keyed>{target => <Dialog title="Move cron" busy={movingCron()} onClose={() => !movingCron() && setMoveCronTarget(null)}
+        footer={<><DialogButton disabled={movingCron()} onClick={() => setMoveCronTarget(null)}>Cancel</DialogButton><DialogButton variant="primary" disabled={movingCron()} onClick={() => void saveMoveCron()}>{movingCron() ? "Moving…" : "Move"}</DialogButton></>}>
+        <div class="col" style={{ gap: "12px" }}>
+          <p class="dim" style={{ margin: 0 }}>Move <strong>{target.name}</strong> to another project or subfolder.</p>
+          <label class="col" style={{ gap: "4px" }}>
+            <span class="s-row-title">Project</span>
+            <Select aria-label="Destination project" class="s-input" value={moveCronProject()} onChange={e => { const next = e.currentTarget.value; setMoveCronProject(next); void loadDir(next, ""); void loadCrons(next); }}>
+              <For each={projects().some(pr => pr.slug === target.slug) ? projects() : [{ slug: target.slug, title: target.slug }, ...projects()]}>
+                {pr => <option value={pr.slug}>{pr.title || pr.slug} ({pr.slug})</option>}
+              </For>
+            </Select>
+          </label>
+          <label class="col" style={{ gap: "4px" }}>
+            <span class="s-row-title">Subfolder</span>
+            <input aria-label="Destination subfolder" class="s-input" placeholder="Project root (e.g. crons, monitors/daily)" value={moveCronFolder()} onInput={e => setMoveCronFolder(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void saveMoveCron(); } }} />
+            <div style={{ display: "flex", "flex-wrap": "wrap", gap: "6px", "margin-top": "4px" }}>
+              <For each={["", ...new Set(["crons", "monitors", ...knownFoldersForProject(moveCronProject() || target.slug)])]}>
+                {folder => <button type="button" class={`s-btn sm ${moveCronFolder().trim() === folder ? "" : "quiet"}`} onClick={() => setMoveCronFolder(folder)}>{folder || "Root"}</button>}
+              </For>
+            </div>
+          </label>
+          <Show when={moveCronError()}><ErrorNotice error={moveCronError()!} /></Show>
+        </div>
+      </Dialog>}</Show>
       <Show when={deleteCronTarget()} keyed>{target => <ConfirmDialog title="Delete cron?" description={`Delete ${target.name} from Hermes? This cannot be undone.`} action="Delete" busy={deletingCron()} error={deleteCronError()} onConfirm={() => void confirmDeleteCron()} onClose={() => !deletingCron() && setDeleteCronTarget(null)} />}</Show>
       <Show when={fileMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
         { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },

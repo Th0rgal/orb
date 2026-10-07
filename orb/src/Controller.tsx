@@ -235,8 +235,19 @@ export function ControllerView(p: { slug: string; id?: string }) {
       const next = await cacheLoad(viewKey(), () => (p.id ? getProjectCron(p.slug, p.id) : getProjectController(p.slug)));
       setView(next);
       setError(null);
+      if (p.id && !next.job) {
+        window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (p.id && e instanceof Error && /\b404\b/.test(e.message)) {
+        const cleared: View = { slug: p.slug, job: null, runs: [] };
+        cachePut(viewKey(), cleared);
+        setView(cleared);
+        setError(null);
+        window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     }
     try {
       setSteers(await getProjectSteers(p.slug));
@@ -279,8 +290,18 @@ export function ControllerView(p: { slug: string; id?: string }) {
       cachePut(viewKey(), cleared);
       setView(cleared);
       setError(null);
+      window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
       bumpProjects();
     } catch (e) {
+      if (p.id && e instanceof Error && /\b404\b/.test(e.message)) {
+        const cleared: View = { slug: p.slug, job: null, runs: [] };
+        cachePut(viewKey(), cleared);
+        setView(cleared);
+        setError(null);
+        window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: p.slug, id: p.id, deleted: true } }));
+        bumpProjects();
+        return;
+      }
       setError(e instanceof Error ? e.message : String(e));
       throw e;
     } finally {
@@ -302,6 +323,10 @@ export function ControllerView(p: { slug: string; id?: string }) {
                     <div class="cr-name">{j().name}</div>
                     <div class="cr-sub">
                       <span>{j().schedule ?? "scheduled"}</span>
+                      <Show when={j().folder}>
+                        <span class="cr-sep">·</span>
+                        <span>{j().folder}</span>
+                      </Show>
                       <span class="cr-sep">·</span>
                       <span class={`cr-state ${state()}`}>
                         {state() === "running"
@@ -336,6 +361,9 @@ export function ControllerView(p: { slug: string; id?: string }) {
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
                     <Show when={!!p.id}>
+                      <button class="s-btn sm quiet" disabled={!!busy()} onClick={() => window.dispatchEvent(new CustomEvent("orb:cron-move-request", { detail: { slug: p.slug, id: p.id, name: j().name, folder: j().folder ?? "" } }))}>
+                        Move…
+                      </button>
                       <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(() => {})}>
                         {busy() === "delete" ? "Deleting…" : "Delete"}
                       </button>

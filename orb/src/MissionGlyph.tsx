@@ -83,8 +83,8 @@ export function MissionGlyph(p: { status: string; missionId?: string; identity?:
       <p>{continuationLabel({ count: 1, items: [item] })}</p>
       <Show when={item.reason}><p>{item.reason}</p></Show>
       <Show when={item.error}><p role="alert">{item.error}</p></Show>
-      <Show when={item.state === "scheduled" || item.state === "error"}>
-        <div class="wake-up-actions"><Show when={item.state === "scheduled"}><button type="button" disabled={busy()} onClick={() => void act(item.id, "resume")}>Resume now</button></Show>
+      <Show when={item.state === "scheduled" || item.state === "queued" || item.state === "error"}>
+        <div class="wake-up-actions"><Show when={item.state === "scheduled" || item.state === "queued"}><button type="button" disabled={busy()} onClick={() => void act(item.id, "resume")}>Resume now</button></Show>
         <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>{item.source === "orb-local-rejected" ? "Dismiss rejected request" : "Cancel wake-up"}</button></div>
       </Show>
     </div>}</For>

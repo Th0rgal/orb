@@ -206,12 +206,16 @@ impl Output {
         let activity = &mut activities[index];
         activity.updated_at = activity_now();
         activity.thinking_tokens = stream.thinking_tokens;
-        activity.label = if stream.agent_response_active {
-            "Generating response…"
-        } else {
-            "Working…"
-        }
-        .into();
+        activity.label = match (
+            stream.goal_mode,
+            stream.goal_iterations.max(1),
+            stream.agent_response_active,
+        ) {
+            (true, iter, true) => format!("Goal (iteration {iter}) · Generating response…"),
+            (true, iter, false) => format!("Goal (iteration {iter}) · Working…"),
+            (false, _, true) => "Generating response…".into(),
+            (false, _, false) => "Working…".into(),
+        };
         activity.detail = Some(
             "Displayed thought summaries are read from this native conversation when available."
                 .into(),

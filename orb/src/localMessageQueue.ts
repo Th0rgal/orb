@@ -20,7 +20,12 @@ const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
 const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
 /** The agent keeps its session: it is told what happened instead of being handed the request as new work. */
-export const resumedPrompt=(prompt:string,cut:'restart'|'connection'='restart')=>`${cut==='connection'?'The connection was lost':'Orb restarted'} while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.\n\n${prompt}`;
+export const resumedPrompt=(prompt:string,cut:'restart'|'connection'='restart')=>{
+ const note=`${cut==='connection'?'The connection was lost':'Orb restarted'} while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.`;
+ const trimmed=prompt.trimStart();
+ if(/^\/goal(?:\s|$)/.test(trimmed))return `${trimmed}\n\n${note}`;
+ return `${note}\n\n${prompt}`;
+};
 /** What Resume sends when no message is waiting: the agent keeps its session and picks its work up. */
 export const resumePrompt='Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work.';
 const closedRun='The previous run ended before syncing finished. Your message and any response are saved on this computer. Retry to continue the conversation.';
@@ -92,14 +97,24 @@ export async function enqueueLocalMessage(request:StartLocal,text:string,options
     return; // Stop invalidated this inbox snapshot, even if it arrived late.
    }
   }
-  const rows=await read(key),existing=rows.find(row=>row.id===id);
+  let rows=await read(key);const existing=rows.find(row=>row.id===id);
   if(options.replace){
    // An edit keeps the message's place in the queue and releases its hold.
    if(!existing||existing.state!=='queued')throw Error('This message was already sent. Your edit is still in the composer.');
    // Images stay attached while their marker is still in the edited text.
    const kept=(existing.request.imagePaths??[]).filter(path=>text.includes(path));
    existing.text=text;existing.request={...request,imagePaths:[...new Set([...(request.imagePaths??[]),...kept])]};delete existing.heldAt;
-  }else if(!existing)rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled});
+  }else if(!existing){
+   if(!options.delegated&&!options.scheduled){
+    // A deliberate new message or Resume supersedes an earlier interrupted/errored turn that already exhausted auto-resume.
+    const stale=rows.filter(r=>r.mission===request.id&&r.state==='error'&&r.interrupted);
+    for(const old of stale){
+     if(old.receipt||old.result)await saveSideThread(`${key}:recovered:${old.id}:${old.receipt?.run_id??'unknown'}`,old);
+    }
+    if(stale.length)rows=rows.filter(r=>!(r.mission===request.id&&r.state==='error'&&r.interrupted));
+   }
+   rows.push({id,mission:request.id,text,request,state:'queued',waiting:options.waiting??true,delegated:options.delegated,scheduled:options.scheduled});
+  }
   await write(key,rows);
   if(options.delegated)await saveSideThread(seenKey,[...seen,id]);
  });
@@ -333,6 +348,17 @@ export function startLocalQueueWorker(){
        requeue(stored,lost?'restart':'connection');
       });
       again=true;
+      continue;
+     }
+     // If a newer run generation has already executed on this mission since this interrupted row's receipt,
+     // retire the superseded interrupted row to the recovery archive so it never head-of-line blocks.
+     if(row.state==='error'&&row.receipt?.generation!=null&&rows.some(r=>r.mission===row.mission&&r.id!==row.id&&r.state==='queued')){
+      const currentMission=await getMission(row.mission).catch(()=>undefined);
+      if(currentMission?.execution?.generation!=null&&currentMission.execution.generation>row.receipt.generation){
+       if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
+       await locked(key,async()=>{const current=await read(key);await write(key,current.filter(r=>r.id!==row.id));});
+       again=true;
+      }
      }
      continue;
     }
