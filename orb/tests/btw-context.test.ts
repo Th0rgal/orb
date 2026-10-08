@@ -15,7 +15,8 @@ it('sends bounded initial context then only new public events, without replaying
  expect(second.summary).toContain('New result');expect(second.summary).not.toContain('[1]');expect(second.summary).not.toContain('Objective');
  const same=await contextSnapshot(source,[event(1),event(2,'tool_result','New result')],'Recent progress',second.cursor);
  expect(same.summary).toContain('No new public events');expect(same.summary).not.toContain('Recent progress');
- const huge=await contextSnapshot(source,[event(3,'tool_result','é'.repeat(100000))],'é'.repeat(100000),first.cursor);
+ const huge=await contextSnapshot(source,[event(2,'assistant_message','Slice 15 summary: 241/462 covered'),...Array.from({length:20},(_,i)=>event(3+i,'tool_result','é'.repeat(5000)))],'é'.repeat(100000),first.cursor);
+ expect(huge.summary).toContain('Slice 15 summary: 241/462 covered');
  expect(new TextEncoder().encode(huge.summary).length).toBeLessThan(6500);
 });
 it('excludes private reasoning, queued drafts and metadata from files',()=>{
@@ -42,11 +43,25 @@ it('resets the cursor when an event log is replaced',async()=>{
 it('reuses the archive when no events or visible text changed',async()=>{
  vi.mocked(api).mockResolvedValueOnce([event(1)]).mockResolvedValueOnce([]);
  const first=await prepareBtwContext(source,'Latest','old-agent');
- vi.mocked(api).mockResolvedValueOnce([event(1)]).mockResolvedValueOnce([]);
+ vi.mocked(api).mockResolvedValueOnce([event(1)]);
  const second=await prepareBtwContext(source,'Latest','old-agent',first.cursor);
  expect(transferFile).toHaveBeenCalledTimes(3);
  expect(second.cursor.archive).toBe(first.cursor.archive);
  expect(second.context).toContain('No new public events.');
+});
+it('stops paginating at previous.sequence and reuses the staged archive when new events arrive',async()=>{
+ vi.mocked(api).mockResolvedValueOnce([event(1),event(2)]).mockResolvedValueOnce([]);
+ const first=await prepareBtwContext(source,'Latest','old-agent');
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(2);
+ expect(transferFile).toHaveBeenCalledTimes(3);
+ vi.mocked(api).mockResolvedValueOnce([event(2),event(3,'tool_result','fresh update')]);
+ const second=await prepareBtwContext(source,'Latest','old-agent',first.cursor);
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(3);
+ expect(transferFile).toHaveBeenCalledTimes(3);
+ expect(second.cursor.archive).toBe(first.cursor.archive);
+ expect(second.cursor.sequence).toBe(3);
+ expect(second.context).toContain('New events after 2 through 3');
+ expect(second.context).toContain('fresh update');
 });
 it('preserves large Unicode tool results byte-for-byte across bounded archive parts',async()=>{
  const {File}=await import('node:buffer');vi.stubGlobal('File',File);

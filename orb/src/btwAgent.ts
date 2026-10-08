@@ -75,7 +75,8 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
  }
  throw new Error('Side session recovery chain is too long.');
 }
-const locks=new Set<string>();
+const locks=new Map<string,Promise<void>>();
+export function btwLaunchPending(parent:string):Promise<void>|undefined{return locks.get(storageKey(parent));}
 export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
@@ -157,9 +158,10 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  }
  }finally{stopStream?.();signal.removeEventListener('abort',abortWake);wake?.();}
 }
-export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[]){
+export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal){
  const version=connectionVersion();
- const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');locks.add(key);
+ const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');
+ let unlock!:()=>void;locks.set(key,new Promise<void>(r=>{unlock=r;}));
  try{
   let s=btwSession(parent);
   let current:Mission|undefined;
@@ -175,7 +177,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     s={...s,launchPending:false,active:false};save(parent,s);
    }
    try {
-    current=await currentSide(parent,s,signal,version);
+    current=await currentSide(parent,s,launchSignal,version);
     if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
     s={...s,active:false};save(parent,s);
    } catch(error) {
@@ -199,7 +201,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   let binding=local?localBinding(parent):undefined;
   let bin='';
   if(local){await restoreLocalBindings();binding=localBinding(parent);if(!bin)bin=(await localAgentForLaunch(config.harness))?.path??'';if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
-  if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
+  if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
    const stored=localStorage.getItem(attemptKey);
@@ -229,13 +231,13 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     // Keep previous side turns in its archive, never in the process argv.
     snapshot=await prepareBtwContext(source,context,destination,undefined,history);
     prompt=makePrompt(snapshot.context);
-    if(signal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
+    if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
     await createSide();
    }
   }
   if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,sharedCwdWith:parent,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;s!.conversationCursor=snapshot.cursor;s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
- }finally{locks.delete(key);}
+ }finally{locks.delete(key);unlock();}
  if(signal.aborted)return;
  await watchBtw(parent,signal,receive);
 }
@@ -294,10 +296,10 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  const existing=btwSession(parent);
  if(latestActive&&(!existing||!existing.active)){
   save(parent,latestActive);
- }else if(latest&&RESUMABLE.includes(latest.status)&&(!existing||existing.id!==latest.id)&&!existing?.active){
+ }else if(latest&&RESUMABLE.includes(latest.status)&&!existing?.active){
   const local=latest.tags?.includes('placement:client')??false;
   const lastTurn=serverTurns.at(-1);
-  if(lastTurn){
+  if(lastTurn&&(!existing||existing.id!==latest.id||existing.question!==lastTurn.question)){
    save(parent,{id:latest.id,question:lastTurn.question,harness:latest.backend||existing?.harness||'opencode',model:latest.model_override||existing?.model||'builtin/smart',local,active:false,baseline:0,placement:existing?.placement,contextVersion:existing?.contextVersion,conversationCursor:existing?.conversationCursor});
   }
  }

@@ -215,3 +215,29 @@ it('restores missing server /btw turns and clears stale interrupted notice when 
  expect(screen.queryByText(/Side question interrupted/)).toBeNull();
 });
 
+it('clears the preparing state after sending a question from the side panel composer',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'done',answer:'Side composer reply'}])));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="composer-prepare-reset" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ handle.open();
+ const input=await screen.findByPlaceholderText('Ask a side question…');
+ fireEvent.input(input,{target:{value:'From side composer'}});
+ fireEvent.keyDown(input,{key:'Enter'});
+ expect(await screen.findByText('Side composer reply')).toBeTruthy();
+ expect(screen.queryByText('Sending…')).toBeNull();
+ expect(screen.queryByText('Side agent is working…')).toBeNull();
+});
+
+it('allows dismissing a failed side question turn',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'error',message:'Temporary failure'}])));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="dismiss-error-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Broken question');
+ expect(await screen.findByText(/Temporary failure/)).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));
+ await waitFor(()=>expect(screen.queryByText(/Temporary failure/)).toBeNull());
+ expect(screen.queryByText('Broken question')).toBeNull();
+});
+
+
+

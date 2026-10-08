@@ -497,3 +497,23 @@ it('reconciles missing completed and active /btw turns from server btw-parent mi
  expect(btwSession('p1')?.id).toBe('m3');
 });
 
+it('completes launching the side session in the background if the UI watch signal aborts during context preparation',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {btwLaunchPending}=await import('../src/btwAgent');
+ const watchAbort=new AbortController();
+ const launchAbort=new AbortController();
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
+ vi.mocked(prepareBtwContext).mockImplementationOnce(async()=>{
+  watchAbort.abort();
+  return {context:'ctx',cursor:{sequence:5,visibleHash:'h5',archive:'.paloma/conversation/1/conversation.json'}};
+ });
+ vi.mocked(api).mockResolvedValueOnce({id:'bg-child'});
+ const p=askBtwAgent('bg-parent','Status?','ctx',[],watchAbort.signal,()=>{},[],launchAbort.signal);
+ expect(btwLaunchPending('bg-parent')).toBeTruthy();
+ await p;
+ expect(btwLaunchPending('bg-parent')).toBeUndefined();
+ expect(api).toHaveBeenCalledWith('/api/control/missions/bg-parent/btw/agent',expect.anything());
+ expect(btwSession('bg-parent')).toMatchObject({id:'bg-child',question:'Status?',active:true});
+});
+
+

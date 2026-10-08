@@ -15,8 +15,8 @@ export function publicEvents(events:StoredEvent[]):StoredEvent[] {
  const allowed=new Set(['user_message','assistant_message','assistant_message_canonical','text_delta','text_op','tool_call','tool_result','error']);
  return events.filter(e=>allowed.has(e.event_type)&&e.metadata?.queued!==true).map(e=>({id:e.id,sequence:e.sequence,event_type:e.event_type,timestamp:e.timestamp,tool_call_id:e.tool_call_id,tool_name:e.tool_name,content:e.content}));
 }
-export async function conversationEvents(parent:string):Promise<StoredEvent[]> {
- const result:StoredEvent[]=[];let before:number|undefined;
+export async function conversationEvents(parent:string,sinceSequence?:number,maxPages?:number):Promise<StoredEvent[]> {
+ const result:StoredEvent[]=[];let before:number|undefined,pages=0;
  // Backwards pagination freezes the upper boundary even while the mission runs.
  while(true){
   const page=await api<StoredEvent[]|{events?:StoredEvent[]}>(`/api/control/missions/${encodeURIComponent(parent)}/events?view=all&limit=1000${before===undefined?'':`&before_seq=${before}`}`);
@@ -24,7 +24,10 @@ export async function conversationEvents(parent:string):Promise<StoredEvent[]> {
   if(!rows.length)break;
   const next=Math.min(...rows.map(e=>e.sequence));
   if(before!==undefined&&next>=before)throw new Error('Conversation pagination did not advance.');
-  result.push(...rows);before=next;
+  result.push(...rows);
+  pages++;
+  if((sinceSequence!==undefined&&next<=sinceSequence)||(maxPages!==undefined&&pages>=maxPages))break;
+  before=next;
  }
  return [...new Map(result.map(e=>[e.sequence,e])).values()].sort((a,b)=>a.sequence-b.sequence);
 }
@@ -36,9 +39,12 @@ export async function contextSnapshot(source:Mission,events:StoredEvent[],visibl
  const safe=publicEvents(events),fresh=safe.filter(e=>e.sequence>(cursor?.sequence??0));
  const overview=fresh.map(e=>`[${e.sequence}] ${e.event_type}${e.tool_name?` ${e.tool_name}`:''}: ${byteTail(e.content,500)}`).join('\n');
  const initial=!cursor;
- const recent=initial?`${byteTail(visible||source.history.filter(h=>h.role==='user'||h.role==='assistant').map(h=>`${h.role}: ${h.content}`).join('\n'),1500)}\nRecent public events:\n${byteTail(overview,3000)}`:byteTail(overview,4500);
+ const latestAssistant=!initial?[...fresh].reverse().find(e=>(e.event_type==='assistant_message'||e.event_type==='assistant_message_canonical')&&e.content.trim()):undefined;
+ const tail=byteTail(overview,latestAssistant?3000:4500);
+ const pinnedAssistant=latestAssistant&&!tail.includes(`[${latestAssistant.sequence}]`)?`Latest assistant message [${latestAssistant.sequence}]:\n${byteTail(latestAssistant.content,1500)}\nRecent public events:\n`:'';
+ const recent=initial?`${byteTail(visible||source.history.filter(h=>h.role==='user'||h.role==='assistant').map(h=>`${h.role}: ${h.content}`).join('\n'),1500)}\nRecent public events:\n${byteTail(overview,3000)}`:`${pinnedAssistant}${tail}`;
  const live=!initial&&!fresh.length&&visibleHash!==cursor.visibleHash?`\nLatest visible snapshot (may be unfinished):\n${byteTail(visible,1500)}`:'';
- return {cursor:{sequence,visibleHash},safe,summary:`${initial?'Initial recent context':`New events after ${cursor.sequence} through ${sequence}`}\n${recent||'No new public events.'}${live}`};
+ return {cursor:{sequence,visibleHash},safe,fresh,summary:`${initial?'Initial recent context':`New events after ${cursor.sequence} through ${sequence}`}\n${recent||'No new public events.'}${live}`};
 }
 async function archiveFile(name:string,text:string,destination:string){return (await transferFile({name,file:new File([text],name,{type:'text/plain'})},destination)).path;}
 export async function archiveParts(name:string,rows:string[],write:(name:string,text:string)=>Promise<string>){
@@ -48,7 +54,7 @@ export async function archiveParts(name:string,rows:string[],write:(name:string,
  // size of the chunk is kept as a count: re-encoding it for every row froze
  // the page for a minute on a long conversation.
  for(const row of rows){let bytes=encoder.encode(row+'\n');while(bytes.length){
-  let end=Math.min(bytes.length,4*1024*1024);while(end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;
+  let end=Math.min(bytes.length,4*1024*1024);while(end>0&&end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;
   const part=bytes.slice(0,end);bytes=bytes.slice(end);
   if(chunkBytes+part.length>8*1024*1024)await flush();
   chunk.push(new TextDecoder().decode(part));chunkBytes+=part.length;
@@ -56,9 +62,14 @@ export async function archiveParts(name:string,rows:string[],write:(name:string,
  if(chunk.length||!paths.length)await flush();return paths;
 }
 export async function prepareBtwContext(source:Mission,visible:string,destination:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[],localRoot?:string){
- const events=await conversationEvents(source.id),snapshot=await contextSnapshot(source,events,visible,previous);
- const unchanged=previous?.archive?.startsWith('.paloma/conversation/')&&previous.sequence===snapshot.cursor.sequence&&previous.visibleHash===snapshot.cursor.visibleHash;
- let manifest=unchanged?previous!.archive:undefined;
+ const hasStagedArchive=!!previous?.archive?.startsWith('.paloma/conversation/')&&!sideHistory.length;
+ let events=await conversationEvents(source.id,hasStagedArchive?previous!.sequence:undefined,hasStagedArchive?1:undefined);
+ let snapshot=await contextSnapshot(source,events,visible,previous);
+ if(hasStagedArchive&&events.length>0&&snapshot.cursor.sequence<previous!.sequence){
+  events=await conversationEvents(source.id);
+  snapshot=await contextSnapshot(source,events,visible,undefined);
+ }
+ let manifest=hasStagedArchive&&(events.length===0||snapshot.cursor.sequence>=previous!.sequence)?previous!.archive:undefined;
  if(!manifest){
  const localId=crypto.randomUUID();
  const write=async(name:string,text:string)=>{
