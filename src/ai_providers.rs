@@ -353,6 +353,9 @@ pub struct AIProvider {
     /// API key (if using API key auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Credential provisioned by Mistral Vibe browser sign-in, billed to its plan.
+    #[serde(default)]
+    pub mistral_subscription: bool,
     /// OAuth credentials (if using OAuth auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthCredentials>,
@@ -431,6 +434,7 @@ impl AIProvider {
             priority: 0,
             google_project_id: None,
             api_key: None,
+            mistral_subscription: false,
             oauth: None,
             cli_proxy_auth_file: None,
             base_url: None,
@@ -515,11 +519,33 @@ impl AIProviderStore {
         let contents = serde_json::to_string_pretty(&providers_vec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        // Write-then-rename for crash safety (atomic on POSIX)
-        let tmp_path = self.storage_path.with_extension("tmp");
-        std::fs::write(&tmp_path, contents)?;
-        std::fs::rename(&tmp_path, &self.storage_path)?;
-        Ok(())
+        self.write_private_snapshot(contents.as_bytes())
+    }
+
+    fn write_private_snapshot(&self, contents: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = self.storage_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = self
+            .storage_path
+            .with_extension(format!("{}.tmp", Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let result = (|| {
+            let mut file = options.open(&temporary)?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.storage_path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 
     pub async fn list(&self) -> Vec<AIProvider> {
@@ -575,6 +601,21 @@ impl AIProviderStore {
             .collect();
         matched.sort_by_key(|p| (p.priority, p.id));
         matched
+    }
+
+    /// Persist a browser-provisioned account before making it visible to readers.
+    pub(crate) async fn persist_account(&self, mut provider: AIProvider) -> std::io::Result<()> {
+        let mut providers = self.providers.write().await;
+        let mut updated = providers.clone();
+        if updated.is_empty() {
+            provider.is_default = true;
+        }
+        updated.insert(provider.id, provider);
+        let values: Vec<_> = updated.values().collect();
+        let contents = serde_json::to_vec_pretty(&values).map_err(std::io::Error::other)?;
+        self.write_private_snapshot(&contents)?;
+        *providers = updated;
+        Ok(())
     }
 
     pub async fn add(&self, provider: AIProvider) -> Uuid {

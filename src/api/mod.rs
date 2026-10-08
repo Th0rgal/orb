@@ -53,6 +53,7 @@ pub mod mission_payload;
 pub mod mission_runner;
 pub mod mission_store;
 pub mod mission_workspace_gc;
+pub(crate) mod mistral_login;
 mod model_routing;
 mod monitoring;
 mod native_loop_observer;

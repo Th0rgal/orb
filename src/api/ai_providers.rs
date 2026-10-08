@@ -2548,6 +2548,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // codex / grok / kimi): spawn the CLI login, hand the auth URL to the
         // UI, replay the pasted localhost callback against the process.
         .merge(super::cli_proxy_login::routes())
+        .merge(super::mistral_login::routes())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5146,7 +5147,7 @@ fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> Prov
         npm_package: provider.npm_package.clone(),
         enabled: provider.enabled,
         is_default: provider.is_default,
-        uses_oauth: pt.uses_oauth(),
+        uses_oauth: pt.uses_oauth() || provider.mistral_subscription,
         auth_methods: pt.auth_methods(),
         status,
         openai_auth,
@@ -5190,7 +5191,7 @@ fn openai_auth_status(
 
 /// Sync the highest-priority enabled provider of a given type from the store
 /// to opencode.json and auth.json for runtime consumption by OpenCode.
-async fn sync_store_to_opencode(
+pub(crate) async fn sync_store_to_opencode(
     store: &crate::ai_providers::AIProviderStore,
     working_dir: &Path,
     provider_type: ProviderType,
@@ -10167,6 +10168,7 @@ async fn update_provider(
     }
     if let Some(api_key_update) = req.api_key {
         updated.api_key = api_key_update;
+        updated.mistral_subscription = false;
     }
     if let Some(ref backends) = req.use_for_backends {
         updated.use_for_backends = Some(backends.clone());

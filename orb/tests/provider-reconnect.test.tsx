@@ -118,3 +118,48 @@ it("warns that removing a combined provider also deletes its independent API key
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(deleted).toBe(true);
 });
+
+it("connects Mistral Vibe through its own browser flow and polls without a callback", async () => {
+  setConnection("http://core.test", "test-token");
+  vi.spyOn(window, "open").mockReturnValue(null);
+  const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/cli-proxy-login")) return new Response(JSON.stringify({available:true,providers:[{id:"mistral",name:"Mistral Vibe"}]}));
+    if (url.endsWith("/mistral-login")) {
+      expect(JSON.parse(options!.body as string)).toEqual({provider:"mistral"});
+      return new Response(JSON.stringify({session_id:"mistral-test",auth_url:"https://console.mistral.ai/vibe/sign-in/test",flow:"device",instructions:"Approve Mistral Vibe."}));
+    }
+    if (url.endsWith("/mistral-login/mistral-test")) return new Response(JSON.stringify({status:"completed"}));
+    return new Response(JSON.stringify(url.endsWith("/providers") || url.endsWith("/cloud/accounts") ? [] : {}));
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(() => <Providers />);
+  const add = await screen.findByRole("button", {name:"Add subscription account"});
+  await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(add);
+  fireEvent.click(screen.getByRole("button", {name:"Continue in browser"}));
+  expect(await screen.findByText("Approve Mistral Vibe.")).toBeTruthy();
+  expect(screen.queryByLabelText("Authorization code or redirect URL")).toBeNull();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull(), {timeout:4000});
+  expect(fetch.mock.calls.some(([url]) => url.endsWith("/callback"))).toBe(false);
+});
+
+it("reconnects a backend-owned Mistral subscription without changing its account ID", async () => {
+  const id = "3be8246a-6fa4-41a5-948c-f0d333e6e247";
+  setConnection("http://core.test", "test-token");
+  vi.spyOn(window, "open").mockReturnValue(null);
+  let started = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/mistral-login")) {
+      expect(JSON.parse(options!.body as string)).toEqual({provider:"mistral",provider_id:id});
+      started = true;
+      return new Response(JSON.stringify({session_id:"mistral-reconnect",auth_url:"https://console.mistral.ai/vibe/sign-in/test",flow:"device"}));
+    }
+    const data = url.endsWith("/providers") ? [{id,name:"Mistral Vibe",provider_type:"mistral",uses_oauth:true,credential_owner:"sandboxed_sh",enabled:true,status:{type:"connected"}}] : url.endsWith("/cli-proxy-login") ? {available:true,providers:[]} : url.endsWith("/cloud/accounts") ? [] : {};
+    return new Response(JSON.stringify(data));
+  }));
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", {name:"Actions for Mistral Vibe",exact:true}));
+  fireEvent.click(screen.getByRole("menuitem", {name:"Re-authenticate",exact:true}));
+  await waitFor(() => expect(started).toBe(true));
+  expect(screen.queryByLabelText("Authorization code or redirect URL")).toBeNull();
+});
