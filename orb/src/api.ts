@@ -467,20 +467,20 @@ export interface CliProxyLoginState {
   message?: string;
 }
 
-export async function startCliProxyLogin(provider: string, providerId?: string): Promise<CliProxyLoginStart> {
-  return api("/api/ai/providers/cli-proxy-login", {
+export async function startSubscriptionLogin(provider: string, providerId?: string): Promise<CliProxyLoginStart> {
+  return api(`/api/ai/providers/${provider === "mistral" ? "mistral-login" : "cli-proxy-login"}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ provider, provider_id: providerId }),
   });
 }
 
-export async function cancelCliProxyLogin(sessionId: string): Promise<void> {
-  await api(`/api/ai/providers/cli-proxy-login/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+export async function cancelSubscriptionLogin(sessionId: string): Promise<void> {
+  await api(`/api/ai/providers/${sessionId.startsWith("mistral-") ? "mistral-login" : "cli-proxy-login"}/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
-export async function getCliProxyLogin(sessionId: string): Promise<CliProxyLoginState> {
-  return api(`/api/ai/providers/cli-proxy-login/${sessionId}`);
+export async function getSubscriptionLogin(sessionId: string): Promise<CliProxyLoginState> {
+  return api(`/api/ai/providers/${sessionId.startsWith("mistral-") ? "mistral-login" : "cli-proxy-login"}/${encodeURIComponent(sessionId)}`);
 }
 
 export async function submitCliProxyLoginCallback(sessionId: string, url: string): Promise<CliProxyLoginState> {

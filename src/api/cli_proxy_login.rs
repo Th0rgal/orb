@@ -558,13 +558,17 @@ async fn cancel_login(AxumPath(id): AxumPath<String>) -> Result<Json<Value>, Api
 async fn login_capabilities() -> Json<Value> {
     let available =
         super::oauth_owner::management_enabled() && ManagementClient::configured().is_ok();
-    Json(json!({"available": available, "providers": [
-        {"id":"anthropic", "name":"Claude Pro/Max"},
-        {"id":"openai", "name":"ChatGPT Plus/Pro"},
-        {"id":"xai", "name":"SuperGrok"},
-        {"id":"kimi", "name":"Kimi Code"},
-        {"id":"antigravity", "name":"Google Antigravity"}
-    ], "reason": if available { None } else { Some("Subscription login is not configured on this backend.") }}))
+    let mut providers = vec![json!({"id":"mistral", "name":"Mistral Vibe"})];
+    if available {
+        providers.extend([
+            json!({"id":"anthropic", "name":"Claude Pro/Max"}),
+            json!({"id":"openai", "name":"ChatGPT Plus/Pro"}),
+            json!({"id":"xai", "name":"SuperGrok"}),
+            json!({"id":"kimi", "name":"Kimi Code"}),
+            json!({"id":"antigravity", "name":"Google Antigravity"}),
+        ]);
+    }
+    Json(json!({"available": true, "providers": providers}))
 }
 
 pub fn routes() -> Router<Arc<super::routes::AppState>> {

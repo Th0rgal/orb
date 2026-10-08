@@ -61,7 +61,12 @@ export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(i
    if((error as {status?:number})?.status===404||/\b404\b|not found/i.test(String(error)))deletedIds.push(mission.id);
   }
  }));
- if(deletedIds.length)await confirmDeletedLocalOrigins(deletedIds);
+ if(deletedIds.length){
+  await confirmDeletedLocalOrigins(deletedIds);
+  // Retirement invalidates cached rows; retain the 404 backoff for journals
+  // still present in this refresh's local snapshot.
+  for(const id of deletedIds)unlistedReads.set(id,{at:Date.now(),mission:undefined});
+ }
  return missing.flatMap(mission=>{const value=unlistedReads.get(mission.id)?.mission;return value?[value]:[];});
 }
 const UNLISTED_LIVE_MS=30_000,UNLISTED_SETTLED_MS=10*60_000;

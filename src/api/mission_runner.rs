@@ -6827,7 +6827,11 @@ fn build_opencode_auth_from_ai_providers(
         .join(".sandboxed-sh")
         .join("ai_providers.json");
     let contents = std::fs::read_to_string(&path).ok()?;
-    let providers: Vec<crate::ai_providers::AIProvider> = serde_json::from_str(&contents).ok()?;
+    let mut providers: Vec<crate::ai_providers::AIProvider> =
+        serde_json::from_str(&contents).ok()?;
+    // API entries overwrite earlier entries for the same provider. Put the
+    // preferred account last, matching AIProviderStore's priority/UUID order.
+    providers.sort_by_key(|provider| std::cmp::Reverse((provider.priority, provider.id)));
 
     let mut map = serde_json::Map::new();
     for provider in providers {
@@ -10582,6 +10586,46 @@ mod tests {
         assert_eq!(merged["anthropic"]["access"], "fresh");
         assert_eq!(merged["anthropic"]["expires"], 2);
         assert_eq!(merged["unmanaged"]["key"], "preserved");
+    }
+
+    #[test]
+    fn opencode_mistral_account_priority_is_independent_of_file_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join(".sandboxed-sh");
+        fs::create_dir_all(&store).unwrap();
+        let account = |id, priority, key: &str, enabled| {
+            let mut provider = crate::ai_providers::AIProvider::new(
+                crate::ai_providers::ProviderType::Mistral,
+                "Test".into(),
+            );
+            provider.id = uuid::Uuid::from_u128(id);
+            provider.priority = priority;
+            provider.enabled = enabled;
+            provider.api_key = Some(key.into());
+            provider.mistral_subscription = true;
+            provider
+        };
+        let preferred = account(1, 5, "preferred", true);
+        let tie = account(2, 5, "tie", true);
+        let lower = account(3, 10, "lower", true);
+        let disabled = account(4, 0, "disabled", false);
+        for accounts in [
+            vec![
+                preferred.clone(),
+                tie.clone(),
+                lower.clone(),
+                disabled.clone(),
+            ],
+            vec![disabled, lower, tie, preferred],
+        ] {
+            fs::write(
+                store.join("ai_providers.json"),
+                serde_json::to_vec(&accounts).unwrap(),
+            )
+            .unwrap();
+            let auth = build_opencode_auth_from_ai_providers(temp.path()).unwrap();
+            assert_eq!(auth["mistral"]["key"], "preferred");
+        }
     }
 
     #[test]

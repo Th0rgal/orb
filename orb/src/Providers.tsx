@@ -16,15 +16,15 @@ import {
   connectionVersion,
   getAllProviderUsage,
   getProviderUsage,
-  getCliProxyLogin,
+  getSubscriptionLogin,
   startProviderOAuth,
   completeProviderOAuth,
   isConnected,
   listProviders,
   setProviderEnabled,
   openExternalUrl,
-  startCliProxyLogin,
-  cancelCliProxyLogin,
+  startSubscriptionLogin,
+  cancelSubscriptionLogin,
   submitCliProxyLoginCallback,
   type AIProvider,
   type ProviderUsage,
@@ -344,7 +344,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
       <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
 
       <section class="s-sec">
-        <div class="section-row"><h3>Subscriptions (OAuth)</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}>Add subscription account</button></div>
+        <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}>Add subscription account</button></div>
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
@@ -370,7 +370,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </div>
       </section>
 
-      <Show when={adding()}><Dialog title="Add subscription account" onClose={() => setAdding(false)} footer={<DialogButton onClick={() => { const kind = loginOptions()?.providers.find(x => x.id === addType()); if (!kind) return; setAdding(false); setReauth({id: "", provider_type: kind.id, provider_type_name: kind.name, name: kind.name, enabled: true, uses_oauth: true, credential_owner: "cli_proxy", status: {type: "needs_auth"}}); }}>Continue in browser</DialogButton>}><Field label="Subscription"><select class="s-input" value={addType()} onChange={e => setAddType(e.currentTarget.value)}><For each={loginOptions()?.providers ?? []}>{kind => <option value={kind.id}>{kind.name}</option>}</For></select></Field><p class="s-row-desc">Choose the account to connect in your browser. You can add more than one account.</p></Dialog></Show>
+      <Show when={adding()}><Dialog title="Add subscription account" onClose={() => setAdding(false)} footer={<DialogButton onClick={() => { const kind = loginOptions()?.providers.find(x => x.id === addType()); if (!kind) return; setAdding(false); setReauth({id: "", provider_type: kind.id, provider_type_name: kind.name, name: kind.name, enabled: true, uses_oauth: true, credential_owner: kind.id === "mistral" ? "sandboxed_sh" : "cli_proxy", status: {type: "needs_auth"}}); }}>Continue in browser</DialogButton>}><Field label="Subscription"><select class="s-input" value={addType()} onChange={e => setAddType(e.currentTarget.value)}><For each={loginOptions()?.providers ?? []}>{kind => <option value={kind.id}>{kind.name}</option>}</For></select></Field><p class="s-row-desc">Choose the account to connect in your browser. You can add more than one account.</p></Dialog></Show>
       <Show when={removing()}>{account => <Dialog title={`Remove ${account().name} and all credentials?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove provider and credentials</DialogButton>}><p class="s-row-desc">This deletes the subscription login and any independent API key saved on this provider. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
@@ -428,7 +428,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
 }
 
 const LEGACY_OAUTH_TYPES = new Set(["anthropic", "openai", "google"]);
-const reconnectable = (a: AIProvider) => cliProxyReconnectable(a) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type));
+const reconnectable = (a: AIProvider) => (a.provider_type === "mistral" && a.uses_oauth) || cliProxyReconnectable(a) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type));
 
 const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi", "antigravity"]);
 
@@ -461,7 +461,7 @@ function UsageSummary(p: { usage: ProviderUsage }) {
 
 function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: () => void }) {
   const [session, setSession] = createSignal<{ id: string; url: string; flow?: string; instructions?: string } | null>(null);
-  const proxy = cliProxyReconnectable(p.provider);
+  const polledLogin = cliProxyReconnectable(p.provider) || p.provider.provider_type === "mistral";
   let disposed = false;
   let completed = false;
   const [resetting, setResetting] = createSignal(false);
@@ -476,13 +476,13 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };
-  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (proxy && s && !completed) void cancelCliProxyLogin(s.id).catch(() => {}); });
+  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (polledLogin && s && !completed) void cancelSubscriptionLogin(s.id).catch(() => {}); });
 
   const startPolling = (id: string) => {
     stopPolling();
     const generation = pollGeneration;
     pollTimer = setInterval(() => {
-      getCliProxyLogin(id)
+      getSubscriptionLogin(id)
         .then((st) => {
           if (disposed || generation !== pollGeneration) return;
           if (st.status === "completed") {
@@ -506,15 +506,15 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
 
   const beginLogin = () => {
     setPhase("starting"); setError(null); setPaste("");
-    const start = proxy
-      ? startCliProxyLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
+    const start = polledLogin
+      ? startSubscriptionLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
-        if (disposed) { if (proxy) void cancelCliProxyLogin(s.id).catch(() => {}); return; }
+        if (disposed) { if (polledLogin) void cancelSubscriptionLogin(s.id).catch(() => {}); return; }
         setSession(s);
         setPhase("awaiting");
-        if (proxy) startPolling(s.id);
+        if (polledLogin) startPolling(s.id);
         void openExternalUrl(s.url).catch(e => setError(String(e)));
       })
       .catch((e: Error) => {
@@ -525,7 +525,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   onMount(beginLogin);
   const closeLogin = async () => {
     const s = session();
-    try { if (proxy && s && !completed) await cancelCliProxyLogin(s.id); completed = true; p.onClose(); }
+    try { if (polledLogin && s && !completed) await cancelSubscriptionLogin(s.id); completed = true; p.onClose(); }
     catch (e) { setError(`Could not cancel sign-in: ${String(e)}`); }
   };
   const retryLogin = async () => {
@@ -533,7 +533,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     setResetting(true);
     stopPolling();
     const s = session();
-    try { if (proxy && s && !completed) await cancelCliProxyLogin(s.id); setSession(null); beginLogin(); }
+    try { if (polledLogin && s && !completed) await cancelSubscriptionLogin(s.id); setSession(null); beginLogin(); }
     catch (e) { setError(`Could not reset sign-in: ${String(e)}`); }
     finally { setResetting(false); }
   };
@@ -544,7 +544,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     if (!s || !url || phase() === "finishing") return;
     setPhase("finishing");
     setError(null);
-    const submit = proxy ? submitCliProxyLoginCallback(s.id, url)
+    const submit = polledLogin ? submitCliProxyLoginCallback(s.id, url)
       : completeProviderOAuth(p.provider.id, url).then(() => ({ status: "completed" as const, message: undefined }));
     submit.then((st) => {
         if (disposed) return;
@@ -604,10 +604,10 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
           </div>
         </div>
         <Show when={session()?.flow !== "device"}>
-          <Field label={proxy && session()?.flow !== "code" ? "Redirect URL (http://localhost:…)" : "Authorization code or redirect URL"}>
+          <Field label={polledLogin && session()?.flow !== "code" ? "Redirect URL (http://localhost:…)" : "Authorization code or redirect URL"}>
             <input
               type="text"
-              placeholder={proxy && session()?.flow !== "code" ? "http://localhost:54545/callback?code=…&state=…" : "Paste the code or full redirect URL"}
+              placeholder={polledLogin && session()?.flow !== "code" ? "http://localhost:54545/callback?code=…&state=…" : "Paste the code or full redirect URL"}
               value={paste()}
               onInput={(e) => setPaste(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && submitPaste()}
