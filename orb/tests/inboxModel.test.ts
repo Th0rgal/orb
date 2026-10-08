@@ -569,4 +569,37 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(item.childSummary?.failedChildren[0]?.title).toBe("fork");
     expect(item.childSummary?.running).toBe(1);
   });
+
+  it("condenses long verbose mission titles and supports stale-while-revalidate AI digest goal & outcome", async () => {
+    const { condenseMissionHeadline } = await import("../src/inboxModel");
+    const { getCachedInboxDigest, getExactCachedInboxDigest, parseDigestJson, storeInboxDigest } =
+      await import("../src/inboxDigest");
+
+    const condensed = condenseMissionHeadline(
+      "/goal Complete the existing lfglabs-dev/verity solidity_import mission, with the remaining 18 functions and EVM parity checks",
+      "Verity",
+    );
+    expect(condensed).toBe("Solidity_import");
+    expect(condensed.length).toBeLessThanOrEqual(58);
+
+    const parsed = parseDigestJson(
+      '{"goal":"Morpho Midnight Solidity Import & EVM Parity","task":"Report current status, remaining work, and pause the goal","outcome":"Paused the goal at 27/45 functions (60%) with byte locals and Yul addition pushed.","verdict":"waiting"}',
+      1000,
+      "builtin/smart",
+    );
+    expect(parsed?.goal).toBe("Morpho Midnight Solidity Import & EVM Parity");
+    expect(parsed?.task).toBe("Report current status, remaining work, and pause the goal");
+    expect(parsed?.verdict).toBe("waiting");
+
+    storeInboxDigest("m-swr-test", 1000, "builtin/smart", parsed!);
+    // Exact lookup hits for 1000, misses for 2000
+    expect(getExactCachedInboxDigest("m-swr-test", 1000, "builtin/smart")?.goal).toBe(
+      "Morpho Midnight Solidity Import & EVM Parity",
+    );
+    expect(getExactCachedInboxDigest("m-swr-test", 2000, "builtin/smart")).toBeUndefined();
+    // Stale-while-revalidate lookup returns the 1000 digest on frame 1 even when updatedMs advances to 2000
+    expect(getCachedInboxDigest("m-swr-test", 2000, "builtin/smart")?.goal).toBe(
+      "Morpho Midnight Solidity Import & EVM Parity",
+    );
+  });
 });

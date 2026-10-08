@@ -27,6 +27,12 @@ describe("harness checklist adapters",()=>{
     const items=buildTranscript([{type:"tool_result",data:{tool_call_id:"a",name:"TodoWrite",result:"ok"}},tool("TodoWrite",fixtures[0].args,"a")]);
     expect(latestChecklist(items)?.tasks).toHaveLength(2);expect(items).toMatchObject([{kind:"tool",done:true,result:"ok"}]);
   });
+  it("hides an earlier turn's checklist once a new user message is sent, while keeping it for queued messages",()=>{
+    const base=[{type:"user_message",data:{id:"u1",content:"Initial request"}},tool("TodoWrite",fixtures[0].args,"a"),{type:"assistant_message",data:{id:"a1",content:"Done."}}];
+    expect(latestChecklist(buildTranscript(base))?.tasks).toHaveLength(2);
+    expect(latestChecklist(buildTranscript([...base,{type:"user_message",data:{id:"u2",content:"Queued follow-up",queued:true}}]))?.tasks).toHaveLength(2);
+    expect(latestChecklist(buildTranscript([...base,{type:"user_message",data:{id:"u2",content:"Follow-up question"}},{type:"assistant_message",data:{id:"a2",content:"Yes, we can add that."}}]))).toBeNull();
+  });
 });
 describe("factual work summaries",()=>{
   it("counts unique known file targets and actual harness command names",()=>{

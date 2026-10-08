@@ -410,6 +410,7 @@ export interface StartLocal {
   model?: string;
   effort?: string;
   sessionId?: string;
+  sharedCwdWith?: string;
 }
 
 const nativeRecoveries = new Map<string, Promise<unknown>>();
@@ -439,7 +440,7 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     }
     const launch = invoke("local_run_launch", {
       connection: { api_url: getApiUrl(), token: getJwt() },
-      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [] },
+      request: { ...req, session_id: req.sessionId, image_paths: req.imagePaths ?? [], shared_cwd_with: req.sharedCwdWith },
     });
     pendingLaunches.set(req.id,launch);
     const receipt = await launch as ClientRunReceipt;
@@ -500,13 +501,14 @@ async function reconcileRun(id: string): Promise<void> {
   } catch (error) {
     // A transport error does not mean the process stopped.
     if (runVersions.get(id)===version && /no local run/i.test(String(error))) {
-      if (localBinding(id) && !launching.has(id)) {
+      const wasKnownSettled = Object.hasOwn(running(), id) && running()[id] === false;
+      if (localBinding(id) && !launching.has(id) && !wasKnownSettled) {
         try {
-          await nativeRecovery(id);
+          const settled = await nativeRecovery(id);
           if (runVersions.get(id)!==version) return;
           recordLocalFailure(id, null);
           setRunning(prev => ({ ...prev, [id]: false }));
-          window.dispatchEvent(new Event("orb:refresh"));
+          if (settled !== false) window.dispatchEvent(new Event("orb:refresh"));
         } catch (recoveryError) {
           // A failed recovery keeps the server fence. Do not mark the local run
           // settled while another window or orphan process still holds it.
@@ -595,19 +597,19 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
 }
 
 /** Explicit retry must prove the previous native launch is no longer alive. */
-export async function recoverLocalLaunch(id: string): Promise<void> {
+export async function recoverLocalLaunch(id: string, sharedCwdWith?: string): Promise<void> {
  const invoke=tauriInvoke();
  if(!invoke)throw new Error("Local agents run in the Orb desktop app.");
- await nativeRecovery(id);
+ await nativeRecovery(id, sharedCwdWith);
  await reconcileLocalRun(id);
 }
 
-function nativeRecovery(id: string): Promise<unknown> {
+function nativeRecovery(id: string, sharedCwdWith?: string): Promise<unknown> {
  const existing=nativeRecoveries.get(id);
  if(existing)return existing;
  const invoke=tauriInvoke();
  if(!invoke)return Promise.reject(new Error("Local agents run in the Orb desktop app."));
- const pending=invoke("local_run_reconcile",{id,connection:{api_url:getApiUrl(),token:getJwt()}}).finally(()=>{nativeRecoveries.delete(id);});
+ const pending=invoke("local_run_reconcile",{id,sharedCwdWith,connection:{api_url:getApiUrl(),token:getJwt()}}).finally(()=>{nativeRecoveries.delete(id);});
  nativeRecoveries.set(id,pending);
  return pending;
 }

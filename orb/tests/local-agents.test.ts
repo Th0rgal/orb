@@ -351,6 +351,12 @@ it('does not mark a local run settled when native recovery is blocked by a runni
       expect(localRunActive('ctrl-g')).toBe(false);
       expect(localFailure('ctrl-g')).toBeUndefined();
       expect(refreshed).toBe(1);
+
+      const reconcileCallsBefore = (host.__TAURI_INTERNALS__.invoke as ReturnType<typeof vi.fn>).mock.calls.filter((c: any) => c[0] === 'local_run_reconcile').length;
+      await reconcileLocalRun('ctrl-g');
+      const reconcileCallsAfter = (host.__TAURI_INTERNALS__.invoke as ReturnType<typeof vi.fn>).mock.calls.filter((c: any) => c[0] === 'local_run_reconcile').length;
+      expect(reconcileCallsAfter).toBe(reconcileCallsBefore);
+      expect(refreshed).toBe(1);
     } finally {
       window.removeEventListener('orb:refresh', onRefresh);
     }

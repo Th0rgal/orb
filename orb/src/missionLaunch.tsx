@@ -50,7 +50,7 @@ export function initialPrompt(mission: Mission | null, receipt?: LaunchReceipt):
   if (user?.content) return user.content;
   if (mission?.goal_mode && mission.goal_objective) return `/goal ${mission.goal_objective.replace(/^\/goal\s+/, "")}`;
 }
-export function withInitialPrompt(items: StreamItem[], mission: Mission | null, receipt?: LaunchReceipt): StreamItem[] {
+export function withInitialPrompt(items: StreamItem[], mission: Mission | null, receipt?: LaunchReceipt, awaiting?: boolean): StreamItem[] {
   // The placeholder represents the initial user turn only. The first real user
   // event replaces it, even if backend normalization changed the stored text.
   // Subsequent real repeated messages are never deduplicated by text.
@@ -64,7 +64,24 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
     return first < 0 ? [...expanded, ...items] : [...items.slice(0, first), ...expanded, ...items.slice(first + 1)];
   }
   const key = receipt?.messageKey ?? `initial:${mission?.id ?? "launch"}`;
-  if (first < 0) return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images}, ...items] : items;
+  if (first < 0) {
+    if (awaiting && mission?.history && mission.history.length > 1) {
+      const seeded: StreamItem[] = [];
+      let usedInitialKey = false;
+      mission.history.forEach((entry, index) => {
+        if (!entry.content) return;
+        if (entry.role === "user") {
+          const isFirst = !usedInitialKey;
+          usedInitialKey = true;
+          seeded.push({ kind: "user", key: isFirst ? key : `history:${mission.id}:${index}`, text: entry.content, ...(isFirst && receipt?.images ? { images: receipt.images } : {}) });
+        } else if (entry.role === "assistant") {
+          seeded.push({ kind: "text", key: `history:${mission.id}:${index}`, text: entry.content, live: false });
+        }
+      });
+      if (seeded.length) return [...seeded, ...items];
+    }
+    return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images}, ...items] : items;
+  }
   // Keep the optimistic turn mounted when its canonical event arrives.
   return receipt ? items.map((item,index) => index === first ? {...item,key,...(receipt.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
 }

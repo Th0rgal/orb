@@ -76,4 +76,13 @@ it("latest checklist is visible outside folded raw work, with real progress and 
   container.querySelector<HTMLButtonElement>('.st-work-head')!.click();
   expect(container.querySelectorAll('.st-tool')).toHaveLength(3);
   expect([...container.querySelectorAll('button')].some(button=>['Plan','Build'].includes(button.textContent??''))).toBe(false);
+
+  const afterFollowUp=buildTranscript([
+    ev("tool_call",{tool_call_id:"new",name:"update_plan",args:{plan:[{step:"Plan a build",status:"completed"}]}}),
+    ev("assistant_message",{content:"Merged PR #486."}),
+    ev("user_message",{id:"u2",content:"Can we ask them to contact us before starting?"}),
+    ev("assistant_message",{content:"Yes, you can add a pre-registration clause."}),
+  ]);
+  const {container:followUpContainer}=render(()=><Transcript items={afterFollowUp}/>);
+  expect(followUpContainer.querySelector('.mission-tasks')).toBeNull();
 });

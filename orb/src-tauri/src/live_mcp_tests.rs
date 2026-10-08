@@ -55,7 +55,8 @@ fn live_native_mcp_roundtrip() {
     std::fs::create_dir_all(&workdir).unwrap();
     tauri::async_runtime::block_on(async {
         let started = local_origin::local_origin_launch(
-            local_agents::StartRequest { effort: None,
+            local_agents::StartRequest {
+                effort: None,
                 cyber_revision: None,
                 cyber_access: None,
                 id: String::new(),
@@ -68,6 +69,7 @@ fn live_native_mcp_roundtrip() {
                     .filter(|s| !s.is_empty()),
                 session_id: None,
                 image_paths: vec![],
+                shared_cwd_with: None,
             },
             local_origin::Draft {
                 key: uuid::Uuid::new_v4().to_string(),
@@ -216,8 +218,7 @@ fn live_native_mcp_resume() {
         crate::run_recovery::local_run_launch(local_agents::StartRequest { effort: None, cyber_revision: None, cyber_access: None,
             id: id.clone(), harness: harness.clone(), bin: binding["bin"].as_str().unwrap().into(),
             cwd: cwd.into(), session_id: Some(session.clone()), model: binding["model"].as_str().map(str::to_string),
-            prompt: "Call sandboxed get_capabilities once again. Report the marker from your previous answer, followed by the role and mission_id from the new tool result. Do not change files or start missions.".into(), image_paths: vec![],
-        }, connection).await.expect("Orb resume failed");
+            prompt: "Call sandboxed get_capabilities once again. Report the marker from your previous answer, followed by the role and mission_id from the new tool result. Do not change files or start missions.".into(), image_paths: vec![], shared_cwd_with: None, }, connection).await.expect("Orb resume failed");
         let _stop = Stop(id.clone());
         let deadline = Instant::now() + Duration::from_secs(150);
         loop {
@@ -279,7 +280,8 @@ fn live_native_wakeup_transport() {
     assert!(Path::new(cwd)
         .components()
         .any(|part| part.as_os_str() == "local-runs"));
-    let mut request = local_agents::StartRequest { effort: None,
+    let mut request = local_agents::StartRequest {
+        effort: None,
         cyber_revision: None,
         cyber_access: None,
         id: id.clone(),
@@ -290,6 +292,7 @@ fn live_native_wakeup_transport() {
         model: None,
         session_id: None,
         image_paths: vec![],
+        shared_cwd_with: None,
     };
     crate::local_wakeups::prepare(
         &mut request,

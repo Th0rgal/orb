@@ -196,7 +196,12 @@ async fn settle(c: &Connection, id: &str, receipt: &Value) -> Result<(), String>
     }
     Ok(())
 }
-async fn recover(c: &Connection, id: &str, cwd: &str) -> Result<(), String> {
+async fn recover(
+    c: &Connection,
+    id: &str,
+    cwd: &str,
+    shared_cwd_with: Option<&str>,
+) -> Result<bool, String> {
     if !stopped(id)? {
         return Err("This mission is still running locally or waiting for your answer.".into());
     }
@@ -205,7 +210,14 @@ async fn recover(c: &Connection, id: &str, cwd: &str) -> Result<(), String> {
     if local_agents::local_agents_poll(id.to_string()).is_ok() {
         local_agents::stop_generation(id, None)?;
     }
-    inspect_and_settle(c, id, cwd, &transfers::local_machine_identity()?).await
+    inspect_and_settle_for(
+        c,
+        id,
+        cwd,
+        &transfers::local_machine_identity()?,
+        shared_cwd_with,
+    )
+    .await
 }
 
 async fn inspect_and_settle(
@@ -213,7 +225,17 @@ async fn inspect_and_settle(
     id: &str,
     cwd: &str,
     client_id: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    inspect_and_settle_for(c, id, cwd, client_id, None).await
+}
+
+async fn inspect_and_settle_for(
+    c: &Connection,
+    id: &str,
+    cwd: &str,
+    client_id: &str,
+    shared_cwd_with: Option<&str>,
+) -> Result<bool, String> {
     let response = post(
         c,
         id,
@@ -226,7 +248,7 @@ async fn inspect_and_settle(
     // Only this explicit response means absence; transport/auth/other conflicts
     // never grant permission to start or clear another owner's receipt.
     if status.as_u16() == 409 && body.contains("No active run on this computer") {
-        return Ok(());
+        return Ok(false);
     }
     if !status.is_success() {
         return Err(format!("Could not inspect previous run ({status}): {body}"));
@@ -235,18 +257,34 @@ async fn inspect_and_settle(
     if receipt["run_id"].as_str().is_none() || receipt["generation"].as_u64().is_none() {
         return Err("Invalid previous run receipt".into());
     }
-    workspace_quiet(cwd)?;
-    settle(c, id, &receipt).await
+    if local_agents::has_orphan_mission_processes(id) {
+        return Err(
+            "An agent process may still be using this workspace. Stop it before retrying.".into(),
+        );
+    }
+    if shared_cwd_with
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        workspace_quiet(cwd)?;
+    }
+    settle(c, id, &receipt).await?;
+    Ok(true)
 }
 
 #[tauri::command]
-pub async fn local_run_reconcile(id: String, connection: Connection) -> Result<(), String> {
+pub async fn local_run_reconcile(
+    id: String,
+    connection: Connection,
+    shared_cwd_with: Option<String>,
+) -> Result<bool, String> {
     let _lock = lock(&id)?;
     let bindings = crate::local_bindings(None, None)?;
     let cwd = bindings[&id]["cwd"]
         .as_str()
         .ok_or("No session binding on this computer")?;
-    recover(&connection, &id, cwd).await
+    recover(&connection, &id, cwd, shared_cwd_with.as_deref()).await
 }
 
 #[tauri::command]
@@ -259,10 +297,20 @@ pub async fn local_run_launch(
         .map_err(|e| e.to_string())?;
     request.cwd = local_agents::local_agents_directory(request.cwd)?;
     let guard = lock(&request.id)?;
-    if local_agents::workspace_busy(std::path::Path::new(&request.cwd))? {
+    if local_agents::workspace_busy_for(
+        std::path::Path::new(&request.cwd),
+        Some(&request.id),
+        request.shared_cwd_with.as_deref(),
+    )? {
         return Err("Local launch deferred: directory busy".into());
     }
-    recover(&connection, &request.id, &request.cwd).await?;
+    recover(
+        &connection,
+        &request.id,
+        &request.cwd,
+        request.shared_cwd_with.as_deref(),
+    )
+    .await?;
     let client_id = transfers::local_machine_identity()?;
     let response=post(&connection,&request.id,"client-run",json!({"op":"begin","model":request.model,"cyber_access":request.cyber_access,"cyber_revision":request.cyber_revision,"client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
     let status = response.status();
@@ -436,6 +484,7 @@ mod protocol_tests {
             session_id: None,
             model: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let error =
             tauri::async_runtime::block_on(local_run_launch(request, connection)).unwrap_err();
@@ -472,6 +521,7 @@ mod protocol_tests {
             session_id: None,
             model: Some("selected-model".into()),
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let error =
             tauri::async_runtime::block_on(local_run_launch(request, connection)).unwrap_err();
@@ -541,6 +591,7 @@ mod protocol_tests {
             session_id: None,
             model: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let result =
             tauri::async_runtime::block_on(local_run_launch(request.clone(), connection.clone()))
@@ -634,6 +685,7 @@ mod process_tests {
             session_id: None,
             model: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let result = tauri::async_runtime::block_on(recover(
@@ -643,6 +695,7 @@ mod process_tests {
             },
             &id,
             root.path().to_str().unwrap(),
+            None,
         ));
         local_agents::local_agents_stop(id).unwrap();
         assert!(result
@@ -675,6 +728,7 @@ mod btw_smoke {
             model: Some("builtin/smart".into()),
             session_id: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let receipt =
             tauri::async_runtime::block_on(local_run_launch(request, connection.clone())).unwrap();
@@ -722,7 +776,7 @@ mod btw_smoke {
             api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
-        let request=local_agents::StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![]};
+        let request=local_agents::StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![], shared_cwd_with: None };
         let receipt =
             tauri::async_runtime::block_on(local_run_launch(request, connection.clone())).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(180);

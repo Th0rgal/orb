@@ -254,10 +254,19 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   });
   await expect(failedRow).toBeHidden();
 
-  // Navigate to m-question and open inline quick reply with 'r'
+  // Navigate to m-question and open unified Peek & Reply drawer with 'r'
   const questionRow = page.locator('[data-inbox-id="m-question"]');
   await questionRow.hover();
+  // Verify there is no duplicate unread dot inside the row next to the project dot
+  await expect(questionRow.locator(".inbox-unread-dot")).toHaveCount(0);
+  await expect(questionRow.locator(".inbox-project-dot")).toHaveCount(1);
+  // Verify keyboard shortcut badges are visible on row actions
+  await expect(questionRow.locator(".inbox-act-btn", { hasText: "Peek & Reply" }).locator("kbd")).toHaveText("R");
+  await expect(questionRow.locator(".inbox-act-btn.done").locator("kbd")).toHaveText("E");
+
   await page.keyboard.press("r");
+  await expect(questionRow.locator(".inbox-peek-drawer")).toBeVisible();
+  await expect(questionRow.locator(".inbox-peek-status-card")).toContainText("Should swipe-right mark the conversation as Done");
   const replyInput = questionRow.locator(".inbox-reply-input");
   await expect(replyInput).toBeFocused();
   await replyInput.fill("Use swipe-right with an Undo toast.");
@@ -271,7 +280,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   // Replied mission immediately leaves the actionable list
   await expect(questionRow).toBeHidden();
 
-  // Verify m-done shows the Asked/outcome overview, omits redundant Completed badge, shows failed child track pill, and supports Space peek preview
+  // Verify m-done shows the Asked/outcome overview, omits redundant Completed badge, shows failed child track pill, and supports Space unified peek & reply preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
   await expect(doneRow.locator(".inbox-task-text")).toHaveText(
     "Hide the sidebar scroll thumb until hover.",
@@ -296,6 +305,9 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
   await expect(doneRow.locator(".inbox-peek-drawer")).toContainText(
     "Hide the sidebar scroll thumb until hover.",
+  );
+  await expect(doneRow.locator(".inbox-peek-status-card")).toContainText(
+    "Updated the scroll thumb track to remain hidden",
   );
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeHidden();
@@ -361,11 +373,11 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
     const firstRow = page.locator(".inbox-row").first();
     if ((await firstRow.count()) > 0) {
       await firstRow.hover();
-      await firstRow.locator(".inbox-act-btn", { hasText: "Peek" }).click();
+      await firstRow.locator(".inbox-act-btn", { hasText: "Peek & Reply" }).click();
       await expect(firstRow.locator(".inbox-peek-drawer")).toBeVisible();
       await page.waitForTimeout(500);
       await page.screenshot({ path: join(outDir, "orb-desktop-inbox-prod-peek.png") });
-      await firstRow.locator(".inbox-act-btn", { hasText: "Peek" }).click();
+      await firstRow.locator(".inbox-act-btn", { hasText: "Close" }).click();
     }
     await page.evaluate(() => {
       document.documentElement.dataset.theme = "light";

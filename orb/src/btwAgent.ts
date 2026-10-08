@@ -170,7 +170,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    if(s.local&&s.launchPending){
     // Native recovery proves the prior attempt stopped before releasing Core.
     // Transport failures and live processes retain the fence.
-    await recoverLocalLaunch(s.id);
+    await recoverLocalLaunch(s.id,parent);
     await setClientMissionStatus(s.id,'interrupted');
     s={...s,launchPending:false,active:false};save(parent,s);
    }
@@ -233,7 +233,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     await createSide();
    }
   }
-  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
+  if(local&&binding){const old=localBinding(s!.id);await rememberBinding(s!.id,{harness:config.harness,bin,cwd:binding.cwd,model:config.model,sessionId:old?.sessionId});s!.launchPending=true;save(parent,s!);const receipt=await startLocal({id:s!.id,harness:config.harness,bin,cwd:binding.cwd,model:config.model,prompt,sessionId:old?.sessionId,sharedCwdWith:parent,imagePaths:paths.filter((_,i)=>attachments[i].media_type.startsWith('image/'))});s!.launchPending=false;s!.active=true;save(parent,s!);follow(s!.id,receipt);await appendClientTranscript(s!.id,'user',question,undefined,receipt);}
   s!.contextVersion=2;s!.conversationCursor=snapshot.cursor;s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
  }finally{locks.delete(key);}
  if(signal.aborted)return;

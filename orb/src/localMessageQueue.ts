@@ -7,7 +7,7 @@ import {sideQuestionKey} from './sideQuestionStorage';
 import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
-export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;lastSyncedText?:string;cut?:'restart'|'connection';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
+export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;lastSyncedText?:string;cut?:'restart'|'connection'|'background';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
 // IndexedDB clones every read. Keep unchanged rows stable so the 1s worker
 // heartbeat does not invalidate every mounted conversation and its markdown.
@@ -21,8 +21,10 @@ const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
 const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
 /** The agent keeps its session: it is told what happened instead of being handed the request as new work. */
-export const resumedPrompt=(prompt:string,cut:'restart'|'connection'='restart')=>{
- const note=`${cut==='connection'?'The connection was lost':'Orb restarted'} while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.`;
+export const resumedPrompt=(prompt:string,cut:'restart'|'connection'|'background'='restart')=>{
+ const note=cut==='background'
+  ?'Your previous headless turn ended while a background task was still running, before its completion could wake the CLI. Check what is already done (and inspect any task logs or re-run foreground commands if needed), then continue from there. Do not redo finished work.'
+  :`${cut==='connection'?'The connection was lost':'Orb restarted'} while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.`;
  const trimmed=prompt.trimStart();
  if(/^\/goal(?:\s|$)/.test(trimmed))return `${trimmed}\n\n${note}`;
  return `${note}\n\n${prompt}`;
@@ -30,8 +32,9 @@ export const resumedPrompt=(prompt:string,cut:'restart'|'connection'='restart')=
 /** What Resume sends when no message is waiting: the agent keeps its session and picks its work up. */
 export const resumePrompt='Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work.';
 const closedRun='The previous run ended before syncing finished. Your message and any response are saved on this computer. Retry to continue the conversation.';
-/** A turn that ended because the model API could not be reached did not fail at its task. */
-const CONNECTION=/ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|socket hang up|Can't reach the API server|Connection error|network connection was lost|fetch failed|network issue connecting to the server|servers are experiencing high traffic right now|no route to host|network is unreachable|no such host|connection reset by peer|i\/o timeout|TLS handshake timeout|unexpected EOF|UNAVAILABLE \(code 503\)|The service is currently unavailable/i;
+/** A turn that ended because the model API could not be reached or because a background task outlived the headless CLI turn did not fail at its task. */
+const CONNECTION=/ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|socket hang up|Can't reach the API server|Connection error|network connection was lost|fetch failed|network issue connecting to the server|servers are experiencing high traffic right now|no route to host|network is unreachable|no such host|connection reset by peer|i\/o timeout|TLS handshake timeout|unexpected EOF|UNAVAILABLE \(code 503\)|The service is currently unavailable|ended its headless turn while background task\(s\)/i;
+const BACKGROUND_HANDOFF=/ended its headless turn while background task\(s\)/i;
 export function cutByConnection(result:Pick<PollLocal,'text'|'error'|'retryable'>|undefined){
  if(!result)return false;
  if(result.error&&providerLimit(result.error)?.kind==='quota')return false;
@@ -52,9 +55,9 @@ const offline=(error:unknown)=>/Load failed|Failed to fetch|NetworkError|network
 /** Core was restarting or unreachable: the answer to the launch was lost, not refused. */
 const unreachable=(error:unknown)=>offline(error)||/\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out/i.test(String(error));
 const retryable=(row:QueuedLocalMessage)=>row.state==='error'||(row.state==='dispatching'&&!!row.error)||(row.state==='accepted'&&!!row.interrupted);
-function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'){
+function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'|'background'){
  stored.state='queued';stored.autoResumed=true;stored.cut=cut;stored.resumes=(stored.resumes??0)+1;
- if(cut==='connection')stored.retryAfter=Date.now()+connectionRetryDelayMs(stored.resumes);else delete stored.retryAfter;
+ if(cut==='connection'||cut==='background')stored.retryAfter=Date.now()+connectionRetryDelayMs(stored.resumes);else delete stored.retryAfter;
  delete stored.error;delete stored.interrupted;
  delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
 }
@@ -281,8 +284,9 @@ export function startLocalQueueWorker(){
    else await setClientMissionStatus(row.mission,status,row.receipt);
    if(!valid())return;
    if(resume){
+    const cut=BACKGROUND_HANDOFF.test(row.result.error??'')?'background':'connection';
     await saveSideThread(`${key}:recovered:${row.id}:${row.receipt.run_id??'unknown'}`,row);
-    await update(key,row.id,stored=>requeue(stored,'connection'));
+    await update(key,row.id,stored=>requeue(stored,cut));
     window.dispatchEvent(new Event('orb:refresh'));
     return;
    }
@@ -391,10 +395,11 @@ export function startLocalQueueWorker(){
      // itself was cut by the connection: nothing the user has to decide.
      const away=row.error===closedRun&&cutByConnection(row.result)&&(row.resumes??0)<RESUME_LIMIT;
      if(row.state==='error'&&(lost||away)){
+      const cut=lost?'restart':BACKGROUND_HANDOFF.test(row.result?.error??'')?'background':'connection';
       if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
       await update(key,row.id,stored=>{
        if(stored.state!=='error'||stored.error!==row.error||(lost&&stored.autoResumed))return;
-       requeue(stored,lost?'restart':'connection');
+       requeue(stored,cut);
       });
       again=true;
       continue;

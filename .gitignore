@@ -90,3 +90,5 @@ orb/playwright-report/
 # Python bytecode
 __pycache__/
 *.pyc
+.vercel
+.env*.local

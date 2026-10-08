@@ -12,6 +12,7 @@ import { workSummary } from "./workModel";
 export type InboxVerdict = "succeeded" | "failed" | "waiting" | "needs_input";
 
 export type InboxDigest = {
+  goal?: string;
   task: string;
   outcome: string;
   verdict: InboxVerdict;
@@ -20,7 +21,8 @@ export type InboxDigest = {
   updatedMs: number;
 };
 
-const STORAGE_KEY = "orb:inbox-digest:v4";
+const STORAGE_KEY = "orb:inbox-digest:v5";
+const LEGACY_STORAGE_KEY = "orb:inbox-digest:v4";
 const MAX_CACHE_ENTRIES = 160;
 const MAX_CONCURRENT = 4;
 
@@ -43,7 +45,7 @@ function ensureCacheLoaded(): Record<string, InboxDigest> {
   if (memoryCache && loadedStorageKey === key) return memoryCache;
   loadedStorageKey = key;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = localStorage.getItem(key) ?? localStorage.getItem(sideQuestionKey(LEGACY_STORAGE_KEY));
     memoryCache = raw ? (JSON.parse(raw) as Record<string, InboxDigest>) : {};
   } catch {
     memoryCache = {};
@@ -74,7 +76,7 @@ function makeCacheKey(missionId: string, updatedMs: number, model: string): stri
   return `${missionId}:${updatedMs}:${model}`;
 }
 
-export function getCachedInboxDigest(
+export function getExactCachedInboxDigest(
   missionId: string,
   updatedMs: number,
   model = inboxConfig().model,
@@ -83,12 +85,31 @@ export function getCachedInboxDigest(
   const cache = ensureCacheLoaded();
   const exact = cache[makeCacheKey(missionId, updatedMs, model)];
   if (exact) return exact;
-  // Also check if we have a digest for the same mission + updatedMs under default model
   const prefix = `${missionId}:${updatedMs}:`;
   for (const [k, v] of Object.entries(cache)) {
     if (k.startsWith(prefix)) return v;
   }
   return undefined;
+}
+
+export function getCachedInboxDigest(
+  missionId: string,
+  updatedMs: number,
+  model = inboxConfig().model,
+): InboxDigest | undefined {
+  const exact = getExactCachedInboxDigest(missionId, updatedMs, model);
+  if (exact) return exact;
+  // Stale-while-revalidate fallback: return the most recent cached digest for this missionId
+  // so rows render stably on frame 1 even if updatedMs shifted slightly on a poll.
+  const cache = ensureCacheLoaded();
+  const missionPrefix = `${missionId}:`;
+  let latest: InboxDigest | undefined;
+  for (const [k, v] of Object.entries(cache)) {
+    if (k.startsWith(missionPrefix) && (!latest || (v.updatedMs ?? 0) >= (latest.updatedMs ?? 0))) {
+      latest = v;
+    }
+  }
+  return latest;
 }
 
 export function storeInboxDigest(
@@ -133,17 +154,28 @@ function cleanAssistantText(raw: string): string {
 export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): string {
   const lines: string[] = [];
   lines.push(`Mission title: ${mission.title ?? "Untitled"}`);
+  if (mission.goal_objective && mission.goal_objective !== mission.title) {
+    lines.push(`Initial goal objective: ${mission.goal_objective.slice(0, 600)}`);
+  }
   lines.push(`Mission status: ${mission.status}`);
   if (mission.terminal_reason) lines.push(`Terminal reason: ${mission.terminal_reason}`);
   if (mission.status_message) lines.push(`Status message: ${mission.status_message}`);
   if (mission.remote_job?.error) lines.push(`Remote error: ${mission.remote_job.error}`);
 
+  let firstUser = "";
   let lastUser = "";
   const assistantBlocks: string[] = [];
   let lastError = "";
   const recentTools: Array<Extract<StreamItem, { kind: "tool" }>> = [];
 
   if (items && items.length > 0) {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === "user" && !it.queued && it.text.trim() && !isSyntheticUserMessage(it.text)) {
+        firstUser = cleanUserText(it.text);
+        break;
+      }
+    }
     let lastUserIdx = -1;
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
@@ -173,6 +205,13 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
   }
 
   if (Array.isArray(mission.history)) {
+    for (let i = 0; i < mission.history.length; i++) {
+      const h = mission.history[i];
+      if (h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content)) {
+        firstUser = firstUser || cleanUserText(h.content);
+        break;
+      }
+    }
     for (let i = mission.history.length - 1; i >= 0; i--) {
       const h = mission.history[i];
       if (!lastUser && h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content)) {
@@ -188,6 +227,9 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
     }
   }
 
+  if (firstUser && firstUser !== lastUser) {
+    lines.push(`Initial user request:\n${firstUser.slice(0, 500)}`);
+  }
   if (lastUser) lines.push(`Latest user request:\n${lastUser.slice(0, 700)}`);
   if (recentTools.length > 0) {
     const details = recentTools.slice(-8).map(formatToolDetail).join("; ");
@@ -205,12 +247,13 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
 }
 
 const DIGEST_PROMPT = [
-  "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
+  "Generate a Google AI Overview-style summary of this coding agent mission for the operator's Inbox.",
   "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-  '{"task":"<concise 4-10 word summary of the user\'s latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
+  '{"goal":"<concise 4-8 word headline of what the mission\'s goal is or evolved into>","task":"<concise 4-10 word summary of the user\'s latest follow-up request, or empty string if there was no follow-up or it repeats the goal>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
   "Rules:",
   "- Write in the same language as the conversation.",
-  "- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
+  "- \"goal\" must be a crisp, scannable 4-8 word title capturing the core mission objective (or what it evolved into), e.g. \"Morpho Midnight Solidity Import & EVM Parity\". Strip boilerplate like \"Complete the existing...\" or \"Mission to...\".",
+  "- If there is no follow-up request different from the goal, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
   "- Write \"outcome\" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker.",
   "- Never write vague boilerplate like \"Mission stopped and is currently blocked\" or \"Finished the task\".",
   "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
@@ -224,11 +267,13 @@ export function parseDigestJson(raw: string, updatedMs: number, model?: string):
   if (start < 0 || end <= start) return null;
   try {
     const parsed = JSON.parse(trimmed.slice(start, end + 1)) as {
+      goal?: unknown;
       task?: unknown;
       outcome?: unknown;
       overview?: unknown;
       verdict?: unknown;
     };
+    const goal = typeof parsed.goal === "string" ? parsed.goal.trim() : "";
     const task = typeof parsed.task === "string" ? parsed.task.trim() : "";
     const outcomeRaw =
       typeof parsed.outcome === "string" && parsed.outcome.trim()
@@ -237,13 +282,14 @@ export function parseDigestJson(raw: string, updatedMs: number, model?: string):
           ? parsed.overview
           : "";
     const outcome = outcomeRaw.trim();
-    if (!task && !outcome) return null;
+    if (!goal && !task && !outcome) return null;
     const rawVerdict = typeof parsed.verdict === "string" ? parsed.verdict.trim().toLowerCase() : "";
     const verdict: InboxVerdict =
       rawVerdict === "failed" || rawVerdict === "waiting" || rawVerdict === "needs_input"
         ? rawVerdict
         : "succeeded";
     return {
+      ...(goal ? { goal } : {}),
       task,
       outcome,
       verdict,
@@ -352,7 +398,7 @@ export function requestInboxDigest(
   if (!hasConversation) return;
 
   const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
-  if (getCachedInboxDigest(mission.id, updatedMs, cfg.model)) return;
+  if (getExactCachedInboxDigest(mission.id, updatedMs, cfg.model)) return;
   if (inFlight.has(cacheKey)) return;
   const lastFail = failedKeys.get(cacheKey);
   if (lastFail && Date.now() - lastFail < 60_000) return;

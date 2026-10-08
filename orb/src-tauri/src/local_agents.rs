@@ -76,7 +76,7 @@ pub struct WriteReport {
     pub skipped: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct StartRequest {
     pub cyber_revision: Option<uuid::Uuid>,
     pub cyber_access: Option<crate::cyber_access::Mode>,
@@ -90,6 +90,8 @@ pub struct StartRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub shared_cwd_with: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -112,6 +114,7 @@ struct Run {
     mcp_wrapped: bool,
     generation: String,
     cwd: PathBuf,
+    shared_cwd_with: Option<String>,
     child: Arc<Mutex<Child>>,
     text: Arc<Output>,
     done: Arc<AtomicBool>,
@@ -314,8 +317,16 @@ pub(crate) fn start_with_env_fenced(
         }
     }
     let canonical_cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
+    let shared_parent = request
+        .shared_cwd_with
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if map.iter().any(|(id, run)| {
         id != &request.id
+            && shared_parent != Some(id.as_str())
+            && run.shared_cwd_with.as_deref() != Some(request.id.as_str())
+            && (shared_parent.is_none() || run.shared_cwd_with.as_deref() != shared_parent)
             && !run.done.load(Ordering::SeqCst)
             && run.cwd.canonicalize().ok().as_ref() == Some(&canonical_cwd)
     }) {
@@ -350,6 +361,7 @@ pub(crate) fn start_with_env_fenced(
         mcp_wrapped: env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER"),
         generation: uuid::Uuid::new_v4().to_string(),
         cwd,
+        shared_cwd_with: shared_parent.map(str::to_owned),
         child,
         text,
         done,
@@ -606,6 +618,13 @@ fn find_orphan_mission_pids(id: &str, session_id: Option<&str>) -> Vec<u32> {
     pids
 }
 
+pub(crate) fn has_orphan_mission_processes(id: &str) -> bool {
+    let session_id = crate::local_bindings(None, None)
+        .ok()
+        .and_then(|b| b[id]["sessionId"].as_str().map(str::to_owned));
+    !find_orphan_mission_pids(id, session_id.as_deref()).is_empty()
+}
+
 fn stop_orphan_mission_processes(id: &str) {
     let session_id = crate::local_bindings(None, None)
         .ok()
@@ -697,6 +716,7 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
         mcp_wrapped: false,
         generation: uuid::Uuid::new_v4().to_string(),
         cwd: PathBuf::from(cwd_str),
+        shared_cwd_with: None,
         child: Arc::clone(&child),
         text: Arc::clone(&text),
         done: Arc::clone(&done),
@@ -825,15 +845,26 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
             }
             thread::sleep(Duration::from_millis(500));
         }
-        stream.success = true;
+        stream.reconcile_orphan_transcript_turn(&home, floor_step);
         text.antigravity_progress(&stream);
         text.publish_activities();
         if let Ok(mut c) = child.lock() {
             let _ = c.kill();
             let _ = c.wait();
         }
+        let finish_result = stream.finish();
+        if let Err(ref message) = finish_result {
+            if let Ok(mut slot) = error.lock() {
+                if slot.is_none() {
+                    *slot = Some(message.clone());
+                }
+            }
+        }
+        let failed = error.lock().is_ok_and(|err| err.is_some());
         if let Ok(mut code) = exit_code.lock() {
-            if code.is_none() {
+            if failed {
+                *code = Some(1);
+            } else if code.is_none() {
                 *code = Some(0);
             }
         }
@@ -845,7 +876,7 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
             exit_code: *exit_code.lock().unwrap(),
             session_id: session_id.lock().unwrap().clone(),
             error: error.lock().unwrap().clone(),
-            retryable: false,
+            retryable: stream.is_retryable(),
             resumed: true,
             waiting_since: None,
         };
@@ -2761,6 +2792,7 @@ mod tests {
             model: None,
             session_id: Some("old-native-session".into()),
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let error = spawn_harness(
             &request,
@@ -2824,6 +2856,7 @@ mod tests {
                 prompt: "hello".into(),
                 model: Some("agy-demo".into()),
                 session_id: Some("native-session".into()),
+                shared_cwd_with: None,
             };
             let output = Arc::new(Output::default());
             let session = Arc::new(Mutex::new(None));
@@ -2991,6 +3024,7 @@ mod tests {
             prompt: "hi".into(),
             model: Some("xai/grok".into()),
             session_id: None,
+            shared_cwd_with: None,
         };
         let mut grok = fresh.clone();
         grok.harness = "grok".into();
@@ -3361,6 +3395,7 @@ mod tests {
             model: None,
             session_id: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         };
         let output = Arc::new(Output::default());
         let mut child = spawn_piped(
@@ -3417,6 +3452,7 @@ printf '%s\n' '{"type":"result"}'
             model: None,
             session_id: Some("existing-session".into()),
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3563,6 +3599,7 @@ printf '%s\n' '{"type":"result"}'
             model: None,
             session_id: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3639,6 +3676,7 @@ printf '%s\n' '{"type":"result"}'
             model: None,
             session_id: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3714,6 +3752,7 @@ printf '%s\n' '{"type":"result"}'
             prompt: "test".into(),
             model: None,
             session_id: None,
+            shared_cwd_with: None,
         };
         local_agents_start(request.clone()).unwrap();
         let initial_generation = native_generation(&request.id).unwrap();
@@ -3751,6 +3790,7 @@ printf '%s\n' '{"type":"result"}'
             model: None,
             session_id: None,
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let generation = native_generation(&id).unwrap();
@@ -3785,6 +3825,7 @@ printf '%s\n' '{"type":"result"}'
                 model: None,
                 session_id: None,
                 image_paths: vec![],
+                shared_cwd_with: None,
             })
             .unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -3847,6 +3888,7 @@ printf '%s\n' '{"type":"result"}'
             model: None,
             session_id: Some("00000000-0000-0000-0000-000000000001".into()),
             image_paths: vec![],
+            shared_cwd_with: None,
         })
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -3890,8 +3932,7 @@ printf '%s\n' '{"type":"result"}'
                 prompt: "test".into(),
                 model: None,
                 session_id: resume.map(Into::into),
-                image_paths: vec![],
-            })
+                image_paths: vec![], shared_cwd_with: None, })
             .unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while !local_agents_poll(id.clone()).unwrap().done {
@@ -3938,7 +3979,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into()}).unwrap();
+        local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into(), shared_cwd_with: None }).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -3995,13 +4036,27 @@ mod plan_smoke {
 }
 
 pub fn workspace_busy(root: &std::path::Path) -> Result<bool, String> {
+    workspace_busy_for(root, None, None)
+}
+
+pub fn workspace_busy_for(
+    root: &std::path::Path,
+    self_id: Option<&str>,
+    shared_cwd_with: Option<&str>,
+) -> Result<bool, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let shared_parent = shared_cwd_with.map(str::trim).filter(|s| !s.is_empty());
     Ok(runs()
         .lock()
         .map_err(|e| e.to_string())?
-        .values()
-        .any(|run| {
-            !run.done.load(Ordering::SeqCst) && run.cwd.canonicalize().ok().as_ref() == Some(&root)
+        .iter()
+        .any(|(id, run)| {
+            self_id != Some(id.as_str())
+                && shared_parent != Some(id.as_str())
+                && (self_id.is_none() || run.shared_cwd_with.as_deref() != self_id)
+                && (shared_parent.is_none() || run.shared_cwd_with.as_deref() != shared_parent)
+                && !run.done.load(Ordering::SeqCst)
+                && run.cwd.canonicalize().ok().as_ref() == Some(&root)
         }))
 }
 
@@ -4048,6 +4103,7 @@ mod directory_tests {
             prompt: "test".into(),
             model: None,
             session_id: None,
+            shared_cwd_with: None,
             image_paths: vec![],
         };
         start_with_env(request.clone(), &[]).unwrap();
@@ -4073,10 +4129,30 @@ mod directory_tests {
                 cyber_access: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 cwd: root.path().join(".").to_string_lossy().into(),
-                ..request
+                ..request.clone()
             },
             &[],
         );
+        let side_id = uuid::Uuid::new_v4().to_string();
+        start_with_env(
+            StartRequest {
+                id: side_id.clone(),
+                shared_cwd_with: Some(first.clone()),
+                ..request.clone()
+            },
+            &[],
+        )
+        .expect("side agent sharing parent cwd should launch while parent is running");
+        assert!(
+            !workspace_busy_for(root.path(), Some(&first), None).unwrap(),
+            "side agent must not block parent mission from using its own directory"
+        );
+        assert!(
+            workspace_busy_for(root.path(), Some(&uuid::Uuid::new_v4().to_string()), None).unwrap(),
+            "unrelated mission must still see directory as busy"
+        );
+        local_agents_stop(side_id.clone()).unwrap();
+        runs().lock().unwrap().remove(&side_id);
         local_agents_stop(first.clone()).unwrap();
         runs().lock().unwrap().remove(&first);
         assert!(second

@@ -75,6 +75,7 @@ export type InboxItem = {
   projectSlug: string;
   projectTitle: string;
   headline: string;
+  goalSummary?: string;
   lastRequest?: string;
   workReceiptSummary?: string;
   verdict: InboxVerdict;
@@ -944,6 +945,77 @@ export function extractPeekTurns(
 
 const RETRYABLE_STATUSES = new Set(["failed", "interrupted", "blocked", "not_feasible"]);
 
+export function condenseMissionHeadline(raw: string, projectTitle?: string): string {
+  let s = raw.trim().replace(/^\/goal\s+/i, "").trim();
+  if (!s) return "";
+  // Strip verbose imperative boilerplate when the title is long
+  if (s.length > 44) {
+    s = s
+      .replace(
+        /^(?:please\s+)?(?:complete|continue|finish|execute|implement|resume|work\s+on)\s+(?:the\s+)?(?:existing\s+|current\s+|remaining\s+)?/i,
+        "",
+      )
+      .replace(/\s+(?:mission|goal|objective|roadmap|task)\b(?:\s*[,:—-]\s*with\s+the.*|\s+with\s+the.*)?$/i, "")
+      .replace(/[,;]\s+with\s+the\s+.*$/i, "")
+      .trim();
+    if (projectTitle) {
+      const slugMatch = s.match(/^([a-z0-9_.-]+\/[a-z0-9_.-]+)\s+(.+)$/i);
+      if (slugMatch) {
+        const repoName = slugMatch[1].split("/")[1]?.toLowerCase() ?? "";
+        const rest = slugMatch[2].replace(/\s+mission\b.*$/i, "").trim();
+        if (rest.length >= 4) {
+          if (repoName && projectTitle.toLowerCase().includes(repoName)) {
+            s = rest;
+          } else {
+            s = `${slugMatch[1]} · ${rest}`;
+          }
+        }
+      }
+    }
+    if (s.length > 0) {
+      s = s.charAt(0).toUpperCase() + s.slice(1);
+    }
+  }
+  return clipToSentence(s, 58);
+}
+
+function extractGoalSummary(
+  mission: Mission,
+  headline: string,
+  firstUser?: string,
+  lastRequest?: string,
+): string | undefined {
+  const candidates: string[] = [];
+  if (mission.goal_objective?.trim()) {
+    candidates.push(mission.goal_objective.trim());
+  }
+  if (firstUser?.trim() && !isSyntheticUserMessage(firstUser)) {
+    const cleanFirst = clipToSentence(stripMarkdownToProse(cleanUserMarkdown(firstUser)), 110);
+    // Only include firstUser as a separate goal summary if there was a later distinct lastRequest
+    // or if the mission is explicitly a goal mission.
+    if (
+      (lastRequest && cleanFirst.toLowerCase() !== lastRequest.toLowerCase()) ||
+      mission.goal_mode ||
+      mission.title?.trim().startsWith("/goal")
+    ) {
+      candidates.push(firstUser.trim());
+    }
+  }
+  const normHead = headline.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normLast = (lastRequest ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  for (const raw of candidates) {
+    const clean = clipToSentence(stripMarkdownToProse(cleanUserMarkdown(raw)), 110);
+    if (!clean) continue;
+    const norm = clean.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!norm || norm === normHead || norm === normLast) continue;
+    if (normHead.length >= 16 && norm.startsWith(normHead.slice(0, 16)) && Math.abs(norm.length - normHead.length) < 12) {
+      continue;
+    }
+    return clean;
+  }
+  return undefined;
+}
+
 export function buildInboxItem(
   mission: Mission,
   projects: ReadonlyArray<ProjectSummary>,
@@ -963,12 +1035,15 @@ export function buildInboxItem(
     (projectSlug === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : projectSlug);
 
   const rawTitle = displayTitle(mission.title);
-  const firstUserItem = items?.find((i) => i.kind === "user" && !i.queued && i.text.trim())?.text;
+  const firstUserItem = items?.find(
+    (i): i is Extract<StreamItem, { kind: "user" }> =>
+      i.kind === "user" && !i.queued && Boolean(i.text.trim()),
+  )?.text;
   const firstUser = firstUserItem || mission.history?.find((h) => h.role === "user")?.content;
   let expandedTitle = rawTitle;
   if (rawTitle && (rawTitle.endsWith("…") || rawTitle.endsWith("...")) && rawTitle.length <= 46) {
     const stem = rawTitle.replace(/(?:…|\.\.\.)$/, "").trim().toLowerCase();
-    const candidateSource = (mission.goal_objective || firstUser || "")
+    const candidateSource = String(mission.goal_objective || firstUser || "")
       .trim()
       .split(/\r?\n/, 1)[0]
       ?.trim();
@@ -977,20 +1052,20 @@ export function buildInboxItem(
     }
   }
   let headline =
-    expandedTitle ||
-    (firstUser ? clipToSentence(firstUser, 84) : "") ||
+    (expandedTitle ? condenseMissionHeadline(expandedTitle, projectTitle) : "") ||
+    (firstUser ? condenseMissionHeadline(clipToSentence(firstUser, 84), projectTitle) : "") ||
     "Untitled conversation";
 
   const isGoal = Boolean(
     mission.goal_mode || (mission.title && mission.title.trim().startsWith("/goal")),
   );
   if (headline.trim().toLowerCase() === projectTitle.trim().toLowerCase()) {
-    const goalLines = (mission.goal_objective ?? firstUser ?? "")
+    const goalLines = String(mission.goal_objective ?? firstUser ?? "")
       .split(/\r?\n/)
-      .map((l) => stripMarkdownToProse(l))
-      .filter((l) => l && l.toLowerCase() !== projectTitle.trim().toLowerCase());
+      .map((l: string) => stripMarkdownToProse(l))
+      .filter((l: string) => Boolean(l) && l.toLowerCase() !== projectTitle.trim().toLowerCase());
     if (goalLines.length > 0) {
-      headline = clipToSentence(goalLines[0], 84);
+      headline = condenseMissionHeadline(goalLines[0], projectTitle);
     } else if (isGoal) {
       headline = `${projectTitle} objective`;
     }
@@ -998,6 +1073,7 @@ export function buildInboxItem(
 
   const summary = extractSummary(mission, items, interaction);
   const lastRequest = extractLastRequest(mission, items);
+  const goalSummary = extractGoalSummary(mission, headline, firstUser, lastRequest);
   const workReceiptSummary = extractLatestWorkReceipt(items);
   const verdict = resolveVerdict(mission, summary, interaction);
   const { badge, tone } = resolveBadgeAndTone(mission, summary, interaction);
@@ -1026,6 +1102,7 @@ export function buildInboxItem(
     projectSlug,
     projectTitle,
     headline,
+    goalSummary,
     lastRequest,
     workReceiptSummary,
     verdict,

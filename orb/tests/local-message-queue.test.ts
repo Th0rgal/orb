@@ -514,3 +514,31 @@ it('does not append duplicate identical assistant bubbles when an auto-resumed t
  expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
 
+it('auto-resumes an Antigravity turn that ended while a background task was still running',async()=>{
+ expect(cutByConnection({
+  text:'I am verifying the Lean 4.31.0 reference proof for succinct-safe and will continue creating the three new task families once the check completes.',
+  error:'Antigravity ended its headless turn while background task(s) ddd67091-4a2f-4fba-b905-7a8144dee4eb/task-2964 were still running; resume this conversation to inspect task logs or re-run foreground commands',
+ })).toBe(true);
+
+ mocks.active=false;
+ mocks.follow.mockResolvedValueOnce({
+  text:'I am verifying the Lean 4.31.0 reference proof for succinct-safe and will continue creating the three new task families once the check completes.',
+  done:true,
+  exit_code:1,
+  error:'Antigravity ended its headless turn while background task(s) ddd67091-4a2f-4fba-b905-7a8144dee4eb/task-2964 were still running; resume this conversation to inspect task logs or re-run foreground commands',
+  retryable:true,
+  resumed:true,
+ });
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage({...request,harness:'antigravity',bin:'agy'},'first');
+ await vi.advanceTimersByTimeAsync(100);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(mocks.status).toHaveBeenCalledWith('mission','interrupted',expect.anything());
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'queued',autoResumed:true,cut:'background',resumes:1});
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ expect(mocks.launch.mock.calls[1][0].prompt).toBe(resumedPrompt('first','background'));
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+
+

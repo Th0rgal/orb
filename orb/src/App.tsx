@@ -1331,6 +1331,7 @@ export default function App() {
     setProjectMissions({});
     setCompletedMissions([]);
   }, { defer: true }));
+  let prevInboxMissions: Mission[] = [];
   const inboxMissions = createMemo(() => {
     const byId = new Map<string, Mission>();
     const put = (m: Mission) => {
@@ -1343,17 +1344,17 @@ export default function App() {
       const prevTs = Date.parse(prev.updated_at || prev.created_at || "") || 0;
       const nextTs = Date.parse(m.updated_at || m.created_at || "") || 0;
       if (nextTs >= prevTs) {
-        byId.set(m.id, {
-          ...prev,
-          ...m,
-          history: m.history?.length ? m.history : prev.history,
-        });
+        if (!prev.history?.length || m.history?.length) {
+          byId.set(m.id, m);
+        } else {
+          byId.set(m.id, { ...prev, ...m, history: prev.history });
+        }
       } else {
-        byId.set(m.id, {
-          ...m,
-          ...prev,
-          history: prev.history?.length ? prev.history : m.history,
-        });
+        if (!m.history?.length || prev.history?.length) {
+          byId.set(m.id, prev);
+        } else {
+          byId.set(m.id, { ...m, ...prev, history: m.history });
+        }
       }
     };
     for (const rows of Object.values(projectMissions())) {
@@ -1361,7 +1362,8 @@ export default function App() {
     }
     for (const m of completedMissions()) put(m);
     for (const m of missions()) put(m);
-    return Array.from(byId.values());
+    prevInboxMissions = mergeById(prevInboxMissions, Array.from(byId.values()));
+    return prevInboxMissions;
   });
   const currentMissionId = createMemo(() => {
     const id = selected();
@@ -2636,7 +2638,10 @@ function MissionDock(p: {
 function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
   const [error, setError] = createSignal("");
-  onMount(() => { if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e))); });
+  onMount(() => {
+    if (p.id) void loadTranscript(p.id).catch(() => {});
+    if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e)));
+  });
   return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show>}</Show>;
 }
 
@@ -2866,7 +2871,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
     void refresh();
     // History must load even when the live connection has not opened yet.
-    void resync(true);
+    let initialReady = true;
+    void resync(true).then(() => { if (nearBottom) scrollIfPinned(); });
     const stopStream = streamMission(
       p.id,
       (ev) => {
@@ -2883,7 +2889,14 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         else applyLive(ev);
       },
       () => void resync(true),
-      () => void resync(true).then(()=>{if(nearBottom)scrollIfPinned();}),
+      () => {
+        if (initialReady) {
+          initialReady = false;
+          if (nearBottom) scrollIfPinned();
+          return;
+        }
+        void resync(true).then(() => { if (nearBottom) scrollIfPinned(); });
+      },
     );
     // Slow status poll — the stream is authoritative for content, but the
     // composer busy state shouldn't depend on it alone.
@@ -2971,7 +2984,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
-    const canonical = withInitialPrompt(items(), mission(), receipt);
+    const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
     const known = new Set(canonical.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId:undefined));
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
@@ -3346,7 +3359,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <Show when={sendError() || error() || queueError()}>
             <ErrorNotice error={(sendError() || error() || queueError())!} title={sendError() ? "Couldn’t send your message" : "Couldn’t load the conversation"} onDismiss={sendError() ? undefined : () => { setError(null); setQueueError(null); }}><Show when={sendError()&&optimistic()}><button onClick={()=>{const draft=optimistic();if(draft?.retry)draft.retry();else if(draft)void sendMsg(draft.text,draft.images,followAttach(),draft.id);}}>Retry</button></Show></ErrorNotice>
           </Show>
-          <Show when={latestChecklist(items())?.tasks.length}>
+          <Show when={latestChecklist(viewItems())?.tasks.length}>
             <button class="tasks-jump" onClick={() => { const tasks = scroller?.querySelector<HTMLElement>(".mission-tasks"); tasks?.scrollIntoView({ behavior: "smooth", block: "center" }); tasks?.focus({ preventScroll: true }); }}>Tasks</button>
           </Show>
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={setMission} onError={setError} onFork={p.onFork} />

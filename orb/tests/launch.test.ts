@@ -129,3 +129,35 @@ it('preserves the draft turn identity when the server allocates the mission id',
  expect(accepted[0].key).toBe(draft[0].key);
  expect(accepted).toHaveLength(1);
 });
+it('optimistically seeds multi-turn mission.history while awaiting the event log snapshot',()=>{
+ const m=mission({
+  id:'yukon',
+  history:[
+   {role:'user',content:'First prompt'},
+   {role:'assistant',content:'First reply'},
+   {role:'user',content:'Latest prompt'},
+   {role:'assistant',content:'Latest reply'},
+  ],
+ });
+ const seeded=withInitialPrompt([],m,undefined,true);
+ expect(seeded.map(i=>`${i.kind}:${'text' in i?i.text:''}`)).toEqual([
+  'user:First prompt',
+  'text:First reply',
+  'user:Latest prompt',
+  'text:Latest reply',
+ ]);
+ // Once awaiting is false and canonical events have arrived, only canonical items are returned
+ const canonical=withInitialPrompt(buildTranscript([
+  {type:'user_message',data:{id:'u1',content:'First prompt'}},
+  {type:'assistant_message',data:{id:'a1',content:'First reply'}},
+  {type:'user_message',data:{id:'u2',content:'Latest prompt'}},
+  {type:'assistant_message',data:{id:'a2',content:'Latest reply'}},
+ ]),m,undefined,false);
+ expect(canonical.map(i=>`${i.kind}:${'text' in i?i.text:''}`)).toEqual([
+  'user:First prompt',
+  'text:First reply',
+  'user:Latest prompt',
+  'text:Latest reply',
+ ]);
+});
+

@@ -178,7 +178,7 @@ it('launches locally in the parent folder with a fresh session identity',async()
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',history:[],tags:id==='local-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'local-child'});
  await askBtwAgent('local-parent','Read this folder','context',[],new AbortController().signal,()=>{});
- expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined}));
+ expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined,sharedCwdWith:'local-parent'}));
 });
 
 it('does not turn an empty successful exit into a fabricated answer',async()=>{
@@ -434,7 +434,7 @@ it('recovers a failed native launch before retrying its pending Core mission',as
  expect(setClientMissionStatus).not.toHaveBeenCalled();
  vi.mocked(setClientMissionStatus).mockImplementationOnce(async()=>{settled=true;});
  await ask();
- expect(recoverLocalLaunch).toHaveBeenCalledWith('failed-launch-child');
+ expect(recoverLocalLaunch).toHaveBeenCalledWith('failed-launch-child','failed-launch-parent');
  expect(setClientMissionStatus).toHaveBeenCalledWith('failed-launch-child','interrupted');
  expect(btwSession('failed-launch-parent')?.id).toBe('retry-launch-child');
 });

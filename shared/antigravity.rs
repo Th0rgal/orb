@@ -700,6 +700,10 @@ impl Stream {
             .into_iter()
             .chain(self.active_command_steps.iter().copied())
             .min();
+        self.scan_transcript_background_tasks(&content, min_turn_step);
+    }
+
+    fn scan_transcript_background_tasks(&mut self, content: &str, min_turn_step: Option<u64>) {
         for line in content.lines() {
             let Ok(entry) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -730,6 +734,68 @@ impl Stream {
                     *running = false;
                 }
             }
+        }
+    }
+
+    /// Reconcile an orphaned `agy` process whose stdout pipe was no longer attached to Orb
+    /// when it exited. Inspects `transcript.jsonl` after the turn's `USER_INPUT` step (`floor_step`)
+    /// to verify whether the turn ended on a `DONE` `PLANNER_RESPONSE` without tool calls or
+    /// `ERROR_MESSAGE` steps, and checks for unfinished background tasks.
+    pub fn reconcile_orphan_transcript_turn(
+        &mut self,
+        home: &std::path::Path,
+        floor_step: Option<u64>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let path = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(&session)
+            .join(".system_generated/logs/transcript.jsonl");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let entries: Vec<Value> = content
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect();
+        let floor = floor_step.or_else(|| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e["type"] == "USER_INPUT")
+                .and_then(|e| e["step_index"].as_u64())
+        });
+        let Some(floor) = floor else {
+            return;
+        };
+        self.scan_transcript_background_tasks(&content, Some(floor + 1));
+        let mut last_step_type = "";
+        let mut last_step_status = "";
+        let mut last_has_tools = false;
+        let mut saw_error_step = false;
+        for entry in entries
+            .iter()
+            .filter(|e| e["step_index"].as_u64().is_some_and(|idx| idx > floor))
+        {
+            let step_type = entry["type"].as_str().unwrap_or("");
+            let status = entry["status"].as_str().unwrap_or("");
+            if step_type == "ERROR_MESSAGE" {
+                saw_error_step = true;
+            }
+            last_step_type = step_type;
+            last_step_status = status;
+            last_has_tools = entry["tool_calls"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty());
+        }
+        if !saw_error_step
+            && last_step_type == "PLANNER_RESPONSE"
+            && last_step_status == "DONE"
+            && !last_has_tools
+        {
+            self.success = true;
         }
     }
 
@@ -811,13 +877,15 @@ impl Stream {
     }
 
     pub fn is_retryable(&self) -> bool {
-        !self.identity_error
-            && !self.success
-            && self.session.is_some()
-            && self
-                .error_marker
-                .as_ref()
-                .is_some_and(|marker| marker.retryable)
+        if self.identity_error || self.session.is_none() {
+            return false;
+        }
+        if self.success {
+            return !self.unfinished_background_tasks().is_empty();
+        }
+        self.error_marker
+            .as_ref()
+            .is_some_and(|marker| marker.retryable)
     }
 
     /// The terminal receipt repeats only the last response, not every update.
@@ -1616,5 +1684,104 @@ mod tests {
             }
         }));
         assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn reconcile_orphan_transcript_turn_rejects_unfinished_background_tasks_and_crashed_turns() {
+        let home = tempfile::tempdir().unwrap();
+        let session = "ddd67091-4a2f-4fba-b905-7a8144dee4eb";
+        let task_id = format!("{session}/task-2964");
+        let logs_dir = home
+            .path()
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        // Case 1: Orphan exited right after launching a background task (step 2964 RUNNING + step 2965 PLANNER_RESPONSE).
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            [
+                json!({
+                    "step_index": 2642,
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": "Oui vas-y"
+                }),
+                json!({
+                    "step_index": 2963,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [{"name": "run_command", "args": {"CommandLine": "lean --stdin"}}]
+                }),
+                json!({
+                    "step_index": 2964,
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": format!("Created At: 2026-10-07T17:49:38+01:00\nTool is running as a background task with task id: {task_id}\nTask Description: lean --stdin")
+                }),
+                json!({
+                    "step_index": 2965,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "I am verifying the Lean 4.31.0 reference proof for succinct-safe and will continue creating the three new task families once the check completes."
+                }),
+            ]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut stream = Stream::default();
+        stream.session = Some(session.to_owned());
+        stream.reconcile_orphan_transcript_turn(home.path(), Some(2642));
+        let err = stream.finish().unwrap_err();
+        assert!(err.contains(&task_id), "unexpected err: {err}");
+        assert!(err.contains("while background task(s)"));
+
+        // Case 2: Background task finished and final PLANNER_RESPONSE completed cleanly.
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            [
+                json!({
+                    "step_index": 2642,
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": "Oui vas-y"
+                }),
+                json!({
+                    "step_index": 2964,
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": format!("Created At: 2026-10-07T17:49:38+01:00\nTool is running as a background task with task id: {task_id}\nTask Description: lean --stdin")
+                }),
+                json!({
+                    "step_index": 2966,
+                    "type": "SYSTEM_MESSAGE",
+                    "status": "DONE",
+                    "content": format!("<SYSTEM_MESSAGE>\nTask id \"{task_id}\" finished with result:\nThe command exited with code 0.\n</SYSTEM_MESSAGE>")
+                }),
+                json!({
+                    "step_index": 2967,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "All three task families are complete."
+                }),
+            ]
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut clean_stream = Stream::default();
+        clean_stream.session = Some(session.to_owned());
+        clean_stream.reconcile_orphan_transcript_turn(home.path(), Some(2642));
+        assert!(clean_stream.finish().is_ok());
     }
 }

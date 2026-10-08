@@ -35,6 +35,7 @@ export function parseChecklist(name: string, input: unknown): TaskItem[] | null 
 export function latestChecklist(items: StreamItem[]): Checklist | null {
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
+    if (item.kind === "user" && !item.queued) return null;
     if (item.kind !== "tool") continue;
     const tasks = parseChecklist(item.name, item.args);
     if (tasks !== null) return { key: item.key, tasks };

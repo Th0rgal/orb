@@ -49,18 +49,35 @@ export function putTranscriptHeight(id: string, height: number) {
   if (height > 0) cachePut(heightKey(id), Math.round(height));
 }
 
+function mergeStreamBySequence(older: StreamEvent[], newer: StreamEvent[]): StreamEvent[] {
+  if (!older.length) return newer;
+  if (!newer.length) return older;
+  const seen = new Set<string>();
+  const idOf = (ev: StreamEvent) => ev.sequence !== undefined ? `seq:${ev.sequence}:${ev.type}` : ev.storedId !== undefined ? `id:${ev.storedId}:${ev.type}` : ev.eventId ? `ev:${ev.eventId}:${ev.type}` : undefined;
+  const merged: StreamEvent[] = [];
+  for (const ev of [...older, ...newer]) {
+    const id = idOf(ev);
+    if (id) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    merged.push(ev);
+  }
+  return merged.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+}
+
 async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   const version=connectionVersion();const check=()=>{if(version!==connectionVersion())throw Error("Connection changed during transcript load.");};
-  // Read pending first, then delivered history. Any delivery racing this read
+  // Start pending queue read in parallel with the event page read rather than
+  // blocking the event log round-trip on /queue. Any delivery racing this read
   // wins by message identity in the reducer; held SSE fills the live boundary.
   let queueError: string | undefined;
-  const queued = await listQueuedMessages(id).catch(error => {
+  const queuedPromise = listQueuedMessages(id).catch(error => {
     queueError = `Queued messages could not refresh: ${error instanceof Error ? error.message : String(error)}`;
     return [];
   });
-  check();
   const previous=peekReadyTranscript(id);
-  const stream:StreamEvent[]=[...(previous?.stream??[])];
+  let stream:StreamEvent[]=[...(previous?.stream??[])];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
   let resets=0;
   for(;;){
@@ -68,10 +85,29 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    check();
    if(page.reset){if(resets++)throw Error('Event history changed repeatedly during recovery.');stream.length=0;cursor=undefined;before=undefined;hasOlder=undefined;continue;}
    for(const row of page.events){const event=storedToStream(row);if(event)stream.push(event);}
-   if(cursor===undefined){before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;break;}
+   if(cursor===undefined){
+    before=page.nextCursor;hasOlder=page.hasMore;cursor=page.pageMax??0;
+    // When a tool-heavy turn exceeds the 200-event tail window (e.g. hundreds
+    // or thousands of consecutive tool_call/tool_result events since the last
+    // user/assistant message), the raw tail page has hasMore=true but lacks
+    // the recent conversation turns. Fetch the lightweight conversational
+    // spine (view=transcript) before nextCursor so the latest messages always
+    // appear immediately above the active work fold on first paint.
+    if(hasOlder && before !== undefined && !stream.some(e => e.type === "user_message" || e.type === "assistant_message")){
+     const spinePage = await getMissionEventPage(id, { before, view: "transcript" }).catch(() => null);
+     check();
+     if(spinePage?.events?.length){
+      const spine = spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+      stream = mergeStreamBySequence(spine, stream);
+     }
+    }
+    break;
+   }
    if(page.nextCursor!==undefined){if(page.nextCursor<=cursor)throw Error('Event cursor did not advance.');cursor=page.nextCursor;}
    if(!page.hasMore)break;
   }
+  const queued = await queuedPromise;
+  check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
   // History first puts accepted user turns at their actual transcript positions.
   return { items: buildTranscript([...stream, ...queueEvents]), stream, fromLog: true, queueError, cursor, before, hasOlder };
@@ -89,7 +125,11 @@ function transcriptJob(id:string,kind:JobKind,load:()=>Promise<TranscriptSnap>):
  }).finally(()=>{owner.pending.delete(kind);if(!owner.pending.size)jobs.delete(scope);});
  owner.tail=result;owner.pending.set(kind,result);return result;
 }
-export function refreshTranscript(id:string):Promise<TranscriptSnap>{return transcriptJob(id,'refresh',()=>fetchTranscript(id));}
+export function refreshTranscript(id:string):Promise<TranscriptSnap>{
+ const scope=key(id),initial=jobs.get(scope)?.pending.get('initial');
+ if(initial&&!peekReadyTranscript(id))return initial;
+ return transcriptJob(id,'refresh',()=>fetchTranscript(id));
+}
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);return cached?Promise.resolve(cached):transcriptJob(id,'initial',()=>fetchTranscript(id));
 }
@@ -127,7 +167,7 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
   const page=await getMissionEventPage(id,{before:previous.before});
   if(page.hasMore&&(page.nextCursor===undefined||page.nextCursor>=previous.before))throw Error('Older event cursor did not advance.');
   const older=page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null);
-  const stream=[...older,...previous.stream];let items=buildTranscript(stream);
+  const stream=mergeStreamBySequence(older,previous.stream);let items=buildTranscript(stream);
   for(const item of previous.items)if(item.kind==='user'&&item.messageId)items=applyStreamEvent(items,{type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
   return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore};
  });

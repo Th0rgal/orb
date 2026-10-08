@@ -49,8 +49,9 @@ async function apiRaw(path: string): Promise<Response> {
 }
 
 export interface EventPage { events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
-export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number}={}):Promise<EventPage>{
+export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all'}={}):Promise<EventPage>{
  const query=new URLSearchParams({limit:'200',include_counts:'false'});
+ if(cursor.view)query.set('view',cursor.view);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
  const response=await apiRaw(`/api/control/missions/${id}/events?${query}`);
