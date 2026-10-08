@@ -1468,99 +1468,108 @@ struct OrbInboxView: View {
     }
 
     private var modeFilterBar: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 4) {
-                ForEach(OrbInboxFilterMode.allCases, id: \.rawValue) { mode in
-                    let active = filterMode == mode
-                    let count = mode == .unread ? unreadCount : (mode == .attention ? attentionCount : totalActionableCount)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                HStack(spacing: 2) {
+                    ForEach(OrbInboxFilterMode.allCases, id: \.rawValue) { mode in
+                        let active = filterMode == mode
+                        let count = mode == .unread ? unreadCount : (mode == .attention ? attentionCount : totalActionableCount)
+                        Button {
+                            withAnimation(.snappy(duration: 0.2)) {
+                                filterMode = mode
+                            }
+                            OrbHaptics.selection()
+                        } label: {
+                            HStack(spacing: 4) {
+                                if mode == .unread {
+                                    Circle()
+                                        .fill(Color.blue)
+                                        .frame(width: 6, height: 6)
+                                }
+                                Text(mode.title)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(active ? .primary : OrbStyle.textSecondary)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                Text("\(count)")
+                                    .font(.caption2)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(
+                                active ? OrbStyle.elevated : Color.clear,
+                                in: Capsule()
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("inbox.filter.\(mode.rawValue)")
+                    }
+                }
+                .padding(3)
+                .background(OrbStyle.surface, in: Capsule())
+                .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+
+                if !computed.working.isEmpty {
+                    let compactWorking = unreadCount > 0
                     Button {
-                        withAnimation(.snappy(duration: 0.2)) {
-                            filterMode = mode
+                        withAnimation(.snappy(duration: 0.22)) {
+                            showWorking.toggle()
                         }
                         OrbHaptics.selection()
                     } label: {
                         HStack(spacing: 5) {
-                            if mode == .unread {
-                                Circle()
-                                    .fill(Color.blue)
-                                    .frame(width: 6, height: 6)
-                            }
-                            Text(mode.title)
+                            OrbRunningDots(size: 11)
+                            Text(compactWorking ? "\(computed.working.count)" : "\(computed.working.count) working")
                                 .font(.caption.weight(.medium))
-                                .foregroundStyle(active ? .primary : OrbStyle.textSecondary)
-                            Text("\(count)")
-                                .font(.caption2)
-                                .foregroundStyle(OrbStyle.textMuted)
+                                .foregroundStyle(.primary)
                                 .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .padding(.horizontal, 10)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 6)
                         .background(
-                            active ? OrbStyle.elevated : Color.clear,
+                            showWorking ? OrbStyle.elevated : OrbStyle.surface,
                             in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
-                    .accessibilityIdentifier("inbox.filter.\(mode.rawValue)")
+                    .accessibilityIdentifier("inbox.workingPill")
                 }
-            }
-            .padding(3)
-            .background(OrbStyle.surface, in: Capsule())
-            .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
 
-            Spacer()
-
-            if !computed.working.isEmpty {
-                Button {
-                    withAnimation(.snappy(duration: 0.22)) {
-                        showWorking.toggle()
-                    }
-                    OrbHaptics.selection()
-                } label: {
-                    HStack(spacing: 6) {
-                        OrbRunningDots(size: 11)
-                        Text("\(computed.working.count) working")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.primary)
-                            .monospacedDigit()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        showWorking ? OrbStyle.elevated : OrbStyle.surface,
-                        in: Capsule()
-                    )
-                    .overlay(
-                        Capsule().stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("inbox.workingPill")
-            }
-
-            if unreadCount > 0 {
-                Button {
-                    OrbHaptics.selection()
-                    withAnimation(.snappy(duration: 0.2)) {
-                        for item in (computed.needsYou + computed.ready).filter(\.unread) {
-                            markItemAndChildrenRead(item)
+                if unreadCount > 0 {
+                    Button {
+                        OrbHaptics.selection()
+                        withAnimation(.snappy(duration: 0.2)) {
+                            for item in (computed.needsYou + computed.ready).filter(\.unread) {
+                                markItemAndChildrenRead(item)
+                            }
                         }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Read all")
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(OrbStyle.surface, in: Capsule())
+                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
                     }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Read all")
-                            .font(.caption.weight(.medium))
-                    }
-                    .foregroundStyle(OrbStyle.textSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(OrbStyle.surface, in: Capsule())
-                    .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("inbox.markAllRead")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("inbox.markAllRead")
             }
         }
     }

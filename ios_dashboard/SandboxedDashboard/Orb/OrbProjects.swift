@@ -875,13 +875,14 @@ struct OrbProjectPage: View {
     private func missionLink(_ row: OrbRow, launched: Int = 0, launchedLive: Int = 0, isExpanded: Bool = false, onToggleLaunched: (() -> Void)? = nil) -> some View {
         let isGoal = OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag
         let cleanTitle = OrbStyle.displayTitle(row.name)
-        return HStack(spacing: 6) {
+        let rel = OrbStyle.relativeTime(row.updatedAt)
+        return HStack(alignment: .top, spacing: 6) {
             NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
                 HStack(alignment: .top, spacing: 12) {
                     statusGlyph(for: row)
                         .padding(.top, 1)
                     VStack(alignment: .leading, spacing: 3) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        HStack(alignment: .center, spacing: 6) {
                             if isGoal {
                                 HStack(spacing: 3) {
                                     Image(systemName: "target")
@@ -899,12 +900,13 @@ struct OrbProjectPage: View {
                                 .lineLimit(1)
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 4)
-                            let rel = OrbStyle.relativeTime(row.updatedAt)
-                            if !rel.isEmpty {
+                            if launched == 0, !rel.isEmpty {
                                 Text(rel)
                                     .font(.caption2)
                                     .foregroundStyle(OrbStyle.textMuted)
                                     .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
                         }
                         Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
@@ -920,20 +922,44 @@ struct OrbProjectPage: View {
             .accessibilityIdentifier("mission.\(row.id)")
 
             if launched > 0, let onToggleLaunched {
+                let badgeColor = launchedLive > 0 ? OrbStyle.success : OrbStyle.textSecondary
                 Button(action: onToggleLaunched) {
-                    HStack(spacing: 4) {
-                        Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
-                            .font(.caption2.weight(.semibold).monospacedDigit())
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .bold))
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    HStack(alignment: .center, spacing: 6) {
+                        HStack(spacing: 3) {
+                            Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
+                                .font(.caption2.weight(.medium).monospacedDigit())
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        }
+                        .foregroundStyle(badgeColor)
+                        .padding(.leading, 6)
+                        .padding(.trailing, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Color.white.opacity(isExpanded ? 0.10 : 0.05),
+                            in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(
+                                launchedLive > 0
+                                    ? OrbStyle.success.opacity(0.35)
+                                    : (isExpanded ? OrbStyle.borderStrong : OrbStyle.border),
+                                lineWidth: 0.75
+                            )
+                        )
+
+                        if !rel.isEmpty {
+                            Text(rel)
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
-                    .foregroundStyle(launchedLive > 0 ? OrbStyle.success : OrbStyle.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.06), in: Capsule())
-                    .overlay(Capsule().stroke(OrbStyle.border))
-                    .frame(minHeight: 36)
+                    .padding(.top, 9)
+                    .padding(.bottom, 6)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

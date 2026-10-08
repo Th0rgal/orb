@@ -1664,9 +1664,11 @@ fun OrbInboxView(
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         // Minimalist filter bar + inline working pill + Read all
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Row(
                                 modifier = Modifier
@@ -1674,7 +1676,7 @@ fun OrbInboxView(
                                     .background(OrbStyle.surface)
                                     .border(1.dp, OrbStyle.border, CircleShape)
                                     .padding(3.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 OrbInboxFilterMode.entries.forEach { mode ->
                                     val active = filterMode == mode
@@ -1688,9 +1690,9 @@ fun OrbInboxView(
                                             .clip(CircleShape)
                                             .background(if (active) OrbStyle.elevated else Color.Transparent)
                                             .orbPressClickable { filterMode = mode }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
                                         if (mode == OrbInboxFilterMode.Unread) {
                                             Box(
@@ -1704,21 +1706,24 @@ fun OrbInboxView(
                                             text = mode.title,
                                             color = if (active) Color.White else OrbStyle.textSecondary,
                                             fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                         Text(
                                             text = "$count",
                                             color = OrbStyle.textMuted,
                                             fontSize = 11.sp,
-                                            fontFamily = FontFamily.Monospace
+                                            fontFamily = FontFamily.Monospace,
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.weight(1f))
-
                             if (workingMissions.isNotEmpty()) {
+                                val compactWorking = unreadCount > 0
                                 Row(
                                     modifier = Modifier
                                         .clip(CircleShape)
@@ -1729,17 +1734,19 @@ fun OrbInboxView(
                                             CircleShape
                                         )
                                         .orbPressClickable { showRunningSection = !showRunningSection }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                        .padding(horizontal = 9.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     OrbRunningDots(color = Color.White, dotSize = 2.1.dp, spacing = 1.9.dp)
                                     Text(
-                                        text = "${workingMissions.size} working",
+                                        text = if (compactWorking) "${workingMissions.size}" else "${workingMissions.size} working",
                                         color = Color.White,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Medium,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -1753,7 +1760,7 @@ fun OrbInboxView(
                                         .orbPressClickable {
                                             allItems.filter { it.isUnread }.forEach { markItemAndChildrenRead(it) }
                                         }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                        .padding(horizontal = 9.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
@@ -1767,7 +1774,9 @@ fun OrbInboxView(
                                         text = "Read all",
                                         color = OrbStyle.textSecondary,
                                         fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -1798,7 +1807,9 @@ fun OrbInboxView(
                                         text = "All projects",
                                         color = if (selectedProjectSlug == null) Color.White else OrbStyle.textSecondary,
                                         fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
 
@@ -1831,13 +1842,16 @@ fun OrbInboxView(
                                             color = if (selected) Color.White else OrbStyle.textSecondary,
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Medium,
-                                            maxLines = 1
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                         Text(
                                             text = "${chip.count}",
                                             color = OrbStyle.textMuted,
                                             fontSize = 11.sp,
-                                            fontFamily = FontFamily.Monospace
+                                            fontFamily = FontFamily.Monospace,
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                     }
                                 }
@@ -2342,6 +2356,8 @@ private fun OrbInboxCard(
                         color = item.tone.foreground,
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .clip(CircleShape)
                             .background(item.tone.background)
@@ -2354,7 +2370,9 @@ private fun OrbInboxCard(
                         text = rel,
                         color = OrbStyle.textMuted,
                         fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -2369,7 +2387,9 @@ private fun OrbInboxCard(
                         text = "Asked:",
                         color = OrbStyle.textMuted,
                         fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                     Text(
                         text = item.lastRequest,
@@ -2469,6 +2489,8 @@ private fun OrbInboxCard(
                         color = OrbStyle.inboxBlue,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .background(OrbStyle.inboxBlue.copy(alpha = 0.12f))
@@ -2500,7 +2522,8 @@ private fun OrbInboxCard(
                             color = if (primary) OrbStyle.background else Color.White,
                             fontSize = 12.sp,
                             fontWeight = if (primary) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = 1
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
@@ -2529,7 +2552,9 @@ private fun OrbInboxCard(
                         text = "Retry",
                         color = OrbStyle.warning,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -2546,7 +2571,9 @@ private fun OrbInboxCard(
                     text = "Peek",
                     color = if (isPeeked) Color.White else OrbStyle.textSecondary,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -2572,7 +2599,9 @@ private fun OrbInboxCard(
                     text = "Reply",
                     color = if (isReplying) Color.White else OrbStyle.textSecondary,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -2596,7 +2625,9 @@ private fun OrbInboxCard(
                     text = "Done",
                     color = OrbStyle.textSecondary,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }

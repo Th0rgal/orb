@@ -29,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -64,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -2060,12 +2062,59 @@ private fun OrbMissionListItem(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
+                        if (node.childCount > 0) {
+                            val liveChildren = node.runningChildCount > 0
+                            val badgeColor = if (liveChildren) OrbStyle.success else OrbStyle.textSecondary
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isExpanded) Color.White.copy(alpha = 0.10f)
+                                        else Color.White.copy(alpha = 0.05f)
+                                    )
+                                    .border(
+                                        0.75.dp,
+                                        if (liveChildren) OrbStyle.success.copy(alpha = 0.35f)
+                                        else if (isExpanded) OrbStyle.borderStrong
+                                        else OrbStyle.border,
+                                        CircleShape
+                                    )
+                                    .orbPressClickable { onToggleExpand() }
+                                    .padding(start = 6.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = if (liveChildren) {
+                                        "${node.runningChildCount}/${node.childCount}"
+                                    } else {
+                                        "${node.childCount}"
+                                    },
+                                    color = badgeColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = if (isExpanded) "Hide sub-missions" else "Show sub-missions",
+                                    tint = badgeColor,
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .rotate(if (isExpanded) 90f else 0f)
+                                )
+                            }
+                        }
                         if (relTime.isNotEmpty()) {
                             Text(
                                 text = relTime,
                                 color = OrbStyle.textMuted,
                                 fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -2076,37 +2125,6 @@ private fun OrbMissionListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                }
-
-                if (node.childCount > 0) {
-                    Row(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.06f))
-                            .border(1.dp, OrbStyle.border, CircleShape)
-                            .orbPressClickable { onToggleExpand() }
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = if (node.runningChildCount > 0) {
-                                "${node.runningChildCount}/${node.childCount}"
-                            } else {
-                                "${node.childCount}"
-                            },
-                            color = if (node.runningChildCount > 0) OrbStyle.success else OrbStyle.textSecondary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Icon(
-                            imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = if (node.runningChildCount > 0) OrbStyle.success else OrbStyle.textSecondary,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
                 }
             }
             HorizontalDivider(
