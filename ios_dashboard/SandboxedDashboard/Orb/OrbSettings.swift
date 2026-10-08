@@ -30,6 +30,8 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.providers")
                 NavigationLink { OrbMachinesSettings() } label: { Label("Machines", systemImage: "desktopcomputer") }
                     .accessibilityIdentifier("settings.machines")
+                NavigationLink { OrbInboxSettingsView() } label: { Label("Inbox", systemImage: "tray.full") }
+                    .accessibilityIdentifier("settings.inbox")
             }
             .scrollContentBackground(.hidden).background(OrbStyle.background)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)

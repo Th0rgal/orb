@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -33,9 +32,13 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -55,14 +58,352 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.time.Instant
+import java.util.UUID
+
+data class OrbInboxModelPreset(
+    val id: String,
+    val label: String,
+    val subtitle: String
+)
+
+object OrbInboxSettings {
+    private const val PREFS_KEY = "orb.inbox.settings.v1"
+    private const val KEY_AI_SUMMARY = "ai_summary"
+    private const val KEY_MODEL = "model"
+
+    const val DEFAULT_MODEL = "builtin/smart"
+
+    val modelPresets: List<OrbInboxModelPreset> = listOf(
+        OrbInboxModelPreset("builtin/smart", "Smart Router (builtin/smart)", "Default router for crisp 2-3 sentence AI Overviews"),
+        OrbInboxModelPreset("builtin/fast", "Fast Router (builtin/fast)", "Lowest latency router"),
+        OrbInboxModelPreset("builtin/reasoning", "Reasoning Router (builtin/reasoning)", "Deeper technical synthesis")
+    )
+
+    private var prefs: SharedPreferences? = null
+    var aiSummary by mutableStateOf(true)
+        private set
+    var model by mutableStateOf(DEFAULT_MODEL)
+        private set
+    var revision by mutableIntStateOf(0)
+        private set
+
+    fun init(context: Context) {
+        if (prefs == null) {
+            val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
+            prefs = p
+            aiSummary = p.getBoolean(KEY_AI_SUMMARY, true)
+            model = p.getString(KEY_MODEL, DEFAULT_MODEL)?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_MODEL
+        }
+    }
+
+    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model) {
+        val cleanModel = newModel.trim().ifEmpty { DEFAULT_MODEL }
+        aiSummary = newAiSummary
+        model = cleanModel
+        revision += 1
+        prefs?.edit()
+            ?.putBoolean(KEY_AI_SUMMARY, newAiSummary)
+            ?.putString(KEY_MODEL, cleanModel)
+            ?.apply()
+    }
+}
+
+data class OrbInboxDigest(
+    val task: String,
+    val outcome: String,
+    val verdict: String,
+    val model: String,
+    val updatedAt: String
+)
+
+object OrbInboxDigestStore {
+    private const val PREFS_KEY = "orb.inbox.digests.v4"
+    private const val MAX_CONCURRENT = 3
+    private var prefs: SharedPreferences? = null
+    private val cache = mutableStateMapOf<String, OrbInboxDigest>()
+    private val inFlight = mutableSetOf<String>()
+    private val failedAtMs = mutableMapOf<String, Long>()
+    private val queueMutex = Mutex()
+    private var activeCount = 0
+    private val queue = mutableListOf<Pair<Int, suspend () -> Unit>>()
+    var revision by mutableIntStateOf(0)
+        private set
+
+    private val DIGEST_PROMPT = listOf(
+        "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
+        "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
+        "{\"task\":\"<concise 4-10 word summary of the user's latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>\",\"outcome\":\"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>\",\"verdict\":\"succeeded|failed|waiting|needs_input\"}",
+        "Rules:",
+        "- Write in the same language as the conversation.",
+        "- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
+        "- Write \"outcome\" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker.",
+        "- Never write vague boilerplate like \"Mission stopped and is currently blocked\" or \"Finished the task\".",
+        "- Verdict must be one of: succeeded, failed, waiting, needs_input."
+    ).joinToString("\n")
+
+    fun init(context: Context) {
+        if (prefs == null) {
+            val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
+            prefs = p
+            for ((k, v) in p.all) {
+                val raw = v as? String ?: continue
+                val dict = OrbJSON.dict(OrbJSON.parse(raw)) ?: continue
+                val task = OrbJSON.str(dict, "task") ?: ""
+                val outcome = OrbJSON.str(dict, "outcome") ?: ""
+                if (task.isEmpty() && outcome.isEmpty()) continue
+                cache[k] = OrbInboxDigest(
+                    task = task,
+                    outcome = outcome,
+                    verdict = OrbJSON.str(dict, "verdict") ?: "succeeded",
+                    model = OrbJSON.str(dict, "model") ?: OrbInboxSettings.DEFAULT_MODEL,
+                    updatedAt = OrbJSON.str(dict, "updatedAt") ?: ""
+                )
+            }
+        }
+    }
+
+    private fun cacheKey(missionId: String, updatedAt: String, model: String): String =
+        "$missionId|$updatedAt|$model"
+
+    fun get(mission: OrbRow): OrbInboxDigest? {
+        val _rev = revision
+        if (!OrbInboxSettings.aiSummary) return null
+        val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
+        val model = OrbInboxSettings.model
+        cache[cacheKey(mission.id, updated, model)]?.let { return it }
+        val prefix = "${mission.id}|$updated|"
+        return cache.entries.firstOrNull { it.key.startsWith(prefix) }?.value
+    }
+
+    fun request(core: OrbCore, mission: OrbRow, events: List<OrbRow>, priority: Int = 10) {
+        if (!OrbInboxSettings.aiSummary || !core.isConfigured) return
+        val status = (mission.str("status", "state") ?: "").lowercase()
+        if (status in setOf("active", "running", "starting", "pending", "queued", "resuming", "waiting_background")) {
+            return
+        }
+        val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
+        val model = OrbInboxSettings.model
+        val key = cacheKey(mission.id, updated, model)
+        if (cache.containsKey(key) || inFlight.contains(key)) return
+        val lastFail = failedAtMs[key]
+        if (lastFail != null && System.currentTimeMillis() - lastFail < 45_000L) return
+
+        val snapshot = buildSnapshot(mission, events)
+        if (snapshot.length < 24) return
+
+        inFlight.add(key)
+        core.scope.launch {
+            enqueue(priority) {
+                try {
+                    val answer = fetchFromBtw(core, mission.id, snapshot, model)
+                    val parsed = parseDigest(answer, updated, model)
+                    if (parsed != null) {
+                        cache[key] = parsed
+                        revision += 1
+                        prefs?.edit()?.putString(
+                            key,
+                            OrbJSON.stringify(
+                                mapOf(
+                                    "task" to parsed.task,
+                                    "outcome" to parsed.outcome,
+                                    "verdict" to parsed.verdict,
+                                    "model" to parsed.model,
+                                    "updatedAt" to parsed.updatedAt
+                                )
+                            )
+                        )?.apply()
+                    } else {
+                        failedAtMs[key] = System.currentTimeMillis()
+                    }
+                } catch (_: Throwable) {
+                    failedAtMs[key] = System.currentTimeMillis()
+                } finally {
+                    inFlight.remove(key)
+                }
+            }
+        }
+    }
+
+    private suspend fun enqueue(priority: Int, block: suspend () -> Unit) {
+        queueMutex.withLock {
+            queue.add(priority to block)
+            queue.sortBy { it.first }
+        }
+        pump()
+    }
+
+    private fun pump() {
+        val core = runCatching { OrbCore.shared }.getOrNull() ?: return
+        core.scope.launch {
+            val next: (suspend () -> Unit)? = queueMutex.withLock {
+                if (activeCount >= MAX_CONCURRENT || queue.isEmpty()) {
+                    null
+                } else {
+                    activeCount += 1
+                    queue.removeAt(0).second
+                }
+            }
+            if (next != null) {
+                try {
+                    next()
+                } finally {
+                    queueMutex.withLock { activeCount -= 1 }
+                    pump()
+                }
+            }
+        }
+    }
+
+    private fun buildSnapshot(mission: OrbRow, events: List<OrbRow>): String {
+        val lines = mutableListOf<String>()
+        lines.add("Mission title: ${mission.str("title", "name") ?: "Untitled"}")
+        lines.add("Mission status: ${mission.str("status", "state") ?: "unknown"}")
+        mission.str("terminal_reason")?.let { lines.add("Terminal reason: $it") }
+        mission.str("status_message")?.let { lines.add("Status message: $it") }
+        OrbJSON.str(mission.dict("remote_job"), "error")?.let { lines.add("Remote error: $it") }
+
+        var lastUser = ""
+        val assistantBlocks = mutableListOf<String>()
+        var lastError = ""
+
+        if (events.isNotEmpty()) {
+            for (ev in events) {
+                val evType = (ev.str("event_type", "type") ?: "").lowercase()
+                val text = ev.str("content", "text", "message", "error") ?: ""
+                when (evType) {
+                    "user_message" -> {
+                        if (text.isNotEmpty() && !OrbInboxModel.isSyntheticUserMessage(text)) {
+                            lastUser = text.trim()
+                        }
+                    }
+                    "assistant_message", "assistant_message_canonical" -> {
+                        val clean = OrbInboxModel.humanizeStatusText(text)
+                        if (clean.isNotEmpty()) assistantBlocks.add(clean)
+                    }
+                    "error" -> {
+                        val clean = OrbInboxModel.humanizeStatusText(text)
+                        if (clean.length >= 220) assistantBlocks.add(clean)
+                        else if (clean.isNotEmpty()) lastError = clean
+                    }
+                }
+            }
+        }
+
+        val history = OrbJSON.dictList(mission.raw["history"])
+        for (entry in history.asReversed()) {
+            val role = OrbJSON.str(entry, "role") ?: ""
+            val content = OrbJSON.str(entry, "content") ?: ""
+            if (lastUser.isEmpty() && role == "user" && content.isNotEmpty() && !OrbInboxModel.isSyntheticUserMessage(content)) {
+                lastUser = content.trim()
+            }
+            if (role == "assistant" && content.isNotEmpty()) {
+                val clean = OrbInboxModel.humanizeStatusText(content)
+                if (clean.isNotEmpty() && !assistantBlocks.contains(clean)) {
+                    assistantBlocks.add(clean)
+                    break
+                }
+            }
+        }
+
+        if (lastUser.isNotEmpty()) lines.add("Latest user request:\n${lastUser.take(700)}")
+        OrbInboxModel.extractWorkReceipt(events)?.let { lines.add("Tools executed: $it") }
+        if (lastError.isNotEmpty()) lines.add("Recorded error:\n${lastError.take(500)}")
+        if (assistantBlocks.isNotEmpty()) {
+            lines.add("Latest agent response:\n${assistantBlocks.takeLast(3).joinToString("\n\n").takeLast(2400)}")
+        }
+        return lines.joinToString("\n\n")
+    }
+
+    private suspend fun fetchFromBtw(
+        core: OrbCore,
+        missionId: String,
+        context: String,
+        model: String
+    ): String = withContext(Dispatchers.IO) {
+        val url = core.makeURL("/api/control/missions/${core.encodeComponent(missionId)}/btw")
+        val bodyMap = mutableMapOf<String, Any?>(
+            "question" to DIGEST_PROMPT,
+            "context" to context
+        )
+        if (model.isNotEmpty() && model != OrbInboxSettings.DEFAULT_MODEL) {
+            bodyMap["model"] = model
+        }
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .post(OrbJSON.stringify(bodyMap).toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .header("Accept", "text/event-stream, application/json")
+        core.token?.trim()?.takeIf { it.isNotEmpty() }?.let { t ->
+            reqBuilder.header("Authorization", "Bearer $t")
+        }
+        val resp = core.httpClient.newCall(reqBuilder.build()).execute()
+        val code = resp.code
+        val raw = resp.body?.string() ?: ""
+        resp.close()
+        if (code == 422 && bodyMap.containsKey("model")) {
+            bodyMap.remove("model")
+            val retryReq = reqBuilder.post(
+                OrbJSON.stringify(bodyMap).toRequestBody("application/json; charset=utf-8".toMediaType())
+            ).build()
+            val retryResp = core.httpClient.newCall(retryReq).execute()
+            val retryRaw = retryResp.body?.string() ?: ""
+            retryResp.close()
+            return@withContext extractBtwAnswer(retryRaw)
+        }
+        if (code !in 200..299) throw OrbError("HTTP $code")
+        extractBtwAnswer(raw)
+    }
+
+    private fun extractBtwAnswer(raw: String): String {
+        val sb = StringBuilder()
+        for (line in raw.lineSequence()) {
+            val trimmed = line.trim()
+            if (!trimmed.startsWith("data:")) continue
+            val payload = trimmed.removePrefix("data:").trim()
+            if (payload.isEmpty() || payload == "[DONE]") continue
+            val dict = OrbJSON.dict(OrbJSON.parse(payload)) ?: continue
+            val delta = OrbJSON.rawStr(dict, "delta")
+            val answer = OrbJSON.rawStr(dict, "answer")
+            if (!delta.isNullOrEmpty()) sb.append(delta)
+            else if (!answer.isNullOrEmpty() && sb.isEmpty()) sb.append(answer)
+        }
+        return if (sb.isNotEmpty()) sb.toString() else raw
+    }
+
+    private fun parseDigest(raw: String, updatedAt: String, model: String): OrbInboxDigest? {
+        val trimmed = raw.trim()
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        val dict = OrbJSON.dict(OrbJSON.parse(trimmed.substring(start, end + 1))) ?: return null
+        val task = (OrbJSON.str(dict, "task") ?: "").trim()
+        val outcome = (OrbJSON.str(dict, "outcome", "overview") ?: "").trim()
+        if (task.isEmpty() && outcome.isEmpty()) return null
+        val verdict = (OrbJSON.str(dict, "verdict") ?: "succeeded").lowercase()
+        return OrbInboxDigest(
+            task = task,
+            outcome = outcome,
+            verdict = if (verdict in setOf("succeeded", "failed", "waiting", "needs_input")) verdict else "succeeded",
+            model = model,
+            updatedAt = updatedAt
+        )
+    }
+}
 
 object OrbMissionUnreadStore {
     private const val PREFS_KEY = "orb.missionSeenAt.v2"
     private var prefs: SharedPreferences? = null
     private val seenMap = mutableStateMapOf<String, String>()
+    private val manuallyUnreadIds = mutableSetOf<String>()
     var revision by mutableIntStateOf(0)
         private set
 
@@ -87,6 +428,7 @@ object OrbMissionUnreadStore {
         val _rev = revision
         val state = (mission.str("status", "state") ?: "").lowercase()
         if (!hasInteraction && state !in unreadResponseStates) return false
+        if (manuallyUnreadIds.contains(mission.id)) return true
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val firstViewed = mission.str("first_viewed_at") ?: ""
         if (firstViewed.isNotEmpty()) {
@@ -99,14 +441,25 @@ object OrbMissionUnreadStore {
         return true
     }
 
-    fun markSeen(mission: OrbRow) {
+    fun markSeen(mission: OrbRow, syncBackend: Boolean = true) {
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val nowIso = Instant.now().toString()
         val stamp = maxOf(updated, nowIso)
+        manuallyUnreadIds.remove(mission.id)
         if (seenMap[mission.id] != stamp) {
             seenMap[mission.id] = stamp
             revision += 1
             prefs?.edit()?.putString(mission.id, stamp)?.apply()
+        }
+        if (syncBackend) {
+            runCatching {
+                val core = OrbCore.shared
+                core.scope.launch {
+                    runCatching {
+                        core.request("/api/control/missions/${core.encodeComponent(mission.id)}/opened", method = "POST")
+                    }
+                }
+            }
         }
     }
 
@@ -115,17 +468,36 @@ object OrbMissionUnreadStore {
         markSeen(row)
     }
 
+    fun toggleUnread(mission: OrbRow) {
+        if (isUnread(mission)) {
+            markSeen(mission)
+        } else {
+            manuallyUnreadIds.add(mission.id)
+            revision += 1
+        }
+    }
+
     fun markAllSeen(missions: List<OrbRow>) {
         val editor = prefs?.edit()
         val nowIso = Instant.now().toString()
         var changed = false
+        val core = runCatching { OrbCore.shared }.getOrNull()
         for (m in missions) {
+            manuallyUnreadIds.remove(m.id)
             val updated = m.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
             val stamp = maxOf(updated, nowIso)
             if (seenMap[m.id] != stamp) {
                 seenMap[m.id] = stamp
                 editor?.putString(m.id, stamp)
                 changed = true
+            }
+            if (core != null) {
+                val id = m.id
+                core.scope.launch {
+                    runCatching {
+                        core.request("/api/control/missions/${core.encodeComponent(id)}/opened", method = "POST")
+                    }
+                }
             }
         }
         if (changed) {
@@ -172,6 +544,28 @@ data class OrbInboxChildFailure(
     val row: OrbRow
 )
 
+data class OrbInboxPeekTurn(
+    val id: String,
+    val role: String,
+    val text: String,
+    val workReceipt: String? = null
+)
+
+data class OrbInboxInteractionOption(
+    val label: String,
+    val isPrimary: Boolean,
+    val payload: OrbDict
+)
+
+data class OrbInboxPendingInteraction(
+    val callId: String,
+    val toolName: String,
+    val kind: String,
+    val prompt: String,
+    val commandPreview: String?,
+    val options: List<OrbInboxInteractionOption>
+)
+
 data class OrbInboxItem(
     val id: String,
     val mission: OrbRow,
@@ -181,8 +575,12 @@ data class OrbInboxItem(
     val badge: String,
     val headline: String,
     val summary: String,
+    val lastRequest: String?,
+    val workReceipt: String?,
+    val aiOverview: OrbInboxDigest?,
     val commandPreview: String?,
     val quickOptions: List<String>,
+    val pendingInteraction: OrbInboxPendingInteraction?,
     val updatedAt: String?,
     val isUnread: Boolean,
     val isAttention: Boolean,
@@ -197,6 +595,8 @@ data class OrbInboxItem(
 
 object OrbInboxModel {
     private const val PREFS_KEY = "orb.inbox.dismissed"
+    const val MAX_SUMMARY_CHARS = 320
+
     private var prefs: SharedPreferences? = null
     private val dismissedMap = mutableStateMapOf<String, String>()
     var revision by mutableIntStateOf(0)
@@ -207,6 +607,9 @@ object OrbInboxModel {
     )
     private val hiddenStatuses = setOf(
         "acknowledged", "archived", "deleted", "cancelled"
+    )
+    private val interactiveTools = setOf(
+        "ui_native_request", "AskUserQuestion", "question"
     )
 
     fun init(context: Context) {
@@ -221,20 +624,47 @@ object OrbInboxModel {
         }
     }
 
-    fun dismiss(item: OrbInboxItem) {
+    fun dismiss(item: OrbInboxItem, syncBackend: Boolean = true) {
         val sig = signature(item.mission)
         dismissedMap[item.id] = sig
         revision += 1
         prefs?.edit()?.putString(item.id, sig)?.apply()
-        OrbMissionUnreadStore.markSeen(item.mission)
+        OrbMissionUnreadStore.markSeen(item.mission, syncBackend = syncBackend)
+        if (syncBackend) {
+            runCatching {
+                val core = OrbCore.shared
+                core.scope.launch {
+                    runCatching {
+                        core.request(
+                            path = "/api/control/missions/${core.encodeComponent(item.id)}/status",
+                            method = "POST",
+                            body = mapOf("status" to "acknowledged")
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun dismissAll(items: List<OrbInboxItem>) {
         val editor = prefs?.edit()
+        val core = runCatching { OrbCore.shared }.getOrNull()
         for (item in items) {
             val sig = signature(item.mission)
             dismissedMap[item.id] = sig
             editor?.putString(item.id, sig)
+            if (core != null) {
+                val id = item.id
+                core.scope.launch {
+                    runCatching {
+                        core.request(
+                            path = "/api/control/missions/${core.encodeComponent(id)}/status",
+                            method = "POST",
+                            body = mapOf("status" to "acknowledged")
+                        )
+                    }
+                }
+            }
         }
         revision += 1
         editor?.apply()
@@ -245,6 +675,19 @@ object OrbInboxModel {
         dismissedMap.remove(item.id)
         revision += 1
         prefs?.edit()?.remove(item.id)?.apply()
+        runCatching {
+            val core = OrbCore.shared
+            core.scope.launch {
+                runCatching {
+                    core.request(
+                        path = "/api/control/missions/${core.encodeComponent(item.id)}/status",
+                        method = "POST",
+                        body = mapOf("status" to "paused")
+                    )
+                    core.refreshMissionsQuietly()
+                }
+            }
+        }
     }
 
     private fun isDismissed(mission: OrbRow): Boolean {
@@ -258,6 +701,26 @@ object OrbInboxModel {
         val status = (mission.str("status", "state") ?: "").lowercase()
         val reason = (mission.str("terminal_reason", "reason", "error") ?: "").lowercase()
         return "$status|$reason|$updated"
+    }
+
+    fun isSyntheticUserMessage(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return true
+        return Regex("^\\[SYSTEM:\\s*AUTOMATIC[\\s_]+RESUME", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) ||
+            Regex("^\\[SYSTEM:\\s*BACKGROUND", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) ||
+            Regex("^Continue from where you left off\\.?$", RegexOption.IGNORE_CASE).matches(trimmed) ||
+            Regex("^Continue and resolve the blocker/error\\.?$", RegexOption.IGNORE_CASE).matches(trimmed)
+    }
+
+    fun cleanChildTrackLabel(raw: String): String {
+        val cleaned = displayTitle(raw).replace(Regex("\\s*·\\s*fork\\s*$", RegexOption.IGNORE_CASE), "").trim()
+        if (cleaned.isEmpty()) return "Worker track"
+        if (Regex("^(i['’]ll|i will|let me|now i['’]ll|first,? i['’]ll)\\b", RegexOption.IGNORE_CASE).containsMatchIn(cleaned) ||
+            cleaned.length > 68
+        ) {
+            return clipToSentence(cleaned, 48).ifEmpty { "Worker track" }
+        }
+        return cleaned
     }
 
     private fun isSubagent(mission: OrbRow): Boolean {
@@ -278,9 +741,11 @@ object OrbInboxModel {
         return tags.none { it.startsWith("btw-parent:") }
     }
 
-    fun build(projects: List<OrbRow>, missions: List<OrbRow>): List<OrbInboxItem> {
+    fun build(projects: List<OrbRow>, missions: List<OrbRow>, answeredCallIds: Set<String> = emptySet()): List<OrbInboxItem> {
         val _rev1 = revision
         val _rev2 = OrbMissionUnreadStore.revision
+        val _rev3 = OrbInboxDigestStore.revision
+        val _rev4 = OrbInboxSettings.revision
 
         val activeProjects = projects.filterNot { p ->
             val st = (p.str("status", "state") ?: "").lowercase()
@@ -328,7 +793,8 @@ object OrbInboxModel {
                 if (!projectsBySlug.containsKey(slug)) continue
             }
 
-            val classified = classify(mission) ?: continue
+            val cachedEvents = OrbReadCache.loadRows("mission_events_${mission.id}")
+            val classified = classify(mission, cachedEvents, answeredCallIds) ?: continue
             val resolvedSlug = if (rawSlug.isEmpty()) "default" else rawSlug
             val project = projectsBySlug[resolvedSlug] ?: resolveProject(mission, activeProjects)
 
@@ -346,11 +812,11 @@ object OrbInboxModel {
                     cst in workingStatuses -> runningKids += 1
                     cst in setOf("failed", "not_feasible", "blocked") -> {
                         failedKids += 1
-                        val cTitle = missionHeadline(child)
+                        val cTitle = cleanChildTrackLabel(child.str("title", "name") ?: "")
                         failedList.add(
                             OrbInboxChildFailure(
                                 id = child.id,
-                                title = cTitle.ifEmpty { "Worker track" },
+                                title = cTitle,
                                 row = child
                             )
                         )
@@ -361,7 +827,21 @@ object OrbInboxModel {
                 }
             }
 
-            val unread = OrbMissionUnreadStore.isUnread(mission) || hasUnreadFailure
+            val headline = missionHeadline(mission)
+            val digest = OrbInboxDigestStore.get(mission)
+            val summaryText = if (classified.pendingInteraction == null && !digest?.outcome.isNullOrEmpty()) {
+                digest!!.outcome
+            } else {
+                classified.summary
+            }
+            val lastReq = if (!digest?.task.isNullOrEmpty()) {
+                digest!!.task.takeIf { !it.equals(headline, ignoreCase = true) }
+            } else {
+                extractLastRequest(mission, cachedEvents, headline)
+            }
+            val workReceipt = extractWorkReceipt(cachedEvents)
+
+            val unread = OrbMissionUnreadStore.isUnread(mission, hasInteraction = classified.pendingInteraction != null) || hasUnreadFailure
             val attention = classified.quickOptions.isNotEmpty() ||
                 state in setOf("blocked", "failed", "not_feasible") ||
                 hasUnreadFailure
@@ -375,10 +855,14 @@ object OrbInboxModel {
                     kind = classified.kind,
                     tone = classified.tone,
                     badge = classified.badge,
-                    headline = missionHeadline(mission),
-                    summary = classified.summary,
+                    headline = headline,
+                    summary = summaryText,
+                    lastRequest = lastReq,
+                    workReceipt = workReceipt,
+                    aiOverview = digest,
                     commandPreview = classified.commandPreview,
                     quickOptions = classified.quickOptions,
+                    pendingInteraction = classified.pendingInteraction,
                     updatedAt = mission.str("updated_at", "completed_at", "started_at", "created_at"),
                     isUnread = unread,
                     isAttention = attention,
@@ -458,14 +942,131 @@ object OrbInboxModel {
         val badge: String,
         val summary: String,
         val commandPreview: String?,
-        val quickOptions: List<String>
+        val quickOptions: List<String>,
+        val pendingInteraction: OrbInboxPendingInteraction?
     )
 
-    private fun classify(mission: OrbRow): Classification? {
+    fun extractPendingInteraction(
+        events: List<OrbRow>,
+        status: String,
+        answeredCallIds: Set<String> = emptySet()
+    ): OrbInboxPendingInteraction? {
+        if (status in hiddenStatuses || status in setOf("completed", "succeeded", "failed", "not_feasible")) {
+            return null
+        }
+        val resolvedCalls = events.mapNotNull { ev ->
+            val evType = (ev.str("event_type", "type") ?: "").lowercase()
+            if (evType == "tool_result") ev.str("tool_call_id", "call_id") else null
+        }.toSet()
+
+        val callEvent = events.asReversed().firstOrNull { ev ->
+            val evType = (ev.str("event_type", "type") ?: "").lowercase()
+            val toolName = ev.str("tool_name", "name") ?: ""
+            val callId = ev.str("tool_call_id", "call_id") ?: ""
+            evType == "tool_call" && toolName in interactiveTools && callId.isNotEmpty() &&
+                callId !in resolvedCalls && callId !in answeredCallIds
+        } ?: return null
+
+        val callId = callEvent.str("tool_call_id", "call_id") ?: return null
+        val toolName = callEvent.str("tool_name", "name") ?: "ui_native_request"
+        val requestDict = OrbJSON.dict(OrbJSON.parse(callEvent.str("content", "arguments") ?: ""))
+            ?: callEvent.dict("data")
+            ?: return null
+
+        val method = OrbJSON.str(requestDict, "method")
+            ?: if (toolName == "AskUserQuestion") "claude_questions" else "question"
+        val params = OrbJSON.dict(requestDict["params"]) ?: requestDict
+
+        if (method == "permission") {
+            val input = OrbJSON.dict(params["input"])
+            val desc = OrbJSON.str(input, "description", "command", "file_path")
+                ?: OrbJSON.str(params, "tool")
+                ?: "Allow this tool action?"
+            val cmd = OrbJSON.str(input, "command")
+            return OrbInboxPendingInteraction(
+                callId = callId,
+                toolName = toolName,
+                kind = "permission",
+                prompt = clipToSentence(desc),
+                commandPreview = cmd,
+                options = listOf(
+                    OrbInboxInteractionOption("Approve", true, mapOf("action" to "accept")),
+                    OrbInboxInteractionOption("Decline", false, mapOf("action" to "revise"))
+                )
+            )
+        }
+
+        if (method == "plan") {
+            val planText = OrbJSON.str(params, "plan") ?: "Review the proposed implementation plan."
+            return OrbInboxPendingInteraction(
+                callId = callId,
+                toolName = toolName,
+                kind = "plan",
+                prompt = clipToSentence(planText),
+                commandPreview = null,
+                options = listOf(
+                    OrbInboxInteractionOption("Approve plan", true, mapOf("action" to "accept")),
+                    OrbInboxInteractionOption("Revise", false, mapOf("action" to "revise"))
+                )
+            )
+        }
+
+        val questions = OrbJSON.dictList(params["questions"])
+        val firstQ = questions.firstOrNull() ?: emptyMap()
+        val qPrompt = OrbJSON.str(firstQ, "question") ?: "Waiting for your answer."
+        val canQuickPick = questions.size == 1 && OrbJSON.bool(firstQ, "multiSelect") != true
+        val claudeFormat = method == "claude_questions" || toolName == "AskUserQuestion"
+        val qKey = OrbJSON.str(firstQ, "id") ?: "0"
+        val opts = mutableListOf<OrbInboxInteractionOption>()
+        if (canQuickPick) {
+            OrbJSON.dictList(firstQ["options"]).take(3).forEachIndexed { idx, optDict ->
+                val label = (OrbJSON.str(optDict, "label") ?: "").trim()
+                if (label.isNotEmpty()) {
+                    val mapped: OrbDict = if (claudeFormat) {
+                        mapOf(qPrompt to label)
+                    } else {
+                        mapOf(qKey to mapOf("answers" to listOf(label)))
+                    }
+                    opts.add(OrbInboxInteractionOption(label, idx == 0, mapOf("answers" to mapped)))
+                }
+            }
+        }
+        return OrbInboxPendingInteraction(
+            callId = callId,
+            toolName = toolName,
+            kind = "question",
+            prompt = clipToSentence(qPrompt),
+            commandPreview = null,
+            options = opts
+        )
+    }
+
+    private fun classify(
+        mission: OrbRow,
+        cachedEvents: List<OrbRow>,
+        answeredCallIds: Set<String>
+    ): Classification? {
         val status = (mission.str("status", "state") ?: "").lowercase()
-        val summaryText = extractSummary(mission)
-        val cachedEvents = OrbReadCache.loadRows("mission_events_${mission.id}")
+        val summaryText = extractSummary(mission, cachedEvents)
         val cachedMessages = OrbReadCache.loadRows("mission_msgs_${mission.id}")
+
+        val pending = extractPendingInteraction(cachedEvents, status, answeredCallIds)
+        if (pending != null) {
+            val badge = when (pending.kind) {
+                "permission" -> "Approval"
+                "plan" -> "Plan review"
+                else -> "Question"
+            }
+            return Classification(
+                kind = OrbInboxKind.NeedsInput,
+                tone = OrbInboxTone.Amber,
+                badge = badge,
+                summary = pending.prompt,
+                commandPreview = pending.commandPreview,
+                quickOptions = pending.options.map { it.label },
+                pendingInteraction = pending
+            )
+        }
 
         val q = OrbQuestionExtractor.extract(cachedEvents, cachedMessages, status)
         if (q != null && status !in setOf("completed", "succeeded", "failed", "not_feasible")) {
@@ -480,7 +1081,8 @@ object OrbInboxModel {
                 badge = badge,
                 summary = clipToSentence(q.prompt),
                 commandPreview = null,
-                quickOptions = q.options.take(3)
+                quickOptions = q.options.take(3),
+                pendingInteraction = null
             )
         }
 
@@ -491,7 +1093,8 @@ object OrbInboxModel {
                 badge = "Blocked",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             "failed" -> Classification(
                 kind = OrbInboxKind.NeedsInput,
@@ -499,7 +1102,8 @@ object OrbInboxModel {
                 badge = "Failed",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             "not_feasible" -> Classification(
                 kind = OrbInboxKind.NeedsInput,
@@ -507,7 +1111,8 @@ object OrbInboxModel {
                 badge = "Not feasible",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             "awaiting_user", "waiting_user" -> Classification(
                 kind = OrbInboxKind.NeedsInput,
@@ -515,7 +1120,8 @@ object OrbInboxModel {
                 badge = if (summaryText.trim().endsWith("?")) "Question" else "Waiting",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             "completed", "succeeded" -> Classification(
                 kind = OrbInboxKind.Finished,
@@ -523,7 +1129,8 @@ object OrbInboxModel {
                 badge = "Completed",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             "paused", "interrupted" -> Classification(
                 kind = OrbInboxKind.Finished,
@@ -531,7 +1138,8 @@ object OrbInboxModel {
                 badge = "Paused",
                 summary = summaryText,
                 commandPreview = null,
-                quickOptions = emptyList()
+                quickOptions = emptyList(),
+                pendingInteraction = null
             )
             else -> null
         }
@@ -560,8 +1168,138 @@ object OrbInboxModel {
         return trimmed.lineSequence().firstOrNull()?.trim() ?: ""
     }
 
-    private fun extractSummary(mission: OrbRow): String {
-        val cachedEvents = OrbReadCache.loadRows("mission_events_${mission.id}")
+    fun extractLastRequest(mission: OrbRow, events: List<OrbRow>, headline: String): String? {
+        for (ev in events.asReversed()) {
+            val evType = (ev.str("event_type", "type") ?: "").lowercase()
+            if (evType == "user_message") {
+                val text = (ev.str("content", "text", "message") ?: "").trim()
+                if (text.isNotEmpty() && !isSyntheticUserMessage(text)) {
+                    val clipped = clipToSentence(text, 96)
+                    if (!clipped.equals(headline, ignoreCase = true)) return clipped
+                    return null
+                }
+            }
+        }
+        val history = OrbJSON.dictList(mission.raw["history"])
+        if (history.size > 1) {
+            for (entry in history.asReversed()) {
+                if (OrbJSON.str(entry, "role") == "user") {
+                    val text = (OrbJSON.str(entry, "content") ?: "").trim()
+                    if (text.isNotEmpty() && !isSyntheticUserMessage(text)) {
+                        val clipped = clipToSentence(text, 96)
+                        if (!clipped.equals(headline, ignoreCase = true)) return clipped
+                        return null
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    fun extractWorkReceipt(events: List<OrbRow>): String? {
+        if (events.isEmpty()) return null
+        var commands = 0
+        var edits = 0
+        var reads = 0
+        for (ev in events) {
+            val evType = (ev.str("event_type", "type") ?: "").lowercase()
+            if (evType != "tool_call") continue
+            val name = (ev.str("tool_name", "name") ?: "").lowercase()
+            when {
+                name in setOf("bash", "run_command", "shell", "terminal", "exec_command") -> commands += 1
+                name.contains("edit") || name.contains("write") || name.contains("patch") || name.contains("replace") -> edits += 1
+                name.contains("read") || name.contains("view") || name.contains("grep") || name.contains("glob") -> reads += 1
+            }
+        }
+        val parts = mutableListOf<String>()
+        if (commands > 0) parts.add("$commands ${if (commands == 1) "command" else "commands"}")
+        if (edits > 0) parts.add("Edited $edits ${if (edits == 1) "file" else "files"}")
+        if (parts.isEmpty() && reads > 0) parts.add("Read $reads ${if (reads == 1) "file" else "files"}")
+        return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    }
+
+    fun extractPeekTurns(mission: OrbRow, events: List<OrbRow>, summaryFallback: String): List<OrbInboxPeekTurn> {
+        val turns = mutableListOf<OrbInboxPeekTurn>()
+        var pendingTools = mutableListOf<OrbRow>()
+
+        for ((idx, ev) in events.withIndex()) {
+            val evType = (ev.str("event_type", "type") ?: "").lowercase()
+            when (evType) {
+                "tool_call" -> pendingTools.add(ev)
+                "user_message" -> {
+                    val raw = ev.str("content", "text", "message") ?: ""
+                    if (!isSyntheticUserMessage(raw)) {
+                        val clean = stripMarkdownToProse(raw).take(600)
+                        if (clean.isNotEmpty()) {
+                            turns.add(OrbInboxPeekTurn("ev-$idx", "user", clean))
+                            pendingTools = mutableListOf()
+                        }
+                    }
+                }
+                "assistant_message", "assistant_message_canonical" -> {
+                    val clean = humanizeStatusText(ev.str("content", "text", "message") ?: "").take(800)
+                    if (clean.isNotEmpty()) {
+                        val receipt = extractWorkReceipt(pendingTools)
+                        pendingTools = mutableListOf()
+                        val last = turns.lastOrNull()
+                        if (last != null && last.role == "assistant") {
+                            turns[turns.lastIndex] = OrbInboxPeekTurn(
+                                id = last.id,
+                                role = "assistant",
+                                text = clean,
+                                workReceipt = receipt ?: last.workReceipt
+                            )
+                        } else {
+                            turns.add(OrbInboxPeekTurn("ev-$idx", "assistant", clean, receipt))
+                        }
+                    }
+                }
+                "error" -> {
+                    val clean = humanizeStatusText(ev.str("content", "message", "error") ?: "").take(800)
+                    if (clean.isNotEmpty()) {
+                        val isProse = clean.length >= 220 && !Regex("^(error|failed|exception|panic):", RegexOption.IGNORE_CASE).containsMatchIn(clean)
+                        val role = if (isProse) "assistant" else "error"
+                        val last = turns.lastOrNull()
+                        if (role == "assistant" && last != null && last.role == "assistant") {
+                            turns[turns.lastIndex] = last.copy(text = clean)
+                        } else {
+                            turns.add(OrbInboxPeekTurn("ev-$idx", role, clean))
+                        }
+                    }
+                }
+            }
+        }
+
+        if (turns.none { it.role == "user" }) {
+            val promptFallback = displayTitle(mission.str("goal_objective", "title", "name") ?: "")
+            if (promptFallback.isNotEmpty() && turns.isNotEmpty()) {
+                turns.add(0, OrbInboxPeekTurn("init-user", "user", promptFallback))
+            }
+        }
+
+        if (turns.isEmpty()) {
+            val history = OrbJSON.dictList(mission.raw["history"])
+            for ((idx, entry) in history.withIndex()) {
+                val role = if (OrbJSON.str(entry, "role") == "user") "user" else "assistant"
+                val content = OrbJSON.str(entry, "content") ?: ""
+                if (role == "user" && isSyntheticUserMessage(content)) continue
+                val clean = humanizeStatusText(content).take(800)
+                if (clean.isNotEmpty()) {
+                    turns.add(OrbInboxPeekTurn("hist-$idx", role, clean))
+                }
+            }
+        }
+
+        if (turns.isEmpty()) {
+            val st = (mission.str("status", "state") ?: "").lowercase()
+            val role = if (st in setOf("failed", "not_feasible")) "error" else "assistant"
+            turns.add(OrbInboxPeekTurn("fallback", role, summaryFallback, extractWorkReceipt(events)))
+        }
+
+        return turns.takeLast(6)
+    }
+
+    private fun extractSummary(mission: OrbRow, cachedEvents: List<OrbRow>): String {
         for (ev in cachedEvents.asReversed()) {
             val evType = (ev.str("event_type", "type") ?: "").lowercase()
             if (evType == "error") {
@@ -614,7 +1352,7 @@ object OrbInboxModel {
 
     fun cleanMarkdownPreview(raw: String): String = clipToSentence(raw)
 
-    private fun stripMarkdownToProse(raw: String): String {
+    fun stripMarkdownToProse(raw: String): String {
         if (raw.isEmpty()) return ""
         var s = raw
         s = s.replace(Regex("```[\\s\\S]*?```"), " ")
@@ -628,24 +1366,24 @@ object OrbInboxModel {
         return s.trim()
     }
 
-    fun clipToSentence(raw: String, maxChars: Int = 112): String {
+    fun clipToSentence(raw: String, maxChars: Int = MAX_SUMMARY_CHARS): String {
         val prose = stripMarkdownToProse(raw)
         if (prose.isEmpty()) return ""
+        if (prose.length <= maxChars) return prose
         var cutIdx = -1
         for (i in prose.indices) {
+            if (i >= maxChars) break
             val ch = prose[i]
             if (ch == '.' || ch == '?' || ch == '!') {
                 val nextIdx = i + 1
                 val isEnd = nextIdx == prose.length || prose[nextIdx].isWhitespace()
-                if (isEnd && nextIdx >= 12) {
+                if (isEnd && nextIdx >= 24) {
                     cutIdx = nextIdx
-                    break
                 }
             }
         }
-        val candidate = if (cutIdx > 0) prose.substring(0, cutIdx).trim() else prose
-        if (candidate.length <= maxChars) return candidate
-        val prefix = candidate.take(maxOf(1, maxChars - 1))
+        if (cutIdx > 0) return prose.substring(0, cutIdx).trim()
+        val prefix = prose.take(maxOf(1, maxChars - 1))
         val lastSpace = prefix.lastIndexOf(' ')
         if (lastSpace >= maxChars / 2) {
             return prefix.substring(0, lastSpace).trim() + "…"
@@ -719,34 +1457,53 @@ fun OrbInboxView(
     var showRunningSection by remember { mutableStateOf(false) }
     var lastDismissedItem by remember { mutableStateOf<OrbInboxItem?>(null) }
     var peekedItemId by remember { mutableStateOf<String?>(null) }
-    val peekMessagesByItem = remember { mutableStateMapOf<String, List<OrbRow>>() }
+    val peekTurnsByItem = remember { mutableStateMapOf<String, List<OrbInboxPeekTurn>>() }
     var loadingPeekId by remember { mutableStateOf<String?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
+    val answeredCallIds = remember { mutableStateMapOf<String, Boolean>() }
 
     var eventsVersion by remember { mutableIntStateOf(0) }
-    androidx.compose.runtime.LaunchedEffect(missions) {
+    LaunchedEffect(missions, filterMode, OrbInboxSettings.aiSummary, OrbInboxSettings.model) {
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
-            st in setOf("active", "running", "starting", "awaiting_user", "waiting_user", "blocked")
-        }.take(8)
+            st in setOf(
+                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
+                "completed", "succeeded", "paused", "interrupted"
+            )
+        }.sortedByDescending { it.str("updated_at", "completed_at", "started_at", "created_at") ?: "" }
+            .take(18)
+
         var anyLoaded = false
-        for (row in candidates) {
-            if (OrbReadCache.loadRows("mission_events_${row.id}").isNotEmpty()) continue
-            val evs = runCatching {
-                core.fetchRows("/api/control/missions/${row.id}/events?limit=120", "events")
-            }.getOrDefault(emptyList())
-            if (evs.isNotEmpty()) {
-                OrbReadCache.saveRows("mission_events_${row.id}", evs)
-                anyLoaded = true
+        for ((idx, row) in candidates.withIndex()) {
+            var evs = OrbReadCache.loadRows("mission_events_${row.id}")
+            if (evs.isEmpty() && idx < 12) {
+                evs = runCatching {
+                    core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
+                }.getOrDefault(emptyList())
+                if (evs.isNotEmpty()) {
+                    OrbReadCache.saveRows("mission_events_${row.id}", evs)
+                    anyLoaded = true
+                }
             }
+            val priority = if (OrbMissionUnreadStore.isUnread(row)) idx else idx + 20
+            OrbInboxDigestStore.request(core, row, evs, priority = priority)
         }
         if (anyLoaded) {
             eventsVersion += 1
         }
     }
 
-    val allItems = remember(projects, missions, OrbInboxModel.revision, OrbMissionUnreadStore.revision, eventsVersion) {
-        OrbInboxModel.build(projects, missions)
+    val allItems = remember(
+        projects,
+        missions,
+        OrbInboxModel.revision,
+        OrbMissionUnreadStore.revision,
+        OrbInboxDigestStore.revision,
+        OrbInboxSettings.revision,
+        eventsVersion,
+        answeredCallIds.size
+    ) {
+        OrbInboxModel.build(projects, missions, answeredCallIds.keys)
     }
 
     val workingMissions = remember(projects, missions) {
@@ -803,18 +1560,21 @@ fun OrbInboxView(
             return
         }
         peekedItemId = item.id
-        val cached = OrbReadCache.loadRows("mission_msgs_${item.id}")
+        val cached = OrbReadCache.loadRows("mission_events_${item.id}")
         if (cached.isNotEmpty()) {
-            peekMessagesByItem[item.id] = cached.takeLast(3)
+            peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, cached, item.summary)
         }
         loadingPeekId = item.id
         scope.launch {
             val rows = runCatching {
-                core.fetchRows("/api/control/missions/${item.id}/messages", "messages")
+                core.fetchRows("/api/control/missions/${core.encodeComponent(item.id)}/events?limit=120", "events")
             }.getOrDefault(emptyList())
             if (rows.isNotEmpty()) {
-                OrbReadCache.saveRows("mission_msgs_${item.id}", rows)
-                peekMessagesByItem[item.id] = rows.takeLast(3)
+                OrbReadCache.saveRows("mission_events_${item.id}", rows)
+                peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, rows, item.summary)
+                eventsVersion += 1
+            } else if (peekTurnsByItem[item.id].isNullOrEmpty()) {
+                peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, emptyList(), item.summary)
             }
             if (loadingPeekId == item.id) {
                 loadingPeekId = null
@@ -841,17 +1601,37 @@ fun OrbInboxView(
         sendingItemId = item.id
         scope.launch {
             try {
-                core.request(
-                    path = "/api/control/missions/${item.id}/message",
-                    method = "POST",
-                    body = mapOf("content" to trimmed)
-                )
+                val pending = item.pendingInteraction
+                val matchedOption = pending?.options?.firstOrNull { it.label.equals(trimmed, ignoreCase = true) }
+                if (pending != null && matchedOption != null) {
+                    core.request(
+                        path = "/api/control/tool_result",
+                        method = "POST",
+                        body = mapOf(
+                            "tool_call_id" to pending.callId,
+                            "name" to pending.toolName,
+                            "result" to matchedOption.payload
+                        )
+                    )
+                    answeredCallIds[pending.callId] = true
+                } else {
+                    core.request(
+                        path = "/api/control/message",
+                        method = "POST",
+                        body = mapOf(
+                            "mission_id" to item.id,
+                            "content" to trimmed,
+                            "queue_followup" to true,
+                            "client_message_id" to UUID.randomUUID().toString()
+                        )
+                    )
+                }
                 markItemAndChildrenRead(item)
                 replyingItemId = null
                 replyDraft = ""
                 core.refreshMissionsQuietly()
-            } catch (e: Throwable) {
-                core.setError(e.message)
+            } catch (msgErr: Throwable) {
+                core.requestInboxOpen()
             } finally {
                 sendingItemId = null
             }
@@ -878,53 +1658,11 @@ fun OrbInboxView(
                     top = 8.dp,
                     bottom = if (lastDismissedItem != null) 76.dp else 28.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item(key = "header") {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        // headerSummary matching iOS line 1059
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "New agent responses and questions waiting on you.",
-                                color = OrbStyle.textSecondary,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            if (workingMissions.isNotEmpty()) {
-                                Row(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(if (showRunningSection) OrbStyle.elevated else OrbStyle.surface)
-                                        .border(
-                                            1.dp,
-                                            if (showRunningSection) OrbStyle.borderStrong else OrbStyle.border,
-                                            CircleShape
-                                        )
-                                        .orbPressClickable { showRunningSection = !showRunningSection }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    OrbRunningDots(color = Color.White, dotSize = 2.1.dp, spacing = 1.9.dp)
-                                    Text(
-                                        text = "${workingMissions.size} working",
-                                        color = Color.White,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-                        }
-
-                        // modeFilterBar matching iOS line 988
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Minimalist filter bar + inline working pill + Read all
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -979,6 +1717,32 @@ fun OrbInboxView(
                             }
 
                             Spacer(modifier = Modifier.weight(1f))
+
+                            if (workingMissions.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (showRunningSection) OrbStyle.elevated else OrbStyle.surface)
+                                        .border(
+                                            1.dp,
+                                            if (showRunningSection) OrbStyle.borderStrong else OrbStyle.border,
+                                            CircleShape
+                                        )
+                                        .orbPressClickable { showRunningSection = !showRunningSection }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    OrbRunningDots(color = Color.White, dotSize = 2.1.dp, spacing = 1.9.dp)
+                                    Text(
+                                        text = "${workingMissions.size} working",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
 
                             if (unreadCount > 0) {
                                 Row(
@@ -1216,37 +1980,46 @@ fun OrbInboxView(
                         }
 
                         items(needsInputItems, key = { "needs-${it.id}" }) { item ->
-                            OrbInboxCard(
+                            OrbSwipeableInboxCard(
                                 item = item,
-                                isReplying = replyingItemId == item.id,
-                                replyDraft = if (replyingItemId == item.id) replyDraft else "",
-                                onReplyDraftChange = { replyDraft = it },
-                                isSending = sendingItemId == item.id,
-                                isPeeked = peekedItemId == item.id,
-                                peekMessages = peekMessagesByItem[item.id] ?: emptyList(),
-                                isLoadingPeek = loadingPeekId == item.id,
-                                onSelectMission = {
-                                    markItemAndChildrenRead(item)
-                                    onSelectMission(item.mission, item.project)
-                                },
-                                onSelectFailedChild = { failedChild ->
-                                    markItemAndChildrenRead(item)
-                                    onSelectMission(failedChild, item.project)
-                                },
-                                onTogglePeek = { togglePeek(item) },
-                                onMarkRead = { markItemAndChildrenRead(item) },
-                                onToggleReply = {
-                                    if (replyingItemId == item.id) {
-                                        replyingItemId = null
-                                        replyDraft = ""
-                                    } else {
-                                        replyingItemId = item.id
-                                        replyDraft = ""
-                                    }
-                                },
-                                onSendQuickReply = { sendQuickReply(it, item) },
-                                onDismiss = { dismissWithUndo(item) }
-                            )
+                                onSwipeDone = { dismissWithUndo(item) },
+                                onSwipeReply = {
+                                    replyingItemId = item.id
+                                    replyDraft = ""
+                                }
+                            ) {
+                                OrbInboxCard(
+                                    item = item,
+                                    isReplying = replyingItemId == item.id,
+                                    replyDraft = if (replyingItemId == item.id) replyDraft else "",
+                                    onReplyDraftChange = { replyDraft = it },
+                                    isSending = sendingItemId == item.id,
+                                    isPeeked = peekedItemId == item.id,
+                                    peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
+                                    isLoadingPeek = loadingPeekId == item.id,
+                                    onSelectMission = {
+                                        markItemAndChildrenRead(item)
+                                        onSelectMission(item.mission, item.project)
+                                    },
+                                    onSelectFailedChild = { failedChild ->
+                                        markItemAndChildrenRead(item)
+                                        onSelectMission(failedChild, item.project)
+                                    },
+                                    onTogglePeek = { togglePeek(item) },
+                                    onToggleRead = { OrbMissionUnreadStore.toggleUnread(item.mission) },
+                                    onToggleReply = {
+                                        if (replyingItemId == item.id) {
+                                            replyingItemId = null
+                                            replyDraft = ""
+                                        } else {
+                                            replyingItemId = item.id
+                                            replyDraft = ""
+                                        }
+                                    },
+                                    onSendQuickReply = { sendQuickReply(it, item) },
+                                    onDismiss = { dismissWithUndo(item) }
+                                )
+                            }
                         }
                     }
 
@@ -1274,37 +2047,46 @@ fun OrbInboxView(
                         }
 
                         items(finishedItems, key = { "done-${it.id}" }) { item ->
-                            OrbInboxCard(
+                            OrbSwipeableInboxCard(
                                 item = item,
-                                isReplying = replyingItemId == item.id,
-                                replyDraft = if (replyingItemId == item.id) replyDraft else "",
-                                onReplyDraftChange = { replyDraft = it },
-                                isSending = sendingItemId == item.id,
-                                isPeeked = peekedItemId == item.id,
-                                peekMessages = peekMessagesByItem[item.id] ?: emptyList(),
-                                isLoadingPeek = loadingPeekId == item.id,
-                                onSelectMission = {
-                                    markItemAndChildrenRead(item)
-                                    onSelectMission(item.mission, item.project)
-                                },
-                                onSelectFailedChild = { failedChild ->
-                                    markItemAndChildrenRead(item)
-                                    onSelectMission(failedChild, item.project)
-                                },
-                                onTogglePeek = { togglePeek(item) },
-                                onMarkRead = { markItemAndChildrenRead(item) },
-                                onToggleReply = {
-                                    if (replyingItemId == item.id) {
-                                        replyingItemId = null
-                                        replyDraft = ""
-                                    } else {
-                                        replyingItemId = item.id
-                                        replyDraft = ""
-                                    }
-                                },
-                                onSendQuickReply = { sendQuickReply(it, item) },
-                                onDismiss = { dismissWithUndo(item) }
-                            )
+                                onSwipeDone = { dismissWithUndo(item) },
+                                onSwipeReply = {
+                                    replyingItemId = item.id
+                                    replyDraft = ""
+                                }
+                            ) {
+                                OrbInboxCard(
+                                    item = item,
+                                    isReplying = replyingItemId == item.id,
+                                    replyDraft = if (replyingItemId == item.id) replyDraft else "",
+                                    onReplyDraftChange = { replyDraft = it },
+                                    isSending = sendingItemId == item.id,
+                                    isPeeked = peekedItemId == item.id,
+                                    peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
+                                    isLoadingPeek = loadingPeekId == item.id,
+                                    onSelectMission = {
+                                        markItemAndChildrenRead(item)
+                                        onSelectMission(item.mission, item.project)
+                                    },
+                                    onSelectFailedChild = { failedChild ->
+                                        markItemAndChildrenRead(item)
+                                        onSelectMission(failedChild, item.project)
+                                    },
+                                    onTogglePeek = { togglePeek(item) },
+                                    onToggleRead = { OrbMissionUnreadStore.toggleUnread(item.mission) },
+                                    onToggleReply = {
+                                        if (replyingItemId == item.id) {
+                                            replyingItemId = null
+                                            replyDraft = ""
+                                        } else {
+                                            replyingItemId = item.id
+                                            replyDraft = ""
+                                        }
+                                    },
+                                    onSendQuickReply = { sendQuickReply(it, item) },
+                                    onDismiss = { dismissWithUndo(item) }
+                                )
+                            }
                         }
                     }
                 }
@@ -1352,6 +2134,83 @@ fun OrbInboxView(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OrbSwipeableInboxCard(
+    item: OrbInboxItem,
+    onSwipeDone: () -> Unit,
+    onSwipeReply: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.EndToStart -> {
+                    onSwipeDone()
+                    true
+                }
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    onSwipeReply()
+                    false
+                }
+                SwipeToDismissBoxValue.Settled -> false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            val direction = dismissState.dismissDirection
+            val bgColor = when (direction) {
+                SwipeToDismissBoxValue.EndToStart -> OrbStyle.success.copy(alpha = 0.22f)
+                SwipeToDismissBoxValue.StartToEnd -> OrbStyle.inboxBlue.copy(alpha = 0.22f)
+                else -> Color.Transparent
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(bgColor)
+                    .padding(horizontal = 18.dp),
+                contentAlignment = when (direction) {
+                    SwipeToDismissBoxValue.EndToStart -> Alignment.CenterEnd
+                    else -> Alignment.CenterStart
+                }
+            ) {
+                if (direction == SwipeToDismissBoxValue.EndToStart) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Done",
+                            tint = OrbStyle.success,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text("Done", color = OrbStyle.success, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                } else if (direction == SwipeToDismissBoxValue.StartToEnd) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Reply,
+                            contentDescription = "Reply",
+                            tint = OrbStyle.inboxBlue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text("Reply", color = OrbStyle.inboxBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        },
+        content = { content() }
+    )
+}
+
 @Composable
 private fun OrbInboxSectionHeader(title: String, count: Int) {
     Row(
@@ -1384,12 +2243,12 @@ private fun OrbInboxCard(
     onReplyDraftChange: (String) -> Unit,
     isSending: Boolean,
     isPeeked: Boolean,
-    peekMessages: List<OrbRow>,
+    peekTurns: List<OrbInboxPeekTurn>,
     isLoadingPeek: Boolean,
     onSelectMission: () -> Unit,
     onSelectFailedChild: (OrbRow) -> Unit,
     onTogglePeek: () -> Unit,
-    onMarkRead: () -> Unit,
+    onToggleRead: () -> Unit,
     onToggleReply: () -> Unit,
     onSendQuickReply: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -1397,6 +2256,7 @@ private fun OrbInboxCard(
 ) {
     val pName = item.project.str("title", "name", "slug") ?: "Project"
     val pColor = OrbProjectAppearance.color(item.project)
+    val showBadge = !(item.kind == OrbInboxKind.Finished && item.badge == "Completed")
 
     Column(
         modifier = modifier
@@ -1409,15 +2269,15 @@ private fun OrbInboxCard(
                 RoundedCornerShape(14.dp)
             )
             .padding(horizontal = 13.dp, vertical = 11.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .orbPressClickable { onSelectMission() },
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // Line 1: Unread dot + Project dot + Project name + · + Goal tag + Headline + Badge + Time
+            // Line 1: Unread dot (tappable) + Project dot + Project name + · + Goal tag + Headline + Badge + Time
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1425,10 +2285,17 @@ private fun OrbInboxCard(
                 if (item.isUnread) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF0A84FF))
-                    )
+                            .size(14.dp)
+                            .orbPressClickable { onToggleRead() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0A84FF))
+                        )
+                    }
                 }
                 Box(
                     modifier = Modifier
@@ -1469,16 +2336,18 @@ private fun OrbInboxCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Text(
-                    text = item.badge,
-                    color = item.tone.foreground,
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(item.tone.background)
-                        .padding(horizontal = 7.dp, vertical = 2.5.dp)
-                )
+                if (showBadge) {
+                    Text(
+                        text = item.badge,
+                        color = item.tone.foreground,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(item.tone.background)
+                            .padding(horizontal = 7.dp, vertical = 2.5.dp)
+                    )
+                }
                 val rel = OrbJSON.relative(item.updatedAt)
                 if (rel.isNotEmpty()) {
                     Text(
@@ -1490,13 +2359,48 @@ private fun OrbInboxCard(
                 }
             }
 
-            // Line 2: 1-sentence prose summary
+            // Follow-up request line ("Asked: ...") when distinct from mission headline
+            if (!item.lastRequest.isNullOrEmpty()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = "Asked:",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = item.lastRequest,
+                        color = OrbStyle.textSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // AI Overview / 4-line summary
             if (item.summary.isNotEmpty()) {
                 Text(
                     text = item.summary,
                     color = OrbStyle.textSecondary,
                     fontSize = 13.sp,
-                    maxLines = 2,
+                    lineHeight = 18.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // Work receipt chip
+            if (!item.workReceipt.isNullOrEmpty()) {
+                Text(
+                    text = item.workReceipt,
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -1518,56 +2422,63 @@ private fun OrbInboxCard(
             }
         }
 
-        // Subagent track summary pill
-        if (item.childCount > 0) {
-            val firstFailed = item.failedChildren.firstOrNull()
-            if (firstFailed != null) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(OrbStyle.error.copy(alpha = 0.12f))
-                        .border(1.dp, OrbStyle.error.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
-                        .orbPressClickable { onSelectFailedChild(firstFailed.row) }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
+        // Actionable child tracks only (failed or running)
+        if (item.failedChildren.isNotEmpty() || item.runningChildCount > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val firstFailed = item.failedChildren.firstOrNull()
+                if (firstFailed != null) {
+                    Row(
                         modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(OrbStyle.error)
-                    )
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(OrbStyle.error.copy(alpha = 0.12f))
+                            .border(1.dp, OrbStyle.error.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
+                            .orbPressClickable { onSelectFailedChild(firstFailed.row) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.error)
+                        )
+                        Text(
+                            text = "${item.failedChildCount} ${if (item.failedChildCount == 1) "track" else "tracks"} failed: ${firstFailed.title}",
+                            color = OrbStyle.error,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Icon(
+                            imageVector = Icons.Default.ArrowForward,
+                            contentDescription = null,
+                            tint = OrbStyle.error,
+                            modifier = Modifier.size(11.dp)
+                        )
+                    }
+                }
+                if (item.runningChildCount > 0) {
                     Text(
-                        text = "${item.failedChildCount} ${if (item.failedChildCount == 1) "track" else "tracks"} failed: ${firstFailed.title}",
-                        color = OrbStyle.error,
+                        text = "${item.runningChildCount} ${if (item.runningChildCount == 1) "track" else "tracks"} running",
+                        color = OrbStyle.inboxBlue,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Icon(
-                        imageVector = Icons.Default.ArrowForward,
-                        contentDescription = null,
-                        tint = OrbStyle.error,
-                        modifier = Modifier.size(11.dp)
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(OrbStyle.inboxBlue.copy(alpha = 0.12f))
+                            .padding(horizontal = 8.dp, vertical = 3.5.dp)
                     )
                 }
-            } else {
-                Text(
-                    text = "${item.childCount} ${if (item.childCount == 1) "track" else "tracks"} · ${item.completedChildCount} completed${if (item.runningChildCount > 0) " · ${item.runningChildCount} running" else ""}",
-                    color = OrbStyle.textMuted,
-                    fontSize = 11.sp,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color.White.copy(alpha = 0.04f))
-                        .padding(horizontal = 8.dp, vertical = 3.5.dp)
-                )
             }
         }
 
-        // Quick action bar matching iOS line 1340
+        // Minimalist quick action bar: Options / Retry / Peek / Reply / Done
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1602,7 +2513,7 @@ private fun OrbInboxCard(
                         .background(OrbStyle.warning.copy(alpha = 0.12f))
                         .border(1.dp, OrbStyle.warning.copy(alpha = 0.32f), CircleShape)
                         .orbPressClickable(enabled = !isSending) {
-                            onSendQuickReply("Continue and resolve the blocker/error.")
+                            onSendQuickReply("Continue from where you left off.")
                         }
                         .padding(horizontal = 9.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1640,32 +2551,6 @@ private fun OrbInboxCard(
             }
 
             Spacer(modifier = Modifier.weight(1f))
-
-            if (item.isUnread) {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.04f))
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .orbPressClickable { onMarkRead() }
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF0A84FF))
-                    )
-                    Text(
-                        text = "Read",
-                        color = OrbStyle.textSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
 
             Row(
                 modifier = Modifier
@@ -1721,7 +2606,7 @@ private fun OrbInboxCard(
                 modifier = Modifier.padding(top = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                if (isLoadingPeek && peekMessages.isEmpty()) {
+                if (isLoadingPeek && peekTurns.isEmpty()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1732,48 +2617,70 @@ private fun OrbInboxCard(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "Loading recent turns…",
+                            text = "Loading conversation…",
                             color = OrbStyle.textSecondary,
                             fontSize = 12.sp
                         )
                     }
                 } else {
-                    val rowsToShow = if (peekMessages.isNotEmpty()) {
-                        peekMessages
-                    } else {
+                    val turnsToShow = peekTurns.ifEmpty {
                         listOf(
-                            OrbRow(
-                                "fallback",
-                                mapOf("role" to "assistant", "content" to item.summary)
+                            OrbInboxPeekTurn(
+                                id = "fallback",
+                                role = "assistant",
+                                text = item.summary,
+                                workReceipt = item.workReceipt
                             )
                         )
                     }
-                    rowsToShow.forEach { msg ->
-                        val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
-                        val isUser = role == "user" || role == "operator" || role == "human"
-                        val text = OrbInboxModel.cleanMarkdownPreview(msg.str("content", "text", "message") ?: "")
-                        if (text.isNotEmpty()) {
+                    turnsToShow.forEach { turn ->
+                        val isUser = turn.role == "user"
+                        val isError = turn.role == "error"
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (isError) OrbStyle.error.copy(alpha = 0.08f)
+                                    else Color.Black.copy(alpha = 0.24f)
+                                )
+                                .padding(horizontal = 9.dp, vertical = 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color.Black.copy(alpha = 0.24f))
-                                    .padding(horizontal = 9.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.Top,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = if (isUser) "YOU" else "AGENT",
-                                    color = if (isUser) OrbStyle.textSecondary else OrbStyle.inboxBlue,
+                                    text = when {
+                                        isUser -> "YOU"
+                                        isError -> "ERROR"
+                                        else -> "AGENT"
+                                    },
+                                    color = when {
+                                        isError -> OrbStyle.error
+                                        isUser -> OrbStyle.textSecondary
+                                        else -> OrbStyle.inboxBlue
+                                    },
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.width(40.dp)
+                                    modifier = Modifier.width(42.dp)
                                 )
                                 Text(
-                                    text = text,
+                                    text = turn.text,
                                     color = OrbStyle.textSecondary,
                                     fontSize = 12.sp,
+                                    lineHeight = 17.sp,
                                     modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (!turn.workReceipt.isNullOrEmpty()) {
+                                Text(
+                                    text = turn.workReceipt,
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 10.5.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(start = 50.dp)
                                 )
                             }
                         }

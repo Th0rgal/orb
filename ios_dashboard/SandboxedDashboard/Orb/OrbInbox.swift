@@ -1,5 +1,363 @@
 import SwiftUI
 
+struct OrbInboxModelPreset: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let subtitle: String
+}
+
+@Observable
+final class OrbInboxSettings: @unchecked Sendable {
+    static let shared = OrbInboxSettings()
+
+    static let defaultModel = "builtin/smart"
+    static let modelPresets: [OrbInboxModelPreset] = [
+        OrbInboxModelPreset(
+            id: "builtin/smart",
+            label: "Smart Router (builtin/smart)",
+            subtitle: "Default router for crisp 2–3 sentence AI Overviews"
+        ),
+        OrbInboxModelPreset(
+            id: "builtin/fast",
+            label: "Fast Router (builtin/fast)",
+            subtitle: "Lowest latency router"
+        ),
+        OrbInboxModelPreset(
+            id: "builtin/reasoning",
+            label: "Reasoning Router (builtin/reasoning)",
+            subtitle: "Deeper technical synthesis"
+        ),
+    ]
+
+    private let aiSummaryKey = "orb.inbox.aiSummary.v1"
+    private let modelKey = "orb.inbox.model.v1"
+
+    private(set) var version = 0
+    var aiSummary: Bool {
+        didSet {
+            UserDefaults.standard.set(aiSummary, forKey: aiSummaryKey)
+            version += 1
+        }
+    }
+    var model: String {
+        didSet {
+            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolved = trimmed.isEmpty ? Self.defaultModel : trimmed
+            if model != resolved {
+                model = resolved
+                return
+            }
+            UserDefaults.standard.set(resolved, forKey: modelKey)
+            version += 1
+        }
+    }
+
+    private init() {
+        if UserDefaults.standard.object(forKey: aiSummaryKey) == nil {
+            self.aiSummary = true
+        } else {
+            self.aiSummary = UserDefaults.standard.bool(forKey: aiSummaryKey)
+        }
+        let savedModel = (UserDefaults.standard.string(forKey: modelKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.model = savedModel.isEmpty ? Self.defaultModel : savedModel
+    }
+}
+
+struct OrbInboxDigest: Codable, Equatable, Sendable {
+    let task: String
+    let outcome: String
+    let verdict: String
+    let model: String
+    let updatedAt: String
+}
+
+@MainActor
+@Observable
+final class OrbInboxDigestStore {
+    static let shared = OrbInboxDigestStore()
+
+    private let diskKey = "inbox:digests:v4"
+    private let maxConcurrent = 3
+    private(set) var version = 0
+    private var cache: [String: OrbInboxDigest] = [:]
+    private var inFlight: Set<String> = []
+    private var failedAt: [String: Date] = [:]
+    private var activeCount = 0
+    private var queue: [(priority: Int, work: () async -> Void)] = []
+
+    private static let digestPrompt = [
+        "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
+        "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
+        #"{"task":"<concise 4-10 word summary of the user's latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}"#,
+        "Rules:",
+        "- Write in the same language as the conversation.",
+        #"- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set "task" to "". Never write generic filler like "Execute the mission goal"."#,
+        #"- Write "outcome" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker."#,
+        #"- Never write vague boilerplate like "Mission stopped and is currently blocked" or "Finished the task"."#,
+        "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
+    ].joined(separator: "\n")
+
+    private init() {
+        if let stored = OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self) {
+            cache = stored
+        }
+    }
+
+    private func cacheKey(missionID: String, updatedAt: String, model: String) -> String {
+        "\(missionID)|\(updatedAt)|\(model)"
+    }
+
+    func get(row: OrbRow) -> OrbInboxDigest? {
+        _ = version
+        let settings = OrbInboxSettings.shared
+        guard settings.aiSummary else { return nil }
+        let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: settings.model)
+        if let exact = cache[key] { return exact }
+        let prefix = "\(row.id)|\(row.updatedAt)|"
+        return cache.first(where: { $0.key.hasPrefix(prefix) })?.value
+    }
+
+    func request(row: OrbRow, events: [StoredEvent], priority: Int = 10) {
+        let settings = OrbInboxSettings.shared
+        guard settings.aiSummary else { return }
+        if ["active", "running", "starting", "pending", "queued", "resuming", "waiting_background"].contains(row.state) {
+            return
+        }
+        let model = settings.model
+        let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: model)
+        if cache[key] != nil || inFlight.contains(key) { return }
+        if let failDate = failedAt[key], Date().timeIntervalSince(failDate) < 45 { return }
+
+        let snapshot = Self.buildSnapshot(row: row, events: events)
+        guard snapshot.count >= 24 else { return }
+
+        inFlight.insert(key)
+        queue.append((priority: priority, work: { [weak self] in
+            guard let self else { return }
+            defer { self.inFlight.remove(key) }
+            do {
+                let answer = try await Self.fetchBtw(missionID: row.id, context: snapshot, model: model)
+                if let digest = Self.parseDigest(answer, updatedAt: row.updatedAt, model: model) {
+                    self.cache[key] = digest
+                    self.version += 1
+                    OrbDisk.saveAsync(self.cache, key: self.diskKey)
+                } else {
+                    self.failedAt[key] = Date()
+                }
+            } catch {
+                self.failedAt[key] = Date()
+            }
+        }))
+        queue.sort { $0.priority < $1.priority }
+        pumpQueue()
+    }
+
+    private func pumpQueue() {
+        while activeCount < maxConcurrent, !queue.isEmpty {
+            let next = queue.removeFirst()
+            activeCount += 1
+            Task { @MainActor in
+                await next.work()
+                self.activeCount -= 1
+                self.pumpQueue()
+            }
+        }
+    }
+
+    private static func buildSnapshot(row: OrbRow, events: [StoredEvent]) -> String {
+        var lines: [String] = []
+        lines.append("Mission title: \(row.name)")
+        lines.append("Mission status: \(row.state)")
+        let term = row.raw["terminal_reason"].text
+        if !term.isEmpty { lines.append("Terminal reason: \(term)") }
+        let statusMsg = row.raw["status_message"].text
+        if !statusMsg.isEmpty { lines.append("Status message: \(statusMsg)") }
+        let remoteErr = row.raw["remote_job"]["error"].text
+        if !remoteErr.isEmpty { lines.append("Remote error: \(remoteErr)") }
+
+        var lastUser = ""
+        var assistantBlocks: [String] = []
+        var lastError = ""
+
+        for event in events {
+            if event.eventType == "user_message" {
+                let text = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty && !OrbInboxModel.isSyntheticUserMessage(text) {
+                    lastUser = text
+                }
+            } else if event.eventType == "assistant_message" || event.eventType == "assistant_message_canonical" {
+                let clean = OrbInboxModel.humanizeStatusText(event.content)
+                if !clean.isEmpty { assistantBlocks.append(clean) }
+            } else if event.eventType == "error" {
+                let clean = OrbInboxModel.humanizeStatusText(event.content)
+                if clean.count >= 220 { assistantBlocks.append(clean) }
+                else if !clean.isEmpty { lastError = clean }
+            }
+        }
+
+        for entry in row.raw["history"].items.reversed() {
+            let role = entry["role"].text
+            let content = entry["content"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if lastUser.isEmpty, role == "user", !content.isEmpty, !OrbInboxModel.isSyntheticUserMessage(content) {
+                lastUser = content
+            }
+            if role == "assistant", !content.isEmpty {
+                let clean = OrbInboxModel.humanizeStatusText(content)
+                if !clean.isEmpty && !assistantBlocks.contains(clean) {
+                    assistantBlocks.append(clean)
+                    break
+                }
+            }
+        }
+
+        if !lastUser.isEmpty { lines.append("Latest user request:\n\(String(lastUser.prefix(700)))") }
+        if let receipt = OrbInboxModel.extractWorkReceipt(events: events) {
+            lines.append("Tools executed: \(receipt)")
+        }
+        if !lastError.isEmpty { lines.append("Recorded error:\n\(String(lastError.prefix(500)))") }
+        if !assistantBlocks.isEmpty {
+            let joined = assistantBlocks.suffix(3).joined(separator: "\n\n")
+            lines.append("Latest agent response:\n\(String(joined.suffix(2400)))")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    private static func fetchBtw(missionID: String, context: String, model: String) async throws -> String {
+        let endpoint = OrbCore.shared.endpoint
+        guard let url = URL(string: "\(endpoint)/api/control/missions/\(OrbCore.escape(missionID))/btw") else {
+            throw URLError(.badURL)
+        }
+        var bodyObj: [String: OrbJSON] = [
+            "question": .string(digestPrompt),
+            "context": .string(context),
+        ]
+        if !model.isEmpty && model != OrbInboxSettings.defaultModel {
+            bodyObj["model"] = .string(model)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 35
+        request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONEncoder().encode(OrbJSON.object(bodyObj))
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 422 && bodyObj["model"] != nil {
+            bodyObj.removeValue(forKey: "model")
+            request.httpBody = try JSONEncoder().encode(OrbJSON.object(bodyObj))
+            let (retryData, retryResp) = try await URLSession.shared.data(for: request)
+            guard let retryHttp = retryResp as? HTTPURLResponse, (200..<300).contains(retryHttp.statusCode) else {
+                throw URLError(.badServerResponse)
+            }
+            return extractBtwAnswer(String(data: retryData, encoding: .utf8) ?? "")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw OrbHTTPError(status: http.statusCode, detail: "BTW failed")
+        }
+        return extractBtwAnswer(String(data: data, encoding: .utf8) ?? "")
+    }
+
+    private static func extractBtwAnswer(_ raw: String) -> String {
+        var deltaText = ""
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payload = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            guard !payload.isEmpty, payload != "[DONE]",
+                  let data = payload.data(using: .utf8),
+                  let json = try? JSONDecoder().decode(OrbJSON.self, from: data) else { continue }
+            let d = json["delta"].text
+            let a = json["answer"].text
+            if !d.isEmpty { deltaText += d }
+            else if !a.isEmpty && deltaText.isEmpty { deltaText = a }
+        }
+        return deltaText.isEmpty ? raw : deltaText
+    }
+
+    private static func parseDigest(_ raw: String, updatedAt: String, model: String) -> OrbInboxDigest? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = trimmed.firstIndex(of: "{"),
+              let end = trimmed.lastIndex(of: "}"),
+              start < end else { return nil }
+        let slice = String(trimmed[start...end])
+        guard let data = slice.data(using: .utf8),
+              let json = try? JSONDecoder().decode(OrbJSON.self, from: data) else { return nil }
+        let task = json["task"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outcomeRaw = !json["outcome"].text.isEmpty ? json["outcome"].text : json["overview"].text
+        let outcome = outcomeRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !task.isEmpty || !outcome.isEmpty else { return nil }
+        let rawVerdict = json["verdict"].text.lowercased()
+        let verdict = ["succeeded", "failed", "waiting", "needs_input"].contains(rawVerdict) ? rawVerdict : "succeeded"
+        return OrbInboxDigest(task: task, outcome: outcome, verdict: verdict, model: model, updatedAt: updatedAt)
+    }
+}
+
+struct OrbInboxSettingsView: View {
+    @State private var settings = OrbInboxSettings.shared
+    @State private var customModel: String = {
+        let cur = OrbInboxSettings.shared.model
+        let isPreset = OrbInboxSettings.modelPresets.contains(where: { $0.id == cur })
+        return isPreset ? "" : cur
+    }()
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("AI Overview summaries", isOn: $settings.aiSummary)
+                    .accessibilityIdentifier("settings.inbox.aiSummary")
+            } footer: {
+                Text("Summarizes your latest request and what the agent accomplished in 2–3 sentences using the configured router.")
+            }
+
+            if settings.aiSummary {
+                Section("Overview Router Model") {
+                    ForEach(OrbInboxSettings.modelPresets) { preset in
+                        Button {
+                            customModel = ""
+                            settings.model = preset.id
+                            OrbHaptics.selection()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(preset.label)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                    Text(preset.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                }
+                                Spacer()
+                                if settings.model == preset.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.blue)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section("Custom Model Override") {
+                    TextField("e.g. builtin/smart", text: $customModel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onChange(of: customModel) { _, newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            settings.model = trimmed.isEmpty ? OrbInboxSettings.defaultModel : trimmed
+                        }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(OrbStyle.background)
+        .navigationTitle("Inbox")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 @Observable
 final class OrbMissionUnreadStore: @unchecked Sendable {
     static let shared = OrbMissionUnreadStore()
@@ -159,6 +517,7 @@ struct OrbInboxPeekTurn: Identifiable, Equatable, Sendable {
     let id: String
     let role: String
     let text: String
+    var workReceipt: String? = nil
 }
 
 struct OrbInboxChildFailure: Identifiable, Equatable {
@@ -183,6 +542,8 @@ struct OrbInboxItem: Identifiable, Equatable {
     let projectTitle: String
     let headline: String
     let summary: String
+    let lastRequest: String?
+    let workReceipt: String?
     let badge: String
     let tone: OrbInboxTone
     let category: OrbInboxCategory
@@ -198,7 +559,7 @@ struct OrbInboxItem: Identifiable, Equatable {
 }
 
 enum OrbInboxModel {
-    static let maxSummaryChars = 112
+    static let maxSummaryChars = 320
 
     private static let workingStatuses: Set<String> = [
         "active", "running", "starting", "pending", "queued", "resuming", "waiting_background",
@@ -210,24 +571,41 @@ enum OrbInboxModel {
         "ui_native_request", "AskUserQuestion", "question",
     ]
 
+    static func isSyntheticUserMessage(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        return trimmed.range(of: #"^\[SYSTEM:\s*AUTOMATIC[\s_]+RESUME"#, options: [.regularExpression, .caseInsensitive]) != nil ||
+            trimmed.range(of: #"^\[SYSTEM:\s*BACKGROUND"#, options: [.regularExpression, .caseInsensitive]) != nil ||
+            trimmed.range(of: #"^Continue from where you left off\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil ||
+            trimmed.range(of: #"^Continue and resolve the blocker/error\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func cleanChildTrackLabel(_ raw: String) -> String {
+        let base = OrbStyle.displayTitle(raw).replacingOccurrences(
+            of: #"\s*·\s*fork\s*$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty else { return "Worker track" }
+        if base.range(of: #"^(i['’]ll|i will|let me|now i['’]ll|first,? i['’]ll)\b"#, options: [.regularExpression, .caseInsensitive]) != nil ||
+            base.count > 68 {
+            let clipped = clipToSentence(base, maxChars: 48)
+            return clipped.isEmpty ? "Worker track" : clipped
+        }
+        return base
+    }
+
     static func stripMarkdownToProse(_ raw: String) -> String {
         guard !raw.isEmpty else { return "" }
         var s = raw
-        // Replace fenced code blocks with compact placeholder
         s = s.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
-        // Drop standalone markdown heading lines (e.g. "## Summary") so the actual prose sentence leads
         s = s.replacingOccurrences(of: #"(?m)^\s{0,3}#{1,6}\s+[^\n]*$"#, with: " ", options: .regularExpression)
-        // Strip blockquote prefixes
         s = s.replacingOccurrences(of: #"(?m)^\s{0,3}>\s*"#, with: "", options: .regularExpression)
-        // Strip bullet and numbered list markers
         s = s.replacingOccurrences(of: #"(?m)^\s*(?:[-*+]|\d+\.)\s+"#, with: "", options: .regularExpression)
-        // Unwrap markdown links [label](url) -> label
         s = s.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]+\)"#, with: "$1", options: .regularExpression)
-        // Unwrap inline code and emphasis markers
         s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)
         s = s.replacingOccurrences(of: #"(\*\*|__)(.*?)\1"#, with: "$2", options: .regularExpression)
         s = s.replacingOccurrences(of: #"(\*|_)(.*?)\1"#, with: "$2", options: .regularExpression)
-        // Collapse whitespace
         s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -235,23 +613,26 @@ enum OrbInboxModel {
     static func clipToSentence(_ raw: String, maxChars: Int = maxSummaryChars) -> String {
         let prose = stripMarkdownToProse(raw)
         guard !prose.isEmpty else { return "" }
+        if prose.count <= maxChars { return prose }
 
         var cutIndex: String.Index?
         for idx in prose.indices {
+            let distFromStart = prose.distance(from: prose.startIndex, to: idx)
+            if distFromStart >= maxChars { break }
             let ch = prose[idx]
             if ch == "." || ch == "?" || ch == "!" {
                 let nextIdx = prose.index(after: idx)
                 let isEnd = nextIdx == prose.endIndex || prose[nextIdx].isWhitespace
                 let dist = prose.distance(from: prose.startIndex, to: nextIdx)
-                if isEnd && dist >= 12 {
+                if isEnd && dist >= 24 {
                     cutIndex = nextIdx
-                    break
                 }
             }
         }
-        let candidate = cutIndex.map { String(prose[..<$0]).trimmingCharacters(in: .whitespaces) } ?? prose
-        if candidate.count <= maxChars { return candidate }
-        let prefix = String(candidate.prefix(max(1, maxChars - 1)))
+        if let cutIndex {
+            return String(prose[..<cutIndex]).trimmingCharacters(in: .whitespaces)
+        }
+        let prefix = String(prose.prefix(max(1, maxChars - 1)))
         if let lastSpace = prefix.lastIndex(of: " "),
            prefix.distance(from: prefix.startIndex, to: lastSpace) >= maxChars / 2 {
             return String(prefix[..<lastSpace]).trimmingCharacters(in: .whitespaces) + "…"
@@ -296,6 +677,55 @@ enum OrbInboxModel {
             options: .regularExpression
         )
         return trimmed
+    }
+
+    static func extractLastRequest(row: OrbRow, events: [StoredEvent], headline: String) -> String? {
+        for event in events.reversed() where event.eventType == "user_message" {
+            let text = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty && !isSyntheticUserMessage(text) {
+                let clipped = clipToSentence(text, maxChars: 96)
+                if clipped.caseInsensitiveCompare(headline) != .orderedSame {
+                    return clipped
+                }
+                return nil
+            }
+        }
+        let history = row.raw["history"].items
+        if history.count > 1 {
+            for entry in history.reversed() where entry["role"].text == "user" {
+                let text = entry["content"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty && !isSyntheticUserMessage(text) {
+                    let clipped = clipToSentence(text, maxChars: 96)
+                    if clipped.caseInsensitiveCompare(headline) != .orderedSame {
+                        return clipped
+                    }
+                    return nil
+                }
+            }
+        }
+        return nil
+    }
+
+    static func extractWorkReceipt(events: [StoredEvent]) -> String? {
+        guard !events.isEmpty else { return nil }
+        var commands = 0
+        var edits = 0
+        var reads = 0
+        for ev in events where ev.eventType == "tool_call" {
+            let name = (ev.toolName ?? "").lowercased()
+            if ["bash", "run_command", "shell", "terminal", "exec_command"].contains(name) {
+                commands += 1
+            } else if name.contains("edit") || name.contains("write") || name.contains("patch") || name.contains("replace") {
+                edits += 1
+            } else if name.contains("read") || name.contains("view") || name.contains("grep") || name.contains("glob") {
+                reads += 1
+            }
+        }
+        var parts: [String] = []
+        if commands > 0 { parts.append("\(commands) \(commands == 1 ? "command" : "commands")") }
+        if edits > 0 { parts.append("Edited \(edits) \(edits == 1 ? "file" : "files")") }
+        if parts.isEmpty && reads > 0 { parts.append("Read \(reads) \(reads == 1 ? "file" : "files")") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     static func extractInteraction(
@@ -511,41 +941,69 @@ enum OrbInboxModel {
         summaryFallback: String
     ) -> [OrbInboxPeekTurn] {
         var turns: [OrbInboxPeekTurn] = []
+        var pendingTools: [StoredEvent] = []
         let clipTurn: (String) -> String = { raw in
             let prose = stripMarkdownToProse(raw)
-            if prose.count <= 240 { return prose }
-            return String(prose.prefix(239)).trimmingCharacters(in: .whitespaces) + "…"
+            if prose.count <= 800 { return prose }
+            return String(prose.prefix(799)).trimmingCharacters(in: .whitespaces) + "…"
         }
 
         if !events.isEmpty {
             for (idx, event) in events.enumerated() {
-                if event.eventType == "user_message" {
-                    let text = clipTurn(event.content)
-                    if !text.isEmpty {
-                        turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: "user", text: text))
+                if event.eventType == "tool_call" {
+                    pendingTools.append(event)
+                } else if event.eventType == "user_message" {
+                    if !isSyntheticUserMessage(event.content) {
+                        let text = clipTurn(event.content)
+                        if !text.isEmpty {
+                            turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: "user", text: text))
+                            pendingTools.removeAll()
+                        }
                     }
                 } else if event.eventType == "assistant_message" || event.eventType == "assistant_message_canonical" {
                     let text = clipTurn(humanizeStatusText(event.content))
                     if !text.isEmpty {
+                        let receipt = extractWorkReceipt(events: pendingTools)
+                        pendingTools.removeAll()
                         if let last = turns.last, last.role == "assistant" {
-                            turns[turns.count - 1] = OrbInboxPeekTurn(id: last.id, role: "assistant", text: text)
+                            turns[turns.count - 1] = OrbInboxPeekTurn(
+                                id: last.id,
+                                role: "assistant",
+                                text: text,
+                                workReceipt: receipt ?? last.workReceipt
+                            )
                         } else {
-                            turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: "assistant", text: text))
+                            turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: "assistant", text: text, workReceipt: receipt))
                         }
                     }
                 } else if event.eventType == "error" {
                     let text = clipTurn(humanizeStatusText(event.content))
                     if !text.isEmpty {
-                        turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: "error", text: text))
+                        let isProse = text.count >= 220 && text.range(of: #"^(error|failed|exception|panic):"#, options: [.regularExpression, .caseInsensitive]) == nil
+                        let role = isProse ? "assistant" : "error"
+                        if role == "assistant", let last = turns.last, last.role == "assistant" {
+                            turns[turns.count - 1] = OrbInboxPeekTurn(id: last.id, role: "assistant", text: text, workReceipt: last.workReceipt)
+                        } else {
+                            turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: role, text: text))
+                        }
                     }
                 }
+            }
+        }
+
+        if !turns.isEmpty && !turns.contains(where: { $0.role == "user" }) {
+            let promptFallback = OrbStyle.displayTitle(row.raw["title"].text)
+            if !promptFallback.isEmpty {
+                turns.insert(OrbInboxPeekTurn(id: "init-user", role: "user", text: promptFallback), at: 0)
             }
         }
 
         if turns.isEmpty {
             for (idx, entry) in row.raw["history"].items.enumerated() {
                 let role = entry["role"].text == "user" ? "user" : "assistant"
-                let text = clipTurn(humanizeStatusText(entry["content"].text))
+                let rawContent = entry["content"].text
+                if role == "user" && isSyntheticUserMessage(rawContent) { continue }
+                let text = clipTurn(humanizeStatusText(rawContent))
                 if !text.isEmpty {
                     turns.append(OrbInboxPeekTurn(id: "hist-\(idx)", role: role, text: text))
                 }
@@ -554,10 +1012,17 @@ enum OrbInboxModel {
 
         if turns.isEmpty {
             let role = ["failed", "not_feasible"].contains(row.state) ? "error" : "assistant"
-            turns.append(OrbInboxPeekTurn(id: "fallback", role: role, text: summaryFallback))
+            turns.append(
+                OrbInboxPeekTurn(
+                    id: "fallback",
+                    role: role,
+                    text: summaryFallback,
+                    workReceipt: extractWorkReceipt(events: events)
+                )
+            )
         }
 
-        return Array(turns.suffix(3))
+        return Array(turns.suffix(6))
     }
 
     static func resolveBadgeAndTone(
@@ -607,6 +1072,7 @@ enum OrbInboxModel {
         return ""
     }
 
+    @MainActor
     static func buildItem(
         row: OrbRow,
         projectsBySlug: [String: String],
@@ -626,7 +1092,17 @@ enum OrbInboxModel {
             ? rawTitle
             : (!firstUser.isEmpty ? clipToSentence(firstUser, maxChars: 54) : "Untitled conversation")
 
-        let summary = extractSummary(row: row, events: events, interaction: interaction)
+        let rawSummary = extractSummary(row: row, events: events, interaction: interaction)
+        let digest = OrbInboxDigestStore.shared.get(row: row)
+        let summary = (interaction == nil && !(digest?.outcome.isEmpty ?? true)) ? (digest?.outcome ?? rawSummary) : rawSummary
+        let lastRequest: String? = {
+            if let dt = digest?.task, !dt.isEmpty {
+                return dt.caseInsensitiveCompare(headline) == .orderedSame ? nil : dt
+            }
+            return extractLastRequest(row: row, events: events, headline: headline)
+        }()
+        let workReceipt = extractWorkReceipt(events: events)
+
         let (badge, tone) = resolveBadgeAndTone(row: row, summary: summary, interaction: interaction)
         let isGoal = row.raw["goal_mode"].flag || OrbStyle.goalObjective(row.raw["title"].text) != nil
         let unread = OrbMissionUnreadStore.shared.isUnread(row: row, hasInteraction: interaction != nil)
@@ -641,6 +1117,8 @@ enum OrbInboxModel {
             projectTitle: projectTitle,
             headline: headline,
             summary: summary,
+            lastRequest: lastRequest,
+            workReceipt: workReceipt,
             badge: badge,
             tone: tone,
             category: category,
@@ -666,6 +1144,7 @@ enum OrbInboxModel {
         }
     }
 
+    @MainActor
     static func buildSections(
         missions: [OrbRow],
         projects: [OrbRow],
@@ -726,11 +1205,11 @@ enum OrbInboxModel {
                         running += 1
                     } else if ["failed", "not_feasible", "blocked"].contains(st) {
                         failed += 1
-                        let childTitle = OrbStyle.displayTitle(child.raw["title"].text)
+                        let childTitle = cleanChildTrackLabel(child.raw["title"].text)
                         failedChildren.append(
                             OrbInboxChildFailure(
                                 id: child.id,
-                                title: childTitle.isEmpty ? "Worker track" : childTitle,
+                                title: childTitle,
                                 row: child
                             )
                         )
@@ -813,6 +1292,8 @@ struct OrbInboxView: View {
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     private let unreadStore = OrbMissionUnreadStore.shared
+    private let digestStore = OrbInboxDigestStore.shared
+    private let inboxSettings = OrbInboxSettings.shared
 
     private func markItemAndChildrenRead(_ item: OrbInboxItem) {
         unreadStore.markRead(item.row)
@@ -843,6 +1324,8 @@ struct OrbInboxView: View {
 
     private var computed: (needsYou: [OrbInboxItem], ready: [OrbInboxItem], working: [OrbInboxItem]) {
         _ = unreadStore.version
+        _ = digestStore.version
+        _ = inboxSettings.version
         return OrbInboxModel.buildSections(
             missions: missions,
             projects: projects,
@@ -904,8 +1387,7 @@ struct OrbInboxView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    headerSummary
+                LazyVStack(alignment: .leading, spacing: 12) {
                     modeFilterBar
 
                     if projectFilters.count > 1 {
@@ -1028,6 +1510,34 @@ struct OrbInboxView: View {
 
             Spacer()
 
+            if !computed.working.isEmpty {
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showWorking.toggle()
+                    }
+                    OrbHaptics.selection()
+                } label: {
+                    HStack(spacing: 6) {
+                        OrbRunningDots(size: 11)
+                        Text("\(computed.working.count) working")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .monospacedDigit()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        showWorking ? OrbStyle.elevated : OrbStyle.surface,
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("inbox.workingPill")
+            }
+
             if unreadCount > 0 {
                 Button {
                     OrbHaptics.selection()
@@ -1051,45 +1561,6 @@ struct OrbInboxView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("inbox.markAllRead")
-            }
-        }
-    }
-
-    private var headerSummary: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Text("New agent responses and questions waiting on you.")
-                .font(.footnote)
-                .foregroundStyle(OrbStyle.textSecondary)
-                .lineLimit(1)
-
-            Spacer(minLength: 6)
-
-            if !computed.working.isEmpty {
-                Button {
-                    withAnimation(.snappy(duration: 0.22)) {
-                        showWorking.toggle()
-                    }
-                    OrbHaptics.selection()
-                } label: {
-                    HStack(spacing: 6) {
-                        OrbRunningDots(size: 11)
-                        Text("\(computed.working.count) working")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.primary)
-                            .monospacedDigit()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        showWorking ? OrbStyle.elevated : OrbStyle.surface,
-                        in: Capsule()
-                    )
-                    .overlay(
-                        Capsule().stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("inbox.workingPill")
             }
         }
     }
@@ -1218,19 +1689,27 @@ struct OrbInboxView: View {
         let isReplying = replyingMissionID == item.id
         let isPeeked = peekedIDs.contains(item.id)
         let isBusy = busyIDs.contains(item.id)
-        return VStack(alignment: .leading, spacing: 9) {
+        let showBadge = !(item.category == .ready && item.badge == "Completed")
+
+        return VStack(alignment: .leading, spacing: 8) {
             Button {
                 OrbHaptics.selection()
                 markItemAndChildrenRead(item)
                 onOpenMission(item.row)
             } label: {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
                     // Line 1: Unread dot + Project dot + Project name + Goal tag + Headline + Badge + Time
                     HStack(alignment: .center, spacing: 6) {
                         if item.unread {
                             Circle()
                                 .fill(Color.blue)
                                 .frame(width: 7, height: 7)
+                                .onTapGesture {
+                                    OrbHaptics.selection()
+                                    withAnimation(.snappy(duration: 0.2)) {
+                                        markItemAndChildrenRead(item)
+                                    }
+                                }
                         }
                         Circle()
                             .fill(appearance.color(item.projectSlug) ?? OrbStyle.icon)
@@ -1260,12 +1739,14 @@ struct OrbInboxView: View {
 
                         Spacer(minLength: 4)
 
-                        Text(item.badge)
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(item.tone.foreground)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2.5)
-                            .background(item.tone.background, in: Capsule())
+                        if showBadge {
+                            Text(item.badge)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(item.tone.foreground)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(item.tone.background, in: Capsule())
+                        }
 
                         if !item.updatedAt.isEmpty {
                             Text(OrbStyle.relativeTime(item.updatedAt))
@@ -1275,13 +1756,33 @@ struct OrbInboxView: View {
                         }
                     }
 
-                    // Line 2: 1-sentence prose summary
+                    // Follow-up request line ("Asked: ...") when distinct from mission headline
+                    if let lastReq = item.lastRequest, !lastReq.isEmpty {
+                        HStack(spacing: 5) {
+                            Text("Asked:")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(OrbStyle.textMuted)
+                            Text(lastReq)
+                                .font(.caption)
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    // AI Overview / 4-line summary
                     Text(item.summary)
                         .font(.footnote)
                         .foregroundStyle(OrbStyle.textSecondary)
-                        .lineLimit(2)
+                        .lineLimit(4)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if let receipt = item.workReceipt, !receipt.isEmpty {
+                        Text(receipt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                    }
 
                     if let cmd = item.interaction?.commandPreview, !cmd.isEmpty {
                         Text(cmd)
@@ -1298,45 +1799,49 @@ struct OrbInboxView: View {
             }
             .buttonStyle(.plain)
 
-            if let cs = item.childSummary, cs.total > 0 {
-                if let firstFailed = cs.failedChildren.first {
-                    Button {
-                        OrbHaptics.selection()
-                        markItemAndChildrenRead(item)
-                        onOpenMission(firstFailed.row)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(OrbStyle.error)
-                                .frame(width: 6, height: 6)
-                            Text("\(cs.failed) \(cs.failed == 1 ? "track" : "tracks") failed: \(firstFailed.title)")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(OrbStyle.error)
-                                .lineLimit(1)
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(OrbStyle.error)
+            // Actionable child tracks only (failed or running)
+            if let cs = item.childSummary, (!cs.failedChildren.isEmpty || cs.running > 0) {
+                HStack(spacing: 6) {
+                    if let firstFailed = cs.failedChildren.first {
+                        Button {
+                            OrbHaptics.selection()
+                            markItemAndChildrenRead(item)
+                            onOpenMission(firstFailed.row)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(OrbStyle.error)
+                                    .frame(width: 6, height: 6)
+                                Text("\(cs.failed) \(cs.failed == 1 ? "track" : "tracks") failed: \(firstFailed.title)")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(OrbStyle.error)
+                                    .lineLimit(1)
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(OrbStyle.error)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(OrbStyle.error.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(OrbStyle.error.opacity(0.28), lineWidth: 1)
+                            )
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(OrbStyle.error.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(OrbStyle.error.opacity(0.28), lineWidth: 1)
-                        )
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                } else {
-                    Text("\(cs.total) \(cs.total == 1 ? "track" : "tracks") · \(cs.completed) completed\(cs.running > 0 ? " · \(cs.running) running" : "")")
-                        .font(.caption2)
-                        .foregroundStyle(OrbStyle.textMuted)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    if cs.running > 0 {
+                        Text("\(cs.running) \(cs.running == 1 ? "track" : "tracks") running")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255).opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
                 }
             }
 
-            // Quick actions row (Options / Retry / Peek / Read / Reply / Done)
+            // Minimalist quick actions row (Options / Retry / Peek / Reply / Done)
             HStack(spacing: 6) {
                 if let interaction = item.interaction, !interaction.options.isEmpty {
                     ForEach(interaction.options) { opt in
@@ -1403,30 +1908,6 @@ struct OrbInboxView: View {
 
                 Spacer()
 
-                if item.unread {
-                    Button {
-                        OrbHaptics.selection()
-                        withAnimation(.snappy(duration: 0.2)) {
-                            markItemAndChildrenRead(item)
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.blue)
-                                .frame(width: 6, height: 6)
-                            Text("Read")
-                                .font(.caption.weight(.medium))
-                        }
-                        .foregroundStyle(OrbStyle.textSecondary)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.04), in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isBusy)
-                }
-
                 Button {
                     OrbHaptics.selection()
                     withAnimation(.snappy(duration: 0.2)) {
@@ -1484,24 +1965,32 @@ struct OrbInboxView: View {
             if isPeeked {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(item.peekTurns) { turn in
-                        HStack(alignment: .top, spacing: 8) {
-                            Text(turn.role == "user" ? "YOU" : (turn.role == "error" ? "ERROR" : "AGENT"))
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(
-                                    turn.role == "error"
-                                        ? OrbStyle.error
-                                        : (turn.role == "assistant"
-                                            ? Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255)
-                                            : OrbStyle.textSecondary)
-                                )
-                                .frame(width: 40, alignment: .leading)
-                            Text(turn.text)
-                                .font(.caption)
-                                .foregroundStyle(OrbStyle.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(turn.role == "user" ? "YOU" : (turn.role == "error" ? "ERROR" : "AGENT"))
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(
+                                        turn.role == "error"
+                                            ? OrbStyle.error
+                                            : (turn.role == "assistant"
+                                                ? Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255)
+                                                : OrbStyle.textSecondary)
+                                    )
+                                    .frame(width: 42, alignment: .leading)
+                                Text(turn.text)
+                                    .font(.caption)
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            if let receipt = turn.workReceipt, !receipt.isEmpty {
+                                Text(receipt)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .padding(.leading, 50)
+                            }
                         }
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 7)
                         .background(
                             turn.role == "error" ? OrbStyle.error.opacity(0.08) : Color.black.opacity(0.24),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1614,6 +2103,18 @@ struct OrbInboxView: View {
         }
     }
 
+    private var emptyInboxSubtitle: String {
+        if filterMode == .unread && totalActionableCount > 0 {
+            let noun = totalActionableCount == 1 ? "conversation is" : "conversations are"
+            return "You’ve opened every recent agent response. \(totalActionableCount) earlier \(noun) in All."
+        }
+        if !computed.working.isEmpty {
+            let noun = computed.working.count == 1 ? "agent is" : "agents are"
+            return "\(computed.working.count) \(noun) working quietly in the background."
+        }
+        return "When an agent needs a decision or finishes a run, it will surface here."
+    }
+
     private var emptyInboxState: some View {
         VStack(spacing: 10) {
             ZStack {
@@ -1631,13 +2132,7 @@ struct OrbInboxView: View {
             )
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.primary)
-            Text(
-                filterMode == .unread && totalActionableCount > 0
-                    ? "You’ve opened every recent agent response. \(totalActionableCount) earlier \(totalActionableCount == 1 ? "conversation is" : "conversations are") in All."
-                    : (!computed.working.isEmpty
-                        ? "\(computed.working.count) \(computed.working.count == 1 ? "agent is" : "agents are") working quietly in the background."
-                        : "When an agent needs a decision or finishes a run, it will surface here.")
-            )
+            Text(emptyInboxSubtitle)
             .font(.footnote)
             .foregroundStyle(OrbStyle.textSecondary)
             .multilineTextAlignment(.center)
@@ -1770,14 +2265,26 @@ struct OrbInboxView: View {
 
     private func prefetchActiveEvents(for rows: [OrbRow]) async {
         let candidates = rows.filter {
-            ["active", "running", "starting", "awaiting_user", "waiting_user", "blocked"].contains($0.state)
-        }.prefix(8)
-        for row in candidates {
+            [
+                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
+                "completed", "succeeded", "paused", "interrupted",
+            ].contains($0.state)
+        }
+        .sorted { $0.updatedAt > $1.updatedAt }
+        .prefix(16)
+
+        for (idx, row) in candidates.enumerated() {
             guard !Task.isCancelled else { return }
-            if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 120, sinceSeq: nil) {
-                OrbReadCache.saveEvents(row.id, events: batch.events)
-                eventsByMission[row.id] = batch.events
+            var events = eventsByMission[row.id] ?? []
+            if events.isEmpty && idx < 12 {
+                if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 120, sinceSeq: nil) {
+                    OrbReadCache.saveEvents(row.id, events: batch.events)
+                    eventsByMission[row.id] = batch.events
+                    events = batch.events
+                }
             }
+            let priority = unreadStore.isUnread(row: row) ? idx : idx + 20
+            digestStore.request(row: row, events: events, priority: priority)
         }
     }
 

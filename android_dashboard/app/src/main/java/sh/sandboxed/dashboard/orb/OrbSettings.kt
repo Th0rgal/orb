@@ -79,7 +79,8 @@ enum class OrbSettingsRoute {
     Root,
     Backend,
     Providers,
-    Machines
+    Machines,
+    Inbox
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -174,6 +175,21 @@ fun OrbSettingsSheet(
                                 subtitle = "${nodes.size} nodes · ${remoteTargets.size} SSH",
                                 onClick = { route = OrbSettingsRoute.Machines }
                             )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            val inboxSubtitle = if (OrbInboxSettings.aiSummary) {
+                                "AI Overview · ${OrbInboxSettings.model}"
+                            } else {
+                                "AI Overview off"
+                            }
+                            OrbSettingsRow(
+                                icon = Icons.Default.Terminal,
+                                title = "Inbox",
+                                subtitle = inboxSubtitle,
+                                onClick = { route = OrbSettingsRoute.Inbox }
+                            )
                         }
                     }
                 }
@@ -194,6 +210,11 @@ fun OrbSettingsSheet(
                 OrbSettingsRoute.Machines -> {
                     OrbMachinesSettingsPage(
                         core = core,
+                        onBack = { route = OrbSettingsRoute.Root }
+                    )
+                }
+                OrbSettingsRoute.Inbox -> {
+                    OrbInboxSettingsPage(
                         onBack = { route = OrbSettingsRoute.Root }
                     )
                 }
@@ -1740,3 +1761,179 @@ private fun OrbMiniField(
         }
     }
 }
+
+@Composable
+fun OrbInboxSettingsPage(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val _rev = OrbInboxSettings.revision
+    var customModel by remember {
+        val current = OrbInboxSettings.model
+        val isPreset = OrbInboxSettings.modelPresets.any { it.id == current }
+        mutableStateOf(if (isPreset) "" else current)
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+            Text(
+                text = "Inbox",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(38.dp))
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "AI Overview summaries",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Summarize what you asked and what the agent accomplished in 2–3 sentences.",
+                        color = OrbStyle.textMuted,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (OrbInboxSettings.aiSummary) Color.White else OrbStyle.card)
+                        .border(1.dp, OrbStyle.border, CircleShape)
+                        .orbPressClickable {
+                            OrbInboxSettings.update(newAiSummary = !OrbInboxSettings.aiSummary)
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (OrbInboxSettings.aiSummary) "On" else "Off",
+                        color = if (OrbInboxSettings.aiSummary) Color.Black else OrbStyle.textSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        if (OrbInboxSettings.aiSummary) {
+            Text(
+                text = "OVERVIEW ROUTER MODEL",
+                color = OrbStyle.textMuted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.6.sp
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+            ) {
+                OrbInboxSettings.modelPresets.forEachIndexed { idx, preset ->
+                    val selected = OrbInboxSettings.model == preset.id
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .orbPressClickable {
+                                customModel = ""
+                                OrbInboxSettings.update(newModel = preset.id)
+                            }
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = preset.label,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = preset.subtitle,
+                                color = OrbStyle.textMuted,
+                                fontSize = 11.5.sp
+                            )
+                        }
+                        if (selected) {
+                            Text(
+                                text = "Active",
+                                color = OrbStyle.inboxBlue,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                    if (idx < OrbInboxSettings.modelPresets.lastIndex) {
+                        HorizontalDivider(color = OrbStyle.border)
+                    }
+                }
+            }
+
+            OrbMiniField(
+                label = "CUSTOM MODEL OVERRIDE",
+                value = customModel,
+                onValueChange = { v ->
+                    customModel = v
+                    val trimmed = v.trim()
+                    if (trimmed.isNotEmpty()) {
+                        OrbInboxSettings.update(newModel = trimmed)
+                    } else {
+                        OrbInboxSettings.update(newModel = OrbInboxSettings.DEFAULT_MODEL)
+                    }
+                }
+            )
+        }
+    }
+}
+
