@@ -26,6 +26,7 @@ import {
 } from "./inboxDigest";
 import {
   buildInboxSections,
+  isSyntheticUserMessage,
   type InboxItem,
   type InboxOption,
 } from "./inboxModel";
@@ -135,32 +136,6 @@ export function InboxPage(p: {
 
   const refreshedTranscriptAt = new Map<string, number>();
 
-  // Load or refresh transcripts for top actionable items so their summary and AI digest reflect the latest turn immediately.
-  createEffect(() => {
-    if (!isConnected()) return;
-    const cfg = inboxConfig();
-    const { needsYou, ready } = allSections();
-    const candidates = [...needsYou, ...ready].slice(0, 14);
-    candidates.forEach((item, idx) => {
-      const prevMs = refreshedTranscriptAt.get(item.id);
-      const readyTx = peekReadyTranscript(item.id);
-      if (!readyTx) {
-        refreshedTranscriptAt.set(item.id, item.updatedMs);
-        if (idx < 8) {
-          void loadTranscript(item.id).catch(() => {});
-        } else {
-          prefetchTranscript(item.id);
-        }
-      } else if (prevMs === undefined || item.updatedMs > prevMs) {
-        refreshedTranscriptAt.set(item.id, item.updatedMs);
-        void refreshTranscript(item.id).catch(() => {});
-      }
-      if (cfg.aiSummary && idx < 10 && !item.interaction) {
-        requestInboxDigest(item.mission, readyTx?.items, item.updatedMs);
-      }
-    });
-  });
-
   const matchesViewMode = (item: InboxItem, mode = viewMode()): boolean => {
     if (mode === "unread") return item.unread;
     if (mode === "attention") return item.attention;
@@ -205,6 +180,38 @@ export function InboxPage(p: {
   });
 
   const actionableItems = createMemo(() => [...filteredNeedsYou(), ...filteredReady()]);
+
+  // Load or refresh transcripts for top actionable items so their summary and AI digest reflect the latest turn immediately.
+  // Always prioritize currently visible items in the active filter tab so off-screen 'All' items never starve top 'Unread' rows.
+  createEffect(() => {
+    if (!isConnected()) return;
+    const cfg = inboxConfig();
+    const visible = actionableItems();
+    const visibleIds = new Set(visible.map((item) => item.id));
+    const { needsYou, ready } = allSections();
+    const background = [...needsYou, ...ready].filter((item) => !visibleIds.has(item.id));
+    const candidates = [...visible, ...background].slice(0, 14);
+    candidates.forEach((item, idx) => {
+      const isVisible = visibleIds.has(item.id);
+      const priority = (isVisible ? 0 : 20) + idx;
+      const prevMs = refreshedTranscriptAt.get(item.id);
+      const readyTx = peekReadyTranscript(item.id);
+      if (!readyTx) {
+        refreshedTranscriptAt.set(item.id, item.updatedMs);
+        if (idx < 8) {
+          void loadTranscript(item.id).catch(() => {});
+          return;
+        }
+        prefetchTranscript(item.id);
+      } else if (prevMs === undefined || item.updatedMs > prevMs) {
+        refreshedTranscriptAt.set(item.id, item.updatedMs);
+        void refreshTranscript(item.id).catch(() => {});
+      }
+      if (cfg.aiSummary && idx < 10 && !item.interaction) {
+        requestInboxDigest(item.mission, readyTx?.items, item.updatedMs, priority);
+      }
+    });
+  });
 
   const unreadItemsInScope = createMemo(() => {
     const filter = projectFilter();
@@ -628,7 +635,7 @@ export function InboxPage(p: {
       /no conversation details/i.test(s);
     const taskLine = () => {
       const aiTask = digest()?.task?.trim();
-      if (aiTask && !isGenericBoilerplate(aiTask)) return aiTask;
+      if (aiTask && !isGenericBoilerplate(aiTask) && !isSyntheticUserMessage(aiTask)) return aiTask;
       return item.lastRequest?.trim();
     };
     const outcomeLine = () => {
@@ -636,11 +643,10 @@ export function InboxPage(p: {
       if (aiOutcome && !isGenericBoilerplate(aiOutcome)) return aiOutcome;
       return item.summary;
     };
-    const verdict = () => digest()?.verdict || item.verdict;
     const showTaskLine = () => {
       if (item.interaction) return false;
       const t = taskLine();
-      if (!t) return false;
+      if (!t || isSyntheticUserMessage(t)) return false;
       const nt = normalizeCmp(t);
       const nh = normalizeCmp(item.headline);
       const no = normalizeCmp(outcomeLine());
@@ -698,14 +704,16 @@ export function InboxPage(p: {
                   <span class="inbox-project-name">{item.projectTitle}</span>
                 </span>
                 <span class="inbox-sep" aria-hidden="true">·</span>
-                <Show when={item.isGoal}>
+                <Show when={item.isGoal && item.badge === "Completed"}>
                   <span class="goal-tag small" aria-hidden="true">
                     <Ic.TargetIcon size={10} />
                     <span class="goal-tag-label">Goal</span>
                   </span>
                 </Show>
                 <span class="inbox-headline">{item.headline}</span>
-                <span class={`inbox-badge ${item.tone}`}>{item.badge}</span>
+                <Show when={item.badge !== "Completed"}>
+                  <span class={`inbox-badge ${item.tone}`}>{item.badge}</span>
+                </Show>
               </button>
 
               <div class="inbox-row-right">
@@ -749,21 +757,6 @@ export function InboxPage(p: {
                   >
                     <span>Peek</span>
                   </button>
-                  <Show when={item.unread}>
-                    <button
-                      type="button"
-                      class="inbox-act-btn"
-                      disabled={isBusy()}
-                      title="Mark as read (U)"
-                      aria-label={`Mark ${item.headline} as read`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleReadState(item);
-                      }}
-                    >
-                      <span>Read</span>
-                    </button>
-                  </Show>
                   <button
                     type="button"
                     class={`inbox-act-btn ${isReplying() ? "on" : ""}`}
@@ -811,65 +804,65 @@ export function InboxPage(p: {
                 </div>
               </Show>
               <div class="inbox-row-bottom">
-                <Show when={!item.interaction}>
-                  <span
-                    class={`inbox-verdict-glyph ${verdict()}`}
-                    aria-hidden="true"
-                    title={
-                      digest()?.aiGenerated
-                        ? `AI summary (${digest()?.model || inboxConfig().model})`
-                        : undefined
+                <p
+                  class="inbox-summary"
+                  title={
+                    digest()?.aiGenerated
+                      ? `AI Overview (${digest()?.model || inboxConfig().model})`
+                      : undefined
+                  }
+                >
+                  <For each={outcomeLine().split(/(`[^`]+`|\*\*[^*]+\*\*)/g)}>
+                    {(part) =>
+                      part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
+                        <code class="inbox-inline-code">{part.slice(1, -1)}</code>
+                      ) : part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+                        <strong>{part.slice(2, -2)}</strong>
+                      ) : (
+                        part
+                      )
                     }
-                  >
-                    {verdict() === "failed"
-                      ? "✕"
-                      : verdict() === "waiting"
-                        ? "·"
-                        : verdict() === "needs_input"
-                          ? "?"
-                          : "✓"}
-                  </span>
-                </Show>
-                <p class="inbox-summary">{outcomeLine()}</p>
-                <Show when={!item.interaction && item.workReceiptSummary}>
-                  <span class="inbox-work-chip" title="Tools executed in the latest turn">
-                    · {item.workReceiptSummary}
-                  </span>
-                </Show>
+                  </For>
+                  <Show when={!item.interaction && item.workReceiptSummary}>
+                    <span class="inbox-work-chip" title="Tools executed in the latest turn">
+                      {" "}· {item.workReceiptSummary}
+                    </span>
+                  </Show>
+                </p>
               </div>
             </button>
 
-            <Show when={item.childSummary && item.childSummary.total > 0}>
+            <Show when={item.childSummary && (item.childSummary.failedChildren.length > 0 || item.childSummary.running > 0)}>
               {(() => {
                 const cs = item.childSummary!;
                 const firstFailed = cs.failedChildren[0];
                 return (
                   <div class="inbox-child-bar">
-                    <Show
-                      when={firstFailed}
-                      fallback={
-                        <span class="inbox-child-pill">
-                          {cs.total} {cs.total === 1 ? "track" : "tracks"} · {cs.completed} completed
-                          {cs.running > 0 ? ` · ${cs.running} running` : ""}
-                        </span>
-                      }
-                    >
+                    <Show when={firstFailed}>
                       <button
                         type="button"
                         class="inbox-child-pill failed"
-                        title={`Open failed child track: ${firstFailed.title}`}
+                        title={`Open failed child track: ${firstFailed!.title}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           markItemAndChildrenRead(item);
-                          p.onOpenMission(firstFailed.id);
+                          p.onOpenMission(firstFailed!.id);
                         }}
                       >
                         <span class="inbox-child-dot" aria-hidden="true" />
                         <span>
-                          {cs.failed} {cs.failed === 1 ? "track" : "tracks"} failed: {firstFailed.title}
+                          {cs.failed} {cs.failed === 1 ? "track" : "tracks"} failed: {firstFailed!.title}
                         </span>
                         <span aria-hidden="true">→</span>
                       </button>
+                    </Show>
+                    <Show when={cs.running > 0}>
+                      <span class="inbox-child-pill running" title="Active child worker tracks">
+                        <span class="inbox-child-dot" aria-hidden="true" />
+                        <span>
+                          {cs.running} {cs.running === 1 ? "track" : "tracks"} running
+                        </span>
+                      </span>
                     </Show>
                   </div>
                 );
@@ -1137,10 +1130,6 @@ export function InboxPage(p: {
           </button>
         </div>
       </div>
-
-      <p class="s-lead inbox-lead">
-        New agent responses and questions waiting on you. Working agents stay quiet until they finish.
-      </p>
 
       <Show when={error()}>
         <ErrorNotice

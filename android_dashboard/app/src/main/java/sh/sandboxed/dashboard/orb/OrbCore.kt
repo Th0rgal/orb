@@ -517,6 +517,12 @@ object OrbReadCache {
         return rows
     }
 
+    fun hasRowsInMemory(key: String): Boolean = rowsByKey.containsKey(key)
+
+    fun saveRowsMemoryOnly(key: String, rows: List<OrbRow>) {
+        rowsByKey[key] = rows
+    }
+
     fun saveRows(key: String, rows: List<OrbRow>) {
         rowsByKey[key] = rows
         val raw = rows.map { it.raw }
@@ -705,7 +711,9 @@ class OrbCore private constructor(context: Context) {
         }
         _token.value = loadedToken
         OrbDisk.setAccountScope(cleanBase, loadedToken)
-        loadCachedSnapshots()
+        scope.launch(Dispatchers.IO) {
+            loadCachedSnapshots()
+        }
         startLiveRefreshLoop()
     }
 
@@ -720,7 +728,9 @@ class OrbCore private constructor(context: Context) {
         if (accountChanged) {
             OrbReadCache.clearMemory()
             resetInMemoryAccountState()
-            loadCachedSnapshots()
+            scope.launch(Dispatchers.IO) {
+                loadCachedSnapshots()
+            }
         }
         _baseURL.value = cleanBase
         _token.value = cleanToken
@@ -827,17 +837,49 @@ class OrbCore private constructor(context: Context) {
         _lastErrorLog.value = null
     }
 
+    private fun seedMissionAndProjectCaches(missionsList: List<OrbRow>) {
+        val byProject = mutableMapOf<String, MutableList<OrbRow>>()
+        for (m in missionsList) {
+            val tags = OrbJSON.strList(m.raw, "tags")
+            if (tags.any { it.startsWith("btw-parent:") }) continue
+            val hist = m.rows("history")
+            if (hist.isNotEmpty()) {
+                OrbReadCache.saveRowsMemoryOnly("mission_msgs_${m.id}", hist)
+            }
+            val projTag = tags.firstOrNull { it.startsWith("project:") }?.removePrefix("project:")
+            val proj = (m.str("project", "project_slug") ?: projTag)?.lowercase()?.trim()
+            if (!proj.isNullOrEmpty()) {
+                byProject.getOrPut(proj) { mutableListOf() }.add(m)
+            }
+        }
+        for ((proj, rows) in byProject) {
+            if (!OrbReadCache.hasRowsInMemory("project_missions_$proj")) {
+                OrbReadCache.saveRowsMemoryOnly("project_missions_$proj", rows)
+            }
+        }
+    }
+
     private fun loadCachedSnapshots() {
-        _projects.value = OrbJSON.dictList(OrbDisk.read("projects")).map { OrbRow(it) }
-        _missions.value = OrbJSON.dictList(OrbDisk.read("missions")).map { OrbRow(it) }
-        _hermesSessions.value = OrbJSON.dictList(OrbDisk.read("hermes_sessions")).map { OrbRow(it) }
-        _workspaces.value = OrbJSON.dictList(OrbDisk.read("workspaces")).map { OrbRow(it) }
-        _backends.value = OrbJSON.dictList(OrbDisk.read("backends")).map { OrbRow(it) }
-        _repositories.value = OrbJSON.dictList(OrbDisk.read("repositories")).map { OrbRow(it) }
-        _providers.value = OrbJSON.dictList(OrbDisk.read("providers")).map { OrbRow(it) }
-        _nodes.value = OrbJSON.dictList(OrbDisk.read("nodes")).map { OrbRow(it) }
-        _remoteTargets.value = OrbJSON.dictList(OrbDisk.read("remote_targets")).map { OrbRow(it) }
-        if (_projects.value.isNotEmpty() || _missions.value.isNotEmpty() || _hermesSessions.value.isNotEmpty()) {
+        val p = OrbJSON.dictList(OrbDisk.read("projects")).map { OrbRow(it) }
+        val m = OrbJSON.dictList(OrbDisk.read("missions")).map { OrbRow(it) }
+        val h = OrbJSON.dictList(OrbDisk.read("hermes_sessions")).map { OrbRow(it) }
+        val w = OrbJSON.dictList(OrbDisk.read("workspaces")).map { OrbRow(it) }
+        val b = OrbJSON.dictList(OrbDisk.read("backends")).map { OrbRow(it) }
+        val r = OrbJSON.dictList(OrbDisk.read("repositories")).map { OrbRow(it) }
+        val pr = OrbJSON.dictList(OrbDisk.read("providers")).map { OrbRow(it) }
+        val n = OrbJSON.dictList(OrbDisk.read("nodes")).map { OrbRow(it) }
+        val rt = OrbJSON.dictList(OrbDisk.read("remote_targets")).map { OrbRow(it) }
+        seedMissionAndProjectCaches(m)
+        _projects.value = p
+        _missions.value = m
+        _hermesSessions.value = h
+        _workspaces.value = w
+        _backends.value = b
+        _repositories.value = r
+        _providers.value = pr
+        _nodes.value = n
+        _remoteTargets.value = rt
+        if (p.isNotEmpty() || m.isNotEmpty() || h.isNotEmpty()) {
             _hasLoadedSuccessfully.value = true
         }
     }
@@ -873,7 +915,7 @@ class OrbCore private constructor(context: Context) {
     suspend fun refreshMissionsQuietly() {
         try {
             coroutineScope {
-                val mDeferred = async { fetchRows("/api/control/missions?limit=100", null) }
+                val mDeferred = async { fetchRows("/api/control/missions?limit=100&all=true", null) }
                 val pDeferred = async { fetchRows("/api/projects", "projects") }
                 val m = mDeferred.await()
                 val p = pDeferred.await()
@@ -881,6 +923,7 @@ class OrbCore private constructor(context: Context) {
                 _projects.value = p
                 _hasLoadedSuccessfully.value = true
                 withContext(Dispatchers.IO) {
+                    seedMissionAndProjectCaches(m)
                     OrbDisk.write("missions", m.map { it.raw })
                     OrbDisk.write("projects", p.map { it.raw })
                 }
@@ -897,7 +940,7 @@ class OrbCore private constructor(context: Context) {
 
         coroutineScope {
             val pTask = async { runCatching { fetchRows("/api/projects", "projects") } }
-            val mTask = async { runCatching { fetchRows("/api/control/missions?limit=100", null) } }
+            val mTask = async { runCatching { fetchRows("/api/control/missions?limit=100&all=true", null) } }
             val hTask = async { runCatching { fetchRows("/api/assistant/hermes/sessions?limit=100", "sessions") } }
             val wTask = async { runCatching { fetchRows("/api/workspaces", null) } }
             val bTask = async { runCatching { fetchRows("/api/backends", null) } }
@@ -919,7 +962,21 @@ class OrbCore private constructor(context: Context) {
             mResult.onSuccess { m ->
                 _missions.value = m
                 anyCoreSuccess = true
-                launch(Dispatchers.IO) { OrbDisk.write("missions", m.map { it.raw }) }
+                launch(Dispatchers.IO) {
+                    seedMissionAndProjectCaches(m)
+                    OrbDisk.write("missions", m.map { it.raw })
+                    for (row in m.take(5)) {
+                        val evKey = "mission_events_${row.id}"
+                        if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                            val evs = runCatching {
+                                fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150", "events")
+                            }.getOrDefault(emptyList())
+                            if (evs.isNotEmpty()) {
+                                OrbReadCache.saveRows(evKey, evs)
+                            }
+                        }
+                    }
+                }
             }
             hTask.await().onSuccess { h ->
                 _hermesSessions.value = h

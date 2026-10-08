@@ -71,6 +71,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 enum class OrbTopTab {
@@ -106,6 +109,8 @@ fun OrbAppRoot(
         OrbProjectAppearance.init(context)
         OrbMissionUnreadStore.init(context)
         OrbInboxModel.init(context)
+        OrbInboxSettings.init(context)
+        OrbInboxDigestStore.init(context)
         true
     }
 
@@ -978,31 +983,68 @@ fun OrbProjectPage(
         mutableStateOf(OrbReadCache.loadRows("project_missions_$projectSlug"))
     }
     var manifestFolders by remember(projectSlug) {
-        mutableStateOf<List<String>>(emptyList())
+        val cachedManifest = OrbReadCache.loadDict("project_manifest_$projectSlug")
+        val entries = OrbJSON.dict(cachedManifest?.get("entries"))
+        val initialDirs = entries?.mapNotNull { (k, v) ->
+            val d = OrbJSON.dict(v)
+            if (OrbJSON.bool(d, "directory") == true) k else null
+        } ?: emptyList()
+        mutableStateOf(initialDirs)
     }
 
     suspend fun loadProjectData() {
         val encoded = core.encodeComponent(projectSlug)
-        val rows = runCatching {
-            core.fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=0", null)
-        }.getOrNull()
-        if (rows != null) {
-            val mobile = rows.filter { m ->
-                OrbJSON.strList(m.raw, "tags").none { it.startsWith("btw-parent:") }
+        kotlinx.coroutines.coroutineScope {
+            val missionsTask = async {
+                runCatching {
+                    core.fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=0", null)
+                }.getOrNull()
             }
-            fetchedProjectMissions = mobile
-            OrbReadCache.saveRows("project_missions_$projectSlug", mobile)
-        }
-        val manifest = runCatching {
-            core.fetchDict("/api/projects/$encoded/context/manifest")
-        }.getOrNull()
-        val entries = OrbJSON.dict(manifest?.get("entries"))
-        if (entries != null) {
-            val dirs = entries.mapNotNull { (k, v) ->
-                val d = OrbJSON.dict(v)
-                if (OrbJSON.bool(d, "directory") == true) k else null
+            val manifestTask = async {
+                runCatching {
+                    core.fetchDict("/api/projects/$encoded/context/manifest")
+                }.getOrNull()
             }
-            manifestFolders = dirs
+            val rows = missionsTask.await()
+            if (rows != null) {
+                val mobile = rows.filter { m ->
+                    OrbJSON.strList(m.raw, "tags").none { it.startsWith("btw-parent:") }
+                }
+                fetchedProjectMissions = mobile
+                OrbReadCache.saveRows("project_missions_$projectSlug", mobile)
+                for (m in mobile) {
+                    val hist = m.rows("history")
+                    if (hist.isNotEmpty()) {
+                        OrbReadCache.saveRows("mission_msgs_${m.id}", hist)
+                    }
+                }
+                // Prefetch top 5 missions' events in background
+                launch(kotlinx.coroutines.Dispatchers.IO) {
+                    for (m in mobile.take(5)) {
+                        val evKey = "mission_events_${m.id}"
+                        if (OrbReadCache.loadRows(evKey).isEmpty()) {
+                            val evs = runCatching {
+                                core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
+                            }.getOrDefault(emptyList())
+                            if (evs.isNotEmpty()) {
+                                OrbReadCache.saveRows(evKey, evs)
+                            }
+                        }
+                    }
+                }
+            }
+            val manifest = manifestTask.await()
+            if (manifest != null) {
+                OrbReadCache.saveDict("project_manifest_$projectSlug", manifest)
+                val entries = OrbJSON.dict(manifest["entries"])
+                if (entries != null) {
+                    val dirs = entries.mapNotNull { (k, v) ->
+                        val d = OrbJSON.dict(v)
+                        if (OrbJSON.bool(d, "directory") == true) k else null
+                    }
+                    manifestFolders = dirs
+                }
+            }
         }
     }
 

@@ -292,8 +292,14 @@ struct OrbHome: View {
     @State private var homeTab = ProcessInfo.processInfo.arguments.contains("-orb_open_inbox") ? "inbox" : "projects"
     @State private var inboxCount = 0
     @State private var inboxWorkingCount = 0
+    @State private var linkedProjectObj: OrbRow?
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
+    private static func argValue(_ flag: String) -> String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
+        return args[idx + 1]
+    }
     var body: some View {
         NavigationStack {
             Group {
@@ -322,7 +328,16 @@ struct OrbHome: View {
                 ToolbarItem(placement: .principal) { homeModePicker }
                 ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
             }
-            .task { await load() }
+            .task {
+                if let m = Self.argValue("-orb_open_mission") {
+                    linkedProject = Self.argValue("-orb_open_project") ?? "verity-core"
+                    linkedFolder = ""
+                    linkedMission = m
+                } else if let p = Self.argValue("-orb_open_project") {
+                    linkedProjectObj = projects.first(where: { $0.id == p }) ?? OrbRow(.object(["slug": .string(p), "title": .string(p == "verity-core" ? "Verity" : p.capitalized)]), project: true)
+                }
+                await load()
+            }
             .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
             .alert("New project", isPresented: $creating) {
                 TextField("Project name", text: $name)
@@ -334,6 +349,7 @@ struct OrbHome: View {
                 Button("Cancel", role: .cancel) {}
             }
             .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
+            .navigationDestination(item: $linkedProjectObj) { OrbProjectPage(project: $0) }
             .onOpenURL { url in
                 if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" {
                     linkedProject = ""
@@ -528,6 +544,7 @@ struct OrbHome: View {
             projects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
         }
         if let cachedMissions = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
+            OrbReadCache.seedFromGlobalMissions(cachedMissions.items)
             let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
             let sections = OrbInboxModel.buildSections(missions: rows, projects: projects)
             inboxCount = sections.needsYou.count + sections.ready.count
@@ -544,17 +561,20 @@ struct OrbHome: View {
             Task {
                 if let rawMissions = try? await api.call("/api/control/missions?limit=100") {
                     OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
+                    OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                     let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
                     let sections = OrbInboxModel.buildSections(missions: rows, projects: roster)
                     inboxCount = sections.needsYou.count + sections.ready.count
                     inboxWorkingCount = sections.working.count
+                    await OrbReadCache.prefetch(rows)
                 }
             }
-            // Warm the first project and the agent picker catalog so opening a project or composer feels instant.
-            if let first = projects.first {
-                Task {
-                    _ = try? await OrbReadCache.project(first.id)
-                    _ = try? await OrbReadCache.agentCatalog()
+            // Warm the top projects and the agent picker catalog so opening a project or composer feels instant.
+            let topProjects = Array(projects.prefix(3))
+            Task {
+                _ = try? await OrbReadCache.agentCatalog()
+                for proj in topProjects {
+                    _ = try? await OrbReadCache.project(proj.id)
                 }
             }
         } catch { self.error = error.localizedDescription }

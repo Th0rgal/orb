@@ -560,7 +560,11 @@ impl MissionStore for FileMissionStore {
         let mission = missions
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
-        if mission.first_viewed_at.is_some() {
+        if mission
+            .first_viewed_at
+            .as_deref()
+            .is_some_and(|existing| existing >= timestamp)
+        {
             return Ok(None);
         }
         mission.first_viewed_at = Some(timestamp.to_string());

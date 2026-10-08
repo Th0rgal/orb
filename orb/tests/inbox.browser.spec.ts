@@ -271,12 +271,15 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   // Replied mission immediately leaves the actionable list
   await expect(questionRow).toBeHidden();
 
-  // Verify m-done shows the Asked/outcome digest, grouped child track failure pill, and Space peek preview
+  // Verify m-done shows the Asked/outcome overview, omits redundant Completed badge, shows failed child track pill, and supports Space peek preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
   await expect(doneRow.locator(".inbox-task-text")).toHaveText(
     "Hide the sidebar scroll thumb until hover.",
   );
-  await expect(doneRow.locator(".inbox-verdict-glyph.succeeded")).toHaveText("✓");
+  await expect(doneRow.locator(".inbox-badge")).toHaveCount(0);
+  await expect(doneRow.locator(".inbox-summary")).toContainText(
+    "Updated the scroll thumb track to remain hidden until pointer hover and verified all Playwright checks pass.",
+  );
   await expect(doneRow.locator(".inbox-child-pill.failed")).toContainText(
     "1 track failed: Track G-4 Proof Closure",
   );
@@ -346,7 +349,12 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
   await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
   // Wait for skeleton to finish and real production rows or zero state to appear
   await expect(page.locator(".inbox-skeleton")).toBeHidden({ timeout: 15000 });
-  await page.waitForTimeout(3500);
+  await page
+    .locator('.inbox-summary[title^="AI Overview"]')
+    .first()
+    .waitFor({ state: "attached", timeout: 12000 })
+    .catch(() => {});
+  await page.waitForTimeout(4500);
   const outDir = process.env.ORB_SCREENSHOT_DIR;
   if (outDir) {
     await page.screenshot({ path: join(outDir, "orb-desktop-inbox-prod-dark.png") });

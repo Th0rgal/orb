@@ -800,6 +800,17 @@ export async function listMissions(): Promise<Mission[]> {
   catch(error){if(local.length)return local;throw error;}
 }
 
+export async function listCompletedMissions(limit = 50): Promise<Mission[]> {
+  try {
+    const remote = await api<Mission[]>(`/api/control/missions?status=completed&limit=${limit}`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    return remote.filter((row) => !isBtwMission(row));
+  } catch {
+    return [];
+  }
+}
+
 export async function getMission(id: string): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins(id)).find(row=>row.id===id);

@@ -43,7 +43,7 @@ enum OrbContinuation {
     }
 }
 
-struct OrbRow: Identifiable, Hashable {
+struct OrbRow: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let state: String
@@ -223,6 +223,12 @@ final class OrbCore {
         var rows: [OrbRow] = [], offset = 0
         while true {
             let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
+            for raw in page {
+                let mid = raw["id"].text
+                if !mid.isEmpty {
+                    OrbReadCache.seedMemory("mission:\(mid)", value: raw)
+                }
+            }
             let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
             rows += fresh
             if !includeArchived || page.count < 100 || fresh.isEmpty { break }
@@ -251,12 +257,17 @@ private actor OrbDiskWriter {
 
 @MainActor
 enum OrbDisk {
+    private static var urlCache: [String: URL] = [:]
     static func url(_ key: String) -> URL {
+        let scope = OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "") + ":" + key
+        if let cached = urlCache[scope] { return cached }
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let scope = OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "") + ":" + key
         let name = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
-        return root.appendingPathComponent(name + ".json")
+        let result = root.appendingPathComponent(name + ".json")
+        if urlCache.count > 1024 { urlCache.removeAll(keepingCapacity: true) }
+        urlCache[scope] = result
+        return result
     }
     static func read<T: Decodable>(_ key: String, as type: T.Type) -> T? {
         guard let data = try? Data(contentsOf: url(key)) else { return nil }
@@ -292,12 +303,46 @@ enum OrbReadCache {
     private static var pending: [String: Pending] = [:]
     private static func key(_ name: String) -> String { OrbDisk.url(name).absoluteString }
     static func read(_ name: String) -> OrbJSON? {
-        values[key(name)]?.value ?? OrbDisk.read(name, as: OrbJSON.self)
+        let scope = key(name)
+        if let cached = values[scope]?.value { return cached }
+        if let disk = OrbDisk.read(name, as: OrbJSON.self) {
+            values[scope] = Entry(value: disk, date: .distantPast)
+            return disk
+        }
+        return nil
+    }
+    static func seedMemory(_ name: String, value: OrbJSON) {
+        let scope = key(name)
+        if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        values[scope] = Entry(value: value, date: Date())
     }
     static func seed(_ name: String, value: OrbJSON) {
-        let scope = key(name)
-        values[scope] = Entry(value: value, date: Date())
+        seedMemory(name, value: value)
         OrbDisk.saveAsync(value, key: name)
+    }
+    static func seedFromGlobalMissions(_ rawMissions: [OrbJSON]) {
+        var byProject: [String: [OrbJSON]] = [:]
+        for item in rawMissions {
+            let mid = item["id"].text
+            if !mid.isEmpty {
+                seedMemory("mission:\(mid)", value: item)
+            }
+            let proj = item["project"].text
+            if !proj.isEmpty {
+                byProject[proj, default: []].append(item)
+            }
+        }
+        for (proj, list) in byProject {
+            let cacheName = "project:\(proj)"
+            let scope = key(cacheName)
+            if values[scope] == nil {
+                let existingManifest = read(cacheName)?["manifest"] ?? .null
+                values[scope] = Entry(
+                    value: .object(["missions": .array(list), "manifest": existingManifest]),
+                    date: Date().addingTimeInterval(-25) // allow quick display while still refreshing
+                )
+            }
+        }
     }
     static func readEvents(_ missionID: String) -> [StoredEvent] {
         let cacheName = "events:\(missionID)"
@@ -312,10 +357,10 @@ enum OrbReadCache {
     static func saveEvents(_ missionID: String, events: [StoredEvent]) {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
-        if eventValues.count >= 32, let firstKey = eventValues.keys.first {
+        if eventValues.count >= 48, let firstKey = eventValues.keys.first {
             eventValues.removeValue(forKey: firstKey)
         }
-        let capped = events.count > 400 ? Array(events.suffix(400)) : events
+        let capped = events.count > 250 ? Array(events.suffix(250)) : events
         eventValues[scope] = capped
         OrbDisk.saveAsync(capped, key: cacheName)
     }
@@ -333,7 +378,7 @@ enum OrbReadCache {
         defer { if pending[scope]?.id == item.id { pending[scope] = nil } }
         let value = try await task.value
         guard scope == key(name), pending[scope]?.id == item.id else { throw CancellationError() }
-        if values.count >= 64, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
+        if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
         values[scope] = Entry(value: value, date: Date())
         OrbDisk.saveAsync(value, key: name)
         return value
@@ -381,18 +426,25 @@ enum OrbReadCache {
         }
     }
     static func prefetch(_ rows: [OrbRow]) async {
-        for row in rows.prefix(2) {
-            guard !Task.isCancelled else { return }
-            do {
-                _ = try await conversation(row.id)
+        let tasks: [Task<Void, Never>] = rows.prefix(5).map { row in
+            Task { @MainActor in
+                guard !Task.isCancelled else { return }
+                if row.raw != .null {
+                    seedMemory("mission:\(row.id)", value: row.raw)
+                } else {
+                    _ = try? await conversation(row.id)
+                }
                 if row.cloud {
-                    _ = try await cloud(row.id)
+                    _ = try? await cloud(row.id)
                 } else if readEvents(row.id).isEmpty {
-                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 200, sinceSeq: nil) {
+                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 150, sinceSeq: nil) {
                         saveEvents(row.id, events: batch.events)
                     }
                 }
-            } catch { return }
+            }
+        }
+        for t in tasks {
+            await t.value
         }
     }
 }

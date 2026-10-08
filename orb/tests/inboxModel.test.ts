@@ -468,4 +468,105 @@ describe("classifyInboxMission & buildInboxSections", () => {
       "Native Codex goal stopped with status 'paused'",
     );
   });
+
+  it("filters out [Automatic resume after a usage limit] from lastRequest and preserves multi-sentence overviews", () => {
+    const resumedMission = makeMission({
+      id: "m-resumed",
+      title: "Fix the remaining data-processing and display bugs",
+      status: "completed",
+      project: "orb",
+      history: [
+        { role: "user", content: "Run the iOS Simulator stability tests on air-2." },
+        {
+          role: "user",
+          content:
+            "[Automatic resume after a usage limit] Antigravity background task handoff stopped your previous turn.",
+        },
+        {
+          role: "assistant",
+          content:
+            "Les tests iOS Simulator (StabilityTests : 37 exécutés, 0 échec) sont passés sur air-2. Les correctifs de traitement de données ont été vérifiés sans régression.",
+        },
+      ],
+    });
+
+    const sections = buildInboxSections(
+      [resumedMission],
+      sampleProjects,
+      () => undefined,
+      () => undefined,
+      Date.parse("2026-10-07T18:30:00Z"),
+    );
+
+    const item = sections.ready[0];
+    expect(item.lastRequest).toBe("Run the iOS Simulator stability tests on air-2.");
+    expect(item.summary).toContain("37 exécutés, 0 échec");
+    expect(item.summary).toContain("sans régression.");
+    expect(item.allPeekTurns.map((t) => t.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("merges long error-kind assistant messages in Peek, synthesizes initial prompt when >200 tools push user_message out, and cleans child fork narration", () => {
+    const parent = makeMission({
+      id: "m-parent-verity",
+      title: "Implement a fully self-contained local-agent runner",
+      goal_mode: true,
+      goal_objective: "Implement a fully self-contained local-agent runner for Orb",
+      status: "completed",
+      project: "orb",
+      history: [],
+    });
+    const failedFork = makeMission({
+      id: "m-child-narration",
+      title:
+        "I’ll read the updated objective file, then check the current worktree and running validations befo... · fork",
+      status: "failed",
+      project: "orb",
+      parent_mission_id: "m-parent-verity",
+    });
+    const runningFork = makeMission({
+      id: "m-child-running",
+      title: "Verity · fork",
+      status: "active",
+      project: "orb",
+      parent_mission_id: "m-parent-verity",
+    });
+
+    const streamItems: StreamItem[] = [
+      {
+        kind: "tool",
+        id: "t-1",
+        name: "bash",
+        input: '{"command":"cargo test"}',
+        output: "ok",
+        done: true,
+      },
+      {
+        kind: "text",
+        id: "a-1",
+        text: "I'll stop work and pause the existing goal now.",
+      },
+      {
+        kind: "error",
+        id: "e-long",
+        text: "All 10 PRs are merged and all roadmap deliverables verified across 64 tests (`verity-core`, `verity-compiler`, and `verity-edsl`). The clean Pareto coverage check passed with zero regressions and worktree receipts are preserved.",
+      },
+    ];
+
+    const sections = buildInboxSections(
+      [parent, failedFork, runningFork],
+      sampleProjects,
+      (id) => (id === "m-parent-verity" ? streamItems : undefined),
+      () => undefined,
+      Date.parse("2026-10-07T19:30:00Z"),
+    );
+
+    const item = sections.ready[0];
+    expect(item.allPeekTurns.map((t) => t.role)).toEqual(["user", "assistant"]);
+    expect(item.allPeekTurns[0].markdown).toContain(
+      "Implement a fully self-contained local-agent runner for Orb",
+    );
+    expect(item.allPeekTurns[1].markdown).toContain("All 10 PRs are merged");
+    expect(item.childSummary?.failedChildren[0]?.title).toBe("fork");
+    expect(item.childSummary?.running).toBe(1);
+  });
 });

@@ -1736,12 +1736,14 @@ struct OrbInboxView: View {
     private func load(force: Bool) async {
         defer { loading = false }
         if missions.isEmpty, let cached = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
+            OrbReadCache.seedFromGlobalMissions(cached.items)
             missions = cached.items.map { OrbRow($0) }.filter(\.mobile)
             seedCachedEvents(for: missions)
             actionableCount = unreadCount
         }
         do {
             let raw = try await api.call("/api/control/missions?limit=100&all=true")
+            OrbReadCache.seedFromGlobalMissions(raw.items)
             let rows = raw.items.map { OrbRow($0) }.filter(\.mobile)
             missions = rows
             OrbDisk.saveAsync(raw, key: "inbox:missions")

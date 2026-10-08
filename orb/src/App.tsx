@@ -100,6 +100,7 @@ import {
   getMission,
   getRemoteNodes,
   isConnected,
+  listCompletedMissions,
   listMissions,
   listProjectMissions,
   listProjects,
@@ -1266,10 +1267,17 @@ export default function App() {
     const summary = names.length ? names.join(", ") : "no harness enabled";
     return rl.state === "error" ? `${summary} (last known)` : summary;
   };
+  const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
   const refreshMissions = async () => {
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
-      const fresh = (await listMissions()).filter(m => !isMissionDeleting(m.id));
+      const [rawFresh, rawCompleted] = await Promise.all([
+        listMissions(),
+        listCompletedMissions(50),
+      ]);
+      const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
+      const completed = rawCompleted.filter(m => !isMissionDeleting(m.id));
+      setCompletedMissions(completed);
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = prev.filter(m => !freshIds.has(m.id));
       setMissions((current) => mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh));
@@ -1321,6 +1329,7 @@ export default function App() {
   const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
   createEffect(on(connectionVersion, () => {
     setProjectMissions({});
+    setCompletedMissions([]);
   }, { defer: true }));
   const inboxMissions = createMemo(() => {
     const byId = new Map<string, Mission>();
@@ -1350,6 +1359,7 @@ export default function App() {
     for (const rows of Object.values(projectMissions())) {
       for (const m of rows) put(m);
     }
+    for (const m of completedMissions()) put(m);
     for (const m of missions()) put(m);
     return Array.from(byId.values());
   });

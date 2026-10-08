@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
+import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
@@ -19,9 +20,9 @@ export type InboxDigest = {
   updatedMs: number;
 };
 
-const STORAGE_KEY = "orb:inbox-digest:v3";
+const STORAGE_KEY = "orb:inbox-digest:v4";
 const MAX_CACHE_ENTRIES = 160;
-const MAX_CONCURRENT = 2;
+const MAX_CONCURRENT = 4;
 
 const [inboxDigestVersion, setInboxDigestVersion] = createSignal(0);
 export { inboxDigestVersion };
@@ -30,7 +31,7 @@ let memoryCache: Record<string, InboxDigest> | null = null;
 let loadedStorageKey: string | null = null;
 const inFlight = new Set<string>();
 const failedKeys = new Map<string, number>();
-const queue: Array<() => Promise<void>> = [];
+const queue: Array<{ priority: number; run: () => Promise<void> }> = [];
 let activeCount = 0;
 
 function currentStorageKey(): string {
@@ -104,9 +105,10 @@ export function storeInboxDigest(
 
 function pumpQueue(): void {
   while (activeCount < MAX_CONCURRENT && queue.length > 0) {
+    queue.sort((a, b) => a.priority - b.priority);
     const next = queue.shift()!;
     activeCount++;
-    void next().finally(() => {
+    void next.run().finally(() => {
       activeCount--;
       pumpQueue();
     });
@@ -123,7 +125,9 @@ function cleanUserText(raw: string): string {
 }
 
 function cleanAssistantText(raw: string): string {
-  return parseRemoteLog(raw).text.trim();
+  return parseRemoteLog(raw)
+    .text.replace(/\n*diagnostics:\s*\d{4}-\d{2}-\d{2}T[\s\S]*$/i, "")
+    .trim();
 }
 
 export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): string {
@@ -135,39 +139,49 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
   if (mission.remote_job?.error) lines.push(`Remote error: ${mission.remote_job.error}`);
 
   let lastUser = "";
-  let lastAssistant = "";
+  const assistantBlocks: string[] = [];
   let lastError = "";
-  const recentTools: StreamItem[] = [];
+  const recentTools: Array<Extract<StreamItem, { kind: "tool" }>> = [];
 
   if (items && items.length > 0) {
     let lastUserIdx = -1;
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
       if (it.kind === "user" && !it.queued && it.text.trim()) {
-        lastUser = cleanUserText(it.text);
-        lastUserIdx = i;
-        break;
+        if (!isSyntheticUserMessage(it.text) && !lastUser) {
+          lastUser = cleanUserText(it.text);
+        }
+        if (lastUserIdx < 0) lastUserIdx = i;
       }
     }
     const startIdx = lastUserIdx >= 0 ? lastUserIdx + 1 : 0;
     for (let i = startIdx; i < items.length; i++) {
       const it = items[i];
       if (it.kind === "tool") recentTools.push(it);
-      else if (it.kind === "text" && it.text.trim()) lastAssistant = cleanAssistantText(it.text);
-      else if (it.kind === "error" && it.text.trim()) lastError = it.text.trim();
+      else if (it.kind === "text" && it.text.trim()) {
+        const cleaned = cleanAssistantText(it.text);
+        if (cleaned) assistantBlocks.push(cleaned);
+      } else if (it.kind === "error" && it.text.trim()) {
+        const cleaned = cleanAssistantText(it.text);
+        if (cleaned.length >= 220) {
+          assistantBlocks.push(cleaned);
+        } else {
+          lastError = cleaned;
+        }
+      }
     }
   }
 
   if (Array.isArray(mission.history)) {
     for (let i = mission.history.length - 1; i >= 0; i--) {
       const h = mission.history[i];
-      if (!lastUser && h.role === "user" && h.content?.trim()) {
+      if (!lastUser && h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content)) {
         lastUser = cleanUserText(h.content);
       }
       if (h.role === "assistant" && h.content?.trim()) {
         const cleaned = cleanAssistantText(h.content);
-        if (cleaned) {
-          lastAssistant = cleaned;
+        if (cleaned && !assistantBlocks.includes(cleaned)) {
+          assistantBlocks.push(cleaned);
           break;
         }
       }
@@ -176,22 +190,29 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
 
   if (lastUser) lines.push(`Latest user request:\n${lastUser.slice(0, 700)}`);
   if (recentTools.length > 0) {
-    lines.push(`Tools executed in latest turn: ${workSummary(recentTools)}`);
+    const details = recentTools.slice(-8).map(formatToolDetail).join("; ");
+    lines.push(
+      `Tools executed in latest turn: ${workSummary(recentTools)}${details ? ` (${details})` : ""}`,
+    );
   }
-  if (lastError) lines.push(`Recorded error:\n${lastError.slice(0, 400)}`);
-  if (lastAssistant) lines.push(`Latest agent response:\n${lastAssistant.slice(0, 900)}`);
+  if (lastError) lines.push(`Recorded error:\n${lastError.slice(0, 500)}`);
+  if (assistantBlocks.length > 0) {
+    const combined = assistantBlocks.slice(-3).join("\n\n");
+    lines.push(`Latest agent response:\n${combined.slice(-2400)}`);
+  }
 
   return lines.join("\n\n");
 }
 
 const DIGEST_PROMPT = [
-  "Summarize the latest turn of this coding agent conversation for a minimalist operator Inbox card.",
+  "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
   "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-  '{"task":"<concise 4-10 word summary of the latest follow-up request, or empty string if identical to the mission title>","outcome":"<concise 6-15 word summary of the concrete result, answer, or specific blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
+  '{"task":"<concise 4-10 word summary of the user\'s latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
   "Rules:",
   "- Write in the same language as the conversation.",
-  "- If there is no follow-up request different from the mission title, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\" or \"Mission stopped and is currently blocked\".",
-  "- In \"outcome\", state the specific technical finding, commit/PR, answer, or exact failure reason.",
+  "- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
+  "- Write \"outcome\" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker.",
+  "- Never write vague boilerplate like \"Mission stopped and is currently blocked\" or \"Finished the task\".",
   "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
 ].join("\n");
 
@@ -205,10 +226,17 @@ export function parseDigestJson(raw: string, updatedMs: number, model?: string):
     const parsed = JSON.parse(trimmed.slice(start, end + 1)) as {
       task?: unknown;
       outcome?: unknown;
+      overview?: unknown;
       verdict?: unknown;
     };
     const task = typeof parsed.task === "string" ? parsed.task.trim() : "";
-    const outcome = typeof parsed.outcome === "string" ? parsed.outcome.trim() : "";
+    const outcomeRaw =
+      typeof parsed.outcome === "string" && parsed.outcome.trim()
+        ? parsed.outcome
+        : typeof parsed.overview === "string"
+          ? parsed.overview
+          : "";
+    const outcome = outcomeRaw.trim();
     if (!task && !outcome) return null;
     const rawVerdict = typeof parsed.verdict === "string" ? parsed.verdict.trim().toLowerCase() : "";
     const verdict: InboxVerdict =
@@ -242,6 +270,7 @@ async function fetchDigestFromBtw(
     Authorization: `Bearer ${getJwt() ?? ""}`,
   };
 
+  const isCustomModel = Boolean(model && model !== "builtin/smart");
   const sendReq = async (includeModel: boolean) =>
     fetch(url, {
       method: "POST",
@@ -249,16 +278,16 @@ async function fetchDigestFromBtw(
       body: JSON.stringify({
         question: DIGEST_PROMPT,
         context,
-        ...(includeModel && model ? { model } : {}),
+        ...(includeModel && isCustomModel ? { model } : {}),
       }),
     });
 
-  let response = await sendReq(coreSupportsModelField !== false);
-  if (response.status === 422 && coreSupportsModelField !== false) {
+  let response = await sendReq(isCustomModel && coreSupportsModelField !== false);
+  if (response.status === 422 && isCustomModel && coreSupportsModelField !== false) {
     // Pre-deploy Core has #[serde(deny_unknown_fields)] without `model`; retry cleanly without `model`.
     coreSupportsModelField = false;
     response = await sendReq(false);
-  } else if (response.ok && coreSupportsModelField === null) {
+  } else if (response.ok && isCustomModel && coreSupportsModelField === null) {
     coreSupportsModelField = true;
   }
 
@@ -312,6 +341,7 @@ export function requestInboxDigest(
   mission: Mission,
   items: StreamItem[] | undefined,
   updatedMs: number,
+  priority = 50,
 ): void {
   if (!isConnected()) return;
   const cfg = inboxConfig();
@@ -328,21 +358,24 @@ export function requestInboxDigest(
   if (lastFail && Date.now() - lastFail < 60_000) return;
 
   inFlight.add(cacheKey);
-  queue.push(async () => {
-    try {
-      const context = buildDigestSnapshot(mission, items);
-      const { answer, resolvedModel } = await fetchDigestFromBtw(mission.id, context, cfg.model);
-      const parsed = parseDigestJson(answer, updatedMs, resolvedModel || cfg.model);
-      if (parsed) {
-        storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
-      } else {
+  queue.push({
+    priority,
+    run: async () => {
+      try {
+        const context = buildDigestSnapshot(mission, items);
+        const { answer, resolvedModel } = await fetchDigestFromBtw(mission.id, context, cfg.model);
+        const parsed = parseDigestJson(answer, updatedMs, resolvedModel || cfg.model);
+        if (parsed) {
+          storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
+        } else {
+          failedKeys.set(cacheKey, Date.now());
+        }
+      } catch {
         failedKeys.set(cacheKey, Date.now());
+      } finally {
+        inFlight.delete(cacheKey);
       }
-    } catch {
-      failedKeys.set(cacheKey, Date.now());
-    } finally {
-      inFlight.delete(cacheKey);
-    }
+    },
   });
   pumpQueue();
 }

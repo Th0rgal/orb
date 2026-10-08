@@ -1041,7 +1041,13 @@ struct OrbConversation: View {
         if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
         refreshing = true; defer { refreshing = false; loading = false }
         do {
-            let value = try await OrbReadCache.conversation(id, force: force)
+            let knownCloud = mission != .null && OrbRow(mission).cloud
+            let sinceSeq = events.last?.sequence
+            async let valueTask = OrbReadCache.conversation(id, force: force)
+            async let batchTask = knownCloud ? nil : (try? await APIService.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
+            async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
+
+            let value = try await valueTask
             mission = value
             unavailable = !OrbRow(value).mobile
             guard !unavailable else { return }
@@ -1073,16 +1079,16 @@ struct OrbConversation: View {
                 selection.backend = value["backend"].text
                 selection.node = value["remote_node_id"].text
                 if selection.model.isEmpty { selection.model = value["model_override"].text }
-                async let batchTask = APIService.shared.getMissionEventsWithMeta(id: id, limit: 200, sinceSeq: events.last?.sequence)
-                async let queueTask = api.call("/api/control/queue")
-                let (batch, queueResp) = try await (batchTask, queueTask)
-                if !batch.events.isEmpty || events.isEmpty {
+                if let batch = await batchTask, (!batch.events.isEmpty || events.isEmpty) {
                     let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
                     events = unique.values.sorted { $0.sequence < $1.sequence }
                     OrbReadCache.saveEvents(id, events: events)
                     rebuildWorkModel()
                 }
-                queued = queueResp.items.filter { $0["mission_id"].text == id }
+                let queueResp = await queueTask
+                if queueResp != .null {
+                    queued = queueResp.items.filter { $0["mission_id"].text == id }
+                }
             } else {
                 let accounts = (try? await OrbReadCache.cloudAccounts().items) ?? []
                 let account = accounts.first { $0["id"].text == execution["selection"]["account"].text && $0["provider"].text == execution["selection"]["provider"].text }

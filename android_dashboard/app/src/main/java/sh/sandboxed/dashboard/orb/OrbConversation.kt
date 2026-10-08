@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -95,6 +96,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -199,29 +202,17 @@ object OrbTimelineBuilder {
             pendingWork.clear()
         }
 
+        val eventUserTexts = mutableListOf<Pair<String, String?>>()
         if (events.isNotEmpty()) {
-            events.forEachIndexed { idx, ev ->
+            events.forEach { ev ->
                 val type = (ev.str("type", "event_type", "kind") ?: "").lowercase()
                 val data = ev.dict("data") ?: ev.raw
                 when {
                     type == "user_message" || type == "user" -> {
-                        flushWork(false, idx)
                         val text = OrbJSON.str(data, "content", "text", "message")
                             ?: ev.str("content", "text", "message") ?: ""
                         if (text.isNotEmpty()) {
-                            if (isControllerWake(text)) {
-                                turns.add(OrbTurn.Wake("wake-${ev.id}", text, ev.str("created_at", "timestamp")))
-                            } else {
-                                turns.add(OrbTurn.User("u-${ev.id}", text, ev.str("created_at", "timestamp")))
-                            }
-                        }
-                    }
-                    type == "assistant_message" || type == "assistant" || type == "agent_message" -> {
-                        flushWork(false, idx)
-                        val text = OrbJSON.str(data, "content", "text", "message")
-                            ?: ev.str("content", "text", "message") ?: ""
-                        if (text.isNotEmpty()) {
-                            turns.add(OrbTurn.Assistant("a-${ev.id}", text, ev.str("created_at", "timestamp")))
+                            eventUserTexts.add(text to ev.str("created_at", "timestamp"))
                         }
                     }
                     type.contains("think") || type == "reasoning" -> {
@@ -245,35 +236,86 @@ object OrbTimelineBuilder {
             }
         }
 
-        if (turns.isEmpty() && messages.isNotEmpty()) {
-            messages.forEachIndexed { idx, msg ->
+        // Deduplicate consecutive identical/retry assistant messages (matching iOS history logic)
+        val deduplicatedMessages = mutableListOf<OrbRow>()
+        for (msg in messages) {
+            val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
+            val text = (msg.str("content", "text", "message") ?: "").trim()
+            if ((role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
+                val prev = deduplicatedMessages.last()
+                val prevRole = (prev.str("role", "sender", "author") ?: "assistant").lowercase()
+                val prevText = (prev.str("content", "text", "message") ?: "").trim()
+                if (prevRole == "assistant" || prevRole == "agent") {
+                    val sharedLen = minOf(160, minOf(prevText.length, text.length))
+                    if (prevText == text || (sharedLen >= 80 && prevText.take(sharedLen) == text.take(sharedLen))) {
+                        deduplicatedMessages[deduplicatedMessages.lastIndex] = msg
+                        continue
+                    }
+                }
+            }
+            deduplicatedMessages.add(msg)
+        }
+
+        var lastAssistantTurnIndex = -1
+        if (deduplicatedMessages.isNotEmpty()) {
+            deduplicatedMessages.forEachIndexed { idx, msg ->
                 val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
                 val text = msg.str("content", "text", "message") ?: ""
                 val ts = msg.str("created_at", "timestamp", "updated_at")
                 if (role == "user" || role == "operator" || role == "human") {
-                    flushWork(false, idx)
                     if (text.isNotEmpty()) {
                         if (isControllerWake(text)) {
-                            turns.add(OrbTurn.Wake("wake-${msg.id}", text, ts))
+                            turns.add(OrbTurn.Wake("wake-$idx-${msg.id}", text, ts))
                         } else {
-                            turns.add(OrbTurn.User("u-${msg.id}", text, ts))
+                            turns.add(OrbTurn.User("u-$idx-${msg.id}", text, ts))
                         }
                     }
                 } else if (role == "assistant" || role == "agent") {
-                    val toolCalls = msg.rows("tool_calls")
-                    toolCalls.forEach { tc ->
-                        parseToolStep(tc, tc.raw)?.let { pendingWork.add(it) }
+                    if (pendingWork.isEmpty()) {
+                        val toolCalls = msg.rows("tool_calls")
+                        toolCalls.forEach { tc ->
+                            parseToolStep(tc, tc.raw)?.let { pendingWork.add(it) }
+                        }
                     }
-                    flushWork(false, idx)
                     if (text.isNotEmpty()) {
-                        turns.add(OrbTurn.Assistant("a-${msg.id}", text, ts))
+                        lastAssistantTurnIndex = turns.size
+                        turns.add(OrbTurn.Assistant("a-$idx-${msg.id}", text, ts))
                     }
                 }
             }
         }
 
-        if (pendingWork.isNotEmpty()) {
-            flushWork(isLive && streamingText.isEmpty(), 9999)
+        // Include any user_message events that haven't landed in mission.history yet
+        for ((evIdx, pair) in eventUserTexts.withIndex()) {
+            val (uText, uTs) = pair
+            val alreadyInHistory = deduplicatedMessages.any {
+                val r = (it.str("role", "sender", "author") ?: "").lowercase()
+                (r == "user" || r == "operator" || r == "human") && (it.str("content", "text", "message") == uText)
+            }
+            if (!alreadyInHistory) {
+                if (isControllerWake(uText)) {
+                    turns.add(OrbTurn.Wake("wake-ev-$evIdx", uText, uTs))
+                } else {
+                    turns.add(OrbTurn.User("u-ev-$evIdx", uText, uTs))
+                }
+            }
+        }
+
+        val cappedWork = if (pendingWork.size > 40) pendingWork.takeLast(40) else pendingWork.toList()
+        if (cappedWork.isNotEmpty()) {
+            val fold = OrbTurn.WorkFold(
+                id = "work-fold-main",
+                steps = cappedWork,
+                isLive = isLive && streamingText.isEmpty(),
+                startedAt = startedAt
+            )
+            // Place completed work fold right before the final assistant response (or at bottom when live)
+            if (!isLive && lastAssistantTurnIndex >= 0 && lastAssistantTurnIndex <= turns.size) {
+                turns.add(lastAssistantTurnIndex, fold)
+            } else {
+                turns.add(fold)
+            }
+            pendingWork.clear()
         } else if (isLive && streamingText.isEmpty() && turns.none { it is OrbTurn.WorkFold && it.isLive }) {
             turns.add(
                 OrbTurn.WorkFold(
@@ -422,7 +464,12 @@ fun OrbConversationPage(
     val eventsCacheKey = remember(missionId) { "mission_events_${missionId ?: "new"}" }
 
     var messages by remember(missionId) {
-        mutableStateOf(if (missionId != null) OrbReadCache.loadRows(messagesCacheKey) else emptyList())
+        val cached = if (missionId != null) OrbReadCache.loadRows(messagesCacheKey) else emptyList()
+        val seeded = if (cached.isNotEmpty()) cached else (initialMission?.rows("history") ?: emptyList())
+        if (cached.isEmpty() && seeded.isNotEmpty() && missionId != null) {
+            OrbReadCache.saveRows(messagesCacheKey, seeded)
+        }
+        mutableStateOf(seeded)
     }
     var events by remember(missionId) {
         mutableStateOf(if (missionId != null) OrbReadCache.loadRows(eventsCacheKey) else emptyList())
@@ -511,19 +558,59 @@ fun OrbConversationPage(
 
     suspend fun loadHistory(targetId: String) {
         try {
-            val idsToLoad = if (chainIds.size > 1) chainIds else listOf(targetId)
+            val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
             val allMsgs = mutableListOf<OrbRow>()
             val allEvs = mutableListOf<OrbRow>()
 
-            for (cid in idsToLoad) {
-                val mRes = runCatching {
-                    core.fetchRows("/api/control/missions/$cid/messages", "messages")
-                }.getOrDefault(emptyList())
-                val eRes = runCatching {
-                    core.fetchRows("/api/control/missions/$cid/events?limit=250", "events")
-                }.getOrDefault(emptyList())
-                allMsgs.addAll(mRes)
-                allEvs.addAll(eRes)
+            kotlinx.coroutines.coroutineScope {
+                val jobs = idsToLoad.map { cid ->
+                    async(Dispatchers.IO) {
+                        val existingForCid = if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid")
+                        val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
+                        val detailDef = async {
+                            runCatching { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
+                        }
+                        val evPath = if (lastSeq != null && lastSeq > 0) {
+                            "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$lastSeq"
+                        } else {
+                            "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150"
+                        }
+                        val eventsDef = async {
+                            runCatching { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
+                        }
+                        val detail = detailDef.await()
+                        val histRows = if (detail != null) {
+                            OrbRow(cid, detail).rows("history")
+                        } else {
+                            allMissions.firstOrNull { it.id == cid }?.rows("history") ?: emptyList()
+                        }
+                        val deltaEvs = eventsDef.await()
+                        val mergedEvs = if (lastSeq != null && lastSeq > 0 && existingForCid.isNotEmpty()) {
+                            (existingForCid + deltaEvs).distinctBy { it.int("sequence", "seq") ?: it.id }
+                        } else if (deltaEvs.isNotEmpty()) {
+                            deltaEvs
+                        } else {
+                            existingForCid
+                        }
+                        if (cid == targetId && detail != null) {
+                            withContext(Dispatchers.Main) {
+                                currentMission = OrbRow(cid, detail)
+                            }
+                        }
+                        Triple(cid, histRows, mergedEvs)
+                    }
+                }
+                for (job in jobs) {
+                    val (cid, hRows, eRows) = job.await()
+                    if (hRows.isNotEmpty()) {
+                        OrbReadCache.saveRows("mission_msgs_$cid", hRows)
+                        allMsgs.addAll(hRows)
+                    }
+                    if (eRows.isNotEmpty()) {
+                        OrbReadCache.saveRows("mission_events_$cid", eRows)
+                        allEvs.addAll(eRows)
+                    }
+                }
             }
 
             if (allMsgs.isNotEmpty()) {
@@ -579,7 +666,7 @@ fun OrbConversationPage(
         val id = missionId ?: return@LaunchedEffect
         loadHistory(id)
         while (isActive) {
-            delay(if (isLive) 2800L else 6500L)
+            delay(if (isLive) 2800L else 10000L)
             loadHistory(id)
         }
     }
@@ -694,7 +781,7 @@ fun OrbConversationPage(
         }
     }
 
-    val turns = remember(messages, events, streamingText, isLive, liveRow) {
+    val allTurns = remember(messages, events, streamingText, isLive, liveRow) {
         OrbTimelineBuilder.build(
             messages = messages,
             events = events,
@@ -702,6 +789,11 @@ fun OrbConversationPage(
             isLive = isLive,
             startedAt = liveRow?.str("root_started_at", "started_at", "created_at")
         )
+    }
+
+    var visibleTurnLimit by remember(missionId) { mutableIntStateOf(24) }
+    val turns = remember(allTurns, visibleTurnLimit) {
+        if (allTurns.size > visibleTurnLimit) allTurns.takeLast(visibleTurnLimit) else allTurns
     }
 
     val todos = remember(events, liveRow) {
@@ -719,9 +811,30 @@ fun OrbConversationPage(
     }
 
     val listState = rememberLazyListState()
-    LaunchedEffect(turns.size) {
+    var hasAnchoredInitial by remember(missionId) { mutableStateOf(false) }
+    val workStepCount = remember(turns) {
+        turns.filterIsInstance<OrbTurn.WorkFold>().sumOf { it.steps.size }
+    }
+    LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, streamingText.length) {
         if (turns.isNotEmpty()) {
-            listState.animateScrollToItem(turns.lastIndex)
+            val layout = listState.layoutInfo
+            val totalItems = layout.totalItemsCount
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearBottom = !hasAnchoredInitial || totalItems == 0 || lastVisible >= totalItems - 3
+            if (nearBottom) {
+                val targetIdx = maxOf(0, (if (totalItems > 0) totalItems else turns.size) - 1)
+                listState.scrollToItem(targetIdx, scrollOffset = 0)
+                // If the last item is taller than the viewport, scroll so its bottom edge aligns with the viewport bottom
+                val postLayout = listState.layoutInfo
+                val lastInfo = postLayout.visibleItemsInfo.lastOrNull()
+                if (lastInfo != null) {
+                    val overflow = (lastInfo.offset + lastInfo.size) - postLayout.viewportEndOffset
+                    if (overflow > 0) {
+                        listState.scrollBy(overflow.toFloat())
+                    }
+                }
+                hasAnchoredInitial = true
+            }
         }
     }
 
@@ -906,6 +1019,28 @@ fun OrbConversationPage(
                             fontSize = 13.sp,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                             modifier = Modifier.padding(horizontal = 24.dp)
+                        )
+                    }
+                }
+            }
+
+            if (allTurns.size > visibleTurnLimit) {
+                item(key = "load_earlier_turns") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.03f))
+                            .border(1.dp, OrbStyle.border, CircleShape)
+                            .orbPressClickable { visibleTurnLimit += 24 }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Load earlier messages",
+                            color = OrbStyle.textSecondary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }

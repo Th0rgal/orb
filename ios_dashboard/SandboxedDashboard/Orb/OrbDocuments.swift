@@ -33,9 +33,19 @@ struct OrbDocuments: View {
             }
         }.listStyle(.plain).scrollContentBackground(.hidden).background(OrbStyle.background).navigationBarTitleDisplayMode(.inline).navigationTitle(path.isEmpty ? "Project context" : path.components(separatedBy: "/").last ?? path)
         .task {
+            let cacheKey = "docs:\(project):\(path)"
+            if let cached = OrbReadCache.read(cacheKey) {
+                entries = cached["entries"].items
+                loading = false
+            }
             defer { loading = false }
-            do { entries = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(project))/files?path=\(OrbCore.escape(path))")["entries"].items }
-            catch { self.error = error.localizedDescription }
+            do {
+                let fresh = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(project))/files?path=\(OrbCore.escape(path))")
+                entries = fresh["entries"].items
+                OrbReadCache.seed(cacheKey, value: fresh)
+            } catch {
+                if entries.isEmpty { self.error = error.localizedDescription }
+            }
         }
     }
 }
@@ -82,13 +92,23 @@ struct OrbDocument: View {
             }
         }
         .task {
+            let cacheKey = "docfile:\(project):\(path)"
+            if let cached = OrbReadCache.read(cacheKey) {
+                content = cached["content"].text
+                savedContent = content
+                revision = cached["revision"]
+                loaded = true
+            }
             do {
                 let value = try await OrbCore.shared.call("/api/projects/\(OrbCore.escape(project))/file?path=\(OrbCore.escape(path))")
+                OrbReadCache.seed(cacheKey, value: value)
                 content = value["content"].text; savedContent = content; revision = value["revision"]; loaded = true
                 if let draft = OrbDisk.read(draftKey, as: OrbJSON.self) {
                     content = draft["content"].text; revision = draft["revision"]; editing = true
                 }
-            } catch { self.error = error.localizedDescription }
+            } catch {
+                if !loaded { self.error = error.localizedDescription }
+            }
         }
         .onChange(of: content) { _, value in
             guard loaded && editing else { return }

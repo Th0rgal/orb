@@ -12,9 +12,16 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -23,6 +30,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -417,11 +425,9 @@ fun OrbRichText(
 ) {
     val cleaned = remember(markdown) { cleanText(markdown) }
     if (!needsWebRenderer(cleaned)) {
-        Text(
-            text = cleaned,
-            color = if (tone == OrbRichTextTone.Primary) Color.White else OrbStyle.textSecondary,
-            fontSize = 15.sp,
-            lineHeight = 22.sp,
+        OrbNativeMarkdown(
+            markdown = cleaned,
+            tone = tone,
             modifier = modifier.fillMaxWidth()
         )
         return
@@ -467,6 +473,395 @@ fun OrbRichText(
     }
 }
 
+private sealed class OrbMdBlock {
+    data class Heading(val level: Int, val text: String) : OrbMdBlock()
+    data class Paragraph(val text: String) : OrbMdBlock()
+    data class CodeBlock(val language: String, val code: String) : OrbMdBlock()
+    data class ListBlock(val ordered: Boolean, val items: List<String>) : OrbMdBlock()
+    data class Quote(val text: String) : OrbMdBlock()
+    data class Table(val headers: List<String>, val rows: List<List<String>>) : OrbMdBlock()
+    data object Divider : OrbMdBlock()
+}
+
+@Composable
+private fun OrbNativeMarkdown(
+    markdown: String,
+    tone: OrbRichTextTone,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val blocks = remember(markdown) { parseMdBlocks(markdown) }
+    val baseColor = if (tone == OrbRichTextTone.Primary) Color(0xFFE5E5E5) else OrbStyle.textSecondary
+    var copiedBlockIdx by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
+
+    androidx.compose.foundation.layout.Column(
+        modifier = modifier,
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(9.dp)
+    ) {
+        blocks.forEachIndexed { idx, block ->
+            when (block) {
+                is OrbMdBlock.Heading -> {
+                    val fontSize = when (block.level) {
+                        1 -> 18.sp
+                        2 -> 16.5.sp
+                        else -> 15.sp
+                    }
+                    Text(
+                        text = remember(block.text) { parseInlineAnnotated(block.text) },
+                        color = Color.White,
+                        fontSize = fontSize,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        lineHeight = (fontSize.value * 1.3f).sp,
+                        modifier = Modifier.padding(top = if (idx == 0) 0.dp else 3.dp)
+                    )
+                }
+                is OrbMdBlock.Paragraph -> {
+                    Text(
+                        text = remember(block.text) { parseInlineAnnotated(block.text) },
+                        color = baseColor,
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
+                    )
+                }
+                is OrbMdBlock.Quote -> {
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .width(2.dp)
+                                .heightIn(min = 20.dp)
+                                .background(Color.White.copy(alpha = 0.22f))
+                        )
+                        androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = remember(block.text) { parseInlineAnnotated(block.text) },
+                            color = OrbStyle.textSecondary,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        )
+                    }
+                }
+                is OrbMdBlock.ListBlock -> {
+                    androidx.compose.foundation.layout.Column(
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(5.dp)
+                    ) {
+                        block.items.forEachIndexed { itemIdx, item ->
+                            androidx.compose.foundation.layout.Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = if (block.ordered) "${itemIdx + 1}." else "•",
+                                    color = OrbStyle.textSecondary,
+                                    fontSize = 14.sp,
+                                    lineHeight = 21.sp
+                                )
+                                Text(
+                                    text = remember(item) { parseInlineAnnotated(item) },
+                                    color = baseColor,
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                }
+                is OrbMdBlock.Table -> {
+                    val hScroll = androidx.compose.foundation.rememberScrollState()
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip( androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .background(Color(0xFF171717))
+                            .border(1.dp, Color.White.copy(alpha = 0.09f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .horizontalScroll(hScroll)
+                    ) {
+                        androidx.compose.foundation.layout.Row(
+                            modifier = Modifier.background(Color.White.copy(alpha = 0.04f))
+                        ) {
+                            block.headers.forEach { h ->
+                                Text(
+                                    text = remember(h) { parseInlineAnnotated(h) },
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .widthIn(min = 96.dp, max = 230.dp)
+                                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                                )
+                            }
+                        }
+                        block.rows.forEach { row ->
+                            androidx.compose.material3.HorizontalDivider(
+                                color = Color.White.copy(alpha = 0.07f),
+                                thickness = 0.5.dp
+                            )
+                            androidx.compose.foundation.layout.Row {
+                                val count = maxOf(block.headers.size, row.size)
+                                for (cIdx in 0 until count) {
+                                    val cell = row.getOrNull(cIdx) ?: ""
+                                    Text(
+                                        text = remember(cell) { parseInlineAnnotated(cell) },
+                                        color = Color(0xFFE0E0E0),
+                                        fontSize = 13.sp,
+                                        lineHeight = 18.sp,
+                                        modifier = Modifier
+                                            .widthIn(min = 96.dp, max = 230.dp)
+                                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                is OrbMdBlock.CodeBlock -> {
+                    val hScroll = androidx.compose.foundation.rememberScrollState()
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .background(Color(0xFF161616))
+                            .border(1.dp, Color.White.copy(alpha = 0.09f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                    ) {
+                        androidx.compose.foundation.layout.Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = block.language.ifEmpty { "code" },
+                                color = OrbStyle.textMuted,
+                                fontSize = 11.sp,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                            Text(
+                                text = if (copiedBlockIdx == idx) "Copied ✓" else "Copy code",
+                                color = if (copiedBlockIdx == idx) OrbStyle.success else OrbStyle.textSecondary,
+                                fontSize = 11.5.sp,
+                                modifier = Modifier.orbPressClickable {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("code", block.code))
+                                    copiedBlockIdx = idx
+                                }
+                            )
+                        }
+                        androidx.compose.material3.HorizontalDivider(
+                            color = Color.White.copy(alpha = 0.06f),
+                            thickness = 0.5.dp
+                        )
+                        Text(
+                            text = block.code,
+                            color = Color(0xFFE5E5E5),
+                            fontSize = 12.5.sp,
+                            lineHeight = 18.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(hScroll)
+                                .padding(horizontal = 13.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+                OrbMdBlock.Divider -> {
+                    androidx.compose.material3.HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.1f),
+                        thickness = 0.5.dp
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun parseInlineAnnotated(raw: String): androidx.compose.ui.text.AnnotatedString {
+    return androidx.compose.ui.text.buildAnnotatedString {
+        var i = 0
+        val n = raw.length
+        while (i < n) {
+            if (raw[i] == '`') {
+                val end = raw.indexOf('`', i + 1)
+                if (end > i) {
+                    pushStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            background = Color.White.copy(alpha = 0.08f),
+                            color = Color(0xFFF0F0F0)
+                        )
+                    )
+                    append(raw.substring(i + 1, end))
+                    pop()
+                    i = end + 1
+                    continue
+                }
+            }
+            if (i + 1 < n && raw[i] == '*' && raw[i + 1] == '*') {
+                val end = raw.indexOf("**", i + 2)
+                if (end > i) {
+                    pushStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                    )
+                    append(parseInlineAnnotated(raw.substring(i + 2, end)))
+                    pop()
+                    i = end + 2
+                    continue
+                }
+            }
+            if (raw[i] == '[') {
+                val closeBracket = raw.indexOf(']', i + 1)
+                if (closeBracket > i && closeBracket + 1 < n && raw[closeBracket + 1] == '(') {
+                    val closeParen = raw.indexOf(')', closeBracket + 2)
+                    if (closeParen > closeBracket) {
+                        val label = raw.substring(i + 1, closeBracket)
+                        pushStyle(
+                            androidx.compose.ui.text.SpanStyle(
+                                color = Color(0xFFB8D5EF)
+                            )
+                        )
+                        append(parseInlineAnnotated(label))
+                        pop()
+                        i = closeParen + 1
+                        continue
+                    }
+                }
+            }
+            append(raw[i])
+            i++
+        }
+    }
+}
+
+private fun isMdTableRow(trimmed: String): Boolean =
+    trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.length > 2
+
+private fun parseMdTableCells(trimmed: String): List<String> =
+    trimmed.substring(1, trimmed.length - 1).split("|").map { it.trim() }
+
+private fun isMdTableSeparator(cells: List<String>): Boolean =
+    cells.isNotEmpty() && cells.all { cell ->
+        val stripped = cell.replace("-", "").replace(":", "").trim()
+        stripped.isEmpty() && cell.contains("-")
+    }
+
+private fun parseMdBlocks(source: String): List<OrbMdBlock> {
+    val blocks = mutableListOf<OrbMdBlock>()
+    val lines = source.split("\n")
+    var idx = 0
+    while (idx < lines.size) {
+        val line = lines[idx]
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) {
+            idx++
+            continue
+        }
+        if (trimmed.startsWith("```")) {
+            val lang = trimmed.drop(3).trim()
+            idx++
+            val codeLines = mutableListOf<String>()
+            while (idx < lines.size && !lines[idx].trim().startsWith("```")) {
+                codeLines.add(lines[idx])
+                idx++
+            }
+            if (idx < lines.size) idx++
+            blocks.add(OrbMdBlock.CodeBlock(lang, codeLines.joinToString("\n")))
+            continue
+        }
+        if (trimmed == "---" || trimmed == "***") {
+            blocks.add(OrbMdBlock.Divider)
+            idx++
+            continue
+        }
+        if (trimmed.startsWith("#")) {
+            val hashes = trimmed.takeWhile { it == '#' }.length
+            if (hashes in 1..4 && trimmed.length > hashes && trimmed[hashes] == ' ') {
+                blocks.add(OrbMdBlock.Heading(hashes, trimmed.drop(hashes + 1)))
+                idx++
+                continue
+            }
+        }
+        if (isMdTableRow(trimmed)) {
+            val rawRows = mutableListOf<List<String>>()
+            while (idx < lines.size) {
+                val t = lines[idx].trim()
+                if (!isMdTableRow(t)) break
+                rawRows.add(parseMdTableCells(t))
+                idx++
+            }
+            if (rawRows.size >= 2 && isMdTableSeparator(rawRows[1])) {
+                blocks.add(OrbMdBlock.Table(rawRows[0], rawRows.drop(2)))
+                continue
+            } else if (rawRows.isNotEmpty()) {
+                blocks.add(OrbMdBlock.Table(rawRows[0], rawRows.drop(1)))
+                continue
+            }
+        }
+        if (trimmed.startsWith("> ") || trimmed == ">") {
+            val quoteLines = mutableListOf<String>()
+            while (idx < lines.size) {
+                val t = lines[idx].trim()
+                if (t.startsWith("> ")) {
+                    quoteLines.add(t.drop(2))
+                    idx++
+                } else if (t == ">") {
+                    quoteLines.add("")
+                    idx++
+                } else break
+            }
+            blocks.add(OrbMdBlock.Quote(quoteLines.joinToString("\n")))
+            continue
+        }
+        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+            val items = mutableListOf<String>()
+            while (idx < lines.size) {
+                val t = lines[idx].trim()
+                if (t.startsWith("- ") || t.startsWith("* ")) {
+                    items.add(t.drop(2))
+                    idx++
+                } else break
+            }
+            blocks.add(OrbMdBlock.ListBlock(false, items))
+            continue
+        }
+        val dotIdx = trimmed.indexOf(". ")
+        if (dotIdx in 1..3 && trimmed.substring(0, dotIdx).all { it.isDigit() }) {
+            val items = mutableListOf<String>()
+            while (idx < lines.size) {
+                val t = lines[idx].trim()
+                val d = t.indexOf(". ")
+                if (d in 1..3 && t.substring(0, d).all { it.isDigit() }) {
+                    items.add(t.substring(d + 2))
+                    idx++
+                } else break
+            }
+            blocks.add(OrbMdBlock.ListBlock(true, items))
+            continue
+        }
+        val paraLines = mutableListOf<String>()
+        while (idx < lines.size) {
+            val l = lines[idx]
+            val t = l.trim()
+            if (t.isEmpty() || t.startsWith("```") || t.startsWith("#") || t.startsWith("- ") || t.startsWith("* ") || t.startsWith("> ") || isMdTableRow(t)) {
+                break
+            }
+            paraLines.add(l)
+            idx++
+        }
+        if (paraLines.isNotEmpty()) {
+            blocks.add(OrbMdBlock.Paragraph(paraLines.joinToString("\n")))
+        } else {
+            idx++
+        }
+    }
+    return blocks
+}
+
 private fun cleanText(raw: String): String {
     val lines = raw.split("\n").filterNot { line ->
         val t = line.trim()
@@ -476,9 +871,48 @@ private fun cleanText(raw: String): String {
 }
 
 private fun needsWebRenderer(text: String): Boolean {
-    if (text.length > 260 || text.contains("\n")) return true
-    for (token in listOf("$", "\\(", "\\[", "```", "`", "**", "##", "# ", "- ", "* ", "1. ", "|", "[", "> ")) {
-        if (text.contains(token)) return true
+    return containsLatexOrEmbeddedMediaOutsideCode(text)
+}
+
+private fun containsLatexOrEmbeddedMediaOutsideCode(source: String): Boolean {
+    if (!source.contains("$") && !source.contains("\\(") && !source.contains("\\[") && !source.contains("![") && !source.contains("<img")) {
+        return false
+    }
+    var inFence = false
+    for (rawLine in source.split("\n")) {
+        val trimmed = rawLine.trim()
+        if (trimmed.startsWith("```")) {
+            inFence = !inFence
+            continue
+        }
+        if (inFence) continue
+        val sb = StringBuilder()
+        var inTick = false
+        for (ch in rawLine) {
+            if (ch == '`') {
+                inTick = !inTick
+                continue
+            }
+            if (!inTick) sb.append(ch)
+        }
+        val stripped = sb.toString()
+        if (stripped.contains("$$") || stripped.contains("\\(") || stripped.contains("\\[")) return true
+        if (stripped.contains("![") || stripped.contains("<img ")) return true
+        val parts = stripped.split("$")
+        if (parts.size < 3) continue
+        var idx = 1
+        while (idx < parts.size - 1) {
+            val candidate = parts[idx]
+            if (candidate.isNotEmpty() &&
+                candidate.length <= 120 &&
+                !candidate.first().isWhitespace() &&
+                !candidate.last().isWhitespace() &&
+                (candidate.contains("\\") || candidate.contains("^") || candidate.contains("_") || candidate.contains("{") || candidate.contains("}"))
+            ) {
+                return true
+            }
+            idx += 2
+        }
     }
     return false
 }

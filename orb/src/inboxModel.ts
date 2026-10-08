@@ -11,6 +11,7 @@ import type { StreamItem } from "./transcriptModel";
 import { toolArgs, toolName, workSummary } from "./workModel";
 
 export const INBOX_SENTENCE_MAX_CHARS = 112;
+export const INBOX_OVERVIEW_MAX_CHARS = 320;
 
 export type InboxOption = {
   key: string;
@@ -215,6 +216,38 @@ export function clipToSentence(raw: string, maxChars = INBOX_SENTENCE_MAX_CHARS)
   const clipped = clean.slice(0, Math.max(1, maxChars - 1));
   const lastSpace = clipped.lastIndexOf(" ");
   if (lastSpace >= 24) {
+    return clipped.slice(0, lastSpace).replace(/[,;:\-–—]+$/, "").trim() + "…";
+  }
+  return clipped.trim() + "…";
+}
+
+/**
+ * Multi-sentence overview clipper for the wider mailbox view:
+ * Preserves multiple complete sentences up to `maxChars` (default 320) instead of
+ * stopping after the first sentence.
+ */
+export function clipToOverview(raw: string, maxChars = INBOX_OVERVIEW_MAX_CHARS): string {
+  const clean = stripMarkdownToProse(raw);
+  if (!clean) return "";
+  if (clean.length <= maxChars) return clean;
+
+  const windowText = clean.slice(0, maxChars);
+  let lastSentenceEnd = -1;
+  for (let i = windowText.length - 1; i >= 48; i--) {
+    const ch = windowText[i];
+    const next = clean[i + 1];
+    if ((ch === "." || ch === "!" || ch === "?") && (!next || /\s/.test(next))) {
+      lastSentenceEnd = i + 1;
+      break;
+    }
+  }
+  if (lastSentenceEnd > 0) {
+    return windowText.slice(0, lastSentenceEnd).trim();
+  }
+
+  const clipped = clean.slice(0, Math.max(1, maxChars - 1));
+  const lastSpace = clipped.lastIndexOf(" ");
+  if (lastSpace >= 36) {
     return clipped.slice(0, lastSpace).replace(/[,;:\-–—]+$/, "").trim() + "…";
   }
   return clipped.trim() + "…";
@@ -456,13 +489,13 @@ function stripLeadingNarration(raw: string): string {
     .filter(Boolean);
   if (paragraphs.length > 1) {
     const isProceduralOrClosing = (p: string) =>
-      /^(no local repo\b|let me\b|i['’]ll\b|i will\b|je vais\b|je reprends\b|gh appears\b|if you['’]?d? (?:like|want)\b|let me know if\b|would you like me to\b|si tu veux\b)/i.test(
+      /^(no local repo\b|let me\b|i['’]ll\b|i will\b|je vais\b|je reprends\b|gh appears\b|the goal is paused\b|the objective was to\b|current status:?$|if you['’]?d? (?:like|want)\b|let me know if\b|would you like me to\b|si tu veux\b)/i.test(
         p,
       );
     const substantive = paragraphs.filter((p) => !isProceduralOrClosing(p) && p.length >= 28);
     if (substantive.length > 0) {
-      // Pick the last substantive paragraph so the final finding/conclusion is shown rather than early narration
-      return substantive.at(-1)!;
+      // Combine the final substantive paragraphs so multi-sentence overviews capture both finding and details
+      return substantive.slice(-2).join(" ");
     }
   }
   const stripped = raw.replace(
@@ -484,7 +517,7 @@ function extractSummary(
       const entry = mission.history[i];
       if (entry.role === "assistant" && entry.content?.trim()) {
         const cleanHist = humanizeStatusText(entry.content) || entry.content;
-        const clipped = clipToSentence(stripLeadingNarration(cleanHist));
+        const clipped = clipToOverview(stripLeadingNarration(cleanHist));
         if (clipped) return clipped;
       }
     }
@@ -503,23 +536,23 @@ function extractSummary(
       const item = items[i];
       if (item.kind === "error" && item.text.trim()) {
         const cleanErr = humanizeStatusText(item.text) || item.text;
-        return clipToSentence(cleanErr);
+        return clipToOverview(stripLeadingNarration(cleanErr));
       }
       if (item.kind === "text" && item.text.trim()) {
         const cleanTxt = humanizeStatusText(item.text) || item.text;
-        return clipToSentence(stripLeadingNarration(cleanTxt));
+        return clipToOverview(stripLeadingNarration(cleanTxt));
       }
     }
   }
 
   const remoteErr = humanizeStatusText(mission.remote_job?.error);
-  if (remoteErr) return clipToSentence(remoteErr);
+  if (remoteErr) return clipToOverview(remoteErr);
 
   const statusMsg = humanizeStatusText(mission.status_message);
-  if (statusMsg) return clipToSentence(statusMsg);
+  if (statusMsg) return clipToOverview(statusMsg);
 
   const termReason = humanizeStatusText(mission.terminal_reason);
-  if (termReason) return clipToSentence(termReason);
+  if (termReason) return clipToOverview(termReason);
 
   switch (mission.status) {
     case "completed":
@@ -608,13 +641,26 @@ function cleanUserMarkdown(raw: string): string {
   return pres.trim();
 }
 
+export function isSyntheticUserMessage(raw: string): boolean {
+  const pres = parseMessagePresentation(raw).text.trim();
+  if (!pres) return true;
+  if (parseBackgroundWake(pres)) return true;
+  return (
+    /^\[automatic resume\b/i.test(pres) ||
+    /^antigravity background task handoff\b/i.test(pres) ||
+    /^background task\s+`[^`]+`\s+.*finished\b/i.test(pres) ||
+    /^continue from where you left off\.?$/i.test(pres) ||
+    /^\[system\b/i.test(pres)
+  );
+}
+
 function cleanAssistantMarkdown(raw: string): string {
   return parseRemoteLog(raw)
     .text.replace(/\n*diagnostics:\s*\d{4}-\d{2}-\d{2}T[\s\S]*$/i, "")
     .trim();
 }
 
-function formatToolDetail(tool: Extract<StreamItem, { kind: "tool" }>): string {
+export function formatToolDetail(tool: Extract<StreamItem, { kind: "tool" }>): string {
   const name = toolName(tool.name);
   const args = toolArgs(tool.args);
   if (!args) return name;
@@ -647,6 +693,7 @@ export function extractLastRequest(mission: Mission, items?: StreamItem[]): stri
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
       if (it.kind === "user" && !it.queued && it.text.trim()) {
+        if (isSyntheticUserMessage(it.text)) continue;
         const cleaned = cleanUserMarkdown(it.text);
         if (cleaned) return clipToSentence(cleaned, 120);
       }
@@ -656,6 +703,7 @@ export function extractLastRequest(mission: Mission, items?: StreamItem[]): stri
     for (let i = mission.history.length - 1; i >= 0; i--) {
       const h = mission.history[i];
       if (h.role === "user" && h.content?.trim()) {
+        if (isSyntheticUserMessage(h.content)) continue;
         const cleaned = cleanUserMarkdown(h.content);
         if (cleaned) return clipToSentence(cleaned, 120);
       }
@@ -715,6 +763,9 @@ export function extractAllPeekTurns(
         continue;
       }
       if (item.kind === "user" && !item.queued && item.text.trim()) {
+        if (isSyntheticUserMessage(item.text)) {
+          continue;
+        }
         pendingTools = [];
         const md = cleanUserMarkdown(item.text);
         const clean = stripMarkdownToProse(md);
@@ -762,12 +813,28 @@ export function extractAllPeekTurns(
         if (receipt && isActualError) receipt.failed = true;
         pendingTools = [];
         if (clean || md) {
-          turns.push({
-            role: isActualError ? "error" : "assistant",
-            text: clipToSentence(clean || md, 240),
-            markdown: md,
-            workReceipt: receipt,
-          });
+          const clipped = clipToSentence(clean || md, 240);
+          const role = isActualError ? "error" : "assistant";
+          const prev = turns.at(-1);
+          if (role === "assistant" && prev?.role === "assistant") {
+            prev.text = clipped;
+            prev.markdown = md;
+            if (receipt) {
+              if (prev.workReceipt) {
+                prev.workReceipt.toolCount += receipt.toolCount;
+                prev.workReceipt.details = [...prev.workReceipt.details, ...receipt.details].slice(-6);
+              } else {
+                prev.workReceipt = receipt;
+              }
+            }
+          } else {
+            turns.push({
+              role,
+              text: clipped,
+              markdown: md,
+              workReceipt: receipt,
+            });
+          }
         }
       }
     }
@@ -798,6 +865,7 @@ export function extractAllPeekTurns(
     for (let i = 0; i < mission.history.length; i++) {
       const entry = mission.history[i];
       if (!entry.content?.trim()) continue;
+      if (entry.role === "user" && isSyntheticUserMessage(entry.content)) continue;
       if (entry.role === "user" || entry.role === "assistant") {
         const md =
           entry.role === "user"
@@ -812,6 +880,24 @@ export function extractAllPeekTurns(
             markdown: md,
           });
         }
+      }
+    }
+  }
+
+  // When a single turn runs 100+ tool calls and pushes the initial user prompt outside the
+  // 200-event tail window, synthesize the initial user prompt from goal_objective or title
+  // so Peek always shows what was asked above the agent's response.
+  if (items && items.length > 0 && turns.length > 0 && !turns.some((t) => t.role === "user")) {
+    const fallbackPrompt = (mission.goal_objective || displayTitle(mission.title) || "").trim();
+    if (fallbackPrompt && fallbackPrompt.toLowerCase() !== "untitled") {
+      const md = cleanUserMarkdown(fallbackPrompt);
+      const clean = stripMarkdownToProse(md);
+      if (clean || md) {
+        turns.unshift({
+          role: "user",
+          text: clipToSentence(clean || md, 240),
+          markdown: md,
+        });
       }
     }
   }
@@ -877,10 +963,22 @@ export function buildInboxItem(
     (projectSlug === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : projectSlug);
 
   const rawTitle = displayTitle(mission.title);
-  const firstUser = mission.history?.find((h) => h.role === "user")?.content;
+  const firstUserItem = items?.find((i) => i.kind === "user" && !i.queued && i.text.trim())?.text;
+  const firstUser = firstUserItem || mission.history?.find((h) => h.role === "user")?.content;
+  let expandedTitle = rawTitle;
+  if (rawTitle && (rawTitle.endsWith("…") || rawTitle.endsWith("...")) && rawTitle.length <= 46) {
+    const stem = rawTitle.replace(/(?:…|\.\.\.)$/, "").trim().toLowerCase();
+    const candidateSource = (mission.goal_objective || firstUser || "")
+      .trim()
+      .split(/\r?\n/, 1)[0]
+      ?.trim();
+    if (stem.length >= 16 && candidateSource && candidateSource.toLowerCase().startsWith(stem)) {
+      expandedTitle = clipToSentence(candidateSource, 84);
+    }
+  }
   let headline =
-    rawTitle ||
-    (firstUser ? clipToSentence(firstUser, 56) : "") ||
+    expandedTitle ||
+    (firstUser ? clipToSentence(firstUser, 84) : "") ||
     "Untitled conversation";
 
   const isGoal = Boolean(
@@ -892,7 +990,7 @@ export function buildInboxItem(
       .map((l) => stripMarkdownToProse(l))
       .filter((l) => l && l.toLowerCase() !== projectTitle.trim().toLowerCase());
     if (goalLines.length > 0) {
-      headline = clipToSentence(goalLines[0], 56);
+      headline = clipToSentence(goalLines[0], 84);
     } else if (isGoal) {
       headline = `${projectTitle} objective`;
     }
@@ -962,6 +1060,16 @@ function urgencyScore(item: InboxItem): number {
   return 6;
 }
 
+function cleanChildTrackLabel(rawTitle: string | null | undefined): string {
+  const raw = (displayTitle(rawTitle) || "").trim();
+  if (!raw) return "Worker track";
+  const withoutFork = raw.replace(/\s*·\s*fork$/i, "").trim();
+  if (/^(i['’]ll|i will|let me|first,|now i|checking|reading)\b/i.test(withoutFork)) {
+    return raw.toLowerCase().endsWith("· fork") ? "fork" : "Worker track";
+  }
+  return clipToSentence(raw, 36) || "Worker track";
+}
+
 export function buildInboxSections(
   missions: ReadonlyArray<Mission>,
   projects: ReadonlyArray<ProjectSummary>,
@@ -1003,7 +1111,7 @@ export function buildInboxSections(
       group.running++;
     } else if (m.status === "failed" || m.status === "blocked" || m.status === "not_feasible") {
       group.failed++;
-      const childTitle = clipToSentence(displayTitle(m.title) || "Worker track", 36);
+      const childTitle = cleanChildTrackLabel(m.title);
       group.failedChildren.push({ id: m.id, title: childTitle, mission: m });
       if (isMissionUnread(m, selectedMissionId, false)) {
         group.hasUnreadFailure = true;

@@ -4343,7 +4343,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let updated = conn
                 .execute(
-                    "UPDATE missions SET first_viewed_at = ?1 WHERE id = ?2 AND first_viewed_at IS NULL",
+                    "UPDATE missions SET first_viewed_at = ?1 WHERE id = ?2 AND (first_viewed_at IS NULL OR first_viewed_at < ?1)",
                     params![&ts, &id_str],
                 )
                 .map_err(|e| e.to_string())?;

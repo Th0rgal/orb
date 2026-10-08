@@ -120,19 +120,69 @@ struct OrbNativeMarkdownView: View {
         case code(language: String, code: String)
         case list(ordered: Bool, items: [String])
         case quote(String)
+        case table(headers: [String], rows: [[String]])
         case divider
     }
 
     static func requiresWebRenderer(_ source: String) -> Bool {
-        if source.contains("$$") || source.contains("\\(") || source.contains("\\[") { return true }
-        if source.contains("<script") || source.contains("<img") || source.contains("![") { return true }
-        // Markdown tables (`| col | col |`) or inline `$math$`
-        for line in source.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("|") && trimmed.hasSuffix("|") && trimmed.count > 2 { return true }
+        return containsLatexOrEmbeddedMediaOutsideCode(source)
+    }
+
+    private static func containsLatexOrEmbeddedMediaOutsideCode(_ source: String) -> Bool {
+        guard source.contains("$") || source.contains("\\(") || source.contains("\\[") || source.contains("![") || source.contains("<img") else {
+            return false
         }
-        if source.contains("$") { return true }
+        var inFence = false
+        for rawLine in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inFence.toggle()
+                continue
+            }
+            if inFence { continue }
+            // Strip inline code spans `...`
+            var clean = ""
+            var inTick = false
+            for ch in rawLine {
+                if ch == "`" { inTick.toggle(); continue }
+                if !inTick { clean.append(ch) }
+            }
+            if clean.contains("$$") || clean.contains("\\(") || clean.contains("\\[") { return true }
+            if clean.contains("![") || clean.contains("<img ") { return true }
+            let parts = clean.split(separator: "$", omittingEmptySubsequences: false)
+            if parts.count < 3 { continue }
+            var idx = 1
+            while idx < parts.count - 1 {
+                let candidate = parts[idx]
+                if !candidate.isEmpty,
+                   candidate.count <= 120,
+                   candidate.first?.isWhitespace == false,
+                   candidate.last?.isWhitespace == false,
+                   (candidate.contains("\\") || candidate.contains("^") || candidate.contains("_") || candidate.contains("{") || candidate.contains("}")) {
+                    return true
+                }
+                idx += 2
+            }
+        }
         return false
+    }
+
+    private static func isTableRow(_ trimmed: String) -> Bool {
+        trimmed.hasPrefix("|") && trimmed.hasSuffix("|") && trimmed.count > 2
+    }
+
+    private static func parseTableCells(_ trimmed: String) -> [String] {
+        let inner = trimmed.dropFirst().dropLast()
+        return inner.split(separator: "|", omittingEmptySubsequences: false).map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    private static func isTableSeparator(_ cells: [String]) -> Bool {
+        !cells.isEmpty && cells.allSatisfy { cell in
+            let stripped = cell.replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
+            return stripped.isEmpty && cell.contains("-")
+        }
     }
 
     static func parseBlocks(_ source: String) -> [Block] {
@@ -172,6 +222,26 @@ struct OrbNativeMarkdownView: View {
                     continue
                 }
             }
+            if isTableRow(trimmed) {
+                var rawRows: [[String]] = []
+                while idx < lines.count {
+                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
+                    guard isTableRow(t) else { break }
+                    rawRows.append(parseTableCells(t))
+                    idx += 1
+                }
+                if rawRows.count >= 2 && isTableSeparator(rawRows[1]) {
+                    let headers = rawRows[0]
+                    let bodyRows = Array(rawRows.dropFirst(2))
+                    blocks.append(.table(headers: headers, rows: bodyRows))
+                    continue
+                } else if !rawRows.isEmpty {
+                    let headers = rawRows[0]
+                    let bodyRows = Array(rawRows.dropFirst(1))
+                    blocks.append(.table(headers: headers, rows: bodyRows))
+                    continue
+                }
+            }
             if trimmed.hasPrefix("> ") || trimmed == ">" {
                 var quoteLines: [String] = []
                 while idx < lines.count {
@@ -195,11 +265,30 @@ struct OrbNativeMarkdownView: View {
                 blocks.append(.list(ordered: false, items: items))
                 continue
             }
+            if let dotIdx = trimmed.firstIndex(of: "."),
+               trimmed[..<dotIdx].allSatisfy(\.isNumber),
+               trimmed.index(after: dotIdx) < trimmed.endIndex,
+               trimmed[trimmed.index(after: dotIdx)] == " " {
+                var items: [String] = []
+                while idx < lines.count {
+                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if let d = t.firstIndex(of: "."),
+                       t[..<d].allSatisfy(\.isNumber),
+                       t.index(after: d) < t.endIndex,
+                       t[t.index(after: d)] == " " {
+                        let start = t.index(d, offsetBy: 2)
+                        items.append(String(t[start...]))
+                        idx += 1
+                    } else { break }
+                }
+                blocks.append(.list(ordered: true, items: items))
+                continue
+            }
             var paraLines: [String] = []
             while idx < lines.count {
                 let l = lines[idx]
                 let t = l.trimmingCharacters(in: .whitespaces)
-                if t.isEmpty || t.hasPrefix("```") || t.hasPrefix("#") || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("> ") {
+                if t.isEmpty || t.hasPrefix("```") || t.hasPrefix("#") || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("> ") || isTableRow(t) {
                     break
                 }
                 paraLines.append(l)
@@ -229,6 +318,7 @@ struct OrbNativeMarkdownView: View {
                         .font(.body)
                         .foregroundStyle(Color(white: 0.89))
                         .lineSpacing(3)
+                        .textSelection(.enabled)
                 case .quote(let text):
                     inlineMarkdownText(text)
                         .font(.subheadline)
@@ -247,8 +337,41 @@ struct OrbNativeMarkdownView: View {
                                 inlineMarkdownText(item)
                                     .font(.body)
                                     .foregroundStyle(Color(white: 0.89))
+                                    .textSelection(.enabled)
                             }
                         }
+                    }
+                case .table(let headers, let rows):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack(spacing: 0) {
+                                ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
+                                    inlineMarkdownText(h)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color.white)
+                                        .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                }
+                            }
+                            .background(Color.white.opacity(0.05))
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                                HStack(alignment: .top, spacing: 0) {
+                                    ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
+                                        let cell = cIdx < row.count ? row[cIdx] : ""
+                                        inlineMarkdownText(cell)
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(Color(white: 0.88))
+                                            .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 7)
+                                    }
+                                }
+                            }
+                        }
+                        .background(Color(white: 0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.1)))
                     }
                 case .code(let lang, let code):
                     VStack(alignment: .leading, spacing: 0) {
@@ -314,8 +437,9 @@ struct OrbNativeMarkdownView: View {
 struct OrbRichText: View {
     let source: String
     var onArtifact: (String) -> Void = { _ in }
-    /// Set to `true` during A/B benchmarking to force native SwiftUI block rendering when no LaTeX/tables are present.
-    @MainActor static var preferNativeWhenSimple = false
+    /// Render standard Markdown natively in SwiftUI for instant 0ms layout and scroll-to-bottom;
+    /// only fall back to WKWebView when LaTeX math or HTML images are present.
+    @MainActor static var preferNativeWhenSimple = true
     @State private var height: CGFloat?
     @Environment(\.dynamicTypeSize) private var textSize
     private var resolvedHeight: CGFloat {
