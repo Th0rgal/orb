@@ -521,6 +521,7 @@ fun OrbQuizCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
+                modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
@@ -535,17 +536,20 @@ fun OrbQuizCard(
                     color = OrbStyle.textSecondary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.6.sp
+                    letterSpacing = 0.6.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(modifier = Modifier.weight(1f))
             if (payload.questions.size > 1) {
                 Text(
                     text = "${currentIndex + 1} / ${payload.questions.size}",
                     color = OrbStyle.textMuted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -644,6 +648,7 @@ fun OrbQuizCard(
                 val chosen = q.options[selected]
                 Row(
                     modifier = Modifier
+                        .weight(1f, fill = false)
                         .clip(CircleShape)
                         .background(Color.White)
                         .orbPressClickable { onSubmitAnswer(chosen) }
@@ -684,7 +689,9 @@ fun OrbQuizCard(
                         text = "Prev",
                         color = if (currentIndex > 0) OrbStyle.textSecondary else OrbStyle.textMuted,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
                 Box(
@@ -700,7 +707,9 @@ fun OrbQuizCard(
                         text = "Next",
                         color = if (currentIndex + 1 < payload.questions.size) Color.White else OrbStyle.textMuted,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -765,7 +774,9 @@ fun OrbRemoteLog(
                         text = "Retry",
                         color = Color.White,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -785,7 +796,9 @@ fun OrbRemoteLog(
                         text = "Remote log",
                         color = OrbStyle.textMuted,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }

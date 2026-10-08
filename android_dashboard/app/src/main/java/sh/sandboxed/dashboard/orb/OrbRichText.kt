@@ -629,19 +629,24 @@ private fun OrbNativeMarkdown(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
                             Text(
                                 text = block.language.ifEmpty { "code" },
                                 color = OrbStyle.textMuted,
                                 fontSize = 11.sp,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
                             Text(
                                 text = if (copiedBlockIdx == idx) "Copied ✓" else "Copy code",
                                 color = if (copiedBlockIdx == idx) OrbStyle.success else OrbStyle.textSecondary,
                                 fontSize = 11.5.sp,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier.orbPressClickable {
                                     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
                                     cm?.setPrimaryClip(android.content.ClipData.newPlainText("code", block.code))

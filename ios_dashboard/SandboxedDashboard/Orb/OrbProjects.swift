@@ -435,6 +435,8 @@ struct OrbHome: View {
                             Text("Inbox")
                                 .font(.body.weight(.medium))
                                 .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                             Spacer()
                             if inboxWorkingCount > 0 {
                                 HStack(spacing: 5) {
@@ -443,6 +445,8 @@ struct OrbHome: View {
                                         .font(.caption)
                                         .foregroundStyle(OrbStyle.textSecondary)
                                         .monospacedDigit()
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
                             }
                             if inboxCount > 0 {
@@ -450,6 +454,8 @@ struct OrbHome: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.primary)
                                     .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 2.5)
                                     .background(OrbStyle.elevated, in: Capsule())
@@ -476,12 +482,15 @@ struct OrbHome: View {
                                 .font(.body.weight(.medium))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                             Spacer()
                             if !project.updatedAt.isEmpty {
                                 Text(OrbStyle.relativeTime(project.updatedAt))
                                     .font(.caption)
                                     .foregroundStyle(OrbStyle.textMuted)
                                     .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 11, weight: .semibold))
@@ -665,14 +674,21 @@ struct OrbProjectPage: View {
     private static func folderBaseName(_ path: String) -> String {
         path.split(separator: "/").last.map(String.init) ?? path
     }
-    var body: some View {
+    private var scrollContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if filter != "All" {
                     HStack {
-                        Text(filter).font(.footnote.weight(.medium)).foregroundStyle(OrbStyle.textSecondary)
+                        Text(filter)
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         Spacer()
-                        Button("Clear filter") { withAnimation(.snappy(duration: 0.18)) { filter = "All" } }.font(.footnote)
+                        Button("Clear filter") { withAnimation(.snappy(duration: 0.18)) { filter = "All" } }
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }.frame(minHeight: 38)
                 }
                 if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
@@ -681,72 +697,89 @@ struct OrbProjectPage: View {
                     missionRowView(item)
                 }
                 folderRows
-                if !loading && nestedRoots.isEmpty && (folders.isEmpty || filtering) && error.isEmpty { ContentUnavailableView(filtering ? "No matching conversations" : "No conversations yet", systemImage: "bubble.left.and.bubble.right", description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")) }
+                if !loading && nestedRoots.isEmpty && (folders.isEmpty || filtering) && error.isEmpty {
+                    ContentUnavailableView(
+                        filtering ? "No matching conversations" : "No conversations yet",
+                        systemImage: "bubble.left.and.bubble.right",
+                        description: Text(filtering ? "Try another search or filter." : "Start an agent with the + button.")
+                    )
+                }
             }.padding(.horizontal, 18)
         }
-        .background(OrbStyle.background)
-        .navigationTitle(project.name)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .searchable(text: $search, prompt: "Search conversations")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { Menu {
-                Picker("Show", selection: $filter) { ForEach(["All", "Working", "Needs attention", "Archived"], id: \.self) { Text($0) } }
-                Button("New folder") { newFolderParent = ""; folderName = ""; newFolder = true }
-                OrbProjectColorMenu(project: project.id)
-                NavigationLink("Project context") { OrbDocuments(project: project.id, path: "") }
-            } label: { OrbCircle(symbol: "ellipsis") }.accessibilityLabel("Project actions") }
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: "") } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("New agent").accessibilityIdentifier("new-agent")
-            }
-        }
-        .alert(newFolderParent.isEmpty ? "New folder" : "New subfolder in \(Self.folderBaseName(newFolderParent))", isPresented: $newFolder) {
-            TextField("Folder name", text: $folderName)
-            Button("Create") { Task { await mkdir() } }
-            Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
-        }
-        .alert("Rename folder", isPresented: Binding(get: { renamingFolder != nil }, set: { if !$0 { renamingFolder = nil } })) {
-            TextField("Folder name", text: $renameFolderDraft)
-            Button("Rename") {
-                if let folder = renamingFolder {
-                    Task { await renameFolder(folder, to: renameFolderDraft) }
+    }
+    private var projectToolbarMenu: some View {
+        Menu {
+            Picker("Show", selection: $filter) {
+                ForEach(["All", "Working", "Needs attention", "Archived"], id: \.self) { option in
+                    Text(option)
                 }
             }
-            Button("Cancel", role: .cancel) { renamingFolder = nil }
+            Button("New folder") { newFolderParent = ""; folderName = ""; newFolder = true }
+            OrbProjectColorMenu(project: project.id)
+            NavigationLink("Project context") { OrbDocuments(project: project.id, path: "") }
+        } label: {
+            OrbCircle(symbol: "ellipsis")
         }
-        .alert("Move folder", isPresented: Binding(get: { movingFolder != nil }, set: { if !$0 { movingFolder = nil } })) {
-            TextField("Destination folder (empty for root)", text: $moveFolderDraft)
-            Button("Move") {
-                if let folder = movingFolder {
-                    Task { await moveFolder(folder, into: moveFolderDraft) }
+        .accessibilityLabel("Project actions")
+    }
+    var body: some View {
+        scrollContent
+            .background(OrbStyle.background)
+            .navigationTitle(project.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .searchable(text: $search, prompt: "Search conversations")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { projectToolbarMenu }
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: "") } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("New agent").accessibilityIdentifier("new-agent")
                 }
             }
-            Button("Cancel", role: .cancel) { movingFolder = nil }
-        } message: {
-            Text("Enter destination parent folder path within \(project.name), or leave empty to move to the project root.")
-        }
-        .alert("Delete folder?", isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } })) {
-            Button("Delete", role: .destructive) {
+            .alert(newFolderParent.isEmpty ? "New folder" : "New subfolder in \(Self.folderBaseName(newFolderParent))", isPresented: $newFolder) {
+                TextField("Folder name", text: $folderName)
+                Button("Create") { Task { await mkdir() } }
+                Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
+            }
+            .alert("Rename folder", isPresented: Binding(get: { renamingFolder != nil }, set: { if !$0 { renamingFolder = nil } })) {
+                TextField("Folder name", text: $renameFolderDraft)
+                Button("Rename") {
+                    if let folder = renamingFolder {
+                        Task { await renameFolder(folder, to: renameFolderDraft) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { renamingFolder = nil }
+            }
+            .alert("Move folder", isPresented: Binding(get: { movingFolder != nil }, set: { if !$0 { movingFolder = nil } })) {
+                TextField("Destination folder (empty for root)", text: $moveFolderDraft)
+                Button("Move") {
+                    if let folder = movingFolder {
+                        Task { await moveFolder(folder, into: moveFolderDraft) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { movingFolder = nil }
+            } message: {
+                Text("Enter destination parent folder path within \(project.name), or leave empty to move to the project root.")
+            }
+            .alert("Delete folder?", isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } })) {
+                Button("Delete", role: .destructive) {
+                    if let folder = deletingFolder {
+                        Task { await deleteFolder(folder) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { deletingFolder = nil }
+            } message: {
                 if let folder = deletingFolder {
-                    Task { await deleteFolder(folder) }
+                    Text("Delete \"\(folder)\" and all context files inside? This cannot be undone.")
                 }
             }
-            Button("Cancel", role: .cancel) { deletingFolder = nil }
-        } message: {
-            if let folder = deletingFolder {
-                Text("Delete \"\(folder)\" and all context files inside? This cannot be undone.")
+            .task { await load() }.refreshable { await load(force: true) }
+            .onChange(of: filter) { _, newValue in
+                if newValue == "Archived" && !loadedArchived {
+                    Task { await load(force: true) }
+                }
             }
-        }
-        .task { await load() }.refreshable { await load(force: true) }
-        .onChange(of: filter) { _, newValue in
-            if newValue == "Archived" && !loadedArchived {
-                Task { await load(force: true) }
-            }
-        }
     }
     private var conversationSkeletons: some View {
         VStack(spacing: 0) {
@@ -784,6 +817,8 @@ struct OrbProjectPage: View {
                         OrbListIcon(symbol: "folder", color: appearance.color(project.id))
                         Text(Self.folderBaseName(folder))
                             .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
@@ -889,6 +924,8 @@ struct OrbProjectPage: View {
                                         .font(.system(size: 9, weight: .semibold))
                                     Text("Goal")
                                         .font(.system(size: 10, weight: .semibold))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
                                 .foregroundStyle(OrbStyle.textSecondary)
                                 .padding(.horizontal, 6)
@@ -898,6 +935,7 @@ struct OrbProjectPage: View {
                             Text(cleanTitle)
                                 .font(.subheadline.weight(.medium))
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 4)
                             if launched == 0, !rel.isEmpty {
@@ -928,6 +966,8 @@ struct OrbProjectPage: View {
                         HStack(spacing: 3) {
                             Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
                                 .font(.caption2.weight(.medium).monospacedDigit())
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 8.5, weight: .bold))
                                 .rotationEffect(.degrees(isExpanded ? 90 : 0))

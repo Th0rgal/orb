@@ -746,6 +746,8 @@ fun OrbPreviewSheet(
                     color = Color.White,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .clip(CircleShape)
                         .orbPressClickable { onDismiss() }

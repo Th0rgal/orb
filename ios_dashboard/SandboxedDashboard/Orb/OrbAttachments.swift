@@ -116,6 +116,8 @@ struct OrbAttachments: View {
                                 do { let url = FileManager.default.temporaryDirectory.appendingPathComponent(file.id.uuidString + "-" + file.name); try file.data.write(to: url, options: .atomic); preview = OrbPreviewFile(url: url) }
                                 catch { self.error = error.localizedDescription }
                             }
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                             Button { files.removeAll { $0.id == file.id } } label: { Image(systemName: "xmark.circle") }.accessibilityLabel("Remove \(file.name)")
                         }.padding(8).background(.white.opacity(0.07), in: Capsule())
                     }

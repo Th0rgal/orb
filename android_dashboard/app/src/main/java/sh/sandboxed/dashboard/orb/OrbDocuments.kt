@@ -309,7 +309,9 @@ fun OrbProjectDocumentsPage(
                                             Text(
                                                 text = updated,
                                                 color = OrbStyle.textMuted,
-                                                fontSize = 12.sp
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                softWrap = false
                                             )
                                         }
                                         Icon(
@@ -805,6 +807,8 @@ fun OrbProjectDocumentViewer(
                     text = "Cancel",
                     color = OrbStyle.textSecondary,
                     fontSize = 14.sp,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .orbPressClickable {
                             draftContent = content
@@ -818,6 +822,8 @@ fun OrbProjectDocumentViewer(
                     color = Color.White,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(OrbStyle.surface)
@@ -831,6 +837,8 @@ fun OrbProjectDocumentViewer(
                     color = Color.White,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(OrbStyle.surface)

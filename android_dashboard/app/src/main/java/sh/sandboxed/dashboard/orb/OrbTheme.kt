@@ -323,7 +323,9 @@ fun OrbNotice(
                     text = "Log tail",
                     color = OrbStyle.textMuted,
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
             if (showLog) {

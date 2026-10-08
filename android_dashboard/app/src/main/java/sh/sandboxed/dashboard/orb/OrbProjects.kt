@@ -406,7 +406,9 @@ fun OrbHomeScreen(
                             text = "Projects",
                             color = if (isProjects) Color.White else OrbStyle.textSecondary,
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
@@ -424,7 +426,9 @@ fun OrbHomeScreen(
                             text = "Inbox",
                             color = if (isInbox) Color.White else OrbStyle.textSecondary,
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false
                         )
                         if (inboxCount > 0) {
                             Box(
@@ -439,7 +443,9 @@ fun OrbHomeScreen(
                                     color = if (isInbox) OrbStyle.background else Color.White,
                                     fontSize = 10.5.sp,
                                     fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -524,6 +530,8 @@ fun OrbHomeScreen(
                                             color = Color.White,
                                             fontSize = 17.sp,
                                             fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f)
                                         )
                                         if (liveMissionsCount > 0) {
@@ -540,7 +548,9 @@ fun OrbHomeScreen(
                                                     text = "$liveMissionsCount working",
                                                     color = OrbStyle.textSecondary,
                                                     fontSize = 12.sp,
-                                                    fontFamily = FontFamily.Monospace
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1,
+                                                    softWrap = false
                                                 )
                                             }
                                         }
@@ -558,7 +568,9 @@ fun OrbHomeScreen(
                                                     color = Color.White,
                                                     fontSize = 12.sp,
                                                     fontWeight = FontWeight.SemiBold,
-                                                    fontFamily = FontFamily.Monospace
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1,
+                                                    softWrap = false
                                                 )
                                             }
                                         }
@@ -619,7 +631,9 @@ fun OrbHomeScreen(
                                                     text = latestTime,
                                                     color = OrbStyle.textMuted,
                                                     fontSize = 12.sp,
-                                                    fontFamily = FontFamily.Monospace
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1,
+                                                    softWrap = false
                                                 )
                                             }
                                             OrbSfIcons.ChevronRightSmall(
@@ -1442,13 +1456,17 @@ fun OrbProjectPage(
                                     text = filter.label,
                                     color = OrbStyle.textSecondary,
                                     fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                                 Spacer(modifier = Modifier.weight(1f))
                                 Text(
                                     text = "Clear filter",
                                     color = Color.White,
                                     fontSize = 13.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.orbPressClickable { filter = OrbProjectFilter.All }
                                 )
                             }
@@ -1523,6 +1541,8 @@ fun OrbProjectPage(
                                         color = Color.White,
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
                                     Icon(
@@ -2049,7 +2069,9 @@ private fun OrbMissionListItem(
                                     text = "Goal",
                                     color = OrbStyle.textSecondary,
                                     fontSize = 10.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }

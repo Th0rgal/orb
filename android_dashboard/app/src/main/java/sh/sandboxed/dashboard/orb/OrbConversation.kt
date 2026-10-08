@@ -904,6 +904,8 @@ fun OrbConversationPage(
                             color = OrbStyle.textSecondary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier
                                 .clip(CircleShape)
                                 .background(OrbStyle.surface)
@@ -926,14 +928,18 @@ fun OrbConversationPage(
                         text = projectName,
                         color = OrbStyle.textMuted,
                         fontSize = 11.sp,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     val contCount = liveRow?.int("_continuation_count") ?: 1
                     if (contCount > 1) {
                         Text(
                             text = "· $contCount continuations",
                             color = OrbStyle.textMuted,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
@@ -964,7 +970,9 @@ fun OrbConversationPage(
                         text = "PR",
                         color = Color.White,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -1157,7 +1165,9 @@ fun OrbConversationPage(
                                 text = mode.slashTrigger,
                                 color = OrbStyle.textMuted,
                                 fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -1193,6 +1203,8 @@ fun OrbConversationPage(
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
                         Icon(
@@ -1353,7 +1365,9 @@ fun OrbConversationPage(
                                 text = badge,
                                 color = Color.White,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
                             )
                             Icon(
                                 imageVector = Icons.Default.Close,
@@ -1366,41 +1380,41 @@ fun OrbConversationPage(
                         }
                     }
 
-                    // Agent / Harness picker pill
-                    Row(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(OrbStyle.card)
-                            .border(1.dp, OrbStyle.border, CircleShape)
-                            .orbPressClickable { showAgentPicker = true }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = buildString {
-                                append(selectedBackend)
-                                if (selectedModel.isNotEmpty()) {
-                                    append(" · ")
-                                    append(selectedModel.substringAfterLast('/'))
-                                }
-                            },
-                            color = OrbStyle.textSecondary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 170.dp)
-                        )
-                        Icon(
-                            imageVector = Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = OrbStyle.textMuted,
-                            modifier = Modifier.size(13.dp)
-                        )
+                    // Agent / Harness picker pill (weighted so Stop/Send never get pushed off-screen)
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        Row(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.border, CircleShape)
+                                .orbPressClickable { showAgentPicker = true }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = buildString {
+                                    append(selectedBackend)
+                                    if (selectedModel.isNotEmpty()) {
+                                        append(" · ")
+                                        append(selectedModel.substringAfterLast('/'))
+                                    }
+                                },
+                                color = OrbStyle.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Icon(
+                                imageVector = Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = OrbStyle.textMuted,
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
                     }
-
-                    Spacer(modifier = Modifier.weight(1f))
 
                     if (isLive && missionId != null) {
                         Box(
@@ -1519,6 +1533,8 @@ private fun OrbUserBubble(
                     color = OrbStyle.textSecondary,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(OrbStyle.elevated)
@@ -1633,7 +1649,9 @@ private fun OrbAssistantTurnView(
                         Text(
                             text = "Copied",
                             color = OrbStyle.success,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
@@ -1642,7 +1660,9 @@ private fun OrbAssistantTurnView(
                     Text(
                         text = rel,
                         color = OrbStyle.textMuted,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -1780,7 +1800,9 @@ fun OrbWorkFoldView(
                     text = elapsedText,
                     color = OrbStyle.textMuted,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
             if (fold.steps.isNotEmpty()) {
@@ -1967,6 +1989,8 @@ fun OrbAgentPickerSheet(
                     color = Color.White,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier
                         .clip(CircleShape)
                         .orbPressClickable { onDismiss() }
@@ -2001,7 +2025,9 @@ fun OrbAgentPickerSheet(
                                 text = b,
                                 color = if (active) Color.Black else Color.White,
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -2042,12 +2068,16 @@ fun OrbAgentPickerSheet(
                                         text = wName,
                                         color = Color.White,
                                         fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
                                         text = wType,
                                         color = OrbStyle.textMuted,
-                                        fontSize = 11.sp
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 if (selected) {
@@ -2085,7 +2115,13 @@ fun OrbAgentPickerSheet(
                         .padding(horizontal = 12.dp, vertical = 11.dp)
                 ) {
                     if (selectedModel.isEmpty()) {
-                        Text("Default model for $selectedBackend", color = OrbStyle.textMuted, fontSize = 14.sp)
+                        Text(
+                            text = "Default model for $selectedBackend",
+                            color = OrbStyle.textMuted,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                     BasicTextField(
                         value = selectedModel,

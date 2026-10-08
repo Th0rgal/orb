@@ -86,6 +86,8 @@ struct OrbQuiz: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(OrbStyle.textSecondary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Spacer()
                 Button {
                     withAnimation(.snappy(duration: 0.18)) { index -= 1 }
@@ -143,18 +145,24 @@ struct OrbQuiz: View {
                     .font(.caption)
                     .foregroundStyle(sent ? OrbStyle.success : OrbStyle.textSecondary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Spacer()
                 if index < quiz.questions.count - 1 {
                     Button("Suivant") {
                         OrbHaptics.selection()
                         withAnimation(.snappy(duration: 0.18)) { index += 1 }
                     }
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .disabled(answers[question.number] == nil || sending)
                 } else {
                     Button(sending ? "Envoi…" : "Envoyer mes réponses") {
                         OrbHaptics.light()
                         Task { await submit() }
                     }
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .disabled(locked || answers.count != quiz.questions.count)
                 }
             }

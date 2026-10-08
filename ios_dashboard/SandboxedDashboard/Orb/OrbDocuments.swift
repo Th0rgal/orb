@@ -49,9 +49,9 @@ struct OrbDocuments: View {
                 let isDir = entry["kind"].text == "dir" || entry["is_dir"].flag || entry["is_directory"].flag || entry["type"].text == "directory"
                 Group {
                     if isDir {
-                        NavigationLink { OrbDocuments(project: project, path: child) } label: { Label(name, systemImage: "folder") }
+                        NavigationLink { OrbDocuments(project: project, path: child) } label: { Label(name, systemImage: "folder").lineLimit(1).truncationMode(.middle) }
                     } else {
-                        NavigationLink { OrbDocument(project: project, path: child) } label: { Label(name, systemImage: "doc.text") }
+                        NavigationLink { OrbDocument(project: project, path: child) } label: { Label(name, systemImage: "doc.text").lineLimit(1).truncationMode(.middle) }
                     }
                 }
                 .contextMenu {

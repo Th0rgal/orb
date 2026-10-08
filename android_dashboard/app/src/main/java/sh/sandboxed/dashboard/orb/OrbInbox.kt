@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -1843,7 +1844,9 @@ fun OrbInboxView(
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Medium,
                                             maxLines = 1,
-                                            softWrap = false
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(max = 160.dp)
                                         )
                                         Text(
                                             text = "${chip.count}",
@@ -1893,12 +1896,18 @@ fun OrbInboxView(
                                         text = pName,
                                         color = OrbStyle.textSecondary,
                                         fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 110.dp)
                                     )
                                     Text(
                                         text = "·",
                                         color = OrbStyle.textMuted,
-                                        fontSize = 12.sp
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                     Text(
                                         text = OrbInboxModel.missionHeadline(mission),
@@ -1913,7 +1922,9 @@ fun OrbInboxView(
                                         text = OrbJSON.relative(updated),
                                         color = OrbStyle.textMuted,
                                         fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -1978,7 +1989,9 @@ fun OrbInboxView(
                                         text = "Show all ${allItems.size} items",
                                         color = Color.White,
                                         fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -2053,6 +2066,8 @@ fun OrbInboxView(
                                     color = OrbStyle.textSecondary,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.orbPressClickable {
                                         OrbInboxModel.dismissAll(finishedItems)
                                     }
@@ -2130,7 +2145,9 @@ fun OrbInboxView(
                     text = "Marked done",
                     color = Color.White,
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
@@ -2138,6 +2155,8 @@ fun OrbInboxView(
                     color = OrbStyle.inboxBlue,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier.orbPressClickable {
                         OrbInboxModel.restore(dismissed)
                         lastDismissedItem = null
@@ -2203,7 +2222,7 @@ private fun OrbSwipeableInboxCard(
                             tint = OrbStyle.success,
                             modifier = Modifier.size(16.dp)
                         )
-                        Text("Done", color = OrbStyle.success, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Done", color = OrbStyle.success, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
                 } else if (direction == SwipeToDismissBoxValue.StartToEnd) {
                     Row(
@@ -2216,7 +2235,7 @@ private fun OrbSwipeableInboxCard(
                             tint = OrbStyle.inboxBlue,
                             modifier = Modifier.size(16.dp)
                         )
-                        Text("Reply", color = OrbStyle.inboxBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Reply", color = OrbStyle.inboxBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -2237,14 +2256,18 @@ private fun OrbInboxSectionHeader(title: String, count: Int) {
             color = OrbStyle.textMuted,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.5.sp
+            letterSpacing = 0.5.sp,
+            maxLines = 1,
+            softWrap = false
         )
         Text(
             text = "$count",
             color = OrbStyle.textMuted,
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -2322,12 +2345,17 @@ private fun OrbInboxCard(
                     color = OrbStyle.textSecondary,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 105.dp)
                 )
                 Text(
                     text = "·",
                     color = OrbStyle.textMuted,
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    softWrap = false
                 )
                 if (item.isGoal) {
                     Text(
@@ -2335,6 +2363,8 @@ private fun OrbInboxCard(
                         color = OrbStyle.inboxBlue,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .clip(CircleShape)
                             .background(OrbStyle.inboxBlue.copy(alpha = 0.14f))
@@ -2396,7 +2426,8 @@ private fun OrbInboxCard(
                         color = OrbStyle.textSecondary,
                         fontSize = 12.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                 }
             }
@@ -2445,6 +2476,7 @@ private fun OrbInboxCard(
         // Actionable child tracks only (failed or running)
         if (item.failedChildren.isNotEmpty() || item.runningChildCount > 0) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
@@ -2452,6 +2484,7 @@ private fun OrbInboxCard(
                 if (firstFailed != null) {
                     Row(
                         modifier = Modifier
+                            .weight(1f, fill = false)
                             .clip(RoundedCornerShape(6.dp))
                             .background(OrbStyle.error.copy(alpha = 0.12f))
                             .border(1.dp, OrbStyle.error.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
@@ -2500,14 +2533,16 @@ private fun OrbInboxCard(
             }
         }
 
-        // Minimalist quick action bar: Options / Retry / Peek / Reply / Done
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            if (item.quickOptions.isNotEmpty()) {
-                item.quickOptions.take(2).forEachIndexed { idx, opt ->
+        // Quick-pick interaction options in their own scrollable row so they never crush Peek/Reply/Done
+        if (item.quickOptions.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                item.quickOptions.take(3).forEachIndexed { idx, opt ->
                     val primary = idx == 0
                     Box(
                         modifier = Modifier
@@ -2523,12 +2558,21 @@ private fun OrbInboxCard(
                             fontSize = 12.sp,
                             fontWeight = if (primary) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = 1,
-                            softWrap = false
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 220.dp)
                         )
                     }
                 }
             }
+        }
 
+        // Minimalist quick action bar: Retry / Peek / Reply / Done
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             if (item.canRetry) {
                 Row(
                     modifier = Modifier
@@ -2695,6 +2739,8 @@ private fun OrbInboxCard(
                                     },
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.width(42.dp)
                                 )
                                 Text(
@@ -2765,7 +2811,9 @@ private fun OrbInboxCard(
                         text = if (isSending) "…" else "Send",
                         color = if (canSend) OrbStyle.background else OrbStyle.textMuted,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }

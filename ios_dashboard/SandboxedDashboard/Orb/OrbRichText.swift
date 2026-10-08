@@ -379,6 +379,8 @@ struct OrbNativeMarkdownView: View {
                             Text(lang.isEmpty ? "code" : lang)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(OrbStyle.textMuted)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             Spacer()
                             Button {
                                 UIPasteboard.general.string = code
@@ -392,6 +394,8 @@ struct OrbNativeMarkdownView: View {
                                 Text(copiedBlockIndex == index ? "Copied ✓" : "Copy code")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(copiedBlockIndex == index ? OrbStyle.success : OrbStyle.textSecondary)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
                             .buttonStyle(.plain)
                         }

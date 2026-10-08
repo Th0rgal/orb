@@ -1584,6 +1584,8 @@ struct OrbInboxView: View {
                     Text("All projects")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(selectedProject == nil ? .primary : OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 11)
                         .padding(.vertical, 6)
                         .background(
@@ -1612,10 +1614,14 @@ struct OrbInboxView: View {
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(active ? .primary : OrbStyle.textSecondary)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: 160)
                             Text("\(proj.count)")
                                 .font(.caption2)
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -1650,19 +1656,27 @@ struct OrbInboxView: View {
                             Text(item.projectTitle)
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(OrbStyle.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             Text("·")
                                 .font(.caption)
                                 .foregroundStyle(OrbStyle.textMuted)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                             Text(item.headline)
                                 .font(.footnote.weight(.medium))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
-                            Spacer()
+                                .truncationMode(.tail)
+                                .layoutPriority(1)
+                            Spacer(minLength: 4)
                             if !item.updatedAt.isEmpty {
                                 Text(OrbStyle.relativeTime(item.updatedAt))
                                     .font(.caption2)
                                     .foregroundStyle(OrbStyle.textMuted)
                                     .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
                         }
                         .padding(.horizontal, 12)
@@ -1686,10 +1700,14 @@ struct OrbInboxView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(0.5)
                 .foregroundStyle(OrbStyle.textMuted)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             Text("\(count)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(OrbStyle.textMuted)
                 .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.top, 2)
     }
@@ -1727,13 +1745,18 @@ struct OrbInboxView: View {
                             .font(.caption.weight(.medium))
                             .foregroundStyle(OrbStyle.textSecondary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                         Text("·")
                             .font(.caption)
                             .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         if item.isGoal {
                             Text("Goal")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(
@@ -1745,6 +1768,8 @@ struct OrbInboxView: View {
                             .font(.subheadline.weight(item.unread ? .semibold : .medium))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(1)
 
                         Spacer(minLength: 4)
 
@@ -1752,6 +1777,8 @@ struct OrbInboxView: View {
                             Text(item.badge)
                                 .font(.system(size: 10.5, weight: .semibold))
                                 .foregroundStyle(item.tone.foreground)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2.5)
                                 .background(item.tone.background, in: Capsule())
@@ -1762,6 +1789,8 @@ struct OrbInboxView: View {
                                 .font(.caption2)
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
 
@@ -1771,10 +1800,13 @@ struct OrbInboxView: View {
                             Text("Asked:")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(OrbStyle.textMuted)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                             Text(lastReq)
                                 .font(.caption)
                                 .foregroundStyle(OrbStyle.textSecondary)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                         }
                     }
 
@@ -1825,6 +1857,7 @@ struct OrbInboxView: View {
                                     .font(.caption2.weight(.medium))
                                     .foregroundStyle(OrbStyle.error)
                                     .lineLimit(1)
+                                    .truncationMode(.tail)
                                 Image(systemName: "arrow.right")
                                     .font(.system(size: 9, weight: .semibold))
                                     .foregroundStyle(OrbStyle.error)
@@ -1843,6 +1876,8 @@ struct OrbInboxView: View {
                         Text("\(cs.running) \(cs.running == 1 ? "track" : "tracks") running")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3.5)
                             .background(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255).opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -1850,33 +1885,40 @@ struct OrbInboxView: View {
                 }
             }
 
-            // Minimalist quick actions row (Options / Retry / Peek / Reply / Done)
-            HStack(spacing: 6) {
-                if let interaction = item.interaction, !interaction.options.isEmpty {
-                    ForEach(interaction.options) { opt in
-                        Button {
-                            OrbHaptics.light()
-                            Task { await pickOption(item: item, interaction: interaction, option: opt) }
-                        } label: {
-                            Text(opt.label)
-                                .font(.caption.weight(opt.isPrimary ? .semibold : .medium))
-                                .foregroundStyle(opt.isPrimary ? OrbStyle.background : .primary)
-                                .lineLimit(1)
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 5.5)
-                                .background(
-                                    opt.isPrimary ? Color.white : Color.white.opacity(0.06),
-                                    in: Capsule()
-                                )
-                                .overlay(
-                                    Capsule().stroke(opt.isPrimary ? Color.clear : OrbStyle.border, lineWidth: 1)
-                                )
+            // Quick-pick interaction options in their own scrollable row so they never crowd utility buttons
+            if let interaction = item.interaction, !interaction.options.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(interaction.options) { opt in
+                            Button {
+                                OrbHaptics.light()
+                                Task { await pickOption(item: item, interaction: interaction, option: opt) }
+                            } label: {
+                                Text(opt.label)
+                                    .font(.caption.weight(opt.isPrimary ? .semibold : .medium))
+                                    .foregroundStyle(opt.isPrimary ? OrbStyle.background : .primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .frame(maxWidth: 220)
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 5.5)
+                                    .background(
+                                        opt.isPrimary ? Color.white : Color.white.opacity(0.06),
+                                        in: Capsule()
+                                    )
+                                    .overlay(
+                                        Capsule().stroke(opt.isPrimary ? Color.clear : OrbStyle.border, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(isBusy)
                     }
                 }
+            }
 
+            // Minimalist quick actions row (Retry / Peek / Reply / Done)
+            HStack(spacing: 6) {
                 if item.canRetry {
                     Button {
                         OrbHaptics.light()
@@ -1887,6 +1929,8 @@ struct OrbInboxView: View {
                                 .font(.system(size: 10, weight: .semibold))
                             Text("Retry")
                                 .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .foregroundStyle(OrbStyle.warning)
                         .padding(.horizontal, 9)
@@ -1906,6 +1950,8 @@ struct OrbInboxView: View {
                     Text("Peek")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(isPeeked ? .primary : OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(isPeeked ? OrbStyle.elevated : Color.white.opacity(0.04), in: Capsule())
@@ -1936,6 +1982,8 @@ struct OrbInboxView: View {
                             .font(.system(size: 10, weight: .semibold))
                         Text("Reply")
                             .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .foregroundStyle(isReplying ? .primary : OrbStyle.textSecondary)
                     .padding(.horizontal, 10)
@@ -1959,6 +2007,8 @@ struct OrbInboxView: View {
                             .font(.system(size: 10, weight: .semibold))
                         Text("Done")
                             .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .foregroundStyle(OrbStyle.textSecondary)
                     .padding(.horizontal, 10)
@@ -1985,6 +2035,8 @@ struct OrbInboxView: View {
                                                 ? Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255)
                                                 : OrbStyle.textSecondary)
                                     )
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                                     .frame(width: 42, alignment: .leading)
                                 Text(turn.text)
                                     .font(.caption)
@@ -2049,6 +2101,8 @@ struct OrbInboxView: View {
                     } label: {
                         Text(isBusy ? "…" : "Send")
                             .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .foregroundStyle(
                                 replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                     ? OrbStyle.textMuted
@@ -2223,6 +2277,8 @@ struct OrbInboxView: View {
                 Text("Undo")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(OrbStyle.background)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 5)
                     .background(Color.white, in: Capsule())

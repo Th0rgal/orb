@@ -448,6 +448,8 @@ struct OrbConversation: View {
                                             .font(.system(size: 10, weight: .semibold))
                                         Text("Goal")
                                             .font(.caption2.weight(.semibold))
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: true, vertical: false)
                                     }
                                     .foregroundStyle(.primary.opacity(0.9))
                                     .padding(.horizontal, 7)
@@ -459,6 +461,8 @@ struct OrbConversation: View {
                                             .font(.system(size: 10, weight: .semibold))
                                         Text("Plan")
                                             .font(.caption2.weight(.semibold))
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: true, vertical: false)
                                     }
                                     .foregroundStyle(.primary.opacity(0.9))
                                     .padding(.horizontal, 7)
@@ -471,6 +475,8 @@ struct OrbConversation: View {
                                             .font(.system(size: 10, weight: .medium))
                                         Text("Attached context")
                                             .font(.caption2)
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: true, vertical: false)
                                     }
                                     .foregroundStyle(OrbStyle.textSecondary)
                                 }
@@ -609,6 +615,8 @@ struct OrbConversation: View {
                     Text(wake.killed ? "Background task stopped" : "Background task finished")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     Text(wake.command)
                         .font(.system(size: 11.5, design: .monospaced))
                         .foregroundStyle(OrbStyle.textMuted)
@@ -873,6 +881,8 @@ struct OrbConversation: View {
                         }
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .padding(.vertical, 3)
                 }
@@ -959,6 +969,8 @@ struct OrbConversation: View {
                             .font(.system(size: 10, weight: .semibold))
                         Text(mode)
                             .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         Image(systemName: "xmark")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(OrbStyle.textSecondary)
@@ -1583,6 +1595,8 @@ struct OrbWorkFold: View {
                             Text(headline.action)
                                 .font(.footnote.weight(.medium))
                                 .foregroundStyle(OrbStyle.textSecondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                                 .orbShimmer(active: true)
                             if !headline.detail.isEmpty {
                                 Text(headline.detail)
@@ -1596,6 +1610,8 @@ struct OrbWorkFold: View {
                         Text(elapsed)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         if !model.isEmpty {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .semibold))
@@ -1671,6 +1687,8 @@ private struct OrbThoughtRow: View {
                     Text(thought.streaming ? "Thinking" : "Thought")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .orbShimmer(active: thought.streaming)
                     if thought.title != "Thought" {
                         Text(thought.title)
@@ -1707,6 +1725,8 @@ private struct OrbToolRow: View {
                         Text(tool.rawName)
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                         Spacer()
                         Button {
                             UIPasteboard.general.string = combined
@@ -1720,6 +1740,8 @@ private struct OrbToolRow: View {
                             HStack(spacing: 3) {
                                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                                 Text(copied ? "Copied" : "Copy")
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(copied ? OrbStyle.success : OrbStyle.textSecondary)
@@ -1764,6 +1786,8 @@ private struct OrbToolRow: View {
                     Text(tool.status == .running ? tool.loadingLabel : tool.completedLabel)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(tool.status == .error ? OrbStyle.warning : OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
 
                     if !tool.target.isEmpty {
                         Text(tool.target)
@@ -1815,6 +1839,8 @@ private struct OrbMissionTasksCard: View {
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     if let active = activeTodo, !expanded {
                         Text("· \(active.content)")
                             .font(.caption)

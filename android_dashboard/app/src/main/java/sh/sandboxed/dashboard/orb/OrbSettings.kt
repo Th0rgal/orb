@@ -861,17 +861,23 @@ fun OrbProvidersSettingsPage(
                                                     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                                         Row(
                                                             modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                            verticalAlignment = Alignment.CenterVertically
                                                         ) {
                                                             Text(
                                                                 text = wLabel,
                                                                 color = Color.White,
-                                                                fontSize = 13.sp
+                                                                fontSize = 13.sp,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis,
+                                                                modifier = Modifier.weight(1f)
                                                             )
                                                             Text(
                                                                 text = "$pctInt% used",
                                                                 color = OrbStyle.textSecondary,
-                                                                fontSize = 13.sp
+                                                                fontSize = 13.sp,
+                                                                maxLines = 1,
+                                                                softWrap = false
                                                             )
                                                         }
                                                         Box(
@@ -924,7 +930,9 @@ fun OrbProvidersSettingsPage(
                                                             text = "Edit API key",
                                                             color = Color.White,
                                                             fontSize = 12.sp,
-                                                            fontWeight = FontWeight.Medium
+                                                            fontWeight = FontWeight.Medium,
+                                                            maxLines = 1,
+                                                            softWrap = false
                                                         )
                                                     }
                                                 }
@@ -940,7 +948,9 @@ fun OrbProvidersSettingsPage(
                                                         text = if (enabled) "Disable" else "Enable",
                                                         color = if (enabled) OrbStyle.textSecondary else OrbStyle.success,
                                                         fontSize = 12.sp,
-                                                        fontWeight = FontWeight.Medium
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        softWrap = false
                                                     )
                                                 }
                                             }
@@ -978,6 +988,8 @@ fun OrbProvidersSettingsPage(
                                                         color = Color.Black,
                                                         fontSize = 12.sp,
                                                         fontWeight = FontWeight.SemiBold,
+                                                        maxLines = 1,
+                                                        softWrap = false,
                                                         modifier = Modifier
                                                             .clip(CircleShape)
                                                             .background(Color.White)
@@ -1086,10 +1098,24 @@ fun OrbProvidersSettingsPage(
                                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Text(text = wLabel, color = Color.White, fontSize = 12.sp)
-                                                    Text(text = "${pct.roundToInt()}% used", color = OrbStyle.textSecondary, fontSize = 12.sp)
+                                                    Text(
+                                                        text = wLabel,
+                                                        color = Color.White,
+                                                        fontSize = 12.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    Text(
+                                                        text = "${pct.roundToInt()}% used",
+                                                        color = OrbStyle.textSecondary,
+                                                        fontSize = 12.sp,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
                                                 }
                                                 Box(
                                                     modifier = Modifier
@@ -1201,7 +1227,9 @@ fun OrbProvidersSettingsPage(
                                             text = if (savingKey) "Saving…" else "Save",
                                             color = Color.Black,
                                             fontSize = 13.sp,
-                                            fontWeight = FontWeight.SemiBold
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                     }
                                 }
@@ -1532,7 +1560,9 @@ fun OrbMachinesSettingsPage(
                                                     text = if (cordoned) "Allow new jobs" else "Pause new jobs",
                                                     color = OrbStyle.inboxBlue,
                                                     fontSize = 13.sp,
-                                                    fontWeight = FontWeight.Medium
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    softWrap = false
                                                 )
                                             }
                                         }
@@ -1687,7 +1717,13 @@ fun OrbMachinesSettingsPage(
                                         .orbPressClickable { showTargetEditor = false }
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    Text("Cancel", color = OrbStyle.textSecondary, fontSize = 13.sp)
+                                    Text(
+                                        text = "Cancel",
+                                        color = OrbStyle.textSecondary,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
                                 }
                                 Box(
                                     modifier = Modifier
@@ -1698,7 +1734,14 @@ fun OrbMachinesSettingsPage(
                                         }
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    Text("Save", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "Save",
+                                        color = Color.Black,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
                                 }
                                 if (editingTarget != null) {
                                     Box(
@@ -1710,7 +1753,14 @@ fun OrbMachinesSettingsPage(
                                             }
                                             .padding(horizontal = 14.dp, vertical = 8.dp)
                                     ) {
-                                        Text("Delete", color = OrbStyle.error, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        Text(
+                                            text = "Delete",
+                                            color = OrbStyle.error,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
                                     }
                                 }
                             }
@@ -1726,11 +1776,24 @@ fun OrbMachinesSettingsPage(
 private fun OrbKeyValueLine(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = label, color = Color.White, fontSize = 13.sp)
-        Text(text = value, color = OrbStyle.textSecondary, fontSize = 13.sp)
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = value,
+            color = OrbStyle.textSecondary,
+            fontSize = 13.sp,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 
@@ -1854,7 +1917,9 @@ fun OrbInboxSettingsPage(
                         text = if (OrbInboxSettings.aiSummary) "On" else "Off",
                         color = if (OrbInboxSettings.aiSummary) Color.Black else OrbStyle.textSecondary,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -1910,7 +1975,9 @@ fun OrbInboxSettingsPage(
                                 text = "Active",
                                 color = OrbStyle.inboxBlue,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
